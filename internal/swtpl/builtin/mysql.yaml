@@ -1,0 +1,108 @@
+id: mysql
+name: MySQL
+category: 数据库
+desc: 数据库（8.4 长期支持版，官方通用安装包）
+homepage: https://dev.mysql.com
+params:
+  - key: port
+    label: 端口
+    type: port
+    default: "3306"
+  - key: public
+    label: 允许其他机器访问
+    type: bool
+    help: 不勾选时只监听 127.0.0.1；勾选后 root 可以从其他机器登录，注意用防火墙限制来源
+  - key: password
+    label: root 密码
+    type: password
+  - key: lowerCase
+    label: 表名不区分大小写
+    type: bool
+    help: lower_case_table_names=1：从 Windows 迁移过来的程序常需要；只能在安装时设置，以后改不了
+variants:
+  - label: 官方安装包（x86_64）
+    arch: [amd64]
+    user: mysql
+    package:
+      url: https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-${version}-linux-glibc2.17-x86_64-minimal.tar.xz
+      # 最新的两个补丁版本在 Downloads 下，更早的移到 archives
+      mirrors: ["https://cdn.mysql.com/archives/mysql-8.4/mysql-${version}-linux-glibc2.17-x86_64-minimal.tar.xz"]
+      file: mysql-${version}-linux-glibc2.17-x86_64-minimal.tar.xz
+      probe: https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-${version}-linux-glibc2.17-x86_64-minimal.tar.xz
+      fallback: 8.4.10
+      size: 约 75 MB
+      format: tar.xz
+      strip: 1
+      into: mysql
+    files:
+      - path: ${dir}/my.cnf
+        content: |
+          # 由 Ferry 生成（软件 ${name}）
+          [mysqld]
+          basedir=${dir}/mysql
+          datadir=${dir}/data
+          socket=${dir}/mysql.sock
+          pid-file=${dir}/mysqld.pid
+          port=${port}
+          bind-address=${public?*|127.0.0.1}
+          mysqlx=OFF
+          log-error=${dir}/logs/error.log
+          tmpdir=${dir}/tmp
+          character-set-server=utf8mb4
+          max_connections=500
+          lower_case_table_names=${lowerCase?1|0}
+          # 第一次启动时设置 root 密码（不依赖 mysql 客户端），就绪后去掉
+          init-file=${dir}/tmp/ferry-init.sql
+
+          [client]
+          socket=${dir}/mysql.sock
+          port=${port}
+      - path: ${dir}/tmp/ferry-init.sql
+        mode: "0600"
+        content: |
+          ALTER USER 'root'@'localhost' IDENTIFIED BY '${password}';
+          ${public?CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '${password}'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;|}
+          FLUSH PRIVILEGES;
+      # 就绪后：去掉 init-file（带密码的文件由下面的步骤删除）
+      - path: ${dir}/my.cnf
+        at: ready
+        content: |
+          # 由 Ferry 生成（软件 ${name}）
+          [mysqld]
+          basedir=${dir}/mysql
+          datadir=${dir}/data
+          socket=${dir}/mysql.sock
+          pid-file=${dir}/mysqld.pid
+          port=${port}
+          bind-address=${public?*|127.0.0.1}
+          mysqlx=OFF
+          log-error=${dir}/logs/error.log
+          tmpdir=${dir}/tmp
+          character-set-server=utf8mb4
+          max_connections=500
+          lower_case_table_names=${lowerCase?1|0}
+
+          [client]
+          socket=${dir}/mysql.sock
+          port=${port}
+    steps:
+      - run: mkdir -p ${dir}/data ${dir}/logs ${dir}/tmp
+      # 缺系统库时 mysqld 起不来：先查出来，说清楚怎么装
+      - run: "! ldd ${dir}/mysql/bin/mysqld 2>&1 | grep 'not found'"
+        error: >-
+          服务器缺少 MySQL 需要的系统库（见下面列出的）。先安装：yum install -y libaio numactl-libs（CentOS / Rocky 等），
+          或 apt install -y libaio1 libnuma1（Ubuntu 24.04 是 libaio1t64，还要 ln -s /usr/lib/x86_64-linux-gnu/libaio.so.1t64 /usr/lib/x86_64-linux-gnu/libaio.so.1）
+      - at: init
+        run: "${dir}/mysql/bin/mysqld --defaults-file=${dir}/my.cnf --initialize-insecure --user=${user} || { tail -n 8 ${dir}/logs/error.log; exit 1; }"
+        error: 初始化数据目录失败
+      - at: ready
+        run: rm -f ${dir}/tmp/ferry-init.sql
+    service:
+      exec: ${dir}/mysql/bin/mysqld --defaults-file=${dir}/my.cnf
+      workdir: ${dir}
+      ready: {port: "${port}", timeout: 180}
+    logs: ["${dir}/logs/error.log"]
+    configs:
+      - {label: MySQL 配置, path: "${dir}/my.cnf", apply: restart}
+    notes:
+      - 连接 ${host}:${port}，用户 root，密码见「密码」；${public?允许其他机器连接（注意防火墙）|只允许本机连接（127.0.0.1）}

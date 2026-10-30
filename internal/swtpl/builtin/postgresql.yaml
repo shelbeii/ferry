@@ -1,0 +1,65 @@
+id: postgresql
+name: PostgreSQL
+category: 数据库
+desc: 数据库。程序用服务器的软件源安装，由 Ferry 单独运行一个实例（自己的配置、数据目录）
+homepage: https://www.postgresql.org
+params:
+  - key: port
+    label: 端口
+    type: port
+    default: "5432"
+  - key: public
+    label: 允许其他机器访问
+    type: bool
+    help: 不勾选时只监听 127.0.0.1；勾选后其他机器可以用密码登录，注意用防火墙限制来源
+  - key: password
+    label: postgres 密码
+    type: password
+variants:
+  - label: 系统软件源（dnf / yum）
+    os: [rhel, centos, fedora]
+    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑
+    user: postgres
+    system:
+      dnf: [postgresql-server]
+      disable: [postgresql.service]
+    files: &files
+      - path: ${dir}/tmp/pwfile
+        mode: "0600"
+        content: "${password}\n"
+    steps: &steps
+      - run: mkdir -p ${dir}/logs ${dir}/run ${dir}/tmp
+      # 各发行版的程序位置不同（Debian 系在 /usr/lib/postgresql/<版本>/bin）：链接到安装目录里
+      - run: for d in /usr/bin /usr/pgsql-*/bin $(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -n 1); do if [ -x $d/postgres ] && [ -x $d/initdb ]; then ln -sfn $d ${dir}/bin; break; fi; done; test -x ${dir}/bin/postgres
+        error: 软件源装好了，但找不到 PostgreSQL 的程序（postgres、initdb）
+      - at: init
+        run: runuser -u ${user} -- ${dir}/bin/initdb -D ${dir}/data -U postgres -E UTF8 --pwfile=${dir}/tmp/pwfile --auth-local=peer --auth-host=scram-sha-256 && rm -f ${dir}/tmp/pwfile
+        error: 初始化数据目录失败
+      - at: init
+        if: public
+        run: echo "host all all 0.0.0.0/0 scram-sha-256" >> ${dir}/data/pg_hba.conf
+    service: &service
+      exec: >-
+        ${dir}/bin/postgres -D ${dir}/data -c port=${port} -c listen_addresses=${public?*|127.0.0.1}
+        -c unix_socket_directories=${dir}/run -c logging_collector=on -c log_directory=${dir}/logs
+      workdir: ${dir}
+      ready: {port: "${port}", timeout: 120}
+    logs: &logs []
+    configs: &configs
+      - {label: PostgreSQL 主配置, path: "${dir}/data/postgresql.conf", apply: restart}
+      - {label: 访问控制, path: "${dir}/data/pg_hba.conf", apply: restart}
+    notes: &notes
+      - 连接 ${host}:${port}，用户 postgres，密码见「密码」；${public?允许其他机器连接（注意防火墙）|只允许本机连接（127.0.0.1）}
+  - label: 系统软件源（apt）
+    os: [debian, ubuntu]
+    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑。装包时系统会自动建一个占用 5432 的默认实例，Ferry 会把它停掉
+    user: postgres
+    system:
+      apt: [postgresql]
+      disable: [postgresql.service]
+    files: *files
+    steps: *steps
+    service: *service
+    logs: *logs
+    configs: *configs
+    notes: *notes

@@ -1,0 +1,61 @@
+# macOS 安装包：在 GitHub 的 Mac 机器上构建 Apple 芯片与 Intel 两个 .dmg，结果在本次运行页面的 Artifacts 里下载。
+# 手动运行：仓库的 Actions → macOS 安装包 → Run workflow；推送 v 开头的标签时由「发布」（release.yml）调用，dmg 附到 Release 上。
+# 没有 Apple 开发者证书：应用是临时签名的，第一次打开要右键「打开」，或执行 xattr -cr /Applications/Ferry.app
+name: macOS 安装包
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  dmg:
+    name: ${{ matrix.name }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            name: Apple 芯片（arm64）
+          - target: x86_64-apple-darwin
+            name: Intel（x64）
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: 安装前端依赖
+        working-directory: desktop
+        run: npm ci
+
+      - name: 测试
+        run: go test ./...
+
+      - name: 构建 .dmg
+        working-directory: desktop
+        run: npx tauri build --target ${{ matrix.target }} --bundles dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Ferry-macos-${{ matrix.target }}
+          path: desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error

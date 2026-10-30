@@ -1,0 +1,81 @@
+id: nacos
+name: Nacos
+category: 中间件
+desc: 注册中心、配置中心（单机模式，内置存储）
+homepage: https://nacos.io
+params:
+  - key: port
+    label: 主端口
+    type: port
+    default: "8848"
+    help: 应用连这个端口；还会用到 +1000 的端口（gRPC）
+    offsets: [1000]
+  - key: console
+    label: 控制台端口
+    type: port
+    default: "8080"
+    help: 在浏览器里打开的管理页面
+  - key: memory
+    label: 内存
+    type: memory
+    default: 512m
+  - key: password
+    label: nacos 密码
+    type: password
+    help: 控制台用户 nacos 的密码
+variants:
+  - label: 官方安装包
+    note: Nacos 监听所有地址（其他服务器上的应用要连它）：不需要对外的话，用防火墙限制
+    java: 17
+    user: nacos
+    package:
+      url: https://github.com/alibaba/nacos/releases/download/${version}/nacos-server-${version}.tar.gz
+      file: nacos-server-${version}.tar.gz
+      github: alibaba/nacos
+      fallback: 3.2.4
+      size: 约 220 MB
+      format: tar.gz
+      strip: 1
+      into: nacos
+      check: target/nacos-server.jar
+      md5: https://github.com/alibaba/nacos/releases/download/${version}/nacos-server-${version}.tar.gz.md5
+    props:
+    # 配置清单单独登记，安装步骤中的临时文件不会出现在编辑器中。
+      # 3.x 启动前必须设置这三个密钥（官方启动脚本会停下来让人输入）
+      - file: ${dir}/nacos/conf/application.properties
+        set:
+          nacos.server.main.port: ${port}
+          nacos.console.port: ${console}
+          nacos.core.auth.plugin.nacos.token.secret.key: ${base64random:48}
+          nacos.core.auth.server.identity.key: ferry-${random:8}
+          nacos.core.auth.server.identity.value: ${random:24}
+          # 内置数据库（Derby）第一次启动要建库，Nacos 只等 10 秒：磁盘慢时超时（Login timeout exceeded），启动失败
+          db.pool.config.connectionTimeout: "120000"
+    steps:
+      - run: mkdir -p ${dir}/nacos/logs
+      # 3.x：控制台第一次打开时要设置 nacos 用户的密码，这里替用户设置好
+      - at: ready
+        http:
+          post: http://127.0.0.1:${port}/nacos/v3/auth/user/admin
+          form: {password: "${password}"}
+          retry: 30
+        soft: 管理员密码没有设置成功：第一次打开控制台时按提示设置 nacos 用户的密码
+    service:
+      exec: >-
+        ${java} -Xms${memory} -Xmx${memory} -Dnacos.standalone=true -Dnacos.member.list=
+        -Xlog:gc*:file=${dir}/nacos/logs/nacos_gc.log:time,tags:filecount=10,filesize=100m
+        --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED
+        -Dnacos.deployment.type=merged
+        -Dloader.path=${dir}/nacos/plugins,${dir}/nacos/plugins/health,${dir}/nacos/plugins/cmdb,${dir}/nacos/plugins/selector
+        -Dnacos.home=${dir}/nacos -jar ${dir}/nacos/target/nacos-server.jar
+        --spring.config.additional-location=file:${dir}/nacos/conf/ --logging.config=${dir}/nacos/conf/nacos-logback.xml
+        --server.max-http-request-header-size=524288 nacos.nacos
+      workdir: ${dir}/nacos
+      ready: {port: "${port}", timeout: 240}
+    logs: ["${dir}/nacos/logs/nacos.log"]
+    configs:
+      - {label: Nacos 主配置, path: "${dir}/nacos/conf/application.properties", format: properties, apply: restart}
+      - {label: 日志配置, path: "${dir}/nacos/conf/nacos-logback.xml", apply: restart}
+    notes:
+      - 控制台：http://${host}:${console}/ ，用户 nacos，密码见「密码」
+      - 应用连接 ${host}:${port}（还会用到 ${port+1000}）

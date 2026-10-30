@@ -1,0 +1,50 @@
+id: sentinel
+name: Sentinel 控制台
+category: 中间件
+desc: 限流、熔断规则的控制台
+homepage: https://sentinelguard.io
+params:
+  - key: port
+    label: 端口
+    type: port
+    default: "8858"
+  - key: public
+    label: 允许其他机器访问
+    type: bool
+    help: 不勾选时只监听 127.0.0.1，只有这台服务器上的程序能连
+  - key: memory
+    label: 内存
+    type: memory
+    default: 256m
+  - key: password
+    label: sentinel 密码
+    type: password
+    help: 控制台用户 sentinel 的密码
+variants:
+  - label: 官方安装包
+    java: 17
+    user: sentinel
+    package:
+      url: https://github.com/alibaba/Sentinel/releases/download/${version}/sentinel-dashboard-${version}.jar
+      file: sentinel-dashboard-${version}.jar
+      github: alibaba/Sentinel
+      fallback: 1.8.10
+      size: 约 23 MB
+      format: jar
+      into: sentinel-dashboard.jar
+      check: com/alibaba/csp/sentinel/dashboard/
+    steps:
+      - run: mkdir -p ${dir}/logs/csp
+    service:
+      # 密码放在只有 root 能读的环境变量文件里，不写进单元文件
+      exec: >-
+        ${java} -Xms${memory} -Xmx${memory} -Dserver.port=${port} -Dserver.address=${public?0.0.0.0|127.0.0.1}
+        -Dcsp.sentinel.dashboard.server=127.0.0.1:${port} -Dproject.name=sentinel-dashboard
+        -Dsentinel.dashboard.auth.username=sentinel -Dsentinel.dashboard.auth.password=$${SENTINEL_PASSWORD}
+        -Duser.home=${dir} -Dcsp.sentinel.log.dir=${dir}/logs/csp -jar ${dir}/sentinel-dashboard.jar
+      workdir: ${dir}
+      env: {SENTINEL_PASSWORD: "${password}"}
+      ready: {port: "${port}", timeout: 120}
+    logs: ["${dir}/logs/csp/sentinel-dashboard.log"]
+    notes:
+      - 控制台：http://${host}:${port}/ ，用户 sentinel，密码见「密码」

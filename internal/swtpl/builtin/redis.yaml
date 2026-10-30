@@ -1,0 +1,63 @@
+id: redis
+name: Redis
+category: 缓存
+desc: 缓存数据库。程序用服务器的软件源安装，由 Ferry 单独运行一个实例（自己的配置、数据目录）
+homepage: https://redis.io
+params:
+  - key: port
+    label: 端口
+    type: port
+    default: "6379"
+  - key: public
+    label: 允许其他机器访问
+    type: bool
+    help: 不勾选时只监听 127.0.0.1
+  - key: password
+    label: 密码
+    type: password
+    help: 连接 Redis 用的密码（requirepass）
+variants:
+  - label: 系统软件源（dnf / yum）
+    os: [rhel, centos, fedora]
+    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑。RHEL / Rocky 10 起没有 redis 包（改名 valkey）
+    user: redis
+    system:
+      dnf: [redis]
+      disable: [redis.service]
+      require: /usr/bin/redis-server
+    files: &files
+      - path: ${dir}/redis.conf
+        content: |
+          # 由 Ferry 生成（软件 ${name}）
+          bind ${public?0.0.0.0|127.0.0.1}
+          port ${port}
+          dir ${dir}/data
+          logfile ${dir}/logs/redis.log
+          requirepass ${password}
+          appendonly yes
+          daemonize no
+    steps: &steps
+      - run: mkdir -p ${dir}/data ${dir}/logs
+    service: &service
+      exec: /usr/bin/redis-server ${dir}/redis.conf
+      workdir: ${dir}
+      ready: {port: "${port}", timeout: 60}
+    logs: &logs ["${dir}/logs/redis.log"]
+    configs: &configs
+      - {label: Redis 配置, path: "${dir}/redis.conf", apply: restart}
+    notes: &notes
+      - 连接 ${host}:${port}，密码见「密码」
+  - label: 系统软件源（apt）
+    os: [debian, ubuntu]
+    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑
+    user: redis
+    system:
+      apt: [redis-server]
+      disable: [redis-server.service]
+      require: /usr/bin/redis-server
+    files: *files
+    steps: *steps
+    service: *service
+    logs: *logs
+    configs: *configs
+    notes: *notes

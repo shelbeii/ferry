@@ -1,0 +1,36 @@
+id: minio
+name: MinIO
+category: 存储
+desc: 兼容 S3 的对象存储。社区版官方已停止发布程序：请导入自己编译或以前下载的 minio 程序（Linux 版）
+homepage: https://github.com/minio/minio
+params:
+  - key: port
+    label: API 端口
+    type: port
+    default: "9000"
+  - key: console
+    label: 控制台端口
+    type: port
+    default: "9001"
+  - key: public
+    label: 允许其他机器访问
+    type: bool
+  - key: password
+    label: minioadmin 密码
+    type: password
+variants:
+  - label: 导入的程序
+    note: 先在「导入安装包」里选你的 minio 程序（单个文件）
+    user: minio
+    package:
+      format: binary
+      into: minio
+    steps:
+      - run: mkdir -p ${dir}/data
+    service:
+      exec: ${dir}/minio server ${dir}/data --address ${public?0.0.0.0|127.0.0.1}:${port} --console-address ${public?0.0.0.0|127.0.0.1}:${console}
+      workdir: ${dir}
+      env: {MINIO_ROOT_USER: minioadmin, MINIO_ROOT_PASSWORD: "${password}"}
+      ready: {port: "${port}", timeout: 60}
+    notes:
+      - API：${host}:${port}；控制台：http://${host}:${console}/ ，用户 minioadmin，密码见「密码」

@@ -1,0 +1,7 @@
+/dist/
+/internal/agentbin/bin/ferry-agent-*
+.ferry/
+*.exe
+/.idea/
+/test/e2e/out/
+/test/e2e/.cache/

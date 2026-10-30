@@ -1,0 +1,123 @@
+id: zlmediakit
+name: ZLMediaKit
+category: 音视频
+desc: RTSP / RTMP / HLS / WebRTC / SRT 流媒体服务器，使用导入的 Linux 原生安装包
+homepage: https://github.com/ZLMediaKit/ZLMediaKit
+params:
+  - {key: port, label: HTTP / API 端口, type: port, default: "18081"}
+  - {key: https, label: HTTPS 端口, type: port, default: "18443"}
+  - {key: rtsp, label: RTSP 端口, type: port, default: "8554"}
+  - {key: rtmp, label: RTMP 端口, type: port, default: "1935"}
+  - {key: rtc, label: WebRTC 媒体端口（TCP 和 UDP）, type: port, default: "18000"}
+  - {key: rtp, label: RTP / GB28181 端口（TCP 和 UDP）, type: port, default: "10000"}
+  # port 类型检查 TCP；SRT 只用 UDP，同号 TCP 端口可以被其他软件使用。
+  - {key: srt, label: SRT 端口（UDP）, type: number, default: "9000"}
+  - key: externIP
+    label: WebRTC 对客户端可见的 IP
+    type: text
+    help: 留空自动获取网卡地址；经过 NAT 时填写客户端能访问的公网 IP
+  - key: password
+    label: API secret
+    type: password
+    help: 管理 API 的密钥，不是网页登录密码；推流和播放默认不启用鉴权
+variants:
+  - label: 导入的 Linux x86_64 安装包
+    arch: [amd64]
+    user: zlmediakit
+    note: 导入 zlmediakit-centos7-x86_64-版本.tar.gz；需 glibc 2.17 或更高以及系统 openssl。WebRTC 和 SRT 支持取决于安装包的编译选项
+    package:
+      file: zlmediakit-centos7-x86_64-${version}.tar.gz
+      format: tar.gz
+      strip: 1
+      into: app
+      check: MediaServer
+    files:
+      - path: ${dir}/config.ini
+        mode: "0600"
+        content: |
+          [api]
+          secret=${password}
+
+          [general]
+          mediaServerId=${name}
+
+          [http]
+          port=${port}
+          sslport=${https}
+          rootPath=${dir}/www
+          virtualPath=ui,${dir}/www
+
+          [protocol]
+          mp4_save_path=${dir}/www
+          hls_save_path=${dir}/www
+
+          [rtc]
+          externIP=${externIP}
+          port=${rtc}
+          tcpPort=${rtc}
+
+          [rtsp]
+          port=${rtsp}
+
+          [rtmp]
+          port=${rtmp}
+
+          [rtp_proxy]
+          port=${rtp}
+
+          [srt]
+          port=${srt}
+
+          [hook]
+          enable=0
+
+          [shell]
+          port=0
+      - path: ${dir}/certificate-request.cnf
+        mode: "0600"
+        content: |
+          [req]
+          distinguished_name=dn
+          prompt=no
+          [dn]
+          CN=${host}
+    steps:
+      - run: |
+          set -eu
+          glibc_version=$(getconf GNU_LIBC_VERSION | awk '{print $2}')
+          printf '%s\n' "$glibc_version" | awk -F. '{ exit !($1 > 2 || ($1 == 2 && $2 >= 17)) }'
+          command -v openssl >/dev/null
+          command -v ss >/dev/null
+          test "${srt}" -ge 1 && test "${srt}" -le 65535
+          for udp_port in ${srt} ${rtc} ${rtp}; do
+            if ss -H -lntu | awk -v p="$udp_port" '$1 == "udp" && $5 ~ (":" p "$") { found=1 } END { exit !found }'; then
+              echo "UDP port $udp_port is already in use" >&2
+              exit 1
+            fi
+          done
+          chmod 0755 "${dir}/app/MediaServer"
+          "${dir}/app/MediaServer" --version
+          mkdir -p "${dir}/logs" "${dir}/www"
+          if test -d "${dir}/app/www"; then cp -a "${dir}/app/www/." "${dir}/www/"; fi
+        error: 检查 ZLMediaKit 运行环境失败，请确认安装包兼容、系统有 openssl / ss，且所选 UDP 端口未被占用
+      - run: |
+          set -eu
+          umask 077
+          openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 365 \
+            -config "${dir}/certificate-request.cnf" \
+            -keyout "${dir}/certificate-key.pem" -out "${dir}/certificate.pem"
+          cat "${dir}/certificate-key.pem" "${dir}/certificate.pem" > "${dir}/default.pem"
+          chmod 0600 "${dir}/default.pem"
+    service:
+      exec: ${dir}/app/MediaServer -c ${dir}/config.ini -s ${dir}/default.pem -l 2 --log-dir ${dir}/logs
+      workdir: ${dir}
+      ready: {port: "${port}", timeout: 60}
+    logs: ["${dir}/logs/*.log"]
+    configs:
+      - {label: ZLMediaKit 主配置, path: "${dir}/config.ini", format: ini, apply: restart}
+      - {label: TLS 证书与私钥, path: "${dir}/default.pem", apply: restart}
+    notes:
+      - HTTP / API：http://${host}:${port}；WebRTC 测试页：https://${host}:${https}/webrtc/
+      - RTSP ${rtsp}/TCP，RTMP ${rtmp}/TCP，WebRTC ${rtc}/TCP+UDP，RTP ${rtp}/TCP+UDP，SRT ${srt}/UDP
+      - API secret 在「密码」中查看；首次生成自签名 TLS 证书，正式使用可替换证书后重启
+      - 网页和媒体文件在 ${dir}/www，配置在 ${dir}/config.ini，日志在 ${dir}/logs

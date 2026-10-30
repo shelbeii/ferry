@@ -1,0 +1,135 @@
+# 发布：推送 v 开头的标签（如 v0.12.80）时，构建 Linux 版 ferry（amd64、arm64）、Windows 安装包、macOS 安装包（Apple 芯片、Intel），
+# 建一个 GitHub Release 并附上它们和 SHA256SUMS.txt。标签要和 desktop/package.json 里的版本号一致（v + 版本号），不一致时不发布。
+#
+#   git tag v0.12.80 && git push origin v0.12.80
+#
+# 同一个标签重新运行时，已有的 Release 里的文件会被替换。
+name: 发布
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: 核对版本号
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: v
+        run: |
+          tag=${GITHUB_REF_NAME#v}
+          pkg=$(node -p "require('./desktop/package.json').version")
+          if [[ $tag != "$pkg" ]]; then
+            echo "::error::标签 ${GITHUB_REF_NAME} 和 desktop/package.json 的版本号 ${pkg} 不一致"
+            exit 1
+          fi
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux 版 ferry
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: 测试
+        run: go test ./...
+      - name: 构建（内嵌服务器端组件）
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          bash scripts/build.sh                 # 先编译要内嵌的 agent（linux amd64、arm64）
+          export CGO_ENABLED=0
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" -o dist/ferry-linux-$arch ./cmd/ferry
+          done
+          ./dist/ferry-linux-amd64 version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ferry-linux
+          path: dist/ferry-linux-*
+          if-no-files-found: error
+
+  windows:
+    name: Windows 安装包
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+      - name: 安装前端依赖
+        working-directory: desktop
+        run: npm ci
+      - name: 构建安装包
+        working-directory: desktop
+        run: npx tauri build --bundles nsis
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ferry-windows
+          path: desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS 安装包
+    needs: check
+    uses: ./.github/workflows/macos.yml
+
+  release:
+    name: 建 Release
+    needs: [check, linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          path: files
+          merge-multiple: true
+      - name: 校验和
+        working-directory: files
+        run: |
+          ls -l
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          cat > notes.md <<EOF
+          ## 下载
+
+          | 文件 | 用途 |
+          | --- | --- |
+          | \`Ferry_${VERSION}_x64-setup.exe\` | Windows 桌面版安装包 |
+          | \`Ferry_${VERSION}_aarch64.dmg\` | macOS 桌面版（Apple 芯片） |
+          | \`Ferry_${VERSION}_x64.dmg\` | macOS 桌面版（Intel） |
+          | \`ferry-linux-amd64\` / \`ferry-linux-arm64\` | Linux 命令行（CI 里部署用，见 [docs/ci.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/ci.md)） |
+          | \`SHA256SUMS.txt\` | 各文件的 sha256 |
+
+          macOS 版是临时签名的：第一次打开要右键 →「打开」，或执行 \`xattr -cr /Applications/Ferry.app\`。
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" files/* --clobber
+          else
+            gh release create "$TAG" files/* --title "Ferry $VERSION" --notes-file notes.md --generate-notes
+          fi

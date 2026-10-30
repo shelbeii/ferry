@@ -1,0 +1,30 @@
+# 端到端测试：上传目录的应用类型（Python、Node 服务端）。和 ferry.yaml 分开：另一个项目、另一个部署目录。
+# 应用由 go run ./test/e2e/mkdirapps out 生成；依赖是本地的包，服务器上不用连外网就能装。
+version: 1
+project: e2edir
+targets:
+  e2e-a:
+    host: 127.0.0.1
+    port: 2222
+    identityFile: out/id_test
+    root: /opt/e2edir
+    runAs: demo
+    confirm: false
+    keepReleases: 2
+
+apps:
+  - name: py
+    type: python
+    artifact: {path: out/pyapp}
+    service:
+      exec: ["${running}/.venv/bin/python", "${running}/server.py"]
+      env: {PORT: "18095"}
+      health: {http: "http://127.0.0.1:18095/health", contains: UP, timeout: 60s}
+
+  - name: nd
+    type: node
+    artifact: {path: out/nodeapp}
+    service:
+      exec: [node, "${running}/server.js"]
+      env: {PORT: "18096"}
+      health: {http: "http://127.0.0.1:18096/health", contains: UP, timeout: 30s}

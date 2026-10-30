@@ -1,0 +1,295 @@
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+/* 应用窗口本身不滚动：滚动都在内部区域（项目页、表格、编辑器、日志）里。
+   否则挂在 body 上的元素（如编辑器的提示框容器）会让页面短暂可滚动——
+   关闭对话框时 Element Plus 先解除滚动锁定、编辑器随后才销毁，右侧会闪出滚动条。 */
+html,
+body {
+  overflow: hidden;
+}
+
+/* 主色：靛蓝。浅色、深色主题各一套（Element Plus 的浅色变体在深色主题里是和背景混色） */
+:root {
+  --el-color-primary: #4f46e5;
+  --el-color-primary-light-3: #847ded;
+  --el-color-primary-light-5: #a7a3f2;
+  --el-color-primary-light-7: #cac8f7;
+  --el-color-primary-light-8: #dcdafa;
+  --el-color-primary-light-9: #edecfc;
+  --el-color-primary-dark-2: #3f38b7;
+  --el-bg-color-page: #f4f5f8;
+  /* 最左边的图标栏：跟着主题，浅色主题是浅灰 */
+  --ferry-rail-bg: #eceef3;
+  --ferry-rail-hover: #dfe2ea;
+  --ferry-rail-icon: #5b6170;
+  --ferry-rail-icon-on: #18181b;
+  --ferry-rail-border: #e2e5ec;
+  --ferry-card-radius: 10px;
+}
+html.dark {
+  --el-color-primary: #6366f1;
+  --el-color-primary-light-3: #4b4daf;
+  --el-color-primary-light-5: #3c3d82;
+  --el-color-primary-light-7: #2c2d56;
+  --el-color-primary-light-8: #242440;
+  --el-color-primary-light-9: #1c1c2a;
+  --el-color-primary-dark-2: #8285f4;
+  --ferry-rail-bg: #0b0b0d;
+  --ferry-rail-hover: #1f1f23;
+  --ferry-rail-icon: #a1a1aa;
+  --ferry-rail-icon-on: #e4e4e7;
+  --ferry-rail-border: transparent;
+}
+
+body {
+  font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+  background: var(--el-bg-color-page);
+}
+
+.mono {
+  font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  font-size: 12.5px;
+}
+
+.muted {
+  color: var(--el-text-color-secondary);
+}
+
+.ev-error {
+  color: var(--el-color-danger);
+}
+
+.ev-warn {
+  color: var(--el-color-warning);
+}
+
+.ev-ok {
+  color: var(--el-color-success);
+}
+
+.ev-rollback {
+  color: #a855f7;
+}
+
+.ev-step {
+  font-weight: 600;
+  color: var(--el-color-primary);
+  margin-top: 6px;
+}
+
+/* 编辑器的补全、悬停提示挂在 body 上，要盖过对话框 */
+.cm-tooltip {
+  z-index: 4000 !important;
+}
+
+/* Shared surfaces, typography and interaction states for the desktop workspace. */
+:root {
+  --ferry-surface: #ffffff;
+  --ferry-surface-raised: #ffffff;
+  --ferry-stroke: #e3e8f0;
+  --ferry-shadow: 0 3px 14px #23334d06, 0 1px 2px #23334d04;
+  --ferry-radius: 12px;
+  --ferry-card-radius: 12px;
+  --ferry-ease: 160ms ease;
+  --el-bg-color-page: #f2f5fa;
+  --el-text-color-primary: #19263b;
+  --el-text-color-regular: #47576d;
+  --el-text-color-secondary: #728096;
+  --el-border-color: #dce3ed;
+  --el-border-color-light: #e5eaf2;
+  --el-border-color-lighter: #edf0f6;
+  --el-fill-color-light: #f5f7fb;
+  --el-color-success: #168465;
+  --el-color-success-light-9: #eaf7f2;
+  --el-color-success-light-8: #d2eee2;
+  --el-color-success-dark-2: #12694f;
+  --el-border-radius-base: 8px;
+  --ferry-rail-bg: #e9eef6;
+  --ferry-rail-hover: #dbe4f2;
+}
+html.dark {
+  --ferry-surface: #141c2b;
+  --el-color-primary: #9297ff;
+  --ferry-surface-raised: #192337;
+  --ferry-stroke: #29364b;
+  --ferry-shadow: 0 4px 18px #00000018;
+  --el-bg-color-page: #0d1421;
+  --el-bg-color: #141c2b;
+  --el-bg-color-overlay: #192337;
+  --el-text-color-primary: #e4ebf7;
+  --el-text-color-regular: #b9c6da;
+  --el-text-color-secondary: #8e9eb7;
+  --el-text-color-placeholder: #697d9a;
+  --el-border-color: #2d3b53;
+  --el-border-color-light: #27344a;
+  --el-border-color-lighter: #202d42;
+  --el-fill-color: #223049;
+  --el-fill-color-light: #1b273b;
+  --el-fill-color-blank: #141c2b;
+  --el-fill-color-extra-light: #111b2b;
+  --el-fill-color-lighter: #17243a;
+  --el-color-success: #4ec5a0;
+  --el-color-success-light-9: #132e2b;
+  --el-color-success-light-8: #1c4039;
+  --el-color-success-dark-2: #7cdec0;
+  --el-color-warning-dark-2: #f2be66;
+  --el-color-primary-light-9: #1c2544;
+  --ferry-rail-bg: #101a2b;
+  --ferry-rail-hover: #223049;
+}
+body { -webkit-font-smoothing: antialiased; }
+button, input, textarea { font: inherit; }
+button { transition: background var(--ferry-ease), border-color var(--ferry-ease), box-shadow var(--ferry-ease); }
+:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }
+.el-button { font-weight: 500; }
+.el-button--primary:not(.is-link, .is-text, .is-plain) { box-shadow: 0 3px 8px #4f46e522; }
+html.dark .el-button--primary:not(.is-link, .is-text, .is-plain) { --el-button-text-color: #10182b; --el-button-hover-text-color: #10182b; }
+html.dark .el-radio-button.is-active .el-radio-button__inner { color: #10182b; }
+html.dark .el-radio-button { --el-radio-button-checked-text-color: #10182b; }
+.el-tag { border-radius: 5px; }
+.el-table { --el-table-header-bg-color: var(--el-fill-color-light); --el-table-header-text-color: var(--el-text-color-secondary); font-size: 13px; }
+.el-table th.el-table__cell { font-size: 12px; font-weight: 500; height: 42px; }
+.el-table td.el-table__cell { padding: 11px 0; }
+.el-table--border .el-table__cell { border-right-color: transparent; }
+.el-table .cell { line-height: 1.6; }
+.el-dialog { display: flex; flex-direction: column; max-width: calc(100vw - 40px); max-height: calc(100dvh - var(--el-dialog-margin-top, 15vh) - 24px); margin-bottom: 24px; padding: 0; border: 1px solid var(--ferry-stroke); border-radius: 16px; box-shadow: 0 24px 80px #0a152b30; overflow: hidden; }
+.el-dialog__header { padding: 22px 60px 18px 24px; margin: 0; border-bottom: 1px solid var(--el-border-color-lighter); }
+.el-dialog__title { font-size: 18px; font-weight: 600; letter-spacing: -.3px; overflow-wrap: anywhere; }
+.el-dialog__headerbtn { top: 12px; right: 12px; }
+.el-dialog__body { min-height: 0; overflow: auto; padding: 22px 24px; }
+.el-dialog__footer { padding: 16px 24px; border-top: 1px solid var(--el-border-color-lighter); background: var(--el-fill-color-light); }
+.el-drawer { border-left: 1px solid var(--ferry-stroke); }
+.el-drawer__header { padding: 20px 24px; margin-bottom: 0; border-bottom: 1px solid var(--el-border-color-lighter); color: var(--el-text-color-primary); font-weight: 600; }
+.el-drawer__body { padding: 20px 24px; }
+.el-alert { border-radius: 9px; }
+.el-empty__description p { max-width: 360px; line-height: 1.8; }
+* { scrollbar-width: thin; scrollbar-color: var(--el-border-color) transparent; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+/* 液态玻璃打开时（html.cg-on），顶部的提示（ElMessage）是一颗浮着的玻璃胶囊：磨砂透出下面的页面，内沿亮边，
+   出现时从上面弹下来。图标保留成功、警告、错误的颜色，文字统一用正文色（玻璃上彩色字不好认）。
+   底色深浅、磨砂程度跟着设置里的「玻璃透明度」（--cg-k、--cg-blur-k，见 glass/runtime.ts） */
+html.cg-on .el-message {
+  gap: 8px;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgb(255 255 255 / calc(.62 * var(--cg-k, 1))), rgb(255 255 255 / calc(.46 * var(--cg-k, 1))));
+  -webkit-backdrop-filter: blur(calc(14px * var(--cg-blur-k, 1))) saturate(1.6) brightness(1.05);
+  backdrop-filter: blur(calc(14px * var(--cg-blur-k, 1))) saturate(1.6) brightness(1.05);
+  box-shadow:
+    inset 1.5px 2px 1px -1.5px rgb(255 255 255 / .85),
+    inset -1px -1.5px 1px -1px rgb(255 255 255 / .4),
+    inset 0 0 0 1px rgb(255 255 255 / .3),
+    0 12px 32px -12px rgb(16 24 40 / .32),
+    0 2px 6px -2px rgb(16 24 40 / .12);
+  transition: opacity .25s, transform .5s cubic-bezier(.3, 1.45, .5, 1), top .4s;
+}
+html.cg-on .el-message .el-message__content { color: var(--el-text-color-primary); font-weight: 500; }
+html.cg-on .el-message .el-message__badge { display: none; }
+html.cg-on .el-message-fade-enter-from,
+html.cg-on .el-message-fade-leave-to { opacity: 0; transform: translate(-50%, -14px) scale(.86); }
+html.dark.cg-on .el-message {
+  background: linear-gradient(180deg, rgb(40 46 64 / calc(.66 * var(--cg-k, 1))), rgb(26 31 46 / calc(.56 * var(--cg-k, 1))));
+  -webkit-backdrop-filter: blur(calc(14px * var(--cg-blur-k, 1))) saturate(1.4) brightness(.9);
+  backdrop-filter: blur(calc(14px * var(--cg-blur-k, 1))) saturate(1.4) brightness(.9);
+  box-shadow:
+    inset 1.5px 2px 1px -1.5px rgb(255 255 255 / .3),
+    inset -1px -1.5px 1px -1px rgb(255 255 255 / .12),
+    inset 0 0 0 1px rgb(255 255 255 / .08),
+    0 14px 36px -12px rgb(0 0 0 / .6),
+    0 2px 6px -2px rgb(0 0 0 / .35);
+}
+/* 液态玻璃的下拉框（html.cg-on）：下拉选择、下拉菜单、输入建议、日期选择和 cg-menu-popover 参数面板是一块磨砂玻璃，
+   打开时从触发的位置弹出、带一点回弹；里面跟着鼠标、方向键滑动的高亮是一颗玻璃液滴（.cg-menu-pill，见 glass/menus.ts）。
+   菜单要看清字：底色至少保留六成，模糊至少 10px，不会随「玻璃透明度」变得完全透明 */
+html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover).el-popper {
+  border: 0;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgb(255 255 255 / max(.66, calc(.84 * var(--cg-k, 1)))), rgb(246 248 253 / max(.6, calc(.78 * var(--cg-k, 1)))));
+  -webkit-backdrop-filter: blur(max(10px, calc(22px * var(--cg-blur-k, 1)))) saturate(1.8);
+  backdrop-filter: blur(max(10px, calc(22px * var(--cg-blur-k, 1)))) saturate(1.8);
+  box-shadow:
+    inset 1.5px 2px 1px -1.5px rgb(255 255 255 / .95),
+    inset -1px -1.5px 1px -1px rgb(255 255 255 / .5),
+    inset 0 0 0 1px rgb(255 255 255 / .4),
+    0 18px 48px -14px rgb(16 24 40 / .32),
+    0 4px 12px -4px rgb(16 24 40 / .12),
+    0 0 0 .5px rgb(16 24 40 / .1);
+  overflow: hidden;
+}
+html.dark.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover).el-popper {
+  background: linear-gradient(180deg, rgb(38 46 66 / max(.66, calc(.84 * var(--cg-k, 1)))), rgb(24 30 46 / max(.62, calc(.8 * var(--cg-k, 1)))));
+  -webkit-backdrop-filter: blur(max(10px, calc(22px * var(--cg-blur-k, 1)))) saturate(1.5);
+  backdrop-filter: blur(max(10px, calc(22px * var(--cg-blur-k, 1)))) saturate(1.5);
+  box-shadow:
+    inset 1.5px 2px 1px -1.5px rgb(255 255 255 / .32),
+    inset -1px -1.5px 1px -1px rgb(255 255 255 / .12),
+    inset 0 0 0 1px rgb(255 255 255 / .07),
+    0 20px 50px -14px rgb(0 0 0 / .7),
+    0 4px 12px -4px rgb(0 0 0 / .4);
+}
+html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover).el-popper .el-popper__arrow { display: none; }
+html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper) :is(.el-select-dropdown, .el-dropdown-menu, .el-autocomplete-suggestion, .el-picker-panel) {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+html.cg-on .el-select-dropdown__list,
+html.cg-on .el-dropdown__popper .el-dropdown-menu { padding: 6px; }
+html.cg-on :is(.el-select-dropdown__item, .el-dropdown-menu__item, .el-autocomplete-suggestion li, .cg-menu-item) { border-radius: 9px; }
+.cg-menu-item { position: relative; }
+/* 液滴出现后，原来的悬停底色去掉（液滴就是高亮）；液滴还没出现时（比如刚打开、用键盘之前）保留原来的 */
+html.cg-on .el-popper:has(> .cg-menu-pill.is-on) .el-select-dropdown__item.is-hovering,
+html.cg-on .el-popper:has(> .cg-menu-pill.is-on) .el-dropdown-menu__item:not(.is-disabled):is(:hover, :focus),
+html.cg-on .el-popper:has(> .cg-menu-pill.is-on) .el-autocomplete-suggestion li:is(:hover, .highlighted),
+html.cg-on .el-popper:has(> .cg-menu-pill.is-on) .cg-menu-item:is(:hover, :focus-visible) { background: transparent; }
+.cg-menu-pill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 9px;
+  pointer-events: none;
+  opacity: 0;
+  transform-origin: center;
+  transition: opacity .16s ease-out;
+  background: linear-gradient(180deg, rgb(255 255 255 / .96), rgb(238 240 255 / .9));
+  box-shadow:
+    inset 1px 1.5px 1px -1px rgb(255 255 255 / 1),
+    inset 0 -1px 1px -.5px rgb(79 70 229 / .12),
+    0 4px 14px -6px rgb(79 70 229 / .45),
+    0 1px 3px rgb(16 24 40 / .1),
+    0 0 0 .5px rgb(79 70 229 / .14);
+}
+.cg-menu-pill.is-on { opacity: 1; }
+html:not(.cg-on) .cg-menu-pill { display: none; }
+html.dark .cg-menu-pill {
+  background: linear-gradient(180deg, rgb(255 255 255 / .17), rgb(255 255 255 / .09));
+  box-shadow:
+    inset 1px 1.5px 1px -1px rgb(255 255 255 / .45),
+    inset 0 -1px 1px -.5px rgb(255 255 255 / .08),
+    0 4px 14px -6px rgb(0 0 0 / .6),
+    0 0 0 .5px rgb(255 255 255 / .1);
+}
+/* 打开：从触发的位置弹出、略带回弹；收起快一些、不回弹 */
+html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover).el-zoom-in-top-enter-active {
+  transition: opacity .16s ease-out, transform .42s cubic-bezier(.3, 1.4, .5, 1);
+}
+html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover).el-zoom-in-top-leave-active {
+  transition: opacity .14s ease-in, transform .16s ease-in;
+}
+html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover):is(.el-zoom-in-top-enter-from, .el-zoom-in-top-leave-active) {
+  opacity: 0;
+  transform: translateY(-6px) scale(.9);
+}
+html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover)[data-popper-placement^=top]:is(.el-zoom-in-top-enter-from, .el-zoom-in-top-leave-active) {
+  transform: translateY(6px) scale(.9);
+}

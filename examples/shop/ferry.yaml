@@ -1,0 +1,228 @@
+# 商城项目（ShopMall）的 ferry 配置示例：11 个 Spring Boot 服务，两台 Linux 服务器。
+#
+# 与现有 cmd/linux-server 脚本的对应关系见同目录 README.md。要点：
+#   - 部署根目录用 /opt/shop（root 所有），版本与依赖缓存放这里；业务数据、密钥、JDK、Nacos 快照仍用原来的 /home/shop 路径。
+#   - 单元名沿用 shop-<服务>.service：首次部署会「接管」现有单元（原文件保存到 apps/<服务>/legacy/，
+#     失败自动恢复；之后也可以 ferry rollback <目标> <服务> --to legacy 回到接管前）。
+#   - 同名服务的 Native 单元 shop-native-<服务>.service 列为 conflicts：部署前停止，成功后取消其开机自启。
+#
+# 相对路径都按「本配置文件所在目录」计算。ferry 与商城项目不在同一个目录下，所以 repo 写商城项目的绝对路径；
+# 换了机器或位置时改成实际路径，放到商城仓库根目录则改成 "."。
+version: 1
+project: shop
+
+vars:
+  repo: D:/work/shop
+  profile: prod
+  legacy: /home/shop/app             # 原部署目录（data、nacos 快照、日志等仍在这里）
+  jdk: /home/shop/runtime/jdk-25
+  secrets: /home/shop/secrets/shop.env
+  withEnv: /home/shop/app/scripts/shop-with-env.sh   # 补齐 Spring 环境变量别名的包装脚本（现有脚本上传的）
+  listen: 127.0.0.1                      # Gateway 覆盖为 0.0.0.0
+  xms: 128m
+  xmx: 512m
+
+git:
+  requireClean: false
+
+builds:
+  maven:
+    workdir: ${repo}
+    # 多个服务一起部署时只打包一次
+    command: mvn -pl ${each:module} -am clean package -DskipTests
+    lock: shop-maven
+
+targets:
+  prod-a:
+    host: 203.0.113.10
+    port: 2222
+    user: root
+    identityFile: ~/.ssh/id_ed25519_prod_a
+    arch: amd64
+    uploadStreams: 12   # 经 VPN 单条连接只有约 0.2 MB/s，多条连接并行（原脚本 ScpParallel 也是 12）
+    root: /opt/shop
+    runAs: shop
+    keepReleases: 5
+
+  prod-b:
+    host: 192.168.10.28
+    port: 22
+    user: root
+    identityFile: ~/.ssh/id_ed25519_prod_b
+    arch: arm64
+    root: /opt/shop
+    runAs: shop
+    keepReleases: 5
+
+apps:
+  - name: System
+    type: java
+    order: 10
+    build: maven
+    vars: {jarName: ShopMall-modules-system, module: ShopMall-modules/ShopMall-system, logFolder: ShopMall-system, port: "9201", sentinelPort: "8721", xms: 256m, xmx: 768m}
+    artifact: &jar
+      path: ${repo}/${module}/target/${jarName}.jar
+      verify:
+        springBoot:
+          requireLibs: ["ShopMall-common-core-*.jar"]
+          nonEmptyLibs: true
+    service: &svc
+      unit: shop-system
+      conflicts: [shop-native-system]
+      java: ${jdk}/bin/java
+      exec:
+        - /usr/bin/bash
+        - ${withEnv}
+        - ${java}
+        - -Xms${xms}
+        - -Xmx${xmx}
+        - -Dfile.encoding=UTF-8
+        - -Djava.io.tmpdir=${legacy}/data/tmp
+        - -DJM.LOG.PATH=${legacy}/logs/nacos-client
+        - -DJM.SNAPSHOT.PATH=${legacy}/data/nacos-snapshot
+        - -Dlogging.file.path=${logs}/${logFolder}
+        - -Dcsp.sentinel.log.dir=${logs}/${logFolder}/sentinel
+        - -Dcsp.sentinel.dashboard.server=127.0.0.1:8718
+        - -Dcsp.sentinel.api.port=${sentinelPort}
+        - -jar
+        - ${artifact}
+        - --spring.profiles.active=${profile}
+      envFile: ${secrets}
+      env:
+        GZTUNNEL_ENV_FILE: ${secrets}
+        SPRING_CLOUD_SENTINEL_EAGER: "true"
+        SERVER_ADDRESS: ${listen}
+        SPRING_CLOUD_NACOS_DISCOVERY_IP: 127.0.0.1
+      execStartPre:
+        - "-/usr/bin/find ${legacy}/data/tmp -mindepth 1 -maxdepth 1 -name tomcat*.${port}.* -exec rm -rf {} +"
+      diagLogs: ["${logs}/${logFolder}/error.log"]
+      health: {tcp: "${port}", timeout: 180s}
+      unitExtra:
+        service:
+          - SyslogIdentifier=shop-${app}
+          - TimeoutStartSec=180
+          - LimitNOFILE=65535
+          - NoNewPrivileges=true
+          - PrivateTmp=true
+          - ProtectSystem=full
+          - ReadWritePaths=${root}/apps ${legacy}
+          - UMask=0027
+
+  - name: File
+    type: java
+    order: 20
+    build: maven
+    vars: {jarName: ShopMall-modules-file, module: ShopMall-modules/ShopMall-file, logFolder: ShopMall-file, port: "9300", sentinelPort: "8730"}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-file
+      conflicts: [shop-native-file]
+
+  - name: Job
+    type: java
+    order: 30
+    # root: /data/shop   # 要放到另一个分区（如数据盘）时设置，可用目标 vars 让每台服务器不同；见 docs/config.md
+    build: maven
+    vars: {jarName: ShopMall-modules-job, module: ShopMall-modules/ShopMall-job, logFolder: ShopMall-job, port: "9203", sentinelPort: "8731"}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-job
+      conflicts: [shop-native-job]
+
+  - name: Gen
+    type: java
+    order: 40
+    build: maven
+    vars: {jarName: ShopMall-modules-gen, module: ShopMall-modules/ShopMall-gen, logFolder: ShopMall-gen, port: "9202", sentinelPort: "8732"}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-gen
+      conflicts: [shop-native-gen]
+
+  - name: ThirdCall
+    type: java
+    order: 50
+    build: maven
+    vars: {jarName: ShopMall-modules-thirdCall, module: ShopMall-modules/ShopMall-thirdCall, logFolder: ShopMall-thirdCall, port: "9205", sentinelPort: "8733"}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-thirdcall
+      conflicts: [shop-native-thirdcall]
+
+  - name: Message
+    type: java
+    order: 60
+    build: maven
+    vars: {jarName: ShopMall-message, module: ShopMall-message, logFolder: ShopMall-message, port: "9206", sentinelPort: "8734", xms: 256m, xmx: 768m}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-message
+      conflicts: [shop-native-message]
+
+  - name: App
+    type: java
+    order: 70
+    build: maven
+    vars: {jarName: ShopMall-modules-app, module: ShopMall-modules/ShopMall-app, logFolder: ShopMall-app, port: "9207", sentinelPort: "8735"}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-app
+      conflicts: [shop-native-app]
+
+  - name: DataExApi
+    type: java
+    order: 80
+    build: maven
+    vars: {jarName: ShopMall-modules-dataExApi, module: ShopMall-modules/ShopMall-dataExApi, logFolder: ShopMall-dataExApi, port: "9211", sentinelPort: "8736"}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-dataexapi
+      conflicts: [shop-native-dataexapi]
+
+  - name: Auth
+    type: java
+    order: 90
+    build: maven
+    vars: {jarName: ShopMall-auth, module: ShopMall-auth, logFolder: ShopMall-auth, port: "9200", sentinelPort: "8720"}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-auth
+      conflicts: [shop-native-auth]
+
+  - name: Monitor
+    type: java
+    order: 100
+    build: maven
+    vars: {jarName: ShopMall-visual-monitor, module: ShopMall-visual/ShopMall-monitor, logFolder: ShopMall-visual-monitor, port: "9100", sentinelPort: "8737"}
+    artifact:
+      path: ${repo}/${module}/target/${jarName}.jar
+      verify:
+        springBoot: {}               # Monitor 不依赖项目公共模块，只检查是 Spring Boot 可执行 JAR
+    service:
+      <<: *svc
+      unit: shop-monitor
+      conflicts: [shop-native-monitor]
+
+  # Gateway 最后：监听 0.0.0.0，不注入 Nacos 注册 IP
+  - name: Gateway
+    type: java
+    order: 110
+    build: maven
+    vars: {jarName: ShopMall-gateway, module: ShopMall-gateway, logFolder: ShopMall-gateway, port: "8080", sentinelPort: "8722", listen: 0.0.0.0, xms: 256m, xmx: 768m}
+    artifact: *jar
+    service:
+      <<: *svc
+      unit: shop-gateway
+      conflicts: [shop-native-gateway]
+      env:
+        GZTUNNEL_ENV_FILE: ${secrets}
+        SPRING_CLOUD_SENTINEL_EAGER: "true"
+        SERVER_ADDRESS: ${listen}

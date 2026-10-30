@@ -1,0 +1,195 @@
+# 端到端测试配置：两台容器服务器。
+#   e2e-a：root 登录
+#   e2e-b：deployer 登录 + sudo
+# 产物由 run.sh 放到 out/ 下。
+version: 1
+project: e2e
+vars:
+  bigDisk: /data/e2e    # far 的部署目录：e2e-a 上 /data 是另一个分区（tmpfs）
+
+targets:
+  e2e-a:
+    host: 127.0.0.1
+    port: 2222
+    identityFile: out/id_test
+    root: /opt/e2e
+    runAs: demo
+    confirm: false
+    keepReleases: 3
+    uploadStreams: 4
+  e2e-b:
+    host: 127.0.0.1
+    port: 2223
+    user: deployer
+    sudo: true
+    identityFile: out/id_test
+    root: /opt/e2e
+    runAs: demo
+    confirm: false
+    keepReleases: 3
+    vars: {bigDisk: /srv/big/e2e}
+    ferryDir: /opt/ferry-tools   # 自定义的 ferry 组件目录（agent、JDK）
+
+  # 与 e2e-b 同一台，用密码登录（密码通过环境变量或系统凭据库提供）
+  e2e-pw:
+    host: 127.0.0.1
+    port: 2223
+    user: deployer
+    sudo: true
+    auth: password
+    root: /opt/e2e
+    runAs: demo
+    confirm: false
+    vars: {bigDisk: /srv/big/e2e}
+
+apps:
+  - name: api
+    type: binary
+    order: 10
+    vars: {port: "18080"}
+    artifact: {path: out/api}
+    service:
+      env: {PORT: "${port}", EXTRA_PORT: "18719", LOG_FILE: "${logs}/api.log", REL_LOG_FILE: logs/rel/app.log}   # 日志和程序放在一起；相对路径的在工作目录（running）下
+      diagLogs: ["${logs}/api.log"]
+      health: {http: "http://127.0.0.1:${port}/health", contains: UP, timeout: 20s}
+
+  - name: sys
+    type: java
+    order: 20
+    artifact:
+      path: out/sys.jar
+      verify:
+        springBoot: {requireLibs: ["demo-common-core-*.jar"], nonEmptyLibs: true}
+    service:
+      java: /usr/local/bin/fakejava
+      env: {PORT: "18081"}
+      sharedDirs: [logs]
+      health: {tcp: "18081", timeout: 20s}
+
+  - name: web
+    type: static
+    order: 30
+    artifact: {path: out/web}
+    static: {link: /srv/www/e2e}
+
+  - name: leg
+    type: binary
+    order: 40
+    artifact: {path: out/leg}
+    service:
+      unit: e2e-leg
+      env: {PORT: "18082"}
+      health: {http: "http://127.0.0.1:18082/health", timeout: 20s}
+
+  # 单独的部署目录（按目标变量放到不同的分区 / 目录）
+  - name: far
+    type: binary
+    order: 50
+    root: ${bigDisk}
+    artifact: {path: out/far}
+    service:
+      env: {PORT: "18083"}
+      health: {http: "http://127.0.0.1:18083/health", contains: UP, timeout: 20s}
+
+  # 部署中途连接断开：等待就绪时间长一些（就绪后要稳定运行 8 秒），在这期间切断连接
+  - name: slow
+    type: binary
+    order: 56
+    artifact: {path: out/slow}
+    service:
+      env: {PORT: "18094"}
+      health: {http: "http://127.0.0.1:18094/health", contains: UP, timeout: 30s, stable: 8s}
+
+  # 部署时执行的命令（hooks）：测试用 data/state 下的标记文件让某一条失败、超时
+  - name: hk
+    type: binary
+    order: 57
+    artifact: {path: out/hk}
+    service:
+      env: {PORT: "18086"}
+      envFile: -/srv/hk.env
+      sharedDirs: [state]
+      health: {http: "http://127.0.0.1:18086/health", contains: UP, timeout: 20s}
+    hooks:
+      beforeSwitch:
+        - 'echo "$(id -un) ${FERRY_RELEASE} prev=$FERRY_PREVIOUS $GREETING $(pwd) $(command -v java)" >> ${data}/state/before.txt'
+        - test ! -e ${data}/state/fail-before
+        - {run: 'if [ -e ${data}/state/slow ]; then sleep 60 & sleep 60; fi', timeout: 5s}
+      afterSwitch:
+        - 'curl -s http://127.0.0.1:18086/health > ${data}/state/after.txt; test ! -e ${data}/state/fail-after'
+        - {run: 'id -un > /tmp/hk-root.txt; exit 3', user: root, optional: true}
+
+  # HTTPS：证书由 Pebble（Let's Encrypt 的测试用证书服务）签发，HTTP 验证（站点在 80）
+  - name: tls
+    type: static
+    order: 85
+    artifact: {path: out/site}
+    static:
+      port: 80
+      https: {domains: [www.e2e.test], email: ops@e2e.test, ca: "https://pebble:14000/dir"}
+
+  # 不停机发布：两个端口轮流用，Ferry 的 nginx 在 18101 上转发到运行中的版本
+  - name: zd
+    type: binary
+    order: 58
+    artifact: {path: out/zd}
+    service:
+      health: {http: "http://127.0.0.1:${port}/health", contains: UP, timeout: 20s}
+      zeroDowntime: {ports: [18102, 18103], listen: 18101, drain: 2s}
+
+  # 附带文件：配置目录、启动脚本和程序放在一起，随版本走；按目标用不同的文件
+  - name: cfg
+    type: binary
+    order: 55
+    artifact:
+      path: out/cfg
+      files:
+        - out/cfgfiles/conf
+        - {from: out/cfgfiles/start.sh, exec: true}
+        - {from: "out/cfgfiles/app-${target}.yml", to: app.yml}
+    service:
+      exec: ["${running}/start.sh"]
+      env: {PORT: "18093", CONF_FILE: conf/demo.conf}
+      health: {http: "http://127.0.0.1:18093/health", contains: UP, timeout: 20s}
+
+  # 经包装脚本启动（预检检查运行用户能否访问脚本）
+  - name: acc
+    type: binary
+    order: 60
+    artifact: {path: out/acc}
+    service:
+      exec: [/usr/bin/bash, /srv/acc/wrap.sh, "${artifact}"]
+      env: {PORT: "18084", LOG_HOME: /srv/acc/logs}   # 运行时要写入的目录：预检连里面已有的文件一起检查
+      health: {http: "http://127.0.0.1:18084/health", contains: UP, timeout: 20s}
+
+  # 由 Ferry 提供 JDK（runtime）：jar 需要 Java 17
+  - name: rt
+    type: java
+    order: 70
+    artifact: {path: out/rt.jar}
+    service:
+      runtime: {java: 17}
+      env: {PORT: "18085"}
+      health: {http: "http://127.0.0.1:18085/health", contains: UP, timeout: 20s}
+
+  # 前端：由 Ferry 提供的 nginx 单独运行（static.port），/api/ 转发到 api
+  - name: site
+    type: static
+    order: 80
+    artifact: {path: out/site}
+    static:
+      port: 18090
+      proxy: {/api/: "http://127.0.0.1:18080/"}
+
+# 数据备份（ferry backup 打开后才按时备份）：目录、自己写的命令
+backups:
+  - name: files
+    paths: [/srv/e2e-data]
+    keep: 2
+    beforeDeploy: true
+    targets: [e2e-a]
+  - name: kv
+    command: cat /srv/e2e-kv.txt
+    restore: cat > /srv/e2e-kv.txt
+    schedule: hourly
+    targets: [e2e-a]

@@ -1,0 +1,103 @@
+id: mariadb
+name: MariaDB
+category: 数据库
+desc: 兼容 MySQL 的数据库。程序用服务器的软件源安装，由 Ferry 单独运行一个实例（自己的配置、数据目录）
+homepage: https://mariadb.org
+params:
+  - key: port
+    label: 端口
+    type: port
+    default: "3306"
+  - key: public
+    label: 允许其他机器访问
+    type: bool
+    help: 不勾选时只监听 127.0.0.1；勾选后 root 可以从其他机器登录，注意用防火墙限制来源
+  - key: password
+    label: root 密码
+    type: password
+  - key: lowerCase
+    label: 表名不区分大小写
+    type: bool
+    help: lower_case_table_names=1：只能在安装时设置，以后改不了
+variants:
+  - label: 系统软件源（dnf / yum）
+    os: [rhel, centos, fedora]
+    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑
+    user: mysql
+    system:
+      dnf: [mariadb-server]
+      disable: [mariadb.service]
+    files: &files
+      - path: ${dir}/my.cnf
+        content: |
+          # 由 Ferry 生成（软件 ${name}）
+          [mysqld]
+          datadir=${dir}/data
+          socket=${dir}/mysql.sock
+          pid-file=${dir}/mysqld.pid
+          port=${port}
+          bind-address=${public?0.0.0.0|127.0.0.1}
+          log-error=${dir}/logs/error.log
+          character-set-server=utf8mb4
+          lower_case_table_names=${lowerCase?1|0}
+          # 第一次启动时设置 root 密码，就绪后去掉
+          init-file=${dir}/tmp/ferry-init.sql
+
+          [client]
+          socket=${dir}/mysql.sock
+          port=${port}
+      - path: ${dir}/tmp/ferry-init.sql
+        mode: "0600"
+        content: |
+          ALTER USER 'root'@'localhost' IDENTIFIED BY '${password}';
+          ${public?CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '${password}'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;|}
+          FLUSH PRIVILEGES;
+      - path: ${dir}/my.cnf
+        at: ready
+        content: |
+          # 由 Ferry 生成（软件 ${name}）
+          [mysqld]
+          datadir=${dir}/data
+          socket=${dir}/mysql.sock
+          pid-file=${dir}/mysqld.pid
+          port=${port}
+          bind-address=${public?0.0.0.0|127.0.0.1}
+          log-error=${dir}/logs/error.log
+          character-set-server=utf8mb4
+          lower_case_table_names=${lowerCase?1|0}
+
+          [client]
+          socket=${dir}/mysql.sock
+          port=${port}
+    steps: &steps
+      - run: mkdir -p ${dir}/data ${dir}/logs ${dir}/tmp
+      # 各发行版的服务端程序位置不同：链接到安装目录里
+      - run: for p in /usr/sbin/mariadbd /usr/libexec/mariadbd /usr/sbin/mysqld /usr/libexec/mysqld; do if [ -x $p ]; then ln -sfn $p ${dir}/mariadbd; break; fi; done; test -x ${dir}/mariadbd
+        error: 软件源装好了，但找不到 MariaDB 的服务端程序（mariadbd / mysqld）
+      - at: init
+        run: "$(command -v mariadb-install-db || command -v mysql_install_db) --defaults-file=${dir}/my.cnf --user=${user} --auth-root-authentication-method=normal >/dev/null || { tail -n 8 ${dir}/logs/error.log; exit 1; }"
+        error: 初始化数据目录失败
+      - at: ready
+        run: rm -f ${dir}/tmp/ferry-init.sql
+    service: &service
+      exec: ${dir}/mariadbd --defaults-file=${dir}/my.cnf
+      workdir: ${dir}
+      ready: {port: "${port}", timeout: 120}
+    logs: &logs ["${dir}/logs/error.log"]
+    configs: &configs
+      - {label: MariaDB 配置, path: "${dir}/my.cnf", apply: restart}
+    notes: &notes
+      - 连接 ${host}:${port}，用户 root，密码见「密码」；${public?允许其他机器连接（注意防火墙）|只允许本机连接（127.0.0.1）}
+  - label: 系统软件源（apt）
+    os: [debian, ubuntu]
+    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑
+    user: mysql
+    system:
+      apt: [mariadb-server]
+      disable: [mariadb.service]
+    files: *files
+    steps: *steps
+    service: *service
+    logs: *logs
+    configs: *configs
+    notes: *notes
