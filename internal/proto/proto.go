@@ -761,7 +761,10 @@ type SoftwareReport struct {
 	Runtimes map[int]Runtime `json:"runtimes,omitempty"` // 服务器上 Ferry 提供的 JDK
 	FerryDir string          `json:"ferryDir,omitempty"` // ferry 组件的目录（公共的 JDK 在它下面的 runtimes）
 	Disks    []Disk          `json:"disks,omitempty"`    // 常用目录所在分区的剩余空间
-	Ports    []int           `json:"ports,omitempty"`    // 已被占用的 TCP 端口
+	Ports    []int           `json:"ports,omitempty"`    // 已被占用的 TCP 端口（在监听的，和 Ferry 装的软件停着时也要用的）
+	UDPPorts []int           `json:"udpPorts,omitempty"` // 已被占用的 UDP 端口
+	// PortUsers 端口被谁占着（键为 tcp/端口、udp/端口）：只有知道是谁的才有
+	PortUsers map[string]string `json:"portUsers,omitempty"`
 }
 
 // OSInfo 服务器的系统（/etc/os-release）。
@@ -806,14 +809,17 @@ type SoftwarePlan struct {
 	Workdir string            `json:"workdir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"` // 写进只有 root 能读的文件
 	// ReadyPort 启动后等这个端口能连上
-	ReadyPort    int                  `json:"readyPort"`
-	ReadyTimeout int                  `json:"readyTimeout,omitempty"`
-	Ports        []int                `json:"ports"`             // 要占用的端口（安装前检查有没有被占用）
-	PortMap      map[string]int       `json:"portMap,omitempty"` // 端口参数（记下来给用户看）
-	Logs         []string             `json:"logs,omitempty"`    // 软件自己的日志文件
-	Notes        []string             `json:"notes,omitempty"`   // 安装完告诉用户的话
-	Configs      []SoftwareConfigFile `json:"configs,omitempty"`
-	Hosting      *NginxHosting        `json:"hosting,omitempty"`
+	ReadyPort    int `json:"readyPort"`
+	ReadyTimeout int `json:"readyTimeout,omitempty"`
+	// Account 登录用的账号（模板的 account 参数）：记进安装记录给用户看
+	Account  string               `json:"account,omitempty"`
+	Ports    []int                `json:"ports"`              // 要占用的 TCP 端口（安装前检查有没有被占用）
+	UDPPorts []int                `json:"udpPorts,omitempty"` // 要占用的 UDP 端口
+	PortMap  map[string]int       `json:"portMap,omitempty"`  // 端口参数（记下来给用户看）
+	Logs     []string             `json:"logs,omitempty"`     // 软件自己的日志文件
+	Notes    []string             `json:"notes,omitempty"`    // 安装完告诉用户的话
+	Configs  []SoftwareConfigFile `json:"configs,omitempty"`
+	Hosting  *NginxHosting        `json:"hosting,omitempty"`
 }
 
 // PlanPackage 上传的安装包怎么放。
@@ -888,6 +894,8 @@ type PlanStep struct {
 	Timeout int       `json:"timeout,omitempty"`
 	Error   string    `json:"error,omitempty"`
 	Soft    string    `json:"soft,omitempty"`
+	// Sets 这一步让这个参数（如 password）生效：soft 失败时记进 SoftwareInstance.Unset
+	Sets string `json:"sets,omitempty"`
 }
 
 // PlanHTTP 就绪后调用的接口。
@@ -899,22 +907,29 @@ type PlanHTTP struct {
 
 // SoftwareInstance Ferry 安装的一个软件（<ferryDir>/software/<名称>.json）。
 type SoftwareInstance struct {
-	Name        string               `json:"name"`
-	Kind        string               `json:"kind"`  // 模板 ID
-	Title       string               `json:"title"` // 显示名
-	Version     string               `json:"version,omitempty"`
-	Dir         string               `json:"dir"`
-	Unit        string               `json:"unit"`
-	User        string               `json:"user"`
-	Ports       map[string]int       `json:"ports,omitempty"`
-	ReadyPort   int                  `json:"readyPort"`
-	Logs        []string             `json:"logs,omitempty"`
-	Packages    []string             `json:"packages,omitempty"` // 从软件源装的包（卸载时不删，告诉用户）
-	InstalledAt time.Time            `json:"installedAt"`
-	InstalledBy string               `json:"installedBy,omitempty"`
-	Notes       []string             `json:"notes,omitempty"`
-	Configs     []SoftwareConfigFile `json:"configs,omitempty"`
-	Hosting     *NginxHosting        `json:"hosting,omitempty"`
+	Name    string         `json:"name"`
+	Kind    string         `json:"kind"`  // 模板 ID
+	Title   string         `json:"title"` // 显示名
+	Version string         `json:"version,omitempty"`
+	Dir     string         `json:"dir"`
+	Unit    string         `json:"unit"`
+	User    string         `json:"user"`
+	Ports   map[string]int `json:"ports,omitempty"`
+	// AllPorts、UDPPorts 占用的全部 TCP、UDP 端口（含附加端口）：停着时别的软件也不能用
+	AllPorts    []int     `json:"allPorts,omitempty"`
+	UDPPorts    []int     `json:"udpPorts,omitempty"`
+	ReadyPort   int       `json:"readyPort"`
+	Logs        []string  `json:"logs,omitempty"`
+	Packages    []string  `json:"packages,omitempty"` // 从软件源装的包（卸载时不删，告诉用户）
+	InstalledAt time.Time `json:"installedAt"`
+	InstalledBy string    `json:"installedBy,omitempty"`
+	Notes       []string  `json:"notes,omitempty"`
+	// Account 登录用的账号（密码在本机凭据库里）
+	Account string `json:"account,omitempty"`
+	// Unset 没能生效的参数（设置它的步骤失败了，如 Nacos 管理员密码）：生成的值不能当作可用的交给用户
+	Unset   []string             `json:"unset,omitempty"`
+	Configs []SoftwareConfigFile `json:"configs,omitempty"`
+	Hosting *NginxHosting        `json:"hosting,omitempty"`
 }
 
 // Software 服务器上找到的一个软件（一个运行中的实例，或装了没运行的服务 / 容器）。
@@ -940,6 +955,7 @@ type Software struct {
 	Path  string   `json:"path,omitempty"` // 程序（Java 软件为 jar 或安装目录）；容器里的为容器内路径
 	// Instance Ferry 安装的软件的实例名（可以启停、看日志、卸载）；其他来源的为空
 	Instance string        `json:"instance,omitempty"`
+	Account  string        `json:"account,omitempty"` // Ferry 安装的：登录用的账号
 	Hosting  *NginxHosting `json:"hosting,omitempty"`
 	Dir      string        `json:"dir,omitempty"` // Ferry 安装的：安装目录
 }

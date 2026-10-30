@@ -41,6 +41,7 @@ var (
 	reSwVersion = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,40}$`)
 	rePkgName   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 	reUnitName  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._-]*\.service$`)
+	reAccount   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{2,31}$`)
 )
 
 func (a *Agent) swDir() string               { return filepath.Join(a.ferryDir(), "software") }
@@ -142,6 +143,8 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 		return fmt.Errorf("版本无效：%q", pl.Version)
 	case !reUserName.MatchString(pl.User) || pl.User == "root":
 		return fmt.Errorf("运行用户无效（不能是 root）：%q", pl.User)
+	case pl.Account != "" && !reAccount.MatchString(pl.Account):
+		return fmt.Errorf("账号无效：%q", pl.Account)
 	case pl.Exec == "" || strings.ContainsAny(pl.Exec, "\n\r"):
 		return errors.New("启动命令无效")
 	case pl.ReadyPort < 1 || pl.ReadyPort > 65535:
@@ -157,15 +160,17 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 			return err
 		}
 	}
-	seen := map[int]bool{}
-	for _, p := range pl.Ports {
-		if p < 1 || p > 65535 {
-			return fmt.Errorf("端口无效：%d", p)
+	for _, list := range [][]int{pl.Ports, pl.UDPPorts} {
+		seen := map[int]bool{}
+		for _, p := range list {
+			if p < 1 || p > 65535 {
+				return fmt.Errorf("端口无效：%d", p)
+			}
+			if seen[p] {
+				return fmt.Errorf("端口 %d 重复", p)
+			}
+			seen[p] = true
 		}
-		if seen[p] {
-			return fmt.Errorf("端口 %d 重复", p)
-		}
-		seen[p] = true
 	}
 	if pk := pl.Package; pk != nil {
 		if !reSafe.MatchString(pk.File) || !zipx.IsSHA256(pk.SHA256) {
@@ -182,8 +187,10 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 	}
 	if s := pl.System; s != nil {
 		for _, n := range append(append([]string{}, s.DNF...), s.APT...) {
-			if !rePkgName.MatchString(n) {
-				return fmt.Errorf("软件包名无效：%q", n)
+			for _, c := range strings.Split(n, "|") {
+				if !rePkgName.MatchString(c) {
+					return fmt.Errorf("软件包名无效：%q", n)
+				}
 			}
 		}
 		for _, u := range s.Disable {
@@ -231,19 +238,54 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 	return nil
 }
 
-// listeningPorts 服务器上正在监听的 TCP 端口（测试时替换）。
-var listeningPorts = func() map[int]bool { return listenPortsIn("/proc/net") }
+// listeningPorts 服务器上正在监听的 TCP 端口；listeningUDP 绑定着的 UDP 端口（测试时替换）。
+var (
+	listeningPorts = func() map[int]bool { return listenPortsIn("/proc/net") }
+	listeningUDP   = func() map[int]bool { return udpPortsIn("/proc/net") }
+)
 
-func listenPortsIn(dir string) map[int]bool {
+func listenPortsIn(dir string) map[int]bool { return procPorts(dir, []string{"tcp", "tcp6"}, "0A") }
+
+// udpPortsIn 绑定着、没有连接对方的 UDP 端口（状态 07；连着对方的是程序自己往外发用的临时端口）。
+func udpPortsIn(dir string) map[int]bool { return procPorts(dir, []string{"udp", "udp6"}, "07") }
+
+// swPortUsers Ferry 装的软件占的端口（键为 tcp/端口、udp/端口）：停着的也算，启动时要用。skip 为不算的实例。
+func (a *Agent) swPortUsers(skip string) map[string]string {
+	out := map[string]string{}
+	for _, in := range a.instances() {
+		if in.Name == skip {
+			continue
+		}
+		who := fmt.Sprintf("Ferry 装的 %s（%s）", strings.TrimSpace(in.Title), in.Name)
+		tcp := in.AllPorts
+		if len(tcp) == 0 { // 老记录只有端口参数
+			for _, p := range in.Ports {
+				tcp = append(tcp, p)
+			}
+		}
+		for _, p := range tcp {
+			out["tcp/"+strconv.Itoa(p)] = who
+		}
+		for _, p := range in.UDPPorts {
+			out["udp/"+strconv.Itoa(p)] = who
+		}
+	}
+	return out
+}
+
+func procPorts(dir string, files []string, state string) map[int]bool {
 	out := map[int]bool{}
-	for _, name := range []string{"tcp", "tcp6"} {
+	for _, name := range files {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}
 		for _, line := range strings.Split(string(b), "\n") {
 			f := strings.Fields(line)
-			if len(f) < 4 || f[3] != "0A" {
+			if len(f) < 4 || f[3] != state {
+				continue
+			}
+			if state == "07" && !strings.HasSuffix(f[2], ":0000") {
 				continue
 			}
 			if _, ph, ok := strings.Cut(f[1], ":"); ok {
@@ -303,10 +345,21 @@ func (a *Agent) swinstall() int {
 	} else {
 		created = true
 	}
-	inUse := listeningPorts()
+	inUse, udpInUse, users := listeningPorts(), listeningUDP(), a.swPortUsers(name)
 	for _, p := range pl.Ports {
+		if who := users["tcp/"+strconv.Itoa(p)]; who != "" {
+			return fail("端口 %d 已被 %s占用（它停着时也算）：换一个端口", p, who)
+		}
 		if inUse[p] {
 			return fail("端口 %d 已被占用：换一个端口", p)
+		}
+	}
+	for _, p := range pl.UDPPorts {
+		if who := users["udp/"+strconv.Itoa(p)]; who != "" {
+			return fail("UDP 端口 %d 已被 %s占用（它停着时也算）：换一个端口", p, who)
+		}
+		if udpInUse[p] {
+			return fail("UDP 端口 %d 已被占用：换一个端口", p)
 		}
 	}
 	src := ""
@@ -334,7 +387,7 @@ func (a *Agent) swinstall() int {
 	var packages []string
 	if s := pl.System; s != nil {
 		var err error
-		if packages, err = a.systemInstall(name, s, proxyEnvPrefix(pl)); err != nil {
+		if packages, err = a.systemInstall(name, s, proxyEnvPrefix(pl), pl.Package != nil); err != nil {
 			return fail("%v", err)
 		}
 	}
@@ -388,7 +441,7 @@ func (a *Agent) swinstall() int {
 			return fail("修改配置 %s 失败：%v", p.File, err)
 		}
 	}
-	if err := a.runSteps(pl, "prepare", nil); err != nil {
+	if err := a.runSteps(pl, "prepare", nil, nil); err != nil {
 		return fail("%v", err)
 	}
 	if err := a.chownTree(pl.Dir, uid, gid); err != nil {
@@ -398,7 +451,7 @@ func (a *Agent) swinstall() int {
 	if ok, err := a.Sys.AccessAs(pl.User, pl.Dir, 'x'); err == nil && !ok {
 		return fail("运行用户 %s 进不了 %s：它的上级目录不允许其他用户进入，换一个安装目录，或给上级目录加上 o+x 权限", pl.User, pl.Dir)
 	}
-	if err := a.runSteps(pl, "init", nil); err != nil {
+	if err := a.runSteps(pl, "init", nil, nil); err != nil {
 		return fail("%v", err)
 	}
 	if len(pl.Env) > 0 {
@@ -432,17 +485,18 @@ func (a *Agent) swinstall() int {
 		return a.result(proto.CodeFailed, "启动失败："+err.Error(), nil)
 	}
 	notes := append([]string{}, pl.Notes...)
+	var unset []string
 	if err := a.writeFiles(pl, "ready"); err != nil {
 		return fail("%v", err)
 	}
-	if err := a.runSteps(pl, "ready", &notes); err != nil {
+	if err := a.runSteps(pl, "ready", &notes, &unset); err != nil {
 		return fail("%v", err)
 	}
 	if len(packages) > 0 {
 		notes = append(notes, "从软件源装了 "+strings.Join(packages, " ")+"（卸载时不会删除这些包）")
 	}
 	inst := proto.SoftwareInstance{Name: name, Kind: pl.Template, Title: pl.Title, Version: pl.Version, Dir: pl.Dir, Unit: unit, User: pl.User,
-		Ports: pl.PortMap, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Configs: pl.Configs, Hosting: pl.Hosting}
+		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting}
 	b, _ := json.MarshalIndent(inst, "", "  ")
 	if err := writeFileAtomic(a.instFile(name), b, 0o644); err != nil {
 		return fail("写安装记录失败：%v", err)
@@ -472,8 +526,9 @@ func clearDir(dir string) {
 }
 
 // systemInstall 用服务器的软件源装包；装包时被自动启动的系统自带服务停掉并禁用（原来就在运行的不动）。
-// env 不为空时下载经这台电脑（proxyEnvPrefix）。
-func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string) ([]string, error) {
+// env 不为空时下载经这台电脑（proxyEnvPrefix）。deps 为 true 时只是安装包需要的系统库：没有包管理器时跳过（后面的检查会说缺什么）。
+// 包名可以写几个候选（a|b）：用已经装着的，或软件源里有的第一个（不同发行版、版本包名不同，如 libaio1t64|libaio1）。
+func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps bool) ([]string, error) {
 	var mgr string
 	var pkgs []string
 	for _, m := range []string{"dnf", "yum", "apt-get"} {
@@ -489,11 +544,47 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string) ([]s
 		pkgs = s.APT
 	}
 	if mgr == "" || len(pkgs) == 0 {
+		if deps {
+			a.warn(proto.EvWarn, name, "服务器上没有 dnf / yum / apt：需要的系统库没有自动安装")
+			return nil, nil
+		}
 		return nil, errors.New("这种装法用不了这台服务器的软件包管理器（需要 dnf / yum / apt）：换一种装法")
 	}
+	// 已经装着的包不交给包管理器：apt install 会顺手把它升级，升级脚本还会重启正在用它的系统服务
+	var have, want, alts []string
+	for _, p := range pkgs {
+		cands := strings.Split(p, "|")
+		got := ""
+		for _, c := range cands {
+			if a.pkgInstalled(mgr, c) {
+				got = c
+				break
+			}
+		}
+		switch {
+		case got != "":
+			have = append(have, got)
+		case len(cands) == 1:
+			want = append(want, p)
+		default:
+			alts = append(alts, p)
+		}
+	}
+	if len(alts) > 0 {
+		want = append(want, a.pickPackages(mgr, env, alts)...)
+	}
+	if len(have) > 0 {
+		a.info(proto.EvSoftware, name, "服务器上已经装着 %s：直接用，不升级", strings.Join(have, " "))
+	}
+	if len(want) == 0 {
+		return nil, a.checkRequire(s)
+	}
+	pkgs = want
+	// 装包前就有的系统服务（原来就装着、或用户自己建的）不动；只停掉这次装包新建出来的
 	before := map[string]bool{}
 	for _, u := range s.Disable {
-		before[u] = isRunning(a.Sys.UnitProps(u))
+		p := a.Sys.UnitProps(u)
+		before[u] = isRunning(p) || p.Load == "loaded"
 	}
 	via := "服务器自己的网络"
 	if env != "" {
@@ -502,7 +593,7 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string) ([]s
 	a.info(proto.EvSoftware, name, "从软件源安装 %s（%s，%s，可能要几分钟）", strings.Join(pkgs, " "), mgr, via)
 	cmd := env + mgr + " install -y " + strings.Join(pkgs, " ")
 	if mgr == "apt-get" {
-		cmd = env + "DEBIAN_FRONTEND=noninteractive apt-get install -y " + strings.Join(pkgs, " ")
+		cmd = env + "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade " + strings.Join(pkgs, " ")
 	}
 	out, err := a.Sys.Shell(cmd+" 2>&1", 20*time.Minute)
 	if err != nil && mgr == "apt-get" {
@@ -523,17 +614,69 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string) ([]s
 	}
 	for _, u := range s.Disable {
 		if before[u] {
-			a.warn(proto.EvWarn, name, "%s 原来就在运行，没有动它", u)
+			if isRunning(a.Sys.UnitProps(u)) {
+				a.warn(proto.EvWarn, name, "%s 原来就有，没有动它", u)
+			}
 			continue
 		}
 		a.Sys.Systemctl("disable", "--now", u)
 	}
+	return pkgs, a.checkRequire(s)
+}
+
+// checkRequire 软件源装好后必须有的程序。
+func (a *Agent) checkRequire(s *proto.PlanSystem) error {
 	if s.Require != "" {
 		if _, err := os.Stat(s.Require); err != nil {
-			return nil, fmt.Errorf("软件源装好了，但没有 %s：这个软件源里的包可能不一样", s.Require)
+			return fmt.Errorf("软件源装好了，但没有 %s：这个软件源里的包可能不一样", s.Require)
 		}
 	}
-	return pkgs, nil
+	return nil
+}
+
+// pickPackages 候选包名里软件源中有的第一个（apt 的索引里一个都没有时先更新索引）；都查不到时用第一个，装的时候报错。
+func (a *Agent) pickPackages(mgr, env string, alts []string) []string {
+	exists := func(p string) bool {
+		cmd := env + mgr + " -q list " + shellQuote(p) + " >/dev/null 2>&1"
+		if mgr == "apt-get" {
+			cmd = "apt-cache show " + shellQuote(p) + " 2>/dev/null | grep -q '^Package:'"
+		}
+		_, err := a.Sys.Shell(cmd, 5*time.Minute)
+		return err == nil
+	}
+	var out []string
+	for _, alt := range alts {
+		cands := strings.Split(alt, "|")
+		got := ""
+		for round := 0; round < 2 && got == ""; round++ {
+			for _, c := range cands {
+				if exists(c) {
+					got = c
+					break
+				}
+			}
+			if got == "" && round == 0 && mgr == "apt-get" {
+				a.Sys.Shell(env+"DEBIAN_FRONTEND=noninteractive apt-get update 2>&1", 10*time.Minute)
+				continue
+			}
+			break
+		}
+		if got == "" {
+			got = cands[0]
+		}
+		out = append(out, got)
+	}
+	return out
+}
+
+// pkgInstalled 包已经装在服务器上。
+func (a *Agent) pkgInstalled(mgr, pkg string) bool {
+	cmd := "rpm -q --quiet " + shellQuote(pkg)
+	if mgr == "apt-get" {
+		cmd = "dpkg-query -W -f='${Status}' " + shellQuote(pkg) + " 2>/dev/null | grep -q 'install ok installed'"
+	}
+	_, err := a.Sys.Shell(cmd, 30*time.Second)
+	return err == nil
 }
 
 // ensureUser 运行用户：没有就创建（系统用户，不能登录）。
@@ -786,8 +929,8 @@ func (a *Agent) writeFiles(pl *proto.SoftwarePlan, at string) error {
 	return nil
 }
 
-// runSteps 执行 at 阶段的步骤；soft 的失败只提示（加到 notes）。
-func (a *Agent) runSteps(pl *proto.SoftwarePlan, at string, notes *[]string) error {
+// runSteps 执行 at 阶段的步骤；soft 的失败只提示（加到 notes），它要设置的参数记进 unset。
+func (a *Agent) runSteps(pl *proto.SoftwarePlan, at string, notes, unset *[]string) error {
 	for _, s := range pl.Steps {
 		sa := s.At
 		if sa == "" {
@@ -823,6 +966,9 @@ func (a *Agent) runSteps(pl *proto.SoftwarePlan, at string, notes *[]string) err
 			a.warn(proto.EvWarn, pl.Name, "%s（%v）", s.Soft, err)
 			if notes != nil {
 				*notes = append(*notes, s.Soft)
+			}
+			if unset != nil && s.Sets != "" {
+				*unset = append(*unset, s.Sets)
 			}
 			continue
 		}
@@ -995,15 +1141,31 @@ func (a *Agent) swremove() int {
 	}
 	defer unlock()
 	a.info(proto.EvSoftware, in.Name, "停止并删除系统服务 %s", in.Unit)
-	a.Sys.Systemctl("disable", "--now", in.Unit)
+	stopErr := a.Sys.Systemctl("disable", "--now", in.Unit)
+	// 确认停下来了才删：还在运行时删目录，数据会在使用中被删掉（单元文件已经不在、停止报错但进程已退出的可以继续）
+	if p := a.Sys.UnitProps(in.Unit); isRunning(p) || p.Active == "deactivating" || p.PID != 0 {
+		why := ""
+		if stopErr != nil {
+			why = "：" + stopErr.Error()
+		}
+		msg := fmt.Sprintf("%s 没有停下来（%s/%s）%s。没有删除任何东西，查看日志处理后再卸载", in.Unit, p.Active, p.Sub, why)
+		a.fail(proto.EvFail, in.Name, "%s", msg)
+		return a.result(proto.CodeFailed, msg, nil)
+	}
 	if a.ferryUnitFile(in.Unit) {
-		os.Remove(a.unitPath(in.Unit))
+		if err := os.Remove(a.unitPath(in.Unit)); err != nil {
+			msg := fmt.Sprintf("删除系统服务 %s 失败：%v。安装记录保留，可以再卸载一次", in.Unit, err)
+			a.fail(proto.EvFail, in.Name, "%s", msg)
+			return a.result(proto.CodeFailed, msg, nil)
+		}
 	}
 	a.Sys.Systemctl("daemon-reload")
 	if a.req.Purge {
 		a.info(proto.EvSoftware, in.Name, "删除安装目录 %s（含数据）", in.Dir)
 		if err := os.RemoveAll(in.Dir); err != nil {
-			a.warn(proto.EvWarn, in.Name, "删除 %s 失败：%v", in.Dir, err)
+			msg := fmt.Sprintf("删除 %s 失败：%v。服务已停止并删除，安装记录保留，处理后可以再卸载一次", in.Dir, err)
+			a.fail(proto.EvFail, in.Name, "%s", msg)
+			return a.result(proto.CodeFailed, msg, nil)
 		}
 	} else {
 		a.info(proto.EvSoftware, in.Name, "安装目录 %s（含数据）保留，不需要了可以手动删除", in.Dir)

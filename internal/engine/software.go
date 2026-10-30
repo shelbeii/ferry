@@ -49,6 +49,11 @@ type SoftwareResult struct {
 	Password string `json:"password,omitempty"`
 	// Saved 密码已存进系统凭据库（以后在「密码」里能再看到）
 	Saved bool `json:"saved"`
+	// Public 其他机器能不能连：chosen = 选了「允许其他机器访问」；always = 模板没有这个选项（监听所有地址）；空 = 只有本机能连
+	Public string `json:"public,omitempty"`
+	// OpenPorts 其他机器要连时防火墙要放行的端口（含附加端口）；Public 为空时没有
+	OpenPorts []int `json:"openPorts,omitempty"`
+	OpenUDP   []int `json:"openUDP,omitempty"`
 }
 
 // SoftwareSources 下载源（设置 → 运行环境）。
@@ -63,7 +68,9 @@ func (e *Engine) Templates() ([]*swtpl.Template, []error) {
 
 var (
 	reMemory = regexp.MustCompile(`^[1-9][0-9]{1,5}[mg]$`)
-	rePass   = regexp.MustCompile(`^[A-Za-z0-9!@#%^*()_+=.,:~-]{8,64}$`)
+	// 账号：数据库、控制台都能用，写进 SQL、配置也不用转义
+	reAccount = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{2,31}$`)
+	rePass    = regexp.MustCompile(`^[A-Za-z0-9!@#%^*()_+=.,:~-]{8,64}$`)
 )
 
 // SoftwareInstall 按模板在服务器上安装软件：选出适合这台服务器的装法，准备安装包（本机库里没有就下载）、需要时装 JDK、上传，
@@ -171,9 +178,9 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 
 	// 参数
 	vars := swtpl.Vars{"name": name, "dir": dir, "user": user, "host": t.Host}
-	var ports []int
+	var ports, udpPorts []int
 	portMap := map[string]int{}
-	password := ""
+	password, account := "", ""
 	known := map[string]bool{}
 	for _, p := range tpl.Params {
 		known[p.Key] = true
@@ -194,17 +201,34 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			portMap[p.Key] = n
 			for _, off := range append([]int{0}, p.Offsets...) {
 				q := n + off
-				if slices.Contains(ports, q) {
-					return nil, fmt.Errorf("端口 %d 重复", q)
+				what := label
+				if off != 0 {
+					what = fmt.Sprintf("%s +%d", label, off)
 				}
-				if slices.Contains(rep.Ports, q) {
-					what := label
-					if off != 0 {
-						what = fmt.Sprintf("%s +%d", label, off)
+				for _, c := range []struct {
+					on         bool
+					pr         string
+					list, used *[]int
+				}{{p.TCP(), "tcp", &ports, &rep.Ports}, {p.UDP(), "udp", &udpPorts, &rep.UDPPorts}} {
+					if !c.on {
+						continue
 					}
-					return nil, fmt.Errorf("%s 上端口 %d（%s）已被占用：换一个", t.Name, q, what)
+					pr := ""
+					if c.pr == "udp" {
+						pr = "UDP "
+					}
+					if slices.Contains(*c.list, q) {
+						return nil, fmt.Errorf("%s端口 %d 重复", pr, q)
+					}
+					if slices.Contains(*c.used, q) {
+						by := "已被占用"
+						if who := rep.PortUsers[c.pr+"/"+strconv.Itoa(q)]; who != "" {
+							by = "已被 " + who + "占用（它停着时也算）"
+						}
+						return nil, fmt.Errorf("%s 上%s端口 %d（%s）%s：换一个", t.Name, pr, q, what, by)
+					}
+					*c.list = append(*c.list, q)
 				}
-				ports = append(ports, q)
 			}
 		case "bool":
 			val = strconv.FormatBool(swtpl.Truthy(val))
@@ -216,6 +240,13 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		case "number":
 			if _, err := strconv.Atoi(val); err != nil {
 				return nil, fmt.Errorf("%s 要写数字：%q", label, val)
+			}
+		case "account":
+			if !reAccount.MatchString(val) {
+				return nil, fmt.Errorf("%s 要 3～32 位，字母开头，只能用字母、数字、下划线：%q", label, val)
+			}
+			if account == "" {
+				account = val
 			}
 		case "select":
 			if !slices.Contains(p.Options, val) {
@@ -348,8 +379,8 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	if err != nil {
 		return nil, err
 	}
-	plan.Name, plan.Dir, plan.User, plan.Version = name, dir, user, version
-	plan.Ports, plan.PortMap = ports, portMap
+	plan.Name, plan.Dir, plan.User, plan.Version, plan.Account = name, dir, user, version, account
+	plan.Ports, plan.UDPPorts, plan.PortMap = ports, udpPorts, portMap
 	plan.FixParents = fix
 	if javaHome != "" {
 		plan.Reach = []string{javaHome}
@@ -376,7 +407,15 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	if err := s.callData("swinstall", &proto.Request{Stage: stage, Install: plan}, &inst); err != nil {
 		return nil, err
 	}
-	res := &SoftwareResult{SoftwareInstance: inst, Target: t.Name, Password: password}
+	res := &SoftwareResult{SoftwareInstance: inst, Target: t.Name, Password: password, Public: publicMode(tpl, vars)}
+	if res.Public != "" {
+		res.OpenPorts, res.OpenUDP = ports, udpPorts
+	}
+	if password != "" && slices.Contains(inst.Unset, "password") {
+		// 设置密码的步骤没成功：这个密码用不了，不给用户、不保存（notes 里有怎么补设）
+		password, res.Password = "", ""
+		e.Rep.Warn("%s 的密码没有设置成功：按安装结果里的说明自己设置", name)
+	}
 	if password != "" {
 		if err := secret.Set(secret.SoftwareAccount(name, t.Host, t.Port), password); err != nil {
 			e.Rep.Warn("密码没能存进系统凭据库（%v）：请自己记下来", err)
@@ -385,6 +424,19 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		}
 	}
 	return res, nil
+}
+
+// publicMode 装好后其他机器能不能连（见 SoftwareResult.Public）：模板有 bool 参数 public 时看它的值，没有时算作总是能连。
+func publicMode(tpl *swtpl.Template, vars swtpl.Vars) string {
+	for _, p := range tpl.Params {
+		if p.Key == "public" && p.Type == "bool" {
+			if swtpl.Truthy(vars["public"]) {
+				return "chosen"
+			}
+			return ""
+		}
+	}
+	return "always"
 }
 
 var reFolderUnsafe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -516,7 +568,7 @@ func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swp
 		if !vars.Cond(st.If) {
 			continue
 		}
-		ps := proto.PlanStep{At: st.At, Run: x(st.Run), Timeout: st.Timeout, Error: st.Error, Soft: st.Soft}
+		ps := proto.PlanStep{At: st.At, Run: x(st.Run), Timeout: st.Timeout, Error: st.Error, Soft: st.Soft, Sets: st.Sets}
 		if h := st.HTTP; h != nil {
 			form := map[string]string{}
 			for k, val := range h.Form {

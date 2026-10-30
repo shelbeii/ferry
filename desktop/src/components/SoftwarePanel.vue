@@ -66,7 +66,7 @@ watch(key, () => { configOf.value = undefined })
 const logsName = ref('')
 const logsOf = ref<{ title: string; unit?: string; container?: string } | null>(null)
 const result = ref<SoftwareResult | null>(null)
-const pwShow = ref<{ name: string; password: string } | null>(null)
+const pwShow = ref<{ name: string; account?: string; password: string } | null>(null)
 const removing = ref<{ row: Software; purge: boolean } | null>(null)
 
 function openInstall() {
@@ -126,7 +126,7 @@ async function controlOther(row: Software, action: 'start' | 'stop' | 'restart')
 async function showPassword(row: Software) {
   try {
     const r = await call<{ password: string }>(['software', 'password', props.target, row.instance!, '-c', props.config])
-    pwShow.value = { name: row.instance!, password: r.password }
+    pwShow.value = { name: row.instance!, account: row.account, password: r.password }
   } catch (e) {
     ElMessage.error((e as Error).message)
   }
@@ -151,8 +151,8 @@ async function copy(text: string) {
 
 const withHost = (s: string) => s.replaceAll('<服务器地址>', props.host)
 
-// 装的时候选了允许其他机器连接：到「端口」里看防火墙放没放行
-const publicPorts = computed(() => (result.value?.public ? [...new Set(Object.values(result.value.ports ?? {}))].filter((p) => p > 0) : []))
+// 其他机器能连的：到「端口」里看防火墙放没放行
+const publicPorts = computed(() => (result.value?.public ? [...new Set(result.value.openPorts ?? [])].filter((p) => p > 0) : []))
 function goPort(p: number) {
   result.value = null
   emit('goPort', p)
@@ -443,6 +443,11 @@ function listenTip(l: string): string {
         {{ result.target }} 上已安装 <b>{{ result.name }}</b>（{{ [result.title || result.kind, result.version].filter(Boolean).join(' ') }}），系统服务 <span class="mono">{{ result.unit }}</span>，安装目录
         <span class="mono">{{ result.dir }}</span>。
       </p>
+      <div v-if="result.account" class="pw">
+        <span>账号：</span>
+        <span class="mono pw-val">{{ result.account }}</span>
+        <el-button :icon="CopyDocument" link @click="copy(result.account ?? '')">复制</el-button>
+      </div>
       <div v-if="result.password" class="pw">
         <span>密码：</span>
         <span class="mono pw-val">{{ result.password }}</span>
@@ -453,7 +458,8 @@ function listenTip(l: string): string {
         <li v-for="n in result.notes ?? []" :key="n">{{ withHost(n) }}</li>
       </ul>
       <p v-if="publicPorts.length" class="muted small">
-        选了允许其他机器连接：服务器开着防火墙的话，还要放行端口 {{ publicPorts.join('、') }}；只给同一台服务器上的程序用就不用放行。
+        {{ result.public === 'chosen' ? '选了允许其他机器连接' : '这个软件监听所有地址' }}：其他机器要连的话，服务器开着防火墙时还要放行端口
+        {{ publicPorts.join('、') }}{{ result.openUDP?.length ? `，UDP 端口 ${result.openUDP.join('、')}` : '' }}；只给同一台服务器上的程序用就不用放行{{ result.public === 'always' ? '，不放行反而更安全' : '' }}。
       </p>
       <template #footer>
         <el-button v-if="publicPorts.length" @click="goPort(publicPorts[0])">到「端口」里看看</el-button>
@@ -461,8 +467,14 @@ function listenTip(l: string): string {
       </template>
     </el-dialog>
 
-    <el-dialog v-if="pwShow" :model-value="true" append-to-body :title="`${pwShow.name} 的密码`" width="460px" @close="pwShow = null">
+    <el-dialog v-if="pwShow" :model-value="true" append-to-body :title="`${pwShow.name} 的${pwShow.account ? '账号和' : ''}密码`" width="460px" @close="pwShow = null">
+      <div v-if="pwShow.account" class="pw">
+        <span>账号：</span>
+        <span class="mono pw-val">{{ pwShow.account }}</span>
+        <el-button :icon="CopyDocument" link @click="copy(pwShow.account ?? '')">复制</el-button>
+      </div>
       <div class="pw">
+        <span v-if="pwShow.account">密码：</span>
         <span class="mono pw-val">{{ pwShow.password }}</span>
         <el-button :icon="CopyDocument" link @click="copy(pwShow.password)">复制</el-button>
       </div>

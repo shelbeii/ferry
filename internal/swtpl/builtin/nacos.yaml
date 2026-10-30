@@ -20,9 +20,9 @@ params:
     type: memory
     default: 512m
   - key: password
-    label: nacos 密码
+    label: 密码
     type: password
-    help: 控制台用户 nacos 的密码
+    help: 控制台账号固定是 nacos（Nacos 只允许第一次启动后给 nacos 设置密码，别的账号装好后在控制台里添加）
 variants:
   - label: 官方安装包
     note: Nacos 监听所有地址（其他服务器上的应用要连它）：不需要对外的话，用防火墙限制
@@ -59,6 +59,7 @@ variants:
           post: http://127.0.0.1:${port}/nacos/v3/auth/user/admin
           form: {password: "${password}"}
           retry: 30
+        sets: password
         soft: 管理员密码没有设置成功：第一次打开控制台时按提示设置 nacos 用户的密码
     service:
       exec: >-

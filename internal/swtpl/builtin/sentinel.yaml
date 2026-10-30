@@ -16,10 +16,14 @@ params:
     label: 内存
     type: memory
     default: 256m
+  - key: account
+    label: 账号
+    type: account
+    default: sentinel
+    help: 登录控制台用的账号
   - key: password
-    label: sentinel 密码
+    label: 密码
     type: password
-    help: 控制台用户 sentinel 的密码
 variants:
   - label: 官方安装包
     java: 17
@@ -40,11 +44,11 @@ variants:
       exec: >-
         ${java} -Xms${memory} -Xmx${memory} -Dserver.port=${port} -Dserver.address=${public?0.0.0.0|127.0.0.1}
         -Dcsp.sentinel.dashboard.server=127.0.0.1:${port} -Dproject.name=sentinel-dashboard
-        -Dsentinel.dashboard.auth.username=sentinel -Dsentinel.dashboard.auth.password=$${SENTINEL_PASSWORD}
+        -Dsentinel.dashboard.auth.username=${account} -Dsentinel.dashboard.auth.password=$${SENTINEL_PASSWORD}
         -Duser.home=${dir} -Dcsp.sentinel.log.dir=${dir}/logs/csp -jar ${dir}/sentinel-dashboard.jar
       workdir: ${dir}
       env: {SENTINEL_PASSWORD: "${password}"}
       ready: {port: "${port}", timeout: 120}
     logs: ["${dir}/logs/csp/sentinel-dashboard.log"]
     notes:
-      - 控制台：http://${host}:${port}/ ，用户 sentinel，密码见「密码」
+      - 控制台：http://${host}:${port}/ ，账号 ${account}，密码见「密码」

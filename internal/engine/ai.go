@@ -23,6 +23,7 @@ import (
 	"github.com/captain/ferry/internal/safe"
 	"github.com/captain/ferry/internal/secret"
 	"github.com/captain/ferry/internal/settings"
+	"github.com/captain/ferry/internal/swpkg"
 	"github.com/captain/ferry/internal/swtpl"
 )
 
@@ -600,7 +601,18 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 				}
 				out = append(out, it)
 			}
-			return toJSON(out), nil
+			// 本机安装包库：software_install 的 package 填这里的 file
+			type pk struct {
+				File     string `json:"file"`
+				Template string `json:"template,omitempty"`
+				Version  string `json:"version,omitempty"`
+				Desc     string `json:"desc,omitempty"`
+			}
+			var lib []pk
+			for _, m := range swpkg.List(e.Settings.SoftwareDir()) {
+				lib = append(lib, pk{File: m.File, Template: m.Template, Version: m.Version, Desc: m.Desc})
+			}
+			return toJSON(map[string]any{"templates": out, "library": lib}), nil
 		},
 	})
 	tools = append(tools, e.aiMoreTools(t, change)...)
@@ -685,6 +697,11 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			"template_yaml": str("直接给出的模板内容（试装自己写的模板时用）"),
 			"version":       str("版本；不填 = 最新"),
 			"name":          str("实例名；不填 = 模板 ID"),
+			"in":            str("安装位置：放在这个目录下的「实例名-版本」文件夹里；不填 = /opt/ferry-software"),
+			"dir":           str("安装目录（完整路径）；填了就不看 in"),
+			"package":       str("用本机安装包库里的这个文件（software_templates 的 library 里的 file）；没有下载地址的软件、用户自己导入的包要填"),
+			"network":       str("服务器要从软件源下载时走谁的网络：auto（默认，服务器连不上的经这台电脑）| local（经这台电脑）| server（服务器自己的）"),
+			"java_dir":      str("需要 JDK 的软件：JDK 装在这个目录下；不填 = Ferry 的公共目录（多个软件、应用共用）"),
 			"params":        map[string]any{"type": "object", "description": "模板参数（如 port、public）；密码不填时自动生成，用户要自己定密码时先用 ask_secret 让用户填，这里写代号 {{secret:名字}}", "additionalProperties": map[string]any{"type": "string"}},
 		}),
 		Approve: func(ctx context.Context, in json.RawMessage) *ai.Approval {
@@ -698,6 +715,20 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			fmt.Fprintf(&d, "软件：%s（模板 %s%s）\n", tpl.Name, tpl.ID, map[bool]string{true: "，模型写的模板", false: ""}[a.TemplateYAML != ""])
 			fmt.Fprintf(&d, "版本：%s\n", orDefault(a.Version, "最新"))
 			fmt.Fprintf(&d, "实例名：%s\n", orDefault(a.Name, tpl.ID))
+			if a.Dir != "" {
+				fmt.Fprintf(&d, "安装目录：%s\n", a.Dir)
+			} else if a.In != "" {
+				fmt.Fprintf(&d, "安装位置：%s\n", a.In)
+			}
+			if a.Package != "" {
+				fmt.Fprintf(&d, "安装包：%s\n", a.Package)
+			}
+			if a.Network != "" {
+				fmt.Fprintf(&d, "下载：%s\n", map[string]string{"auto": "自动", "local": "经这台电脑", "server": "服务器自己的网络"}[a.Network])
+			}
+			if a.JavaDir != "" {
+				fmt.Fprintf(&d, "JDK 目录：%s\n", a.JavaDir)
+			}
 			for k, v := range a.Params {
 				if isSecretParam(tpl, k) {
 					v = "******"
@@ -727,7 +758,8 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			}
 			r, err := withProgress(e, ctx, func() (any, error) {
 				return e.SoftwareInstall(t.Name, SoftwareOptions{Template: a.Template, TemplateYAML: []byte(a.TemplateYAML),
-					Variant: -1, Name: a.Name, Version: a.Version, Params: params})
+					Variant: -1, Name: a.Name, Version: a.Version, Params: params,
+					In: a.In, Dir: a.Dir, PackageFile: a.Package, Network: a.Network, JavaDir: a.JavaDir})
 			})
 			if err != nil {
 				return "", err
@@ -777,6 +809,11 @@ type softwareArgs struct {
 	TemplateYAML string            `json:"template_yaml"`
 	Version      string            `json:"version"`
 	Name         string            `json:"name"`
+	In           string            `json:"in"`
+	Dir          string            `json:"dir"`
+	Package      string            `json:"package"`
+	Network      string            `json:"network"`
+	JavaDir      string            `json:"java_dir"`
 	Params       map[string]string `json:"params"`
 }
 
@@ -1002,17 +1039,19 @@ const templateGuide = `# Ferry 软件模板（YAML）
 
 顶层字段：
 - id：小写字母、数字、横线，字母开头（如 rabbitmq）；name：显示名；category：数据库 / 缓存 / 中间件 / 存储 / 其他；desc：一句话说明；homepage
-- params：安装时填的参数，每个有 key、label、type（text | port | password | bool | memory | select | number）、default、options（select 用）、help、offsets（port 用：还要占用的端口，如 [1000]）
-  password 类型不填时自动生成随机密码并存进凭据库。
+- params：安装时填的参数，每个有 key、label、type（text | port | password | account | bool | memory | select | number）、default、options（select 用）、help、offsets（port 用：还要占用的端口，如 [1000]）、proto（port 用：tcp 默认 | udp | both）
+  password 类型不填时自动生成随机密码并存进凭据库。account 类型是登录用的账号（3～32 位，字母开头，字母、数字、下划线），装好后和密码一起给用户看；软件能自定义账号时就加上它。
 - variants：一种或几种装法，按顺序选第一个适用的：
   - label：如「系统软件源（dnf / yum）」「官方安装包」；os：适用的系统（/etc/os-release 的 ID 或 ID_LIKE：rhel、centos、fedora、debian、ubuntu、kylin……，空 = 任何）；arch：amd64 / arm64（空 = 任何）；note：给用户的说明
   - user：运行用户（不能是 root，没有时自动创建）；java：需要 Ferry 提供的 JDK 版本（如 17）
-  - system：用软件源装 —— dnf: [包名]、apt: [包名]、disable: [装完要停掉并禁用的系统自带服务]、require: 装完必须有的程序路径
+  - system：用软件源装 —— dnf: [包名]、apt: [包名]（几个候选写成 "a|b"，用软件源里有的第一个；已经装着的不会升级）、disable: [装完要停掉并禁用的系统自带服务]、require: 装完必须有的程序路径。
+    和 package 一起写时只是安装包需要的系统库（没有包管理器时跳过）
   - package：上传安装包 —— url（可用 ${version}）、file（官方文件名）、github（owner/repo，查最新版本）、fallback（查不到最新版本时用的版本）、
     format（tar.gz | tar.xz | zip | jar | binary）、strip（解压去掉几层目录）、into（解到安装目录下哪里）、check（包里必须有的文件）
   - files：要写的文件 —— path、content、mode（默认 0640）、at（install 默认 | ready）、if（bool 参数名，!参数 = 为 false 时）
   - props：改配置文件里的项 —— file、sep（默认 =）、set: {键: 值}
-  - steps：以 root 执行的步骤 —— run（shell 命令）或 http（post、form、retry），at（prepare 默认：交给运行用户之前 | init：启动之前 | ready：就绪之后），timeout（秒），error、soft（失败只提示），if
+  - steps：以 root 执行的步骤 —— run（shell 命令）或 http（post、form、retry），at（prepare 默认：交给运行用户之前 | init：启动之前 | ready：就绪之后），timeout（秒），error、soft（失败只提示）、sets（这一步让哪个参数生效，如设置管理员密码的写 password：soft 失败时不把密码当作可用的）、if。
+    数据库等有密码的软件，在 ready 阶段加一步用密码登录一次（如 mysql -e 'select 1'），密码不对时安装失败
   - service：exec（前台运行的启动命令，不能自己转后台）、workdir、env（写进只有 root 能读的文件，密码放这里）、ready: {port: "${port}", timeout: 秒}
   - logs：日志文件（第一个为主日志）；notes：装好后给用户看的说明（如连接地址）
 

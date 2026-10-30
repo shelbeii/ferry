@@ -40,6 +40,11 @@ type swInstallIn struct {
 	TemplateYAML string            `json:"template_yaml,omitempty" jsonschema:"直接给出的模板内容（试装自己写的模板时用，格式见 template_guide）"`
 	Version      string            `json:"version,omitempty" jsonschema:"版本；不填 = 最新"`
 	Name         string            `json:"name,omitempty" jsonschema:"实例名；不填 = 模板 ID"`
+	In           string            `json:"in,omitempty" jsonschema:"安装位置：放在这个目录下的「实例名-版本」文件夹里；不填 = /opt/ferry-software"`
+	Dir          string            `json:"dir,omitempty" jsonschema:"安装目录（完整路径）；填了就不看 in"`
+	Package      string            `json:"package,omitempty" jsonschema:"用本机安装包库里的这个文件（software_templates 的 library 里的 file）；没有下载地址的软件、用户自己导入的包要填"`
+	Network      string            `json:"network,omitempty" jsonschema:"服务器要从软件源下载时走谁的网络：auto（默认，服务器连不上的经这台电脑）| local（经这台电脑）| server（服务器自己的）"`
+	JavaDir      string            `json:"java_dir,omitempty" jsonschema:"需要 JDK 的软件：JDK 装在这个目录下；不填 = Ferry 的公共目录"`
 	Params       map[string]string `json:"params,omitempty" jsonschema:"模板参数（如 port、public）；密码不填时自动生成，用户要自己定密码时先用 ask_secret 让用户填，这里写代号 {{secret:名字}}"`
 	Reason       string            `json:"reason" jsonschema:"为什么要装（显示在确认框里）"`
 }
@@ -116,7 +121,8 @@ func (s *server) addAITools(m *mcp.Server) {
 			if in.Template == "" && strings.TrimSpace(in.TemplateYAML) == "" {
 				return nil, errors.New("要给出 template（模板 ID）或 template_yaml")
 			}
-			input := map[string]any{"template": in.Template, "template_yaml": in.TemplateYAML, "version": in.Version, "name": in.Name, "params": in.Params}
+			input := map[string]any{"template": in.Template, "template_yaml": in.TemplateYAML, "version": in.Version, "name": in.Name, "params": in.Params,
+				"in": in.In, "dir": in.Dir, "package": in.Package, "network": in.Network, "java_dir": in.JavaDir}
 			return s.aiChange(ctx, req, in.targetIn, "install", input, in.Reason)
 		}))
 

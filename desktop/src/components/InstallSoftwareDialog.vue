@@ -52,9 +52,10 @@ const shown = computed(() => {
 })
 
 function howTo(v: SwVariant): string {
-  if (v.system) return '系统软件源'
+  // 有安装包时 system 只是它需要的系统库
   if (v.package?.url) return '下载官方安装包'
-  return '导入安装包'
+  if (v.package) return '导入安装包'
+  return '系统软件源'
 }
 
 // ---------------------------------------------------------------- 按模板安装
@@ -198,23 +199,38 @@ function javaDirHint(n: number): string {
 }
 
 const used = computed(() => new Set(props.report?.ports ?? []))
+const usedUDP = computed(() => new Set(props.report?.udpPorts ?? []))
+const protos = (p: SwParam) => (p.proto === 'udp' ? ['udp'] : p.proto === 'both' ? ['tcp', 'udp'] : ['tcp'])
+/** 端口参数占用的全部端口（含附加端口），按协议 */
+const portsOf = (p: SwParam) => [0, ...(p.offsets ?? [])].map((off) => Number(values.value[p.key]) + off)
+function portTaken(pr: string, n: number): string {
+  if (!(pr === 'udp' ? usedUDP : used).value.has(n)) return ''
+  const who = props.report?.portUsers?.[`${pr}/${n}`]
+  return who ? `已被 ${who}占用` : '已被占用'
+}
 function paramError(p: SwParam): string {
   const v = values.value[p.key]
   switch (p.type) {
     case 'port': {
       const n = Number(v)
       if (!n || n < 1 || n > 65535) return '端口要在 1～65535 之间'
-      for (const off of [0, ...(p.offsets ?? [])]) {
-        if (used.value.has(n + off)) return off ? `${n + off}（+${off}）已被占用` : `${n} 已被占用`
+      for (const pr of protos(p)) {
+        const tag = pr === 'udp' && p.proto === 'both' ? ' UDP' : ''
+        for (const off of [0, ...(p.offsets ?? [])]) {
+          const taken = portTaken(pr, n + off)
+          if (taken) return off ? `${n + off}${tag}（+${off}）${taken}` : `${n}${tag} ${taken}`
+        }
+        const others = params.value.filter((q) => q.type === 'port' && q.key !== p.key && protos(q).includes(pr)).flatMap(portsOf)
+        if (portsOf(p).some((x) => others.includes(x))) return '和其他端口重复'
       }
-      const others = params.value.filter((q) => q.type === 'port' && q.key !== p.key).map((q) => Number(values.value[q.key]))
-      if (others.includes(n)) return '和其他端口重复'
       return ''
     }
     case 'password':
       return v && !/^[A-Za-z0-9!@#%^*()_+=.,:~-]{8,64}$/.test(String(v)) ? '8～64 位，只能用字母、数字和 !@#%^*()_+=.,:~-' : ''
     case 'memory':
       return /^[1-9][0-9]{1,5}[mg]$/i.test(String(v)) ? '' : '写成 512m、2g 这样'
+    case 'account':
+      return /^[A-Za-z][A-Za-z0-9_]{2,31}$/.test(String(v)) ? '' : '3～32 位，字母开头，只能用字母、数字、下划线'
   }
   return ''
 }
@@ -318,7 +334,7 @@ const customErrors = computed(() => {
   if (c.java && javaDirError.value) e.javaDir = javaDirError.value
   if (inError.value) e.in = inError.value
   if (!c.port || c.port < 1 || c.port > 65535) e.port = '端口要在 1～65535 之间'
-  else if (used.value.has(c.port)) e.port = `${c.port} 已被占用`
+  else if (portTaken('tcp', c.port)) e.port = `${c.port} ${portTaken('tcp', c.port)}`
   if (c.save && !/^[a-z][a-z0-9-]{0,30}$/.test(c.id)) e.id = '模板 ID：小写字母、数字、横线，以字母开头'
   return e
 })

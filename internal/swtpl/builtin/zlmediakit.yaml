@@ -8,10 +8,10 @@ params:
   - {key: https, label: HTTPS 端口, type: port, default: "18443"}
   - {key: rtsp, label: RTSP 端口, type: port, default: "8554"}
   - {key: rtmp, label: RTMP 端口, type: port, default: "1935"}
-  - {key: rtc, label: WebRTC 媒体端口（TCP 和 UDP）, type: port, default: "18000"}
-  - {key: rtp, label: RTP / GB28181 端口（TCP 和 UDP）, type: port, default: "10000"}
-  # port 类型检查 TCP；SRT 只用 UDP，同号 TCP 端口可以被其他软件使用。
-  - {key: srt, label: SRT 端口（UDP）, type: number, default: "9000"}
+  - {key: rtc, label: WebRTC 媒体端口（TCP 和 UDP）, type: port, proto: both, default: "18000"}
+  - {key: rtp, label: RTP / GB28181 端口（TCP 和 UDP）, type: port, proto: both, default: "10000"}
+  # SRT 只用 UDP：同号 TCP 端口可以被其他软件使用
+  - {key: srt, label: SRT 端口（UDP）, type: port, proto: udp, default: "9000"}
   - key: externIP
     label: WebRTC 对客户端可见的 IP
     type: text
@@ -87,19 +87,11 @@ variants:
           glibc_version=$(getconf GNU_LIBC_VERSION | awk '{print $2}')
           printf '%s\n' "$glibc_version" | awk -F. '{ exit !($1 > 2 || ($1 == 2 && $2 >= 17)) }'
           command -v openssl >/dev/null
-          command -v ss >/dev/null
-          test "${srt}" -ge 1 && test "${srt}" -le 65535
-          for udp_port in ${srt} ${rtc} ${rtp}; do
-            if ss -H -lntu | awk -v p="$udp_port" '$1 == "udp" && $5 ~ (":" p "$") { found=1 } END { exit !found }'; then
-              echo "UDP port $udp_port is already in use" >&2
-              exit 1
-            fi
-          done
           chmod 0755 "${dir}/app/MediaServer"
           "${dir}/app/MediaServer" --version
           mkdir -p "${dir}/logs" "${dir}/www"
           if test -d "${dir}/app/www"; then cp -a "${dir}/app/www/." "${dir}/www/"; fi
-        error: 检查 ZLMediaKit 运行环境失败，请确认安装包兼容、系统有 openssl / ss，且所选 UDP 端口未被占用
+        error: 检查 ZLMediaKit 运行环境失败，请确认安装包兼容（glibc 2.17 以上）、系统有 openssl
       - run: |
           set -eu
           umask 077

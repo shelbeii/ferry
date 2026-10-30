@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -54,7 +55,7 @@ func TestRenderDetails(t *testing.T) {
 		return tp
 	}
 	base := func() swtpl.Vars {
-		return swtpl.Vars{"name": "x", "dir": "/opt/ferry-software/x", "user": "u", "host": "h", "version": "1", "java": "/j", "package": ""}
+		return swtpl.Vars{"name": "x", "dir": "/opt/ferry-software/x", "user": "u", "host": "h", "version": "1", "java": "/j", "package": "", "account": "root"}
 	}
 	// Sentinel：密码只在环境变量文件里，启动命令里留给 systemd 展开
 	st := find("sentinel")
@@ -106,6 +107,77 @@ func TestRenderDetails(t *testing.T) {
 		}
 		if has != (public == "true") {
 			t.Errorf("postgresql public=%s：pg_hba 步骤 %v", public, has)
+		}
+	}
+	// 有密码的软件：就绪后用密码登录一次；密码只写在文件里，不出现在命令行上
+	for _, id := range []string{"mysql", "mariadb", "postgresql", "redis"} {
+		tp := find(id)
+		vs := base()
+		for _, p := range tp.Params {
+			vs[p.Key] = p.Default
+		}
+		vs["password"], vs["public"], vs["lowerCase"] = "Secret-123", "false", "false"
+		pl, err := renderPlan(tp, &tp.Variants[0], vs, &swpkg.Meta{File: "m.tar.xz"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check := false
+		for _, s := range pl.Steps {
+			check = check || s.At == "ready" && (strings.Contains(s.Error, "登录不上") || strings.Contains(s.Error, "连不上"))
+			if strings.Contains(s.Run, "Secret-123") {
+				t.Errorf("%s：密码出现在命令里：%s", id, s.Run)
+			}
+		}
+		if !check {
+			t.Errorf("%s：没有就绪后用密码登录的步骤", id)
+		}
+	}
+	// MySQL：选的账号有全部权限；允许其他机器时是这个账号能远程登录
+	vs = base()
+	vs["port"], vs["public"], vs["password"], vs["lowerCase"], vs["account"] = "3306", "true", "Secret-123", "false", "app_user"
+	pl, _ = renderPlan(my, &my.Variants[0], vs, &swpkg.Meta{File: "m.tar.xz"})
+	sql := ""
+	for _, f := range pl.Files {
+		if strings.HasSuffix(f.Path, "ferry-init.sql") {
+			sql = f.Content
+		}
+	}
+	for _, want := range []string{"'app_user'@'localhost' IDENTIFIED BY 'Secret-123'", "TO 'app_user'@'%' WITH GRANT OPTION", "ALTER USER 'root'@'localhost'"} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("mysql 账号：没有 %s：%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "'root'@'%'") {
+		t.Errorf("账号不是 root 时 root 不能远程登录：%s", sql)
+	}
+	// MySQL 需要的系统库：从软件源装（Ubuntu 24.04 起包名不同）
+	if sy := my.Variants[0].System; sy == nil || !slices.Contains(sy.DNF, "libaio") || !slices.Contains(sy.APT, "libaio1t64|libaio1") {
+		t.Errorf("mysql 的系统库：%+v", sy)
+	}
+	// Nacos：设置管理员密码的步骤标明 sets: password
+	nc := find("nacos")
+	sets := false
+	for _, s := range nc.Variants[0].Steps {
+		sets = sets || s.Sets == "password" && s.Soft != ""
+	}
+	if !sets {
+		t.Error("nacos：设置密码的步骤要写 sets: password")
+	}
+}
+
+func TestPublicMode(t *testing.T) {
+	for id, want := range map[string]map[string]string{
+		"mysql": {"true": "chosen", "false": ""},
+		"nacos": {"true": "always", "false": "always"},
+	} {
+		tp, err := swtpl.Find(t.TempDir(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for pub, w := range want {
+			if got := publicMode(tp, swtpl.Vars{"public": pub}); got != w {
+				t.Errorf("%s public=%s：%q，期望 %q", id, pub, got, w)
+			}
 		}
 	}
 }

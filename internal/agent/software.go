@@ -131,10 +131,23 @@ func (a *Agent) software() int {
 			rep.Disks = append(rep.Disks, proto.Disk{Path: d, FreeMB: diskFreeMB(d)})
 		}
 	}
-	for p := range listeningPorts() {
+	// 已占用的端口：在监听的，加上 Ferry 装的软件停着时也要用的
+	rep.PortUsers = a.swPortUsers("")
+	tcp, udp := listeningPorts(), listeningUDP()
+	for k := range rep.PortUsers {
+		pr, ps, _ := strings.Cut(k, "/")
+		if p, err := strconv.Atoi(ps); err == nil {
+			map[string]map[int]bool{"tcp": tcp, "udp": udp}[pr][p] = true
+		}
+	}
+	for p := range tcp {
 		rep.Ports = append(rep.Ports, p)
 	}
+	for p := range udp {
+		rep.UDPPorts = append(rep.UDPPorts, p)
+	}
 	sort.Ints(rep.Ports)
+	sort.Ints(rep.UDPPorts)
 	return a.result(proto.CodeOK, "", rep)
 }
 
@@ -201,7 +214,7 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 		if in.Version != "" {
 			it.Version = in.Version
 		}
-		it.Hosting = in.Hosting
+		it.Hosting, it.Account = in.Hosting, in.Account
 		if it.Name == "" {
 			it.Name = in.Name
 		}

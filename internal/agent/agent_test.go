@@ -99,6 +99,17 @@ func (f *fakeSys) Systemctl(args ...string) error {
 	if len(args) < 2 {
 		return nil
 	}
+	if args[1] == "--now" && len(args) > 2 { // enable / disable --now 同时启动 / 停止
+		f.calls = f.calls[:len(f.calls)-1]
+		if err := f.Systemctl(args[0], args[2]); err != nil {
+			return err
+		}
+		f.calls = f.calls[:len(f.calls)-1]
+		now := map[string]string{"enable": "start", "disable": "stop"}[args[0]]
+		err := f.Systemctl(now, args[2])
+		f.calls[len(f.calls)-1] = strings.Join(args, " ")
+		return err
+	}
 	u := f.unit(args[1])
 	switch args[0] {
 	case "start", "restart":

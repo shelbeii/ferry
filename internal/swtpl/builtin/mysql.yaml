@@ -11,9 +11,14 @@ params:
   - key: public
     label: 允许其他机器访问
     type: bool
-    help: 不勾选时只监听 127.0.0.1；勾选后 root 可以从其他机器登录，注意用防火墙限制来源
+    help: 不勾选时只监听 127.0.0.1；勾选后下面的账号可以从其他机器登录，注意用防火墙限制来源
+  - key: account
+    label: 账号
+    type: account
+    default: root
+    help: 登录用的账号，有全部权限。不是 root 时，root 也用下面的密码，但只能从本机登录
   - key: password
-    label: root 密码
+    label: 密码
     type: password
   - key: lowerCase
     label: 表名不区分大小写
@@ -34,6 +39,10 @@ variants:
       format: tar.xz
       strip: 1
       into: mysql
+    # mysqld 需要的系统库：没装的从软件源装（Ubuntu 24.04 起包名是 libaio1t64）
+    system:
+      dnf: [libaio, numactl-libs]
+      apt: ["libaio1t64|libaio1", libnuma1]
     files:
       - path: ${dir}/my.cnf
         content: |
@@ -61,7 +70,9 @@ variants:
         mode: "0600"
         content: |
           ALTER USER 'root'@'localhost' IDENTIFIED BY '${password}';
-          ${public?CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '${password}'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;|}
+          CREATE USER IF NOT EXISTS '${account}'@'localhost' IDENTIFIED BY '${password}';
+          GRANT ALL PRIVILEGES ON *.* TO '${account}'@'localhost' WITH GRANT OPTION;
+          ${public?CREATE USER IF NOT EXISTS '${account}'@'%' IDENTIFIED BY '${password}'; GRANT ALL PRIVILEGES ON *.* TO '${account}'@'%' WITH GRANT OPTION;|}
           FLUSH PRIVILEGES;
       # 就绪后：去掉 init-file（带密码的文件由下面的步骤删除）
       - path: ${dir}/my.cnf
@@ -85,16 +96,43 @@ variants:
           [client]
           socket=${dir}/mysql.sock
           port=${port}
+      # 就绪后用设置的密码登录一次，确认真的能用（密码放在只有 root 能读的文件里，不出现在命令行上）
+      - path: ${dir}/tmp/ferry-check.cnf
+        at: ready
+        mode: "0600"
+        content: |
+          [client]
+          user=${account}
+          password="${password}"
+          socket=${dir}/mysql.sock
     steps:
       - run: mkdir -p ${dir}/data ${dir}/logs ${dir}/tmp
+      # libaio1t64 只有 libaio.so.1t64：在 MySQL 自己的库目录（mysqld 会先找这里）里链接成 libaio.so.1，不改系统目录
+      - run: |
+          if ! ldconfig -p | grep -q 'libaio\.so\.1 '; then
+            t=$(ldconfig -p | awk '/libaio\.so\.1t64 /{print $NF; exit}')
+            if [ -n "$t" ]; then mkdir -p ${dir}/mysql/lib/private && ln -sfn "$t" ${dir}/mysql/lib/private/libaio.so.1; fi
+          fi
       # 缺系统库时 mysqld 起不来：先查出来，说清楚怎么装
       - run: "! ldd ${dir}/mysql/bin/mysqld 2>&1 | grep 'not found'"
         error: >-
-          服务器缺少 MySQL 需要的系统库（见下面列出的）。先安装：yum install -y libaio numactl-libs（CentOS / Rocky 等），
-          或 apt install -y libaio1 libnuma1（Ubuntu 24.04 是 libaio1t64，还要 ln -s /usr/lib/x86_64-linux-gnu/libaio.so.1t64 /usr/lib/x86_64-linux-gnu/libaio.so.1）
+          服务器缺少 MySQL 需要的系统库（见下面列出的），自动安装没有成功。可以手动安装：yum install -y libaio numactl-libs（CentOS / Rocky 等），
+          或 apt install -y libaio1 libnuma1（Ubuntu 24.04 是 libaio1t64）
       - at: init
         run: "${dir}/mysql/bin/mysqld --defaults-file=${dir}/my.cnf --initialize-insecure --user=${user} || { tail -n 8 ${dir}/logs/error.log; exit 1; }"
         error: 初始化数据目录失败
+      # 只有密码不对才算失败（客户端缺库等运行不了时不拦着）
+      - at: ready
+        run: |
+          r=0
+          m=${dir}/mysql/bin/mysql
+          [ -x "$m" ] || m=$(command -v mysql || command -v mariadb || true)
+          if [ -n "$m" ]; then
+            out=$("$m" --defaults-extra-file=${dir}/tmp/ferry-check.cnf -N -e 'select 1' 2>&1) || case "$out" in *1045*|*"Access denied"*) echo "$out"; r=1;; esac
+          fi
+          rm -f ${dir}/tmp/ferry-check.cnf
+          exit $r
+        error: MySQL 已经启动，但用设置的账号和密码登录不上
       - at: ready
         run: rm -f ${dir}/tmp/ferry-init.sql
     service:
@@ -105,4 +143,4 @@ variants:
     configs:
       - {label: MySQL 配置, path: "${dir}/my.cnf", apply: restart}
     notes:
-      - 连接 ${host}:${port}，用户 root，密码见「密码」；${public?允许其他机器连接（注意防火墙）|只允许本机连接（127.0.0.1）}
+      - 连接 ${host}:${port}，账号 ${account}，密码见「密码」；${public?允许其他机器连接（注意防火墙）|只允许本机连接（127.0.0.1）}

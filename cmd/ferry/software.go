@@ -123,6 +123,9 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 			return ok(res)
 		}
 		con.OK("%s 上已安装 %s（%s，系统服务 %s）", res.Target, strings.TrimSpace(res.Name+" "+res.Version), res.Dir, res.Unit)
+		if res.Account != "" {
+			con.Info("账号：%s", res.Account)
+		}
 		if res.Password != "" {
 			pw := "密码：" + res.Password
 			if res.Saved {

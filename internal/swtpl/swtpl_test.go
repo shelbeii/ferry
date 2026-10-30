@@ -1,6 +1,7 @@
 package swtpl
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,29 @@ func TestBuiltinTemplates(t *testing.T) {
 		if !ids[id] {
 			t.Errorf("缺少内置模板 %s", id)
 		}
+	}
+}
+
+func TestValidateProtoSets(t *testing.T) {
+	base := "id: x\nname: X\nparams:\n  - {key: port, type: port, default: \"1\"%s}\n  - {key: password, type: password}\n" +
+		"variants:\n  - user: x\n    system: {dnf: [x]}\n    steps:\n      - {run: \"true\"%s}\n    service: {exec: /x, ready: {port: \"${port}\"}}\n"
+	cases := map[string][2]string{
+		"udp 端口":       {", proto: udp", ""},
+		"tcp 和 udp":    {", proto: both", ""},
+		"sets 写参数名":    {"", ", sets: password"},
+		"proto 不认识":    {", proto: sctp", ""},
+		"sets 写了没有的参数": {"", ", sets: secret"},
+	}
+	for what, c := range cases {
+		_, err := Parse([]byte(fmt.Sprintf(base, c[0], c[1])))
+		bad := strings.Contains(what, "不认识") || strings.Contains(what, "没有")
+		if (err != nil) != bad {
+			t.Errorf("%s：%v", what, err)
+		}
+	}
+	p := Param{Proto: "both"}
+	if !p.TCP() || !p.UDP() || (&Param{}).UDP() || (&Param{Proto: "udp"}).TCP() {
+		t.Error("TCP / UDP")
 	}
 }
 

@@ -52,13 +52,19 @@ type Template struct {
 type Param struct {
 	Key     string   `yaml:"key" json:"key"`
 	Label   string   `yaml:"label" json:"label"`
-	Type    string   `yaml:"type" json:"type"` // text | port | password | bool | memory | select | number
+	Type    string   `yaml:"type" json:"type"` // text | port | password | account | bool | memory | select | number
 	Default string   `yaml:"default,omitempty" json:"default,omitempty"`
 	Options []string `yaml:"options,omitempty" json:"options,omitempty"` // select 的选项
 	Help    string   `yaml:"help,omitempty" json:"help,omitempty"`
 	// Offsets port 参数：还要占用的端口（主端口加上这些数，如 Nacos 的 +1000）
 	Offsets []int `yaml:"offsets,omitempty" json:"offsets,omitempty"`
+	// Proto port 参数：tcp（默认）| udp | both（TCP 和 UDP 都用）
+	Proto string `yaml:"proto,omitempty" json:"proto,omitempty"`
 }
+
+// TCP、UDP 端口参数用不用 TCP / UDP。
+func (p *Param) TCP() bool { return p.Proto != "udp" }
+func (p *Param) UDP() bool { return p.Proto == "udp" || p.Proto == "both" }
 
 // Variant 一种装法：适用的系统与架构、程序从哪来、怎么配置和运行。
 type Variant struct {
@@ -139,6 +145,8 @@ type Step struct {
 	Error   string `yaml:"error,omitempty" json:"error,omitempty"`     // 失败时告诉用户的话
 	Soft    string `yaml:"soft,omitempty" json:"soft,omitempty"`       // 失败不算安装失败，只提示这句话
 	If      string `yaml:"if,omitempty" json:"if,omitempty"`
+	// Sets 这一步让哪个参数生效（如 password：设置管理员密码）；soft 失败时 Ferry 不把这个值当作可用的交给用户
+	Sets string `yaml:"sets,omitempty" json:"sets,omitempty"`
 }
 
 // HTTP 就绪后调用的接口（如初始化管理员密码）。
@@ -178,7 +186,7 @@ func Parse(b []byte) (*Template, error) {
 	return &t, t.Validate()
 }
 
-var paramTypes = map[string]bool{"text": true, "port": true, "password": true, "bool": true, "memory": true, "select": true, "number": true}
+var paramTypes = map[string]bool{"text": true, "port": true, "password": true, "account": true, "bool": true, "memory": true, "select": true, "number": true}
 
 // Validate 检查模板。
 func (t *Template) Validate() error {
@@ -197,7 +205,15 @@ func (t *Template) Validate() error {
 			return fmt.Errorf("模板 %s：参数名 %s 和内置变量重名", t.ID, p.Key)
 		}
 		if !paramTypes[p.Type] {
-			return fmt.Errorf("模板 %s：参数 %s 的类型 %q 不认识（text、port、password、bool、memory、select、number）", t.ID, p.Key, p.Type)
+			return fmt.Errorf("模板 %s：参数 %s 的类型 %q 不认识（text、port、password、account、bool、memory、select、number）", t.ID, p.Key, p.Type)
+		}
+		switch p.Proto {
+		case "", "tcp", "udp", "both":
+			if p.Proto != "" && p.Type != "port" {
+				return fmt.Errorf("模板 %s：参数 %s 不是 port，不能写 proto", t.ID, p.Key)
+			}
+		default:
+			return fmt.Errorf("模板 %s：参数 %s 的 proto 只能是 tcp、udp、both", t.ID, p.Key)
 		}
 		keys[p.Key] = true
 	}
@@ -238,6 +254,9 @@ func (t *Template) Validate() error {
 			case "", "prepare", "init", "ready":
 			default:
 				return fmt.Errorf("%s：步骤的 at 只能是 prepare、init、ready", where)
+			}
+			if s.Sets != "" && !keys[s.Sets] {
+				return fmt.Errorf("%s：步骤的 sets 要写参数名，没有参数 %s", where, s.Sets)
 			}
 		}
 		// 用到的变量都要有

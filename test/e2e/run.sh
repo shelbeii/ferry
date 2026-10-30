@@ -1112,7 +1112,16 @@ if [ -n "$init" ]; then d=$(sed -n "s/^datadir=//p" "$cnf"); touch $d/ibdata1 &&
 f=$(sed -n "s/^init-file=//p" "$cnf"); [ -n "$f" ] && cat "$f" > /tmp/mysql-init-seen.sql
 PORT=$(sed -n "s/^port=//p" "$cnf" | head -n 1) exec /usr/local/bin/demoserver
 EOS
-chmod 755 $p/bin/mysqld && cd /tmp/mysqlpkg && tar -cJf /tmp/mysql-8.4.10-linux-glibc2.17-x86_64-minimal.tar.xz mysql-8.4.10-linux-glibc2.17-x86_64-minimal'
+cat > $p/bin/mysql <<"EOS"
+#!/bin/sh
+# 假的 mysql 客户端：密码和 init-file 里设置的一样才能登录（/tmp/mysql-deny 在时一律拒绝）
+for a in "$@"; do case $a in --defaults-extra-file=*) cnf=${a#*=};; esac; done
+pw=$(sed -n "s/^password=\"\(.*\)\"$/\1/p" "$cnf")
+echo "$pw" > /tmp/mysql-check-seen; cp "$cnf" /tmp/mysql-check-cnf
+if [ ! -e /tmp/mysql-deny ] && grep -q "BY .$pw.;" /tmp/mysql-init-seen.sql; then echo 1; exit 0; fi
+echo "ERROR 1045 (28000): Access denied for user root@localhost (using password: YES)"; exit 1
+EOS
+chmod 755 $p/bin/mysqld $p/bin/mysql && cd /tmp/mysqlpkg && tar -cJf /tmp/mysql-8.4.10-linux-glibc2.17-x86_64-minimal.tar.xz mysql-8.4.10-linux-glibc2.17-x86_64-minimal'
 docker cp ferry-e2e-a:/tmp/mysql-8.4.10-linux-glibc2.17-x86_64-minimal.tar.xz "$OUT/pkg/" >/dev/null
 cp "$OUT/pkg/sentinel-dashboard-1.8.10.jar" "$OUT/pkg/sentinel.jar"
 swpw() { FERRY_SOFTWARE_PASSWORD=$1 "${@:2}"; }
@@ -1131,9 +1140,9 @@ t "密码不在单元文件里" ok "0" -- dx a 'grep -c Sentinel-pw1 /etc/system
 t "密码文件只有 root 能读" ok "root 600" -- dx a 'stat -c "%U %a" /opt/ferry-software/sentinel-1.8.10/ferry.env'
 sw=$(F software e2e-a --json 2>&1)
 has "软件列表里标出 Ferry 安装的" '"manager":"Ferry"' "$sw"
-has "软件列表里有实例名与目录" '"instance":"sentinel","dir":"/opt/ferry-software/sentinel-1.8.10"' "$sw"
+has "软件列表里有实例名与目录" '"instance":"sentinel","account":"sentinel","dir":"/opt/ferry-software/sentinel-1.8.10"' "$sw"
 t "本机保存了密码" ok "Sentinel-pw1" -- F software password e2e-a sentinel
-t "端口已被占用时拒绝" fail "已被占用" -- F software install e2e-a sentinel --version 1.8.10 --port 18858
+t "端口已被占用时拒绝：说明被谁占着" fail "已被 Ferry 装的 Sentinel 控制台（sentinel）占用" -- F software install e2e-a sentinel --version 1.8.10 --port 18858
 t "停止" ok "stop 完成" -- F software stop e2e-a sentinel
 t "停止后列表里是已停止" ok '"version":"1.8.10","state":"stopped","via":"systemd","unit":"ferry-sentinel.service"' -- F software e2e-a --json
 t "启动并等到就绪" ok "start 完成" -- F software start e2e-a sentinel
@@ -1148,13 +1157,34 @@ t "撤销后没有目录和单元" ok "gone gone" -- dx a 'echo $(test -e /opt/f
 t "失败后安装包留在服务器上" ok "1" -- dx a 'ls /usr/local/lib/ferry/software/.cache | wc -l'
 t "再装同一个包不用再上传" fail "不用再上传" -- swpw x12345678 F software install e2e-a nacos --version 0.0.1 --name nacos-bad --port 18850 --console-port 18089
 
-t "安装 MySQL" ok "已安装 mysql 8.4.10" -- swpw Mysql-pw123 F software install e2e-a mysql --version 8.4.10 --port 13306
+# MySQL 需要的系统库（libaio、numactl-libs）：没装的从软件源装。假的 dnf 只记下被要求装什么
+dx a 'cat > /usr/local/bin/dnf <<"EOS"
+#!/bin/sh
+echo "$@" >> /tmp/dnf-calls
+EOS
+chmod 755 /usr/local/bin/dnf; rm -f /tmp/dnf-calls'
+sw=$(swpw Mysql-pw123 F software install e2e-a mysql --version 8.4.10 --port 13306 --set account=app_user --network server 2>&1)
+printf '\n### software install mysql\n%s\n' "$sw" >> "$LOG"
+has "安装 MySQL" "已安装 mysql 8.4.10" "$sw"
+has "MySQL 需要的系统库：没装的自动装，装着的直接用" "libaio" "$sw"
+has "装好后告诉用户账号" "账号：app_user" "$sw"
+t "装系统库时不会升级已装的包" ok "ok" -- dx a 'for p in libaio numactl-libs; do rpm -q --quiet $p && grep -q " $p" /tmp/dnf-calls 2>/dev/null && { echo "$p 已装着还交给了 dnf"; exit 0; }; done; echo ok'
+t "装好后用设置的密码登录了一次" ok "Mysql-pw123" -- dx a 'cat /tmp/mysql-check-seen'
+t "登录用的密码文件已删掉" ok "gone" -- dx a 'test -e /opt/ferry-software/mysql-8.4.10/tmp/ferry-check.cnf && echo left || echo gone'
 t "MySQL 在运行" ok "UP" -- health a 13306
 t "第一次启动时设置了 root 密码" ok "ALTER USER 'root'@'localhost' IDENTIFIED BY 'Mysql-pw123'" -- dx a 'cat /tmp/mysql-init-seen.sql'
+t "建了选的账号，有全部权限" ok "GRANT ALL PRIVILEGES ON *.* TO 'app_user'@'localhost' WITH GRANT OPTION" -- dx a 'cat /tmp/mysql-init-seen.sql'
+t "软件列表里有账号" ok '"account":"app_user"' -- F software e2e-a --json
+t "登录检查用的是选的账号" ok "user=app_user" -- dx a 'cat /tmp/mysql-check-cnf'
 t "就绪后删掉了带密码的 init-file" ok "0 gone" -- dx a 'echo $(grep -c init-file /opt/ferry-software/mysql-8.4.10/my.cnf) $(test -e /opt/ferry-software/mysql-8.4.10/tmp/ferry-init.sql && echo left || echo gone)'
 t "默认只监听本机" ok "bind-address=127.0.0.1" -- dx a 'cat /opt/ferry-software/mysql-8.4.10/my.cnf'
 t "数据目录归 mysql" ok "mysql" -- dx a 'stat -c %U /opt/ferry-software/mysql-8.4.10/data/ibdata1'
 t "装好后清掉留着的安装包" ok "gone" -- dx a 'test -e /usr/local/lib/ferry/software/.cache && echo left || echo gone'
+dx a 'touch /tmp/mysql-deny'
+t "用设置的密码登录不上：安装失败" fail "用设置的账号和密码登录不上" -- swpw Mysql-pw456 F software install e2e-a mysql --version 8.4.10 --name mysql-deny --port 13307 --network server
+t "登录不上时撤销了安装" ok "gone gone" -- dx a 'echo $(test -e /opt/ferry-software/mysql-deny-8.4.10 && echo left || echo gone) $(test -e /etc/systemd/system/ferry-mysql-deny.service && echo left || echo gone)'
+t "登录不上时不保存密码" fail "没有保存" -- F software password e2e-a mysql-deny
+dx a 'rm -f /tmp/mysql-deny /usr/local/bin/dnf /tmp/dnf-calls /tmp/mysql-check-seen /tmp/mysql-check-cnf; rm -rf /usr/local/lib/ferry/software/.cache'
 
 t "卸载 Nacos（连数据一起删）" ok "已卸载 nacos" -- F software remove e2e-a nacos --purge
 t "Nacos 目录、单元已删除" ok "gone gone" -- dx a 'echo $(test -e /opt/ferry-software/nacos-3.2.4 && echo left || echo gone) $(test -e /etc/systemd/system/ferry-nacos.service && echo left || echo gone)'

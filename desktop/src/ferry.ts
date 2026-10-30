@@ -457,7 +457,11 @@ export interface SoftwareReport {
   /** 服务器上 ferry 组件的目录：公共的 JDK 在它下面的 runtimes */
   ferryDir?: string
   disks?: { path: string; freeMB: number }[]
+  /** 已占用的 TCP、UDP 端口（含 Ferry 装的软件停着时也要用的） */
   ports?: number[]
+  udpPorts?: number[]
+  /** 端口被谁占着：键为 tcp/端口、udp/端口 */
+  portUsers?: Record<string, string>
 }
 
 /** ferry who：服务器上一个已登录的 SSH 连接 */
@@ -603,12 +607,14 @@ export interface PortProbe {
 export interface SwParam {
   key: string
   label: string
-  type: 'text' | 'port' | 'password' | 'bool' | 'memory' | 'select' | 'number'
+  type: 'text' | 'port' | 'password' | 'account' | 'bool' | 'memory' | 'select' | 'number'
   default?: string
   options?: string[]
   help?: string
   /** port：还要占用的端口（主端口加上这些数） */
   offsets?: number[]
+  /** port：tcp（默认）| udp | both */
+  proto?: 'tcp' | 'udp' | 'both'
 }
 
 export interface SwVariant {
@@ -695,7 +701,13 @@ export interface SoftwareResult {
   unit: string
   user: string
   ports: Record<string, number>
-  public?: boolean
+  /** 登录用的账号（模板有账号参数时） */
+  account?: string
+  /** chosen = 选了允许其他机器访问；always = 软件总是监听所有地址；没有 = 只有本机能连 */
+  public?: 'chosen' | 'always'
+  /** 其他机器要连时要放行的端口（含附加端口） */
+  openPorts?: number[]
+  openUDP?: number[]
   notes?: string[]
   target: string
   password?: string
@@ -726,6 +738,8 @@ export interface Software {
   path?: string
   /** Ferry 安装的：实例名（可以启停、看日志、卸载）与安装目录 */
   instance?: string
+  /** Ferry 安装的：登录用的账号 */
+  account?: string
   dir?: string
   hosting?: {binary: string; config: string; prefix: string; sites: string}
 }

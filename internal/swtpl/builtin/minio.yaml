@@ -15,8 +15,13 @@ params:
   - key: public
     label: 允许其他机器访问
     type: bool
+  - key: account
+    label: 账号
+    type: account
+    default: minioadmin
+    help: 管理员账号（MINIO_ROOT_USER），登录控制台、用 S3 工具管理时用
   - key: password
-    label: minioadmin 密码
+    label: 密码
     type: password
 variants:
   - label: 导入的程序
@@ -30,7 +35,7 @@ variants:
     service:
       exec: ${dir}/minio server ${dir}/data --address ${public?0.0.0.0|127.0.0.1}:${port} --console-address ${public?0.0.0.0|127.0.0.1}:${console}
       workdir: ${dir}
-      env: {MINIO_ROOT_USER: minioadmin, MINIO_ROOT_PASSWORD: "${password}"}
+      env: {MINIO_ROOT_USER: "${account}", MINIO_ROOT_PASSWORD: "${password}"}
       ready: {port: "${port}", timeout: 60}
     notes:
-      - API：${host}:${port}；控制台：http://${host}:${console}/ ，用户 minioadmin，密码见「密码」
+      - API：${host}:${port}；控制台：http://${host}:${console}/ ，账号 ${account}，密码见「密码」
