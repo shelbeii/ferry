@@ -20,7 +20,11 @@ func configFixture(t *testing.T) (*fakeSys, *Agent, proto.SoftwareConfigFile) {
 	if err := os.WriteFile(file, []byte("{\"port\":6379}\r\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	// 保存时按链接解析后的路径取权限（macOS 的临时目录 /var 是指向 /private/var 的链接）
 	f.owners = map[string]Ownership{file: {UID: 1001, GID: 1001, Perm: 0o640}}
+	if real, err := filepath.EvalSymlinks(file); err == nil {
+		f.owners[real] = f.owners[file]
+	}
 	a := &Agent{Sys: f, Out: io.Discard, req: &proto.Request{Root: f.root, FerryDir: filepath.Join(dir, "ferry")}}
 	it := proto.Software{Kind: "redis", Instance: "cache", Unit: "ferry-cache.service", Dir: dir, Via: "systemd", Manager: "Ferry"}
 	in := &proto.SoftwareInstance{Name: "cache", Kind: "redis", Dir: dir, Unit: it.Unit, Configs: []proto.SoftwareConfigFile{{Path: file, Label: "主配置", Format: "json", Apply: "restart"}}}
