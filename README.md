@@ -596,7 +596,7 @@ npm run tauri dev             # 开发
 npm run tauri build           # Windows 安装包：src-tauri/target/release/bundle/nsis/
 ```
 
-发布：推送 `v` 开头、和版本号一致的标签（如 `git tag v0.13.16 && git push origin v0.13.16`），GitHub Actions（`.github/workflows/release.yml`）会构建 Linux 版 ferry、Windows 安装包、macOS 安装包，建一个 Release 并附上它们和 `SHA256SUMS.txt`。只要 macOS 安装包时：Actions →「macOS 安装包」→ Run workflow。在普通浏览器里调试界面等更多说明见 [desktop/README.md](desktop/README.md)。
+发布：推送 `v` 开头、和版本号一致的标签（如 `git tag v0.13.18 && git push origin v0.13.18`），GitHub Actions（`.github/workflows/release.yml`）会构建 Linux 版 ferry、Windows 安装包、macOS 安装包，建一个 Release 并附上它们和 `SHA256SUMS.txt`。只要 macOS 安装包时：Actions →「macOS 安装包」→ Run workflow。在普通浏览器里调试界面等更多说明见 [desktop/README.md](desktop/README.md)。
 
 版本号写在 `desktop/package.json`、`desktop/src-tauri/tauri.conf.json`、`desktop/src-tauri/Cargo.toml`（以及 `desktop/package-lock.json`）里，四处要一起改。用打包脚本可以一步完成改版本号和打包：
 

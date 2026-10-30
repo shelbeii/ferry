@@ -19,7 +19,7 @@
 4. **下载 ferry**（Linux 命令行，一个文件）：从 [Releases](https://github.com/shelbeii/ferry/releases) 下载，建议固定版本号：
 
    ```bash
-   curl -fsSL -o /usr/local/bin/ferry https://github.com/shelbeii/ferry/releases/download/v0.13.16/ferry-linux-amd64
+   curl -fsSL -o /usr/local/bin/ferry https://github.com/shelbeii/ferry/releases/download/v0.13.18/ferry-linux-amd64
    chmod +x /usr/local/bin/ferry
    ferry version
    ```
@@ -67,7 +67,7 @@ deploy:
     key: ferry
     paths: [.ferry-home/runtimes]
   script:
-    - curl -fsSL -o /usr/local/bin/ferry https://github.com/shelbeii/ferry/releases/download/v0.13.16/ferry-linux-amd64
+    - curl -fsSL -o /usr/local/bin/ferry https://github.com/shelbeii/ferry/releases/download/v0.13.18/ferry-linux-amd64
     - chmod +x /usr/local/bin/ferry
     - ferry deploy prod --yes      # FERRY_SSH_KEY、FERRY_NOTIFY 在 设置 → CI/CD → 变量 里添加（勾「隐藏」）
 ```
@@ -89,7 +89,7 @@ jobs:
       - uses: actions/cache@v4
         with: {path: .ferry-home/runtimes, key: ferry-runtimes}
       - run: |
-          curl -fsSL -o "$RUNNER_TEMP/ferry" https://github.com/shelbeii/ferry/releases/download/v0.13.16/ferry-linux-amd64
+          curl -fsSL -o "$RUNNER_TEMP/ferry" https://github.com/shelbeii/ferry/releases/download/v0.13.18/ferry-linux-amd64
           chmod +x "$RUNNER_TEMP/ferry"
           "$RUNNER_TEMP/ferry" deploy prod --yes
         env:
