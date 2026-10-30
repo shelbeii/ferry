@@ -5,7 +5,6 @@ import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { ArrowRight, Back, Delete, Document, Download, EditPen, Folder, FolderAdd, HomeFilled, Link, Refresh, Upload, View } from '@element-plus/icons-vue'
 import { bytes, call, ferry, FerryError, isSecretKind, type DirListing, type ErrorDetail, type FileEntry, type Running } from '../ferry'
 import { validRemoteName } from '../fileNames'
-import { selectFileNames } from '../fileSelection'
 import FilePermissions from './FilePermissions.vue'
 import FilePreviewDialog from './FilePreviewDialog.vue'
 import { onFileDrop, pickDir, pickMany, reveal } from '../platform'
@@ -23,8 +22,7 @@ const entries = ref<FileEntry[]>([])
 const loading = ref(false)
 const error = ref('')
 const selected = ref<FileEntry[]>([])
-const table = ref<{ toggleRowSelection: (row: FileEntry, selected?: boolean) => void; clearSelection: () => void }>()
-const selectionAnchor = ref<string>()
+const table = ref<{ clearSelection: () => void }>()
 const focusedName = ref<string>()
 const preview = ref<{ entry: FileEntry; dir: string }>()
 const query = ref('')
@@ -147,7 +145,6 @@ watch(query, clearSelection)
 
 function clearSelection() {
   selected.value = []
-  selectionAnchor.value = undefined
   focusedName.value = undefined
   table.value?.clearSelection()
 }
@@ -156,49 +153,24 @@ function focusList() {
   root.value?.querySelector<HTMLElement>('.el-table')?.focus({ preventScroll: true })
 }
 
-function setSelection(names: string[]) {
-  const wanted = new Set(names)
-  const before = selectedNames.value
-  for (const row of shownEntries.value) {
-    const checked = wanted.has(row.name) && !isDeleting(row)
-    if (before.has(row.name) !== checked) table.value?.toggleRowSelection(row, checked)
-  }
-  selected.value = shownEntries.value.filter((row) => wanted.has(row.name) && !isDeleting(row))
-}
-
-function selectRow(row: FileEntry, modifiers: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean } = {}) {
-  const order = shownEntries.value.filter((item) => !isDeleting(item)).map((item) => item.name)
-  const result = selectFileNames(order, selected.value.map((item) => item.name), selectionAnchor.value, row.name, {
-    toggle: modifiers.ctrlKey || modifiers.metaKey,
-    range: modifiers.shiftKey,
-  })
-  selectionAnchor.value = result.anchor
-  focusedName.value = row.name
-  setSelection(result.names)
-}
-
-// 双击的第二次 click 不再改变选择；打开由 dblclick 单独处理。
+// 行点击只定位，勾选由复选框处理；打开由 dblclick 单独处理。
 function rowClick(row: FileEntry, column: { type?: string } | null, event: MouseEvent) {
   if (busy.value || column?.type === 'selection' || isDeleting(row) || event.detail > 1) return
-  selectRow(row, event)
+  focusedName.value = row.name
   focusList()
 }
 
 function checkboxSelect(_selection: FileEntry[], row: FileEntry) {
-  selectionAnchor.value = row.name
   focusedName.value = row.name
-  focusList()
 }
 
 function selectAll(selection: FileEntry[]) {
-  selectionAnchor.value = selection[0]?.name
   focusedName.value = selection[0]?.name
-  focusList()
 }
 
-function clearOnBackground(event: MouseEvent) {
+function clearFocusOnBackground(event: MouseEvent) {
   if (busy.value || !(event.target instanceof Element) || event.target.closest('tr, input, button, .el-checkbox, .el-scrollbar__bar')) return
-  clearSelection()
+  focusedName.value = undefined
   focusList()
 }
 
@@ -220,19 +192,14 @@ function rowDblclick(row: FileEntry, column: { type?: string } | null, event: Mo
 function listKeydown(event: KeyboardEvent) {
   const target = event.target
   if (target instanceof Element && target.closest('input, textarea, button, a, [contenteditable="true"]')) return
-  const ctrl = event.ctrlKey || event.metaKey
-  if (ctrl && event.key.toLowerCase() === 'a') {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
     event.preventDefault()
-    if (busy.value) return
-    const rows = shownEntries.value.filter((row) => !isDeleting(row))
-    setSelection(rows.map((row) => row.name))
-    selectionAnchor.value = rows[0]?.name
-    focusedName.value ??= rows[0]?.name
     return
   }
   if (busy.value) return
-  if (event.key === 'Enter' && selected.value.length === 1) {
-    event.preventDefault(); openEntry(selected.value[0])
+  const focusedRow = shownEntries.value.find((row) => row.name === focusedName.value)
+  if (event.key === 'Enter' && focusedRow) {
+    event.preventDefault(); openEntry(focusedRow)
   } else if (event.key === 'F2' && selected.value.length === 1) {
     event.preventDefault(); rename()
   } else if (event.key === 'Delete' && selected.value.length) {
@@ -243,10 +210,6 @@ function listKeydown(event: KeyboardEvent) {
     event.preventDefault(); if (parent.value) load(parent.value)
   } else if (event.key === 'F5') {
     event.preventDefault(); load(path.value)
-  } else if (event.key === ' ' && focusedName.value) {
-    event.preventDefault()
-    const row = shownEntries.value.find((item) => item.name === focusedName.value)
-    if (row && !isDeleting(row)) selectRow(row, event)
   } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
     event.preventDefault()
     const rows = shownEntries.value.filter((row) => !isDeleting(row))
@@ -258,8 +221,7 @@ function listKeydown(event: KeyboardEvent) {
     else if (current < 0) index = event.key === 'ArrowUp' ? rows.length - 1 : 0
     else index = Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)))
     const row = rows[index]
-    if (ctrl && !event.shiftKey) focusedName.value = row.name
-    else selectRow(row, { shiftKey: event.shiftKey, ctrlKey: ctrl && event.shiftKey })
+    focusedName.value = row.name
     nextTick(() => {
       if (focusedName.value !== row.name) return
       const position = shownEntries.value.findIndex((item) => item.name === row.name)
@@ -484,7 +446,7 @@ function time(t: string): string {
       <el-button size="small" :icon="Delete" :disabled="busy || !selected.length" type="danger" plain @click="remove">删除</el-button>
     </div>
 
-    <div class="file-filter"><el-input v-model="query" size="small" placeholder="搜索当前文件夹" clearable aria-label="搜索当前文件夹" /><span class="muted small">{{ shownEntries.length }} / {{ entries.length }} 项<span v-if="selected.length"> · 已选 {{ selected.length }} 项</span></span><el-button v-if="selected.length" size="small" text @click="clearSelection">取消选择</el-button></div>
+    <div class="file-filter"><el-input v-model="query" size="small" placeholder="搜索当前文件夹" clearable aria-label="搜索当前文件夹" /><span class="muted small">{{ shownEntries.length }} / {{ entries.length }} 项<span v-if="selected.length"> · 已勾选 {{ selected.length }} 项</span></span><el-button v-if="selected.length" size="small" text @click="clearSelection">取消勾选</el-button></div>
     <el-alert v-if="error" type="error" :closable="false" show-icon class="err" :title="error"><el-button link type="primary" @click="load(requestedPath)">重试</el-button></el-alert>
     <el-table
       ref="table"
@@ -502,7 +464,7 @@ function time(t: string): string {
       @select-all="selectAll"
       @row-click="rowClick"
       @row-dblclick="rowDblclick"
-      @click="clearOnBackground"
+      @click="clearFocusOnBackground"
       @keydown="listKeydown"
       :row-class-name="({ row }: { row: FileEntry }) => [isDeleting(row) ? 'is-deleting' : '', selectedNames.has(row.name) ? 'file-selected' : '', focusedName === row.name ? 'file-focused' : ''].join(' ')"
     >
@@ -517,13 +479,13 @@ function time(t: string): string {
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="大小" width="80" align="right">
+      <el-table-column label="大小" width="88" align="right">
         <template #default="{ row }">{{ row.dir ? '' : bytes(row.size) }}</template>
       </el-table-column>
-      <el-table-column label="修改时间" width="128">
+      <el-table-column label="修改时间" width="156">
         <template #default="{ row }">{{ time(row.mtime) }}</template>
       </el-table-column>
-      <el-table-column label="权限" width="224">
+      <el-table-column label="权限" width="270">
         <template #default="{ row }"><FilePermissions :mode="row.mode" :dir="row.dir" :link="row.link" /></template>
       </el-table-column>
     </el-table>
@@ -536,7 +498,7 @@ function time(t: string): string {
       <el-progress :percentage="percent" :stroke-width="6" />
       <div class="muted small mono">{{ xfer.file }} {{ xfer.total ? `${bytes(xfer.done)} / ${bytes(xfer.total)}` : '' }}</div>
     </div>
-    <div v-else class="muted small tip" role="status">{{ working || (deleting.size ? `正在删除 ${deleting.size} 项，可以继续浏览别的文件夹` : '单击选中，双击打开；Ctrl 多选，Shift 连选；可拖入文件上传') }}</div>
+    <div v-else class="muted small tip" role="status">{{ working || (deleting.size ? `正在删除 ${deleting.size} 项，可以继续浏览别的文件夹` : '双击打开文件或文件夹；勾选复选框后可下载、改名或删除；可拖入文件上传') }}</div>
     <div v-if="dropOver" class="drop">松开就上传到 {{ path }}</div>
     <FilePreviewDialog v-if="preview" :config="config" :target="target" :path="join(preview.dir, preview.entry.name)" @close="preview = undefined" @download="download([preview!.entry], preview!.dir)" @saved="load(path)" />
   </div>
@@ -559,8 +521,8 @@ function time(t: string): string {
 .glass-head :deep(.el-table__header-wrapper tr),
 .glass-head :deep(.el-table__header-wrapper th.el-table__cell) { background: transparent; }
 .glass-head :deep(.el-table__body-wrapper .el-scrollbar__view) { padding-top: var(--th-h, 0px); }
-.file-breadcrumbs { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 14px; line-height: 20px; }
-.file-breadcrumbs .file-crumb-separator { flex-shrink: 0; color: var(--el-text-color-placeholder); font-size: 11px; }
+.file-breadcrumbs { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 16px; line-height: 24px; }
+.file-breadcrumbs .file-crumb-separator { flex-shrink: 0; color: var(--el-text-color-placeholder); font-size: 12px; }
 .file-breadcrumbs button { flex-shrink: 0; border: 0; background: none; color: var(--el-text-color-regular); cursor: pointer; padding: 4px 7px; border-radius: 5px; font: inherit; }
 .file-breadcrumbs button.current { color: var(--el-text-color-primary); font-weight: 600; }
 .file-breadcrumbs button:hover { color: var(--el-color-primary); background: var(--el-fill-color-light); }
@@ -568,6 +530,8 @@ function time(t: string): string {
 .file-filter { display: flex; align-items: center; gap: 12px; }
 .file-filter .el-input { flex: 1; min-width: 100px; }
 .file-filter > span { white-space: nowrap; }
+.bar :deep(.el-button--small), .file-filter :deep(.el-button--small) { font-size: 14px; height: 30px; }
+.path, .file-filter .el-input { --el-input-height: 30px; --el-input-text-height: 28px; --el-input-text-color: var(--el-text-color-regular); font-size: 14px; }
 .files {
   position: relative;
   box-sizing: border-box;
@@ -605,7 +569,11 @@ function time(t: string): string {
 .list {
   flex: 1;
   min-height: 0;
+  font-size: 15px;
 }
+.list :deep(th.el-table__cell) { font-size: 14px; }
+.list :deep(.cell) { line-height: 24px; }
+.list :deep(.permission-summary) { font-size: 15px; }
 .list :deep(.el-table__body) { user-select: none; -webkit-user-select: none; }
 .list :deep(.file-selected > td.el-table__cell) { background: var(--el-color-primary-light-9); }
 .list:focus { outline: none; }
@@ -637,10 +605,10 @@ function time(t: string): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 14px;
 }
 .small {
-  font-size: 12px;
+  font-size: 13px;
 }
 .tip {
   padding-top: 2px;
