@@ -52,6 +52,10 @@ func TestBlockedDirsNewUser(t *testing.T) {
 }
 
 func TestSwReach(t *testing.T) {
+	// Linux 上临时目录在 /tmp 下，本身算系统目录：测试时只把 /proc 当系统目录
+	old := systemDirs
+	systemDirs = []string{"/proc"}
+	t.Cleanup(func() { systemDirs = old })
 	base := filepath.ToSlash(t.TempDir())
 	home := base + "/home/alice"
 	os.MkdirAll(home+"/soft", 0o700)

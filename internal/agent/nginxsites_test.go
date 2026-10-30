@@ -147,6 +147,7 @@ func TestSystemNginxSiteDeployAndStopWithoutInstallRecord(t *testing.T) {
 	os.Remove(a.instFile(in.Name))
 	a.instanceLookup = func(string) (*proto.SoftwareInstance, error) { return nil, os.ErrNotExist }
 	in.Name, in.Unit, in.User = proto.SystemNginxInstance, "nginx.service", "root"
+	f.users = map[string]bool{"root": true}
 	in.Hosting.Binary = filepath.Join(in.Dir, "nginx")
 	in.Hosting.System = true
 	s.NginxInstance = in.Name

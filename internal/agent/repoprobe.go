@@ -243,7 +243,9 @@ func probeErr(err error) string {
 		runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(10054)) || errors.Is(err, syscall.Errno(10053))):
 		// Windows 使用 WSA 错误码，文本不一定包含 reset，不能只按英文字符串判断。
 		return "连上就被断开"
-	case strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "reset"):
+	case errors.Is(err, syscall.EPIPE) || strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "reset") ||
+		strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "server closed idle connection"):
+		// 对方接下连接马上关掉：还没发完请求（broken pipe）或还没收到回应（EOF、closed idle connection），看时机
 		return "连上就被断开"
 	}
 	return err.Error()
