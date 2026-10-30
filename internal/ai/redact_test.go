@@ -44,3 +44,11 @@ func TestSensitivePatterns(t *testing.T) {
 		t.Errorf("普通通配符应放行：%v", err)
 	}
 }
+
+func TestRedactKeepsSecretTokens(t *testing.T) {
+	in := "代号 {{secret:db_pw}}，命令里用 \"$FERRY_SECRET_DB_PW\"；password=hunter2 {{secret:x}}"
+	got := Redact(in)
+	if !strings.Contains(got, "{{secret:db_pw}}") || !strings.Contains(got, "{{secret:x}}") || strings.Contains(got, "hunter2") {
+		t.Fatalf("Redact = %q", got)
+	}
+}

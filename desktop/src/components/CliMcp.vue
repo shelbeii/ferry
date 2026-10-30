@@ -10,7 +10,7 @@ import McpToolsDialog from './McpToolsDialog.vue'
 import GlassSwitch from './glass/GlassSwitch.vue'
 import GlassToggle from './glass/GlassToggle.vue'
 
-const props = defineProps<{ dataDir?: string; mcp: { allowChanges: boolean; targets: string[] | null } }>()
+const props = defineProps<{ dataDir?: string; mcp: { allowChanges: boolean; targets: string[] | null; confirmIn?: string } }>()
 const emit = defineEmits<{ goto: [tab: string] }>()
 
 // ---------------------------------------------------------------- 允许改动的目标
@@ -62,6 +62,14 @@ watch(
   },
   { immediate: true },
 )
+
+// 改动在哪里确认：空 = 在 Ferry 里弹窗，client = 编程软件支持时在编程软件里
+const confirmIn = computed({
+  get: () => props.mcp.confirmIn ?? '',
+  set: (v: string) => {
+    props.mcp.confirmIn = v
+  },
+})
 
 function toggleTarget(key: string, on: boolean) {
   const list = new Set(props.mcp.targets ?? [])
@@ -207,17 +215,30 @@ onMounted(loadCallCount)
     <h4>MCP：让编程软件使用 Ferry</h4>
     <p class="muted small">
       Claude Code、Cursor 等编程软件接入后，它的 AI 可以查看 Ferry 里的项目、服务器上应用的状态、日志、版本、部署记录、已装的软件、端口和登录用户，帮你排查线上问题。
-      返回的内容会先去掉密码、密钥等敏感信息。不能执行任意命令。
+      返回的内容会先去掉密码、密钥等敏感信息。查看时只能执行只读命令。
     </p>
     <div class="switch-row">
       <GlassSwitch v-model="props.mcp.allowChanges" aria-label="允许编程软件请求改动" />
       <span>允许编程软件请求部署、启停、回滚等改动</span>
     </div>
     <p class="muted small">
-      打开后，编程软件可以请求部署、启停、回滚、启停软件、放行 / 关闭端口、打开防火墙、断开 SSH 连接，但每次都会在 Ferry 里弹出确认，你点「同意执行」才做，由 Ferry 执行（任务面板里能看到、能停止）；5 分钟没确认自动拒绝，Ferry 没打开时一律不做。
+      打开后，编程软件可以请求部署、启停、回滚、启停软件、放行 / 关闭端口、打开防火墙、断开 SSH 连接，以及和 AI 助手一样执行改动服务器的命令、写文件（显示差异、自动备份）、用模板装软件、保存软件模板，
+      但每次都要你确认，你同意了才做，由 Ferry 执行（任务面板里能看到、能停止）；5 分钟没确认自动拒绝，Ferry 没打开时一律不做。
+      要用到密码时，Ferry 弹出输入框让你填，编程软件只拿到代号，看不到内容。
       生产服务器（配置里 <span class="mono">production: true</span>）和设了 <span class="mono">aiChanges: false</span> 的服务器始终不允许。改完点「保存」生效。
     </p>
     <div v-if="props.mcp.allowChanges" class="scope">
+      <div class="confirm-in">
+        <span class="small">在哪里确认：</span>
+        <el-radio-group v-model="confirmIn" size="small">
+          <el-radio value="">在 Ferry 里弹窗</el-radio>
+          <el-radio value="client">在编程软件里</el-radio>
+        </el-radio-group>
+      </div>
+      <p v-if="confirmIn === 'client'" class="muted small">
+        编程软件支持时（MCP 的表单确认），确认框显示在编程软件里，你在那里点同意，Ferry 不再弹窗、直接执行；不支持的编程软件仍在 Ferry 里确认。
+        这样确认的可靠程度取决于编程软件：它能执行命令时，也可能绕过确认，所以只在你信任的编程软件里这样用。密码始终在 Ferry 里填。
+      </p>
       <el-radio-group v-model="scope" size="small">
         <el-radio value="all">全部非生产服务器</el-radio>
         <el-radio value="selected">只允许下面打开的服务器</el-radio>
@@ -304,6 +325,12 @@ h4.first {
 }
 .scope {
   margin: 0 0 10px 2px;
+}
+.confirm-in {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
 }
 .targets {
   margin-top: 6px;

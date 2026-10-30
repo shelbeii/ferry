@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/engine"
@@ -58,7 +60,8 @@ type statusTaskIn struct {
 
 var actionNames = map[string]string{"deploy": "部署", "start": "启动", "stop": "停止", "restart": "重启", "rollback": "回滚",
 	"sw-start": "启动软件", "sw-stop": "停止软件", "sw-restart": "重启软件", "port-open": "放行端口", "port-close": "关闭端口",
-	"fw-enable": "打开防火墙", "ssh-kick": "断开 SSH 连接", "backup-run": "现在备份", "create": "新建项目"}
+	"fw-enable": "打开防火墙", "ssh-kick": "断开 SSH 连接", "backup-run": "现在备份", "create": "新建项目",
+	"exec": "执行命令", "write-file": "写文件", "install": "安装软件", "tpl-save": "保存软件模板", "secret": "填写密码"}
 
 // reSoftware Ferry 装的软件的名称（安装时的 --name）。
 var reSoftware = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -158,6 +161,9 @@ func PrepareRequest(r *approve.Request) error {
 	if _, ok := actionNames[r.Action]; !ok {
 		return fmt.Errorf("不支持的操作：%s", r.Action)
 	}
+	if r.ClientConfirmed && (r.Action == "create" || r.Action == "secret") {
+		return errors.New("新建项目、填写密码只能在 Ferry 里确认")
+	}
 	if r.Action == "create" {
 		content, err := generateProject(r.Spec, r.Config)
 		if err != nil {
@@ -177,6 +183,16 @@ func PrepareRequest(r *approve.Request) error {
 	st, _ := settings.Load()
 	if err := ChangeAllowed(st, f, t); err != nil {
 		return err
+	}
+	if r.ClientConfirmed && st.MCP.ConfirmIn != "client" {
+		return errors.New("Ferry 设置里没有选在编程软件里确认改动：要在 Ferry 里确认")
+	}
+	if _, ok := aiActionTool[r.Action]; ok {
+		e := &engine.Engine{File: f, Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Ctx: context.Background(), Getenv: os.Getenv}
+		return prepareAI(e, r)
+	}
+	if r.Action == "secret" {
+		return ai.CheckSecretFields(r.Fields)
 	}
 	if strings.HasPrefix(r.Action, "sw-") {
 		if !reSoftware.MatchString(r.Software) {
@@ -232,7 +248,10 @@ func PrepareRequest(r *approve.Request) error {
 
 // change 检查是否允许，补上给人看的信息，交给桌面版；最多等 waitCap，没结束就返回 id。
 func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in targetIn, r approve.Request) (any, error) {
-	var o *op
+	if req != nil && req.Params != nil && req.Params.RequestState != "" {
+		return s.confirmed(ctx, req)
+	}
+	inClient := false
 	_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, target string) (any, error) {
 		t, _ := e.File.Target(target)
 		if err := ChangeAllowed(e.Settings, e.File, t); err != nil {
@@ -247,14 +266,87 @@ func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in target
 		r.Session, r.Client = s.session, clientName(req)
 		r.Project, r.Config, r.Target, r.Host = e.File.Project, e.File.Path, t.Name, t.Host
 		r.Reason = strings.TrimSpace(r.Reason)
-		r.Detail = preview(e, target, r)
-		o = s.submit(r)
+		if r.Tool != "" || r.Action == "secret" {
+			r.Detail, r.Danger = aiPreview(e, target, r)
+		} else {
+			r.Detail = preview(e, target, r)
+		}
+		inClient = e.Settings.MCP.ConfirmIn == "client"
 		return nil, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return o.wait(ctx, req, waitCap)
+	// 设置里选了在编程软件里确认、编程软件也支持时，先让编程软件问用户（用户在编程软件的界面里回答，不经过模型），
+	// 回答后编程软件带着回答再调一次（见上面）；密码始终在 Ferry 里填
+	if inClient && r.Action != "secret" && canElicit(req) {
+		state := newID() + newID()
+		s.mu.Lock()
+		s.confirms[state] = r
+		s.mu.Unlock()
+		return &mcp.CallToolResult{InputRequests: mcp.InputRequestMap{confirmKey: confirmForm(r)}, RequestState: state}, nil
+	}
+	return s.submit(r).wait(ctx, req, waitCap)
+}
+
+// confirmKey 交给编程软件的确认表单的标识。
+const confirmKey = "ferry-confirm"
+
+// confirmed 编程软件带着用户的回答再调一次：按第一次准备好的请求执行（同意时）。
+func (s *server) confirmed(ctx context.Context, req *mcp.CallToolRequest) (any, error) {
+	p := req.Params
+	s.mu.Lock()
+	r, ok := s.confirms[p.RequestState]
+	delete(s.confirms, p.RequestState)
+	s.mu.Unlock()
+	if !ok {
+		return nil, errors.New("这次确认已经失效（ferry mcp 重启过，或者已经回答过）：要做的话重新调用")
+	}
+	yes := false
+	if res, ok := p.InputResponses[confirmKey].(*mcp.ElicitResult); ok && res.Action == "accept" {
+		yes, _ = res.Content["approve"].(bool)
+	}
+	if !yes {
+		return nil, fmt.Errorf("没有执行%s：用户在 %s 里拒绝了。不要换个办法做同样的事，先问用户怎么办", opTitle(r), orDash(r.Client))
+	}
+	r.ClientConfirmed = true
+	return s.submit(r).wait(ctx, req, waitCap)
+}
+
+// canElicit 编程软件支不支持在它的界面里弹出表单（MCP 的 elicitation）。
+func canElicit(req *mcp.CallToolRequest) bool {
+	if req == nil || req.Session == nil {
+		return false
+	}
+	p := req.Session.InitializeParams()
+	if p == nil || p.Capabilities == nil || p.Capabilities.Elicitation == nil {
+		return false
+	}
+	el := p.Capabilities.Elicitation
+	return el.Form != nil || el.URL == nil // 两个都没写时按支持表单算
+}
+
+// confirmForm 在编程软件里给用户看的确认表单：要做什么、在哪台服务器、详情、理由，一个「同意执行」。
+func confirmForm(r approve.Request) *mcp.ElicitParams {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Ferry：%s 请求%s\n服务器：%s（%s）\n", orDash(r.Client), opTitle(r), r.Target, r.Host)
+	if r.Danger != "" {
+		fmt.Fprintf(&b, "危险：%s\n", r.Danger)
+	}
+	for _, d := range r.Detail {
+		b.WriteString(d + "\n")
+	}
+	if r.Reason != "" {
+		fmt.Fprintf(&b, "理由：%s\n", r.Reason)
+	}
+	b.WriteString("同意后由 Ferry 桌面版执行（任务面板里能看到）。看不明白要做什么时请拒绝。")
+	return &mcp.ElicitParams{Mode: "form", Message: ai.Clip(b.String(), 8000), RequestedSchema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"approve": map[string]any{"type": "boolean", "title": "同意执行", "default": false},
+		},
+		"required": []string{"approve"},
+	}}
 }
 
 func appsOn(f *config.File, t *config.Target) []string {
@@ -570,8 +662,18 @@ func opTitle(r approve.Request) string {
 		return actionNames[r.Action] + " " + r.Software + "（" + r.Target + "）"
 	case strings.HasPrefix(r.Action, "port-"):
 		return actionNames[r.Action] + " " + r.Port + "（" + r.Target + "）"
-	case r.Action == "fw-enable":
+	case r.Action == "fw-enable" || r.Action == "exec" || r.Action == "install" || r.Action == "tpl-save":
 		return actionNames[r.Action] + "（" + r.Target + "）"
+	case r.Action == "write-file":
+		var in struct{ Path string }
+		json.Unmarshal(r.Input, &in)
+		return actionNames[r.Action] + " " + in.Path + "（" + r.Target + "）"
+	case r.Action == "secret":
+		labels := make([]string, len(r.Fields))
+		for i, f := range r.Fields {
+			labels[i] = f.Label
+		}
+		return actionNames[r.Action] + "：" + strings.Join(labels, "、") + "（" + r.Target + "）"
 	case r.Action == "backup-run":
 		what := r.Backup
 		if what == "" {

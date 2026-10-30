@@ -519,6 +519,18 @@ t "backup_status：各项" ok '"name": "kv"' -- MC backup_status '{"target":"e2e
 t "backup_status files：备份文件" ok '"name": "kv-' -- MC backup_status '{"target":"e2e-a","files":true,"name":"kv"}'
 t "backup_status：名字不对" fail "名字不对" -- MC backup_status '{"target":"e2e-a","files":true,"name":"../x"}'
 t "backup_run：没允许编程软件改动时不做" fail "允许编程软件" -- MC backup_run '{"target":"e2e-a","name":"kv","reason":"e2e"}'
+t "run_change_command：只读命令直接执行" ok "e2e-mcp-readonly" -- MC run_change_command '{"target":"e2e-a","command":"echo e2e-mcp-readonly","reason":"e2e"}'
+t "run_change_command：改动的命令没允许时不做" fail "允许编程软件" -- MC run_change_command '{"target":"e2e-a","command":"touch /tmp/e2e-mcp-x","reason":"e2e"}'
+t "write_file：没允许时不做" fail "允许编程软件" -- MC write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-x","content":"x","reason":"e2e"}'
+t "software_templates：模板库" ok '"id": "redis"' -- MC software_templates '{"target":"e2e-a"}'
+t "ask_secret：名字不对" fail "名字" -- MC ask_secret '{"target":"e2e-a","fields":[{"name":"Bad","label":"x"}],"purpose":"e2e"}'
+# 用户同意后桌面版用 ferry ai-exec 执行：写文件（先备份原文件）、执行命令；输出里遮住用户填的密码（这里没有）
+dx a 'printf "old\n" > /tmp/e2e-aiexec.conf'
+t "ai-exec write_file：写文件、备份原文件" ok "已写入 /tmp/e2e-aiexec.conf" -- env FERRY_AI_INPUT='{"path":"/tmp/e2e-aiexec.conf","content":"new\n"}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a write_file --scope mcp-e2e
+t "ai-exec write_file：内容和备份" ok "new old" -- dx a 'echo $(cat /tmp/e2e-aiexec.conf) $(cat /tmp/e2e-aiexec.conf.ferry-bak-*)'
+t "ai-exec run_command：改动的命令" ok "e2e-aiexec-ok" -- env FERRY_AI_INPUT='{"command":"touch /tmp/e2e-aiexec-x && echo e2e-aiexec-ok"}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a run_command --scope mcp-e2e
+t "ai-exec run_command：用到没填的密码时不执行" fail "ask_secret" -- env FERRY_AI_INPUT='{"command":"echo \"$FERRY_SECRET_NOPE\""}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a run_command --scope mcp-e2e
+t "ai-exec：不支持的工具" fail "不支持的工具" -- env FERRY_AI_INPUT='{}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a app_status --scope mcp-e2e
 t "调用记在 mcp/calls.jsonl" ok "backup_status" -- cat "$OUT/home/mcp/calls.jsonl"
 
 step "更多应用类型：Python、Node 服务端（上传目录，依赖在服务器上装）"

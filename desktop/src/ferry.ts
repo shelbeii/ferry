@@ -980,7 +980,7 @@ export interface AppSettings {
   ui: { theme: 'light' | 'dark' | 'system'; taskKeep: number; taskKeepDays: number; taskMaxMB: number; confirmClose: boolean; notify: boolean; glass: boolean; glassTransparency: number }
   ai: { models: AiModel[]; default: string; keepDays: number; maxMB: number }
   /** targets：只允许这些目标（「项目/目标」）；空 = 全部非生产目标 */
-  mcp: { allowChanges: boolean; targets: string[] | null; logKeepDays: number; logMaxMB: number }
+  mcp: { allowChanges: boolean; targets: string[] | null; confirmIn?: string; logKeepDays: number; logMaxMB: number }
   notify: { channels: NotifyChannel[] }
   desktop: { projects: { path: string; name: string }[] | null; current: string }
   team: { name: string }

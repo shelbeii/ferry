@@ -99,14 +99,15 @@ func TestMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	var names []string
-	changes := map[string]bool{"deploy": true, "app_control": true, "rollback": true, "software_control": true, "port_control": true, "create_project": true, "ssh_disconnect": true, "firewall_enable": true, "backup_run": true}
+	changes := map[string]bool{"deploy": true, "app_control": true, "rollback": true, "software_control": true, "port_control": true, "create_project": true, "ssh_disconnect": true, "firewall_enable": true, "backup_run": true,
+		"run_change_command": true, "write_file": true, "software_install": true, "save_software_template": true, "ask_secret": true}
 	for _, tl := range tools.Tools {
 		names = append(names, tl.Name)
 		if tl.Annotations == nil || tl.Annotations.ReadOnlyHint == changes[tl.Name] {
 			t.Errorf("%s 的只读标记不对", tl.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "app_control,app_logs,app_releases,app_status,backup_run,backup_status,build_log,create_project,deploy,deploy_changes,deploy_history,detect_project,firewall_enable,list_projects,monitor_status,port_check,port_control,preflight,rollback,run_command,server_check,server_ports,server_software,software_control,software_logs,ssh_disconnect,ssh_sessions,task_status" {
+	if got := strings.Join(names, ","); got != "app_control,app_logs,app_releases,app_status,ask_secret,backup_run,backup_status,build_log,create_project,deploy,deploy_changes,deploy_history,detect_project,firewall_enable,list_projects,monitor_status,port_check,port_control,preflight,rollback,run_change_command,run_command,save_software_template,server_check,server_ports,server_software,software_control,software_install,software_logs,software_templates,ssh_disconnect,ssh_sessions,task_status,template_guide,write_file" {
 		t.Fatalf("工具：%s", got)
 	}
 

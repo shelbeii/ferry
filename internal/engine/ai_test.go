@@ -1,12 +1,15 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 
+	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/config"
 )
 
@@ -127,5 +130,71 @@ func TestMarkAITemplate(t *testing.T) {
 	y := markAITemplate("id: demo\norigin: mine\nname: 演示\n")
 	if !strings.HasPrefix(y, "origin: ai") || strings.Count(y, "origin:") != 1 || !strings.Contains(y, "name: 演示") {
 		t.Fatalf("%s", y)
+	}
+}
+
+// 用户填的值经标准输入设成环境变量：不出现在命令行上，命令本身仍接原来的输入（没有时是 /dev/null）。
+func TestWrapCommandSecrets(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("没有 sh")
+	}
+	env := map[string]string{"FERRY_SECRET_PW": `p@ss 'w"0rd' $x`}
+	for _, c := range []struct {
+		stdin []byte
+		want  string
+	}{
+		{nil, "[p@ss 'w\"0rd' $x]()"},
+		{[]byte("文件内容\n"), "[p@ss 'w\"0rd' $x](文件内容)"},
+	} {
+		line, in := wrapCommand(`printf '[%s](%s)' "$FERRY_SECRET_PW" "$(cat)"`, c.stdin, env, "")
+		if strings.Contains(line, "p@ss") {
+			t.Fatalf("命令行里不应该有值：%s", line)
+		}
+		cmd := exec.Command(sh, "-c", line)
+		cmd.Stdin = bytes.NewReader(in)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v：%s", err, out)
+		}
+		got := strings.SplitN(string(out), "\n", 2)
+		if len(got) != 2 || !strings.HasPrefix(got[0], pidMark) || got[1] != c.want {
+			t.Fatalf("输出 = %q，想要 %q", out, c.want)
+		}
+	}
+}
+
+// ask_secret 只在允许改动时有；用到代号的只读命令也要确认，没填过的不打扰用户
+func TestAISecretTools(t *testing.T) {
+	e := &Engine{}
+	tg := &config.Target{Name: "a", User: "root", Plain: true}
+	has := func(mode string) bool {
+		for _, tool := range e.aiTools(nil, tg, mode, "c-tools") {
+			if tool.Name == "ask_secret" {
+				return true
+			}
+		}
+		return false
+	}
+	if has(AIReadOnly) || !has(AIConfirm) {
+		t.Fatal("ask_secret 只在允许改动时有")
+	}
+	defer ai.ForgetSecrets("c-tools")
+	ai.SetSecret("c-tools", "pw", "secret-value")
+	var run ai.Tool
+	for _, tool := range e.aiTools(nil, tg, AIConfirm, "c-tools") {
+		if tool.Name == "run_command" {
+			run = tool
+		}
+	}
+	ap := run.Approve(context.Background(), json.RawMessage(`{"command":"echo \"$FERRY_SECRET_PW\""}`))
+	if ap == nil || ap.Once == "" {
+		t.Fatalf("用到代号的只读命令也要每次确认：%+v", ap)
+	}
+	if ap := run.Approve(context.Background(), json.RawMessage(`{"command":"echo \"$FERRY_SECRET_NOPE\""}`)); ap != nil {
+		t.Fatal("没填过的不用问用户，执行时告诉模型")
+	}
+	if ap := run.Approve(context.Background(), json.RawMessage(`{"command":"ls /"}`)); ap != nil {
+		t.Fatal("普通只读命令不用确认")
 	}
 }

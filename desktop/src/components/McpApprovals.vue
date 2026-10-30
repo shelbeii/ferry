@@ -12,13 +12,16 @@ import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { call, ferry, type FerryLine, type Running } from '../ferry'
 import { isTauri } from '../platform'
 import { addProject, notifyUser, startTask, type Task } from '../state'
+import SecretForm, { type SecretField, type SecretValue } from './SecretForm.vue'
 
 interface McpRequest {
   id: string
   time: string
   session?: string
   client?: string
-  action: 'deploy' | 'start' | 'stop' | 'restart' | 'rollback' | 'sw-start' | 'sw-stop' | 'sw-restart' | 'port-open' | 'port-close' | 'fw-enable' | 'ssh-kick' | 'backup-run' | 'create'
+  action:
+    | 'deploy' | 'start' | 'stop' | 'restart' | 'rollback' | 'sw-start' | 'sw-stop' | 'sw-restart' | 'port-open' | 'port-close' | 'fw-enable' | 'ssh-kick' | 'backup-run' | 'create'
+    | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret'
   project: string
   config: string
   target: string
@@ -39,6 +42,14 @@ interface McpRequest {
   /** create：向导的内容（原样交给 ferry create）与按它生成的 ferry.yaml（桌面版这边生成的） */
   spec?: unknown
   content?: string
+  /** exec、write-file、install、tpl-save：用服务器助手的工具执行（tool + input）；detail 是 Ferry 按参数算出的确认内容 */
+  tool?: string
+  input?: Record<string, unknown>
+  danger?: string
+  /** secret：让用户填的项（值只交给 Ferry，编程软件只拿到代号） */
+  fields?: SecretField[]
+  /** 用户已经在编程软件里确认（设置里选了在编程软件里确认时） */
+  clientConfirmed?: boolean
   detail?: string[]
   reason?: string
 }
@@ -61,7 +72,15 @@ const VERBS: Record<string, string> = {
   'ssh-kick': '断开 SSH 连接',
   'backup-run': '现在备份',
   create: '新建项目',
+  exec: '执行命令',
+  'write-file': '写文件',
+  install: '安装软件',
+  'tpl-save': '保存软件模板',
+  secret: '填写密码',
 }
+// 用服务器助手的工具执行的操作：确认内容按命令、差异整块显示，每次都要确认
+const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save']
+const isAI = (r: McpRequest) => AI_ACTIONS.includes(r.action)
 
 const queue = ref<McpRequest[]>([])
 const current = computed(() => queue.value[0])
@@ -93,7 +112,8 @@ const keyOf = (r: McpRequest) =>
 const grantKey = (r: McpRequest) => [r.session, r.config, r.target, r.action].join('|')
 const clientOf = (r: McpRequest) => r.client || '编程软件'
 // 改防火墙、断开别人的连接、新建项目每次都问：不给「不再询问」
-const canGrant = (r: McpRequest) => r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick'
+const canGrant = (r: McpRequest) =>
+  r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick' && r.action !== 'secret' && !isAI(r)
 const titleOf = (r: McpRequest) => {
   if (r.action === 'create') return `新建项目 ${r.project}`
   if (r.action.startsWith('sw-')) return `${VERBS[r.action]} ${r.software ?? ''}`
@@ -101,6 +121,10 @@ const titleOf = (r: McpRequest) => {
   if (r.action === 'fw-enable') return VERBS[r.action]
   if (r.action === 'ssh-kick') return `${VERBS[r.action]}（PID ${(r.pids ?? []).join('、')}）`
   if (r.action === 'backup-run') return `${VERBS[r.action]} ${r.backup || '全部'}`
+  if (r.action === 'write-file') return `${VERBS[r.action]} ${String(r.input?.path ?? '')}`
+  if (r.action === 'install') return `${VERBS[r.action]} ${String(r.input?.template || '（自定义模板）')}`
+  if (r.action === 'secret') return `${VERBS[r.action]}：${(r.fields ?? []).map((f) => f.label).join('、')}`
+  if (isAI(r)) return VERBS[r.action]
   return `${VERBS[r.action] ?? r.action} ${(r.apps ?? []).join('、')}`
 }
 
@@ -131,6 +155,14 @@ async function arrive(r: McpRequest) {
   const last = rejected.get(keyOf(r))
   if (last && Date.now() - last < REJECT_REPEAT_MS) {
     await reply(r, false, '2 分钟内刚拒绝过同样的请求')
+    return
+  }
+  if (r.clientConfirmed) {
+    // 用户已经在编程软件里确认过（Ferry 检查过设置里允许这样）：直接执行，告诉用户一声
+    if (await reply(r, true, `用户已在 ${clientOf(r)} 里确认`)) {
+      execute(r)
+      ElNotification({ type: 'info', title: `${clientOf(r)} 请求的操作开始执行`, message: `${titleOf(r)}（${r.target}）：你在 ${clientOf(r)} 里同意了`, duration: 6000 })
+    }
     return
   }
   const until = session && canGrant(r) ? grants.get(grantKey(r)) : undefined
@@ -191,10 +223,43 @@ async function decide(approve: boolean, blockSession = false) {
   }
 }
 
+const scopeOf = (r: McpRequest) => `mcp-${r.session ?? ''}`
+
+/** 填写密码：值交给 Ferry（只记在这次打开的 Ferry 里），编程软件只拿到代号。 */
+async function fill(values: SecretValue[]) {
+  const r = current.value
+  if (!r) return
+  deciding.value = true
+  try {
+    await call(['ai-secret', '--scope', scopeOf(r)], { FERRY_AI_SECRETS: JSON.stringify(values) })
+    if (await reply(r, true)) {
+      const output =
+        '用户在 Ferry 里填好了（值只在用户电脑上，你看不到，也不要问）：\n' +
+        (r.fields ?? [])
+          .map((f) => `- ${f.label}：代号 {{secret:${f.name}}}，run_change_command 的命令里用 "$FERRY_SECRET_${f.name.toUpperCase()}"，write_file 的内容、software_install 的参数里写代号`)
+          .join('\n')
+      call(['mcp-decide', r.id, 'done'], { FERRY_MCP_OUTCOME: JSON.stringify({ ok: true, data: { output } }) }).catch(() => {})
+    }
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+    return
+  } finally {
+    deciding.value = false
+  }
+  queue.value = queue.value.filter((x) => x.id !== r.id)
+}
+
 /** 按请求里的操作、目标、应用拼命令，当作普通任务执行；进展和结果交回编程软件。 */
 function execute(r: McpRequest) {
   if (r.action === 'create') {
     createProject(r)
+    return
+  }
+  if (isAI(r)) {
+    const title = `${titleOf(r)} ${r.target}（${clientOf(r)} 请求）`
+    const args = ['ai-exec', r.target, r.tool ?? '', '-c', r.config, '--scope', scopeOf(r)]
+    const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: `${clientOf(r)} · MCP`, FERRY_AI_INPUT: JSON.stringify(r.input ?? {}) })
+    watchProgress(r, task)
     return
   }
   const apps = r.apps ?? []
@@ -239,10 +304,14 @@ function execute(r: McpRequest) {
             ? r.backup || '全部'
             : apps.join('、')
   const title = `${VERBS[r.action]} ${r.target}：${what}（${clientOf(r)} 请求）`
+  const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: `${clientOf(r)} · MCP` })
+  watchProgress(r, task)
+}
+
+/** 当前步骤变了就报一行给编程软件（最多每秒一行）。 */
+function watchProgress(r: McpRequest, task: Task) {
   let lastSent = ''
   let lastAt = 0
-  const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: `${clientOf(r)} · MCP` })
-  // 当前步骤变了就报一行（最多每秒一行）
   const stopWatch = watch(
     () => task.step?.text,
     (text) => {
@@ -301,14 +370,21 @@ onBeforeUnmount(() => {
   running?.kill()
 })
 
+// 确认内容第一行之后的部分（命令、差异）按行显示
+const detailLines = (d: string[]) => d.slice(1).join('\n').split('\n')
+
 const actionType = (a: string) =>
-  ['stop', 'rollback', 'sw-stop', 'port-close', 'port-open', 'fw-enable', 'ssh-kick'].includes(a) ? 'danger' : a === 'create' || a === 'backup-run' ? 'primary' : 'warning'
+  ['stop', 'rollback', 'sw-stop', 'port-close', 'port-open', 'fw-enable', 'ssh-kick'].includes(a)
+    ? 'danger'
+    : a === 'create' || a === 'backup-run' || a === 'secret'
+      ? 'primary'
+      : 'warning'
 </script>
 
 <template>
   <el-dialog
     :model-value="!!current"
-    :title="shown?.action === 'create' ? '编程软件请求新建项目' : '编程软件请求改动服务器'"
+    :title="shown?.action === 'create' ? '编程软件请求新建项目' : shown?.action === 'secret' ? '编程软件请你填写' : '编程软件请求改动服务器'"
     width="560px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
@@ -319,6 +395,7 @@ const actionType = (a: string) =>
     <template v-if="shown">
       <div class="headline">
         <el-tag :type="actionType(shown.action)" disable-transitions>{{ titleOf(shown) }}</el-tag>
+        <el-tag v-if="shown.danger" type="danger" effect="dark" disable-transitions>危险：{{ shown.danger }}</el-tag>
         <span class="muted small">来自 {{ clientOf(shown) }}</span>
       </div>
       <el-descriptions :column="1" border size="small" label-width="80px">
@@ -329,7 +406,7 @@ const actionType = (a: string) =>
         <el-descriptions-item v-else label="服务器">
           {{ shown.target }}<span class="muted mono ml">{{ shown.host }}</span>
         </el-descriptions-item>
-        <el-descriptions-item v-for="(d, i) in shown.detail ?? []" :key="i" :label="i === 0 ? '详情' : ''">
+        <el-descriptions-item v-for="(d, i) in isAI(shown) || shown.action === 'secret' ? [] : (shown.detail ?? [])" :key="i" :label="i === 0 ? '详情' : ''">
           <span class="detail">{{ d }}</span>
         </el-descriptions-item>
         <el-descriptions-item label="理由">
@@ -337,6 +414,12 @@ const actionType = (a: string) =>
           <span v-else class="muted">（没有说明）</span>
         </el-descriptions-item>
       </el-descriptions>
+      <div v-if="isAI(shown) && shown.detail?.length" class="yaml">
+        <div class="muted small">{{ shown.detail[0] }}</div>
+        <pre class="mono"><span v-for="(ln, k) in detailLines(shown.detail)" :key="k" :class="{ add: ln.startsWith('+ '), del: ln.startsWith('- ') }">{{ ln }}
+</span></pre>
+      </div>
+      <SecretForm v-if="shown.action === 'secret' && shown.fields?.length" class="secret" :fields="shown.fields" :disabled="deciding" no-remember @submit="fill" @cancel="decide(false)" />
       <div v-if="shown.action === 'create' && shown.content" class="yaml">
         <div class="muted small">将写入的 ferry.yaml（已有文件不会覆盖）：</div>
         <pre class="mono">{{ shown.content }}</pre>
@@ -346,6 +429,7 @@ const actionType = (a: string) =>
       </el-checkbox>
       <p class="muted small note">
         <template v-if="shown.action === 'create'">同意后生成这个文件，并加进 Ferry 的项目列表；不连服务器、不部署。</template>
+        <template v-else-if="shown.action === 'secret'">填的内容只记在这次打开的 Ferry 里，执行时才用上；{{ clientOf(shown) }} 只拿到代号，看不到内容。Ferry 退出或这次连接断开后要重新填。</template>
         <template v-else>同意后由 Ferry 执行，任务面板里能看到过程、可以停止；结果交回编程软件，部署记录里会标明经它请求。</template>
         看不明白要做什么时请拒绝。
         <template v-if="queue.length > 1">后面还有 {{ queue.length - 1 }} 个请求。</template>
@@ -361,7 +445,7 @@ const actionType = (a: string) =>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
-      <el-button type="primary" class="ml" :loading="deciding" @click="decide(true)">同意执行</el-button>
+      <el-button v-if="shown?.action !== 'secret'" type="primary" class="ml" :loading="deciding" @click="decide(true)">同意执行</el-button>
     </template>
   </el-dialog>
 </template>
@@ -402,6 +486,15 @@ const actionType = (a: string) =>
 }
 .note {
   margin: 6px 0 0;
+}
+.yaml pre .add {
+  color: var(--el-color-success);
+}
+.yaml pre .del {
+  color: var(--el-color-danger);
+}
+.secret {
+  margin-top: 12px;
 }
 .left {
   float: left;

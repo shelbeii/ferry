@@ -52,11 +52,14 @@ func writeIndex(es []Entry) error {
 	return appdir.WriteFileAtomic(indexFile(), append(b, '\n'), 0o600)
 }
 
-func indexAdd(account string) {
+func indexAdd(account, label string) {
 	indexMu.Lock()
 	defer indexMu.Unlock()
 	es, _ := readIndex()
-	kind, label := describe(account)
+	kind, l := describe(account)
+	if label == "" {
+		label = l
+	}
 	out := es[:0]
 	for _, e := range es {
 		if e.Account != account {
@@ -81,11 +84,16 @@ func indexRemove(account string) {
 }
 
 func describe(account string) (kind, label string) {
-	for _, k := range []string{KindPassword, KindPassphrase, KindSoftware, KindAI, KindNotify, KindDNS} {
+	for _, k := range []string{KindPassword, KindPassphrase, KindSoftware, KindAI, KindNotify, KindDNS, KindAIInput} {
 		if len(account) > len(k)+1 && account[:len(k)+1] == k+":" {
 			label = account[len(k)+1:]
 			if k == KindAI && strings.HasPrefix(label, "api-key:") {
 				label = "API Key（" + strings.TrimPrefix(label, "api-key:") + "）"
+			}
+			if k == KindAIInput {
+				if i := strings.LastIndex(label, ":"); i > 0 {
+					label = label[i+1:] + "（AI 助手对话 " + label[:i] + "）"
+				}
 			}
 			if k == KindNotify {
 				if id, ok := strings.CutPrefix(label, "url:"); ok {

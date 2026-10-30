@@ -68,6 +68,9 @@ type MCP struct {
 	AllowChanges bool `json:"allowChanges"`
 	// Targets 只允许这些目标（「项目/目标」，项目是 ferry.yaml 里的 project）；为空 = 全部非生产目标
 	Targets []string `json:"targets"`
+	// ConfirmIn 改动在哪里确认：空 = 在 Ferry 桌面版里弹窗 | client = 编程软件支持时在编程软件里确认（不支持时仍在 Ferry 里）。
+	// 不管在哪确认都由桌面版执行；要用户填的密码始终在 Ferry 里填，不经过编程软件
+	ConfirmIn string `json:"confirmIn"`
 	// 调用记录（数据目录的 mcp/calls.jsonl）：保留多少天、最多占用多少 MB（超出时从最旧的删起）
 	LogKeepDays int `json:"logKeepDays"` // 默认 30
 	LogMaxMB    int `json:"logMaxMB"`    // 默认 20

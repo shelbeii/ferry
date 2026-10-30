@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/safe"
 )
@@ -35,7 +36,7 @@ import (
 // DefaultFile 桌面版写端口和令牌、ferry mcp 读的文件（数据目录的 mcp/approver.json）。
 func DefaultFile() string { return filepath.Join(appdir.SubDir("mcp"), "approver.json") }
 
-// Request 一个待确认的改动。桌面版只按 Action、Config、Target、Apps、SkipBuild、To、Software、Port、Pids、Allow、RestartDocker、Backup、Spec 执行；其余是给人看的。
+// Request 一个待确认的改动。桌面版只按 Action、Config、Target、Apps、SkipBuild、To、Software、Port、Pids、Allow、RestartDocker、Backup、Spec、Tool、Input、Fields 执行；其余是给人看的。
 type Request struct {
 	ID        string    `json:"id"`
 	Time      time.Time `json:"time"`
@@ -60,8 +61,16 @@ type Request struct {
 	// Content 是按 Spec 生成的 ferry.yaml，由桌面版这边生成（Prepare），不用请求方给的
 	Spec    json.RawMessage `json:"spec,omitempty"`
 	Content string          `json:"content,omitempty"`
-	Detail  []string        `json:"detail,omitempty"` // 补充说明（代码提交、构建命令、线上版本……）
-	Reason  string          `json:"reason,omitempty"` // 编程软件说的理由
+	// exec | write-file | install | tpl-save：用服务器助手的工具 Tool 执行，Input 是它的参数（确认框里的内容由桌面版按它重新算）；
+	// secret：让用户在 Ferry 里填 Fields，值只记在桌面版
+	Tool   string           `json:"tool,omitempty"`
+	Input  json.RawMessage  `json:"input,omitempty"`
+	Fields []ai.SecretField `json:"fields,omitempty"`
+	Danger string           `json:"danger,omitempty"` // 危险的原因（桌面版算的）
+	// ClientConfirmed 用户已经在编程软件里确认了（设置里选了在编程软件里确认时）：桌面版不再弹窗，直接执行
+	ClientConfirmed bool     `json:"clientConfirmed,omitempty"`
+	Detail          []string `json:"detail,omitempty"` // 补充说明（代码提交、构建命令、线上版本……）
+	Reason          string   `json:"reason,omitempty"` // 编程软件说的理由
 }
 
 // Decision 用户的决定。
@@ -108,11 +117,12 @@ type Hub struct {
 	nextSub int
 	pending map[string]chan Decision // 等决定的
 	running map[string]chan message  // 已同意、桌面版正在执行的
+	outbox  map[string]chan message  // 每个等决定的请求收进展和结果的通道（同意时放进 running）
 }
 
 // NewHub file 是写端口和令牌的文件（数据目录的 mcp/approver.json）。
 func NewHub(file string) *Hub {
-	return &Hub{file: file, subs: map[int]func(string, any){}, pending: map[string]chan Decision{}, running: map[string]chan message{}}
+	return &Hub{file: file, subs: map[int]func(string, any){}, pending: map[string]chan Decision{}, running: map[string]chan message{}, outbox: map[string]chan message{}}
 }
 
 // Subscribe 桌面版开始接收请求：emit("request", Request) 新请求；emit("gone", {"id","note"}) 请求不用再处理了（编程软件断开、超时）。
@@ -244,7 +254,9 @@ func (h *Hub) handle(c net.Conn) {
 		reject("请求 ID 重复")
 		return
 	}
+	msgs := make(chan message, 64)
 	h.pending[req.ID] = ch
+	h.outbox[req.ID] = msgs
 	h.emitLocked("request", req)
 	h.mu.Unlock()
 
@@ -265,11 +277,9 @@ func (h *Hub) handle(c net.Conn) {
 	}
 	h.mu.Lock()
 	delete(h.pending, req.ID)
-	var msgs chan message
-	if d.Approve {
-		msgs = make(chan message, 64)
-		h.running[req.ID] = msgs
-	} else {
+	delete(h.outbox, req.ID)
+	if !d.Approve {
+		delete(h.running, req.ID)
 		h.emitLocked("gone", map[string]any{"id": req.ID, "note": d.Note})
 	}
 	h.mu.Unlock()
@@ -304,6 +314,10 @@ func (h *Hub) Decide(id string, d Decision) error {
 		return errors.New("这个请求已经结束了（超时或编程软件取消了）")
 	}
 	delete(h.pending, id)
+	if d.Approve {
+		// 同意时马上开始收进展和结果：桌面版紧接着报结果（如填写密码）也不会丢
+		h.running[id] = h.outbox[id]
+	}
 	ch <- d
 	return nil
 }

@@ -221,17 +221,7 @@ func (s *server) addMoreTools(m *mcp.Server) {
 }
 
 // tailFile 文件的最后 n 行。
-func tailFile(path string, n int) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	lines := strings.Split(strings.TrimRight(string(b), "\r\n"), "\n")
-	if len(lines) > n {
-		lines = append([]string{fmt.Sprintf("…（前面还有 %d 行）", len(lines)-n)}, lines[len(lines)-n:]...)
-	}
-	return strings.Join(lines, "\n"), nil
-}
+func tailFile(path string, n int) (string, error) { return engine.TailFile(path, n) }
 
 // ---------------------------------------------------------------- 新建项目
 

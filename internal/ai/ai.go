@@ -217,6 +217,8 @@ type Approval struct {
 	Danger string `json:"danger,omitempty"` // 危险的原因：非空时每次都要确认
 	Once   string `json:"once,omitempty"`   // 每次都要确认的原因（执行别的命令或代码、访问外部地址……），不能「同类不再询问」
 	AsRoot bool   `json:"asRoot,omitempty"` // 以 root 执行
+	// Fields 要用户填的密码、账号（ask_secret）：界面上显示输入框，用户填好了才执行
+	Fields []SecretField `json:"fields,omitempty"`
 }
 
 // 用户的决定
@@ -389,7 +391,8 @@ func (l *Loop) Send(ctx context.Context, conv *Conversation, user string, images
 		}
 		conv.Pending = nil
 	}
-	conv.Messages = append(conv.Messages, Message{Role: "user", Text: user, Images: images})
+	// 用户又在对话里直接打了填过的值：也遮住
+	conv.Messages = append(conv.Messages, Message{Role: "user", Text: MaskSecrets(conv.ID, user), Images: images})
 	l.save()
 	return l.loop(ctx, conv)
 }
@@ -452,6 +455,9 @@ func (l *Loop) runCalls(ctx context.Context, conv *Conversation, calls []ToolCal
 			ap, how = first, decision
 			if decision == Reject {
 				out := "没有执行：用户不同意这个操作。不要换个方式去做同样的事；需要的话先问用户。"
+				if len(ap.Fields) > 0 {
+					out = "用户没有填写，取消了。不要让用户在对话里直接发密码；需要的话先问用户想怎么办。"
+				}
 				l.audit(conv, c, ap, Reject, "", false)
 				l.Emit(Event{Type: "result", Call: &c, Result: out, IsError: true})
 				conv.Messages = append(conv.Messages, Message{Role: "tool", CallID: c.ID, Text: out, IsError: true})
@@ -498,8 +504,8 @@ func (l *Loop) runCalls(ctx context.Context, conv *Conversation, calls []ToolCal
 		}
 		l.audit(conv, c, ap, how, out, isErr)
 		l.Emit(Event{Type: "result", Call: &c, Result: out, IsError: isErr})
-		// 交给模型（也存进对话记录）的输出遮住密码、密钥；界面上实时显示的是完整的
-		conv.Messages = append(conv.Messages, Message{Role: "tool", CallID: c.ID, Text: Clip(Redact(out), ResultLimit), IsError: isErr})
+		// 交给模型（也存进对话记录）的输出遮住密码、密钥和用户填过的值；界面上实时显示的是完整的
+		conv.Messages = append(conv.Messages, Message{Role: "tool", CallID: c.ID, Text: Clip(Redact(MaskSecrets(conv.ID, out)), ResultLimit), IsError: isErr})
 		l.save()
 	}
 	return false, nil
@@ -522,13 +528,18 @@ func (l *Loop) audit(conv *Conversation, c ToolCall, ap *Approval, decision, res
 		return
 	}
 	l.Audit(AuditEntry{Time: time.Now(), Config: conv.Config, Target: conv.Target, Conv: conv.ID, Tool: c.Name, Input: Redact(string(c.Input)),
-		Kind: ap.Kind, Danger: ap.Danger, Decision: decision, Result: Clip(Redact(result), 2000), IsError: isErr})
+		Kind: ap.Kind, Danger: ap.Danger, Decision: decision, Result: Clip(Redact(MaskSecrets(conv.ID, result)), 2000), IsError: isErr})
 }
 
 type progressKey struct{}
 
 func withProgress(ctx context.Context, emit func(Event), c ToolCall) context.Context {
 	return context.WithValue(ctx, progressKey{}, func(text string) { emit(Event{Type: "output", Call: &c, Text: text}) })
+}
+
+// WithProgress 不在对话里执行工具时（编程软件经 MCP 请求的），把工具的实时输出交给 f。
+func WithProgress(ctx context.Context, f func(string)) context.Context {
+	return context.WithValue(ctx, progressKey{}, f)
 }
 
 // Progress 工具执行中的实时输出（如安装命令的输出），交给界面显示。

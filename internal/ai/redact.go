@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -36,6 +37,21 @@ func Redact(s string) string {
 	if s == "" {
 		return s
 	}
+	// 用户填的密码的代号 {{secret:名字}} 不是密码，模型要靠它用：先换成占位，遮完再换回来
+	toks := reSecretToken.FindAllString(s, -1)
+	if len(toks) > 0 {
+		i := 0
+		s = reSecretToken.ReplaceAllStringFunc(s, func(string) string { i++; return fmt.Sprintf("\x00%d\x00", i-1) })
+		out := redact(s)
+		for j, t := range toks {
+			out = strings.Replace(out, fmt.Sprintf("\x00%d\x00", j), t, 1)
+		}
+		return out
+	}
+	return redact(s)
+}
+
+func redact(s string) string {
 	s = rePEM.ReplaceAllString(s, "-----BEGIN ${1}PRIVATE KEY-----（已隐藏）-----END ${2}PRIVATE KEY-----")
 	s = reKV.ReplaceAllStringFunc(s, func(m string) string {
 		sub := reKV.FindStringSubmatch(m)

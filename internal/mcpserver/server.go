@@ -21,6 +21,7 @@ import (
 
 	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/appdir"
+	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/engine"
 	"github.com/captain/ferry/internal/proto"
@@ -39,7 +40,10 @@ const instructions = `Ferry 是把后端（Java、Go 等原生程序、Python、
   部署前用 deploy_changes 看这次会带上线的提交、单元文件和附带文件的变化；app_status 里的 busy 表示团队里有人正在部署、启停这台服务器上的应用。
   list_projects 里的 machine 是这台电脑上缺的东西（别的电脑上的私钥、源码目录），要用户在 Ferry 的「本机设置」里补上。
 - 改动服务器：deploy 部署（先在本机构建）、app_control 启动 / 停止 / 重启、rollback 回滚。用户在 Ferry 设置里打开了「允许编程软件请求改动」才能用，
-  每次都会在 Ferry 桌面版弹出确认，用户同意后由桌面版执行（最多等 5 分钟确认）；生产服务器不允许。用户拒绝后不要换个办法做同样的事，先问用户。
+  每次都要用户确认（在 Ferry 桌面版弹窗，或者用户设置了在编程软件里确认时在这里），用户同意后由桌面版执行（最多等 5 分钟确认）；生产服务器不允许。用户拒绝后不要换个办法做同样的事，先问用户。
+  run_change_command 执行改动服务器的命令，write_file 写文件（改配置文件用它，确认时显示差异、自动备份原文件），software_templates / software_install 用模板装软件，
+  template_guide / save_software_template 写、存软件模板；要用户提供密码、账号时用 ask_secret（用户在 Ferry 里填，你只拿到代号 {{secret:名字}}，
+  命令里用环境变量 "$FERRY_SECRET_<名字大写>"，写文件、装软件的参数里写代号），不要让用户在对话里发密码。
   backup_run 现在备份一次（改数据库、数据目录前先备份）。打开 / 关闭告警和数据备份、恢复备份只能由用户在 Ferry 里做。
   这几个工具最多等 40 秒：没结束时返回 id 和进展，用 task_status 接着查，直到结束。部署失败时看返回的构建输出、日志找原因。
   动手前先用查看的工具确认现状，reason 里写清楚为什么要做。
@@ -69,6 +73,8 @@ type server struct {
 
 	mu  sync.Mutex
 	ops map[string]*op // 交给桌面版的改动
+	// confirms 等用户在编程软件里确认的改动（按交给编程软件的 requestState 记）：用户回答后编程软件带着回答再调一次
+	confirms map[string]approve.Request
 
 	tools []ToolInfo // 注册的工具（桌面版「MCP 工具列表」用），按注册的顺序
 }
@@ -85,7 +91,7 @@ func newServer(o Options) (*server, *mcp.Server) {
 	}
 	st, _ := settings.Load()
 	s := &server{o: o, pool: engine.NewPool(time.Duration(max(st.Connect.IdleMinutes, 1)) * time.Minute),
-		session: newID() + newID(), ops: map[string]*op{}}
+		session: newID() + newID(), ops: map[string]*op{}, confirms: map[string]approve.Request{}}
 	m := mcp.NewServer(&mcp.Implementation{Name: "ferry", Title: "Ferry", Version: o.Version},
 		&mcp.ServerOptions{Instructions: instructions})
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(true)}
@@ -169,6 +175,7 @@ func newServer(o Options) (*server, *mcp.Server) {
 	s.addChangeTools(m)
 	s.addMoreTools(m)
 	s.addExtraTools(m)
+	s.addAITools(m)
 	s.addDataTools(m)
 	s.addPrompts(m)
 	return s, m
@@ -472,6 +479,9 @@ func loggedReq[In any](s *server, name string, fn func(context.Context, *mcp.Cal
 				err = errors.New("已取消")
 			}
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: ai.Redact(err.Error())}}}, nil, nil
+		}
+		if res, ok := v.(*mcp.CallToolResult); ok { // 要编程软件先问用户（确认改动），回答后再调一次
+			return res, nil, nil
 		}
 		text, ok := v.(string)
 		if ok {

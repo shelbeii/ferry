@@ -29,6 +29,7 @@ const (
 	KindAI         = "ai"         // 服务器助手用的大模型 API Key
 	KindNotify     = "notify"     // 部署通知的机器人地址、加签密钥
 	KindDNS        = "dns"        // HTTPS 证书 DNS 验证用的 DNS 服务商密钥
+	KindAIInput    = "ai-input"   // 用户在 AI 助手的输入框里填、并选了记住的密码、账号
 )
 
 func service() string {
@@ -56,6 +57,9 @@ const AIKeyAccount = KindAI + ":api-key"
 
 // AIModelKeyAccount 设置 → AI 里某个模型的 API Key。
 func AIModelKeyAccount(modelID string) string { return AIKeyAccount + ":" + modelID }
+
+// AIInputAccount AI 助手对话里用户填、并选了记住的一项：ai-input:<对话>:<名字>。
+func AIInputAccount(conv, name string) string { return KindAIInput + ":" + conv + ":" + name }
 
 // NotifyURLAccount / NotifySignAccount 部署通知的机器人地址（含令牌）、加签密钥。
 func NotifyURLAccount(id string) string  { return KindNotify + ":url:" + id }
@@ -119,7 +123,18 @@ func Set(account, value string) error {
 	if err := keyring.Set(service(), account, value); err != nil {
 		return fmt.Errorf("写入系统凭据库失败：%w", err)
 	}
-	indexAdd(account)
+	indexAdd(account, "")
+	return nil
+}
+
+// SetLabeled 写凭据库，设置页里显示 label（为空时按账户名生成）。
+func SetLabeled(account, value, label string) error {
+	if err := Set(account, value); err != nil {
+		return err
+	}
+	if label != "" {
+		indexAdd(account, label)
+	}
 	return nil
 }
 

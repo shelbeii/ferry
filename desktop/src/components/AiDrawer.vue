@@ -5,7 +5,7 @@
 // 能看图片的模型可以附图片：粘贴截图、选文件、拖进输入框。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Promotion, VideoPause, Plus, Setting, CaretRight, CaretBottom, Loading, WarningFilled, Clock, Delete, Cpu, Opportunity, ArrowDown, EditPen, Download, Close, Picture, FullScreen } from '@element-plus/icons-vue'
+import { Promotion, VideoPause, Plus, Setting, CaretRight, CaretBottom, Loading, WarningFilled, Clock, Delete, Cpu, Opportunity, ArrowDown, EditPen, Download, Close, Picture, FullScreen, Lock } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import { call, ferry, isSecretKind, type FerryLine } from '../ferry'
 import { onFileDrop, openUrl, pickSaveFile } from '../platform'
@@ -15,6 +15,7 @@ import { supportsImages, prepareImage, base64Blob, imageUrl, MAX_IMAGES, type Ai
 import GlassPane from './glass/GlassPane.vue'
 import { glass, setVar } from '../glass/runtime'
 import GlassSwitch from './glass/GlassSwitch.vue'
+import SecretForm, { type SecretField, type SecretValue } from './SecretForm.vue'
 
 const props = defineProps<{
   config: string
@@ -41,6 +42,7 @@ interface Approval {
   danger?: string
   once?: string // 每次都要确认的原因
   asRoot?: boolean
+  fields?: SecretField[] // 要你填的密码、账号（ask_secret）
 }
 interface Item {
   kind: 'user' | 'text' | 'thinking' | 'usage' | 'tool' | 'error'
@@ -126,6 +128,21 @@ const canImages = computed(() => supportsImages(curModel.value))
 const fileInput = ref<HTMLInputElement>()
 const composerEl = ref<HTMLElement>()
 const dropOver = ref(false)
+
+// 安全输入：值只交给本机的 Ferry，输入框里只插代号 {{secret:名字}}，发送时值随这句话交给 Ferry
+const secureOpen = ref(false)
+const TOKEN_EXAMPLE = '{{secret:in_xxxx}}'
+const secureLabel = ref('')
+let secureValues: SecretValue[] = []
+const secureField = computed<SecretField[]>(() => [{ name: 'value', label: secureLabel.value.trim() || '内容' }])
+function addSecure(v: SecretValue[]) {
+  const name = 'in_' + Math.random().toString(36).slice(2, 8)
+  secureValues.push({ name, value: v[0].value, remember: v[0].remember, label: secureLabel.value.trim() || '安全输入' })
+  const token = `{{secret:${name}}}`
+  input.value = input.value && !/\s$/.test(input.value) ? `${input.value} ${token}` : input.value + token
+  secureOpen.value = false
+  secureLabel.value = ''
+}
 let adding = 0 // 正在处理的图片
 
 function cannotSee() {
@@ -386,7 +403,7 @@ function onLine(l: FerryLine) {
 }
 
 // 调用一次 ferry ai：说一句话（message，可以附图片），或对待确认的操作做决定（decide）
-async function run(message: string, decide?: string, retry?: () => void, rewind = 0, images: AiImage[] = []) {
+async function run(message: string, decide?: string, retry?: () => void, rewind = 0, images: AiImage[] = [], secrets: SecretValue[] = []) {
   running.value = true
   turnUsage = zeroUsage()
   turnModel = ''
@@ -403,6 +420,7 @@ async function run(message: string, decide?: string, retry?: () => void, rewind 
     env.FERRY_AI_MESSAGE = message
     if (images.length) env.FERRY_AI_IMAGES = JSON.stringify(images)
   }
+  if (secrets.length) env.FERRY_AI_SECRETS = JSON.stringify(secrets)
   const r0 = ferry<{ conv?: string; pending?: boolean }>(args, onLine, env)
   kill = r0.kill
   const r = await r0.done
@@ -460,6 +478,9 @@ async function send(text = input.value, retry = false, images = attachments.valu
     if (at >= 0) items.value = items.value.slice(0, at)
   }
   editing.value = 0
+  // 这句话里用到的安全输入的值（随这句交给 Ferry）
+  const secrets = secureValues.filter((x) => text.includes(`{{secret:${x.name}}}`))
+  if (!retry) secureValues = []
   if (!retry) {
     // 有等确认的操作时接着说了别的：那个操作不执行了
     const w = waitingItem.value
@@ -473,15 +494,18 @@ async function send(text = input.value, retry = false, images = attachments.valu
     attachments.value = []
   }
   following.value = true
-  await run(text, undefined, () => send(text, true, images), rewind, images)
+  await run(text, undefined, () => {
+    secureValues.push(...secrets)
+    send(text, true, images)
+  }, rewind, images, secrets)
 }
 
-async function decide(it: Item, choice: 'approve' | 'always' | 'reject') {
+async function decide(it: Item, choice: 'approve' | 'always' | 'reject', secrets: SecretValue[] = []) {
   if (running.value) return
   it.waiting = false
   it.decision = choice
   if (choice === 'reject') it.done = true
-  await run('', choice, () => decide(it, choice))
+  await run('', choice, () => decide(it, choice, secrets), 0, [], secrets)
 }
 
 async function stop() {
@@ -657,6 +681,34 @@ function callTitle(c: Call): string {
       return `安装软件 ${i.template || '（自定义模板）'}${i.version ? ' ' + i.version : ''}`
     case 'software_control':
       return `${verbs[i.action] ?? i.action}软件 ${i.name}`
+    case 'server_ports':
+      return '查看端口和防火墙'
+    case 'ssh_sessions':
+      return '查看谁连着服务器'
+    case 'server_check':
+      return '测试连接和网络延迟'
+    case 'port_check':
+      return `从这台电脑测端口 ${((c.input.ports as number[] | undefined) ?? []).join('、')}`
+    case 'preflight':
+      return '部署前检查'
+    case 'software_logs':
+      return `看 ${i.name || i.unit || i.container} 的日志`
+    case 'deploy_changes':
+      return '查看部署会带上线的改动'
+    case 'build_log':
+      return i.file ? `看构建日志 ${i.file}` : '查看构建日志'
+    case 'port_control':
+      return `${i.action === 'close' ? '关闭' : '放行'}端口 ${i.port}`
+    case 'firewall_enable':
+      return '打开防火墙'
+    case 'ssh_disconnect':
+      return `断开 SSH 连接（PID ${((c.input.pids as number[] | undefined) ?? []).join('、')}）`
+    case 'backup_run':
+      return `现在备份 ${i.name || '全部'}`
+    case 'deploy':
+      return `部署 ${((c.input.apps as string[] | undefined) ?? []).join('、')}`
+    case 'ask_secret':
+      return `请你填写：${((c.input.fields as SecretField[] | undefined) ?? []).map((f) => f.label).join('、')}`
     case 'save_software_template':
       return '保存软件模板'
   }
@@ -667,6 +719,8 @@ const decisionText: Record<string, string> = {
   approve: '已同意执行',
   always: '已同意，本次对话同类不再询问',
   reject: '没有执行（你拒绝了）',
+  filled: '已填写（AI 只拿到代号）',
+  unfilled: '没有填写',
   skipped: '没有执行（你接着说了别的）',
   allowed: '同类已允许，直接执行',
 }
@@ -821,6 +875,8 @@ function copy(text: string) {
               <el-tag v-if="it.approval.asRoot" size="small" type="warning" effect="plain">以 root 执行</el-tag>
               <el-tag v-if="it.approval.danger" size="small" type="danger" effect="dark">危险：{{ it.approval.danger }}</el-tag>
             </div>
+            <SecretForm v-if="it.approval.fields?.length" :fields="it.approval.fields" :disabled="running" @submit="(v) => decide(it, 'approve', v)" @cancel="decide(it, 'reject')" />
+            <template v-else>
             <div v-if="it.approval.once && !it.approval.danger" class="muted small once">每次都要确认：{{ it.approval.once }}</div>
             <pre v-if="it.approval.detail" class="tool-out mono detail"><span v-for="(ln, k) in detailLines(it.approval.detail)" :key="k" :class="ln.c">{{ ln.t }}
 </span></pre>
@@ -834,9 +890,10 @@ function copy(text: string) {
             <div v-if="!it.approval.danger && !it.approval.once" class="muted small scope">
               同类指：{{ it.approval.kind.replace(/^命令：/, '') }}
             </div>
+            </template>
           </div>
           <div v-else-if="it.decision" class="muted small decision" :class="{ no: it.decision === 'reject' || it.decision === 'skipped' }">
-            {{ decisionText[it.decision] }}
+            {{ decisionText[it.approval?.fields?.length && it.decision !== 'skipped' ? (it.decision === 'reject' ? 'unfilled' : 'filled') : it.decision] }}
           </div>
 
           <pre v-if="it.expanded && !it.done && it.live" class="tool-out mono">{{ it.live }}</pre>
@@ -930,6 +987,11 @@ function copy(text: string) {
               <el-icon><Picture /></el-icon>
             </span>
           </el-tooltip>
+          <el-tooltip v-if="models.length" :show-after="HOVER_DELAY" content="安全输入密码、账号：AI 只拿到代号，看不到内容" placement="top">
+            <span class="chip" :class="{ off: running }" role="button" aria-label="安全输入密码" @click="!running && (secureOpen = true)">
+              <el-icon><Lock /></el-icon>
+            </span>
+          </el-tooltip>
           <span class="spacer" />
           <span v-if="totalText" class="muted hint total">{{ totalText }}</span>
           <span v-else class="muted hint">Enter 发送 · Shift+Enter 换行</span>
@@ -940,6 +1002,13 @@ function copy(text: string) {
         </div>
       </div>
     </div>
+    <el-dialog v-model="secureOpen" title="安全输入" width="420px" append-to-body destroy-on-close>
+      <div class="secure-dlg">
+        <el-input v-model="secureLabel" size="small" placeholder="这是什么（只给你自己看，可不填），如 Redis 新密码" maxlength="40" aria-label="说明" />
+        <SecretForm :fields="secureField" submit-text="插入代号" cancel-text="取消" @submit="addSecure" @cancel="secureOpen = false" />
+        <div class="muted small">输入框里会插入一个代号，如 <span class="mono">{{ TOKEN_EXAMPLE }}</span>。照常写这句话（如「把 Redis 密码改成 代号」），AI 用代号做事，Ferry 执行时才换成你填的内容。</div>
+      </div>
+    </el-dialog>
   </el-drawer>
 </template>
 
@@ -1467,6 +1536,11 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
 .composer.over {
   border-color: var(--el-color-primary);
   border-style: dashed;
+}
+.secure-dlg {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 .attach {
   display: flex;

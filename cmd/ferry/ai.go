@@ -261,6 +261,13 @@ func aiCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, st settings.Settin
 			images = append(images, im)
 		}
 	}
+	// 用户在输入框里填的（ask_secret 的回答、安全输入）：[{"name","value","remember"}]
+	var secrets []engine.AISecret
+	if v := cio.getenv("FERRY_AI_SECRETS"); v != "" {
+		if err := json.Unmarshal([]byte(v), &secrets); err != nil {
+			return fail(fmt.Errorf("填写的内容无效：%v", err))
+		}
+	}
 	if msg == "" && decide == "" && len(images) == 0 {
 		return fail(errors.New("要问什么？"))
 	}
@@ -281,7 +288,7 @@ func aiCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, st settings.Settin
 		rewind = n
 	}
 	r, err := e.AIChat(c.pos[0], engine.AIOptions{Conv: c.flags["conv"], Message: msg, Images: images, Decide: decide, Mode: c.flags["mode"],
-		Rewind: rewind, Model: cfg, Emit: emit})
+		Rewind: rewind, Secrets: secrets, Model: cfg, Emit: emit})
 	if err != nil {
 		if js != nil {
 			js.Result(false, r, err)
@@ -529,6 +536,7 @@ func aiHistoryCmd(c *cli, cio *cliIO, js *ui.JSON, st settings.Settings, fail fu
 		if err := ai.Delete(dir, arg); err != nil {
 			return fail(err)
 		}
+		ai.ForgetSecrets(arg) // 没让记住的值也一起忘掉；记住的在「设置 → 凭据」里删
 		res = usage()
 	case "clean":
 		n := 0

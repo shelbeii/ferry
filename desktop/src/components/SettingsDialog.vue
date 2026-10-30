@@ -208,7 +208,7 @@ const jdkJava = ref(17)
 const jdkArch = ref<'x64' | 'aarch64'>('x64')
 const jdkBusy = ref(false)
 
-const secretKind = (k: string) => ({ password: '登录密码', passphrase: '私钥密码', software: '软件密码', ai: 'AI 模型', notify: '部署通知', dns: 'DNS 密钥' })[k] ?? k
+const secretKind = (k: string) => ({ password: '登录密码', passphrase: '私钥密码', software: '软件密码', ai: 'AI 模型', notify: '部署通知', dns: 'DNS 密钥', 'ai-input': 'AI 助手填写' })[k] ?? k
 
 async function loadJdks() {
   try {

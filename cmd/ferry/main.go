@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/captain/ferry/internal/agentbin"
+	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/build"
 	"github.com/captain/ferry/internal/config"
@@ -159,7 +160,7 @@ type cli struct {
 var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": true, "limit": true, "offset": true, "tool": true, "client": true, "result": true, "since": true, "until": true, "q": true, "n": true, "expect": true, "key": true, "passphrase": true, "account": true,
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
 	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true,
-	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true}
+	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true}
 var boolFlags = map[string]bool{
 	"y": true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
@@ -323,6 +324,8 @@ func run(argv []string, cio *cliIO) int {
 	switch {
 	case cmd == "settings":
 		return settingsCmd(c, cio, js, con, st, fail)
+	case cmd == "ai-secret":
+		return aiSecretCmd(c, cio, js, fail)
 	case cmd == "datadir":
 		return datadirCmd(c, cio, js, con, fail)
 	case cmd == "secret" && (len(c.pos) > 0 && (c.pos[0] == "list" || c.pos[0] == "show") || c.flags["account"] != ""):
@@ -487,6 +490,9 @@ func run(argv []string, cio *cliIO) int {
 
 	case "files":
 		return filesCmd(e, c, cio, js, con, fail)
+
+	case "ai-exec": // ai-exec <目标> <工具> --scope <范围>（编程软件请求、用户同意后桌面版执行）
+		return aiExecCmd(e, c, cio, js, fail)
 
 	case "ai": // ai <目标> <要问的话…> [--conv <对话>] [--mode readonly|confirm] [--decide approve|always|reject]
 		return aiCmd(e, c, cio, js, st, fail)
@@ -1937,6 +1943,12 @@ func secretAccountCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail fun
 			return fail(err)
 		}
 		cio.invalidate()
+		if rest, ok := strings.CutPrefix(c.flags["account"], secret.KindAIInput+":"); ok {
+			// AI 助手里填的：内存里的也忘掉（ai-input:<对话>:<名字>）
+			if conv, name, ok := strings.Cut(rest, ":"); ok {
+				ai.ForgetSecret(conv, name)
+			}
+		}
 		if js != nil {
 			js.Result(true, map[string]any{"stored": false}, nil)
 		} else {
