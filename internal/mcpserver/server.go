@@ -21,7 +21,6 @@ import (
 
 	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/appdir"
-	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/engine"
 	"github.com/captain/ferry/internal/proto"
@@ -74,7 +73,7 @@ type server struct {
 	mu  sync.Mutex
 	ops map[string]*op // 交给桌面版的改动
 	// confirms 等用户在编程软件里确认的改动（按交给编程软件的 requestState 记）：用户回答后编程软件带着回答再调一次
-	confirms map[string]approve.Request
+	confirms map[string]pendingConfirm
 
 	tools []ToolInfo // 注册的工具（桌面版「MCP 工具列表」用），按注册的顺序
 }
@@ -91,7 +90,7 @@ func newServer(o Options) (*server, *mcp.Server) {
 	}
 	st, _ := settings.Load()
 	s := &server{o: o, pool: engine.NewPool(time.Duration(max(st.Connect.IdleMinutes, 1)) * time.Minute),
-		session: newID() + newID(), ops: map[string]*op{}, confirms: map[string]approve.Request{}}
+		session: newID() + newID(), ops: map[string]*op{}, confirms: map[string]pendingConfirm{}}
 	m := mcp.NewServer(&mcp.Implementation{Name: "ferry", Title: "Ferry", Version: o.Version},
 		&mcp.ServerOptions{Instructions: instructions})
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(true)}

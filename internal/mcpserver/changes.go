@@ -282,7 +282,7 @@ func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in target
 	if inClient && r.Action != "secret" && canElicit(req) {
 		state := newID() + newID()
 		s.mu.Lock()
-		s.confirms[state] = r
+		s.confirms[state] = pendingConfirm{r: r, at: time.Now()}
 		s.mu.Unlock()
 		return &mcp.CallToolResult{InputRequests: mcp.InputRequestMap{confirmKey: confirmForm(r)}, RequestState: state}, nil
 	}
@@ -296,21 +296,71 @@ const confirmKey = "ferry-confirm"
 func (s *server) confirmed(ctx context.Context, req *mcp.CallToolRequest) (any, error) {
 	p := req.Params
 	s.mu.Lock()
-	r, ok := s.confirms[p.RequestState]
+	c, ok := s.confirms[p.RequestState]
 	delete(s.confirms, p.RequestState)
 	s.mu.Unlock()
 	if !ok {
 		return nil, errors.New("这次确认已经失效（ferry mcp 重启过，或者已经回答过）：要做的话重新调用")
 	}
-	yes := false
-	if res, ok := p.InputResponses[confirmKey].(*mcp.ElicitResult); ok && res.Action == "accept" {
-		yes, _ = res.Content["approve"].(bool)
-	}
-	if !yes {
+	r := c.r
+	res, _ := p.InputResponses[confirmKey].(*mcp.ElicitResult)
+	took := time.Since(c.at)
+	answer, how := judgeAnswer(res, took)
+	// 记下编程软件回答了什么、用了多久（编程软件没把确认框给用户看时，从这里看得出来）
+	args, _ := json.Marshal(map[string]any{"project": r.Project, "target": r.Target, "action": actionNames[r.Action], "answer": answer})
+	writeLog(callEntry{Time: time.Now(), Client: r.Client, Tool: r.Action + "（编程软件里确认）", Op: r.ID, Args: args,
+		OK: how == answerYes, Decision: answerText[how], Ms: took.Milliseconds()})
+	switch how {
+	case answerYes:
+		r.ClientConfirmed = true
+	case answerNo:
 		return nil, fmt.Errorf("没有执行%s：用户在 %s 里拒绝了。不要换个办法做同样的事，先问用户怎么办", opTitle(r), orDash(r.Client))
+	default:
+		// 编程软件没让用户确认（回答得太快、没有明确的选择）：改在 Ferry 里弹窗确认
+		r.Detail = append([]string{fmt.Sprintf("%s 没有让你确认（%s），改在 Ferry 里确认", orDash(r.Client), answer)}, r.Detail...)
 	}
-	r.ClientConfirmed = true
 	return s.submit(r).wait(ctx, req, waitCap)
+}
+
+// pendingConfirm 等用户在编程软件里确认的改动，和交给编程软件的时间。
+type pendingConfirm struct {
+	r  approve.Request
+	at time.Time
+}
+
+// minAnswer 编程软件的回答至少要隔这么久才算用户看过、点过：更快的是编程软件自己回的（没显示确认框，或者按默认值自动提交）。
+var minAnswer = 2 * time.Second
+
+const (
+	answerYes   = "yes"   // 用户同意
+	answerNo    = "no"    // 用户明确拒绝
+	answerFerry = "ferry" // 编程软件没让用户确认：改在 Ferry 里确认
+)
+
+var answerText = map[string]string{answerYes: "在编程软件里同意", answerNo: "在编程软件里拒绝", answerFerry: "编程软件没让用户确认，改在 Ferry 里确认"}
+
+// judgeAnswer 编程软件交回的回答算什么：只有用户看过之后明确点了同意 / 拒绝才算数，其余的改在 Ferry 里确认。
+// 返回给人看的回答说明（动作、内容、用时）和结论。
+func judgeAnswer(res *mcp.ElicitResult, took time.Duration) (string, string) {
+	if res == nil {
+		return fmt.Sprintf("没有回答，%.1f 秒", took.Seconds()), answerFerry
+	}
+	content, _ := json.Marshal(res.Content)
+	desc := fmt.Sprintf("回答 %s %s，%.1f 秒", orDash(res.Action), content, took.Seconds())
+	if took < minAnswer {
+		return desc, answerFerry
+	}
+	switch res.Action {
+	case "accept":
+		v, ok := res.Content["approve"].(bool)
+		if !ok || v { // 没有这一项（编程软件不显示勾选框）也算同意：用户点的是提交
+			return desc, answerYes
+		}
+		return desc, answerNo
+	case "decline":
+		return desc, answerNo
+	}
+	return desc, answerFerry // cancel：关掉了，没有选
 }
 
 // canElicit 编程软件支不支持在它的界面里弹出表单（MCP 的 elicitation）。
@@ -343,9 +393,8 @@ func confirmForm(r approve.Request) *mcp.ElicitParams {
 	return &mcp.ElicitParams{Mode: "form", Message: ai.Clip(b.String(), 8000), RequestedSchema: map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"approve": map[string]any{"type": "boolean", "title": "同意执行", "default": false},
+			"approve": map[string]any{"type": "boolean", "title": "同意执行（取消勾选再提交 = 不同意）", "default": true},
 		},
-		"required": []string{"approve"},
 	}}
 }
 

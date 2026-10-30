@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -93,19 +94,58 @@ func TestAITools(t *testing.T) {
 		t.Fatalf("名字不对应该报错：%s", text)
 	}
 
-	// 设置里选了在编程软件里确认：编程软件里拒绝 → 不交给桌面版
+	// 设置里选了在编程软件里确认
 	st.MCP.ConfirmIn = "client"
 	settings.Save(st)
 	restart := map[string]any{"target": "test", "action": "restart", "apps": []string{"api"}, "reason": "改了配置"}
+
+	// 编程软件马上就回答了（没把确认框给用户看）：不算拒绝，改在 Ferry 里确认
+	go func() {
+		r := <-reqs
+		if r.ClientConfirmed || len(r.Detail) == 0 || !strings.Contains(r.Detail[0], "没有让你确认") {
+			t.Errorf("改在 Ferry 里确认的请求：%+v", r)
+		}
+		hub.Decide(r.ID, approve.Decision{Note: "你在 Ferry 里拒绝了"})
+	}()
 	text, isErr = callText(t, cs, "app_control", restart)
-	if !isErr || !strings.Contains(text, "test-client 1.0 里拒绝了") || len(asked) != 1 || !strings.Contains(asked[0], "重启 api") || !strings.Contains(asked[0], "改了配置") {
-		t.Fatalf("编程软件里拒绝：%v %s %v", isErr, text, asked)
+	if !isErr || !strings.Contains(text, "你在 Ferry 里拒绝了") || len(asked) != 1 || !strings.Contains(asked[0], "重启 api") || !strings.Contains(asked[0], "改了配置") {
+		t.Fatalf("编程软件马上回答：%v %s %v", isErr, text, asked)
+	}
+
+	// 用户看过之后明确拒绝 → 不交给桌面版
+	oldMin := minAnswer
+	minAnswer = 0
+	t.Cleanup(func() { minAnswer = oldMin })
+	text, isErr = callText(t, cs, "app_control", restart)
+	if !isErr || !strings.Contains(text, "test-client 1.0 里拒绝了") {
+		t.Fatalf("编程软件里拒绝：%v %s", isErr, text)
 	}
 	select {
 	case r := <-reqs:
 		t.Fatalf("拒绝了还交给了桌面版：%+v", r)
 	default:
 	}
+
+	// 回答的判断：太快、关掉、提交但没勾选框、取消勾选
+	for _, c := range []struct {
+		res  *mcp.ElicitResult
+		took time.Duration
+		want string
+	}{
+		{&mcp.ElicitResult{Action: "accept", Content: map[string]any{"approve": true}}, 100 * time.Millisecond, answerFerry},
+		{&mcp.ElicitResult{Action: "decline"}, 50 * time.Millisecond, answerFerry},
+		{&mcp.ElicitResult{Action: "cancel"}, 10 * time.Second, answerFerry},
+		{nil, 10 * time.Second, answerFerry},
+		{&mcp.ElicitResult{Action: "accept"}, 10 * time.Second, answerYes},
+		{&mcp.ElicitResult{Action: "accept", Content: map[string]any{"approve": false}}, 10 * time.Second, answerNo},
+		{&mcp.ElicitResult{Action: "decline"}, 10 * time.Second, answerNo},
+	} {
+		minAnswer = oldMin
+		if _, got := judgeAnswer(c.res, c.took); got != c.want {
+			t.Errorf("judgeAnswer(%+v, %v) = %s，想要 %s", c.res, c.took, got, c.want)
+		}
+	}
+	minAnswer = 0
 
 	// 编程软件里同意 → 桌面版不再弹窗（请求里标明已确认），执行结果交回来
 	cs2 := connectElicit(t, t.TempDir(), func(msg string) *mcp.ElicitResult {
@@ -122,6 +162,13 @@ func TestAITools(t *testing.T) {
 	}()
 	if text, isErr := callText(t, cs2, "app_control", restart); isErr || !strings.Contains(text, `"result": "OK"`) {
 		t.Fatalf("编程软件里同意：%v %s", isErr, text)
+	}
+
+	// 调用记录里记下编程软件回答了什么、用了多久
+	b, _ := os.ReadFile(LogFile())
+	if log := string(b); !strings.Contains(log, `"tool":"restart（编程软件里确认）"`) || !strings.Contains(log, "改在 Ferry 里确认") ||
+		!strings.Contains(log, "在编程软件里拒绝") || !strings.Contains(log, "在编程软件里同意") || !strings.Contains(log, `回答 decline`) {
+		t.Errorf("调用记录：\n%s", log)
 	}
 
 	// 桌面版这边：设置里没选在编程软件里确认时，不认「已确认」；密码、新建项目只能在 Ferry 里确认
