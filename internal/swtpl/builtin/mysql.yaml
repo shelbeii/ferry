@@ -140,6 +140,9 @@ variants:
       workdir: ${dir}
       ready: {port: "${port}", timeout: 180}
     logs: ["${dir}/logs/error.log"]
+    logrotate: true
+    # 升级：换掉 mysql 目录里的程序（数据在 data 里，新版本启动时自己升级）；libaio 的链接带过去
+    upgrade: {keep: [mysql/lib/private/libaio.so.1]}
     configs:
       - {label: MySQL 配置, path: "${dir}/my.cnf", apply: restart}
     notes:

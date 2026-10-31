@@ -89,6 +89,15 @@ type Variant struct {
 	Hosting *proto.NginxHosting `yaml:"hosting,omitempty" json:"hosting,omitempty"`
 	// SELinux 开着 SELinux 时给安装目录、端口加的类型（从软件源装的程序受 SELinux 限制），如 {files: redis_var_lib_t, port: redis_port_t}
 	SELinux *proto.PlanSELinux `yaml:"selinux,omitempty" json:"selinux,omitempty"`
+	// Logrotate logs 里的日志按天轮转（软件自己不轮转日志时写 true）
+	Logrotate bool `yaml:"logrotate,omitempty" json:"logrotate,omitempty"`
+	// Upgrade 升级（换新版本的安装包）时：keep 是从旧程序目录带到新版本的数据（安装目录下的相对路径）；configs 里的配置自动带上
+	Upgrade *Upgrade `yaml:"upgrade,omitempty" json:"upgrade,omitempty"`
+}
+
+// Upgrade 升级时的做法。
+type Upgrade struct {
+	Keep []string `yaml:"keep,omitempty" json:"keep,omitempty"`
 }
 
 type ConfigFile struct {

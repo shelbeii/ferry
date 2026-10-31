@@ -465,6 +465,10 @@ export interface SoftwareReport {
   udpPorts?: number[]
   /** 端口被谁占着：键为 tcp/端口、udp/端口 */
   portUsers?: Record<string, string>
+  /** 卸载时保留了数据的 Ferry 软件（可以恢复） */
+  kept?: KeptSoftware[]
+  /** 最近一次安装软件的结果 */
+  lastInstall?: { name: string; ok: boolean; msg?: string; time: string }
   /** 服务器上的包管理器：dnf | yum | apt-get */
   pkgMgr?: string
   /** 内存总量与可用量（MB） */
@@ -724,9 +728,22 @@ export interface SoftwareResult {
   saved: boolean
 }
 
+/** 卸载时保留了数据的 Ferry 软件 */
+export interface KeptSoftware {
+  name: string
+  kind: string
+  title: string
+  version?: string
+  dir: string
+  account?: string
+  removedAt: string
+}
+
 export interface Software {
   /** mysql、redis、nacos……；认不出的容器为空 */
   kind?: string
+  /** Ferry 用安装包装的：可以升级 */
+  upgradable?: boolean
   name: string
   version?: string
   state: 'running' | 'stopped'

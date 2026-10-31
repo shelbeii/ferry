@@ -403,6 +403,7 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		return nil, err
 	}
 	plan.Name, plan.Dir, plan.User, plan.Version, plan.Account = name, dir, user, version, account
+	plan.Variant, plan.Logrotate = vi, v.Logrotate
 	plan.Ports, plan.UDPPorts, plan.PortMap = ports, udpPorts, portMap
 	plan.FixParents = fix
 	if plan.System != nil {
@@ -430,8 +431,26 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	}
 	e.Rep.Step("在 %s 上安装 %s", t.Name, strings.TrimSpace(tpl.Name+" "+version))
 	var inst proto.SoftwareInstance
+	// 密码在动服务器之前就存进凭据库：连接断开、本机没拿到结果时，服务器上照样会装完，密码不会丢
+	pwKey := secret.SoftwareAccount(name, t.Host, t.Port)
+	saved := false
+	if password != "" {
+		if err := secret.Set(pwKey, password); err != nil {
+			e.Rep.Warn("密码没能存进系统凭据库（%v）：装好后请自己记下来", err)
+		} else {
+			saved = true
+		}
+	}
+	forget := func() {
+		if saved {
+			secret.Delete(pwKey)
+		}
+	}
 	r, err := s.call("swinstall", &proto.Request{Stage: stage, Install: plan})
 	if err != nil {
+		if saved {
+			return nil, fmt.Errorf("%w。稍后在「软件」里刷新：出现 %s 就是装好了，密码已经先存进本机凭据库，点「密码」能看到", err, name)
+		}
 		return nil, err
 	}
 	switch r.RC {
@@ -440,27 +459,24 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			return nil, err
 		}
 	case proto.CodeConfirm:
+		forget()
 		var c proto.SwChanges
 		json.Unmarshal(r.Data, &c)
 		return nil, &PkgChangesError{Target: t.Name, Packages: c.Packages, Changes: c.Changes, Msg: r.Msg}
 	default:
+		forget()
 		return nil, &AgentError{Cmd: "swinstall", RC: r.RC, Msg: r.Msg}
 	}
 	res := &SoftwareResult{SoftwareInstance: inst, Target: t.Name, Password: password, Public: publicMode(tpl, vars)}
 	if res.Public != "" {
 		res.OpenPorts, res.OpenUDP = ports, udpPorts
 	}
+	res.Saved = saved
 	if password != "" && slices.Contains(inst.Unset, "password") {
 		// 设置密码的步骤没成功：这个密码用不了，不给用户、不保存（notes 里有怎么补设）
-		password, res.Password = "", ""
+		forget()
+		res.Password, res.Saved = "", false
 		e.Rep.Warn("%s 的密码没有设置成功：按安装结果里的说明自己设置", name)
-	}
-	if password != "" {
-		if err := secret.Set(secret.SoftwareAccount(name, t.Host, t.Port), password); err != nil {
-			e.Rep.Warn("密码没能存进系统凭据库（%v）：请自己记下来", err)
-		} else {
-			res.Saved = true
-		}
 	}
 	return res, nil
 }
@@ -746,7 +762,10 @@ func (e *Engine) SoftwareRemove(target, name string, purge bool) error {
 		if err := s.callData("swremove", &proto.Request{Instance: name, Purge: purge}, nil); err != nil {
 			return err
 		}
-		secret.Delete(secret.SoftwareAccount(name, s.t.Host, s.t.Port))
+		// 保留数据时密码也留着：恢复后照样能用
+		if purge {
+			secret.Delete(secret.SoftwareAccount(name, s.t.Host, s.t.Port))
+		}
 		return nil
 	})
 }

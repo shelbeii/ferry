@@ -461,7 +461,7 @@ backups:
 | 字段 | 说明 |
 | --- | --- |
 | `name` | 名字：小写字母、数字、横线 |
-| `mysql` / `postgres` | `database`（必填）、`host`（默认 127.0.0.1）、`port`（3306 / 5432）、`user`（root / postgres）、`container`（在这个 Docker 容器里执行 mysqldump / pg_dump；不写 host 时在容器里连本机，没写密码时用容器自己的 `MYSQL_ROOT_PASSWORD` / `POSTGRES_PASSWORD`） |
+| `mysql` / `postgres` | `database`（必填，`*` 为全部库）、`host`（默认 127.0.0.1）、`port`（3306 / 5432）、`user`（root / postgres）、`container`（在这个 Docker 容器里执行 mysqldump / pg_dump；不写 host 时在容器里连本机，没写密码时用容器自己的 `MYSQL_ROOT_PASSWORD` / `POSTGRES_PASSWORD`）、`bin`（mysqldump / pg_dump 所在的目录，不在 PATH 里时写） |
 | `paths` | 要打包的目录、文件（服务器上的绝对路径，可以用 `${变量}`） |
 | `command` / `restore` | 自己写的备份命令（输出就是备份内容）和恢复命令（备份内容从标准输入进来） |
 | `envFile` | 执行时读的环境变量文件（服务器上），数据库密码放这里，不写进 ferry.yaml |
@@ -488,7 +488,7 @@ ferry backup <目标> download <名字> <文件> [本机目录]
 
 ## 服务器告警（ferry monitor）
 
-服务器上的 Ferry 每隔几分钟检查一次，有问题发到「设置 → 通知」里的群机器人（企业微信、钉钉、飞书、自定义接口）；问题出现时、恢复时各发一次，不会每次检查都发。检查：应用停了或启动失败在反复重启、不是部署引起的重启、磁盘快满、HTTPS 证书快到期或一直是临时证书、防火墙被关、新出现对外开放的端口、数据备份失败。在桌面版的「服务器告警」里打开、关闭，或：
+服务器上的 Ferry 每隔几分钟检查一次，有问题发到「设置 → 通知」里的群机器人（企业微信、钉钉、飞书、自定义接口）；问题出现时、恢复时各发一次，不会每次检查都发。检查：应用停了或启动失败在反复重启、Ferry 装的软件停了或在反复重启（在 Ferry 里停掉的不算）、不是部署引起的重启、磁盘快满、HTTPS 证书快到期或一直是临时证书、防火墙被关、新出现对外开放的端口、数据备份失败。在桌面版的「服务器告警」里打开、关闭，或：
 
 ```
 ferry monitor <目标> on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14]

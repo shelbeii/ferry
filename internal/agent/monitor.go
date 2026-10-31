@@ -348,6 +348,8 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 			}
 		}
 	}
+	// 1b. Ferry 装的软件
+	out = append(out, a.swMonitor()...)
 	// 2. 磁盘
 	paths := []string{"/"}
 	maxPct := 99

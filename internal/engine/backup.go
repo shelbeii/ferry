@@ -73,7 +73,7 @@ func (e *Engine) backupItems(t *config.Target) ([]proto.BackupItem, error) {
 		}
 		for _, db := range []*config.DBBackup{b.MySQL, b.Postgres} {
 			if db != nil {
-				it.Database, it.Host, it.Port, it.User, it.Container = ex(db.Database), ex(db.Host), db.Port, ex(db.User), ex(db.Container)
+				it.Database, it.Host, it.Port, it.User, it.Container, it.Bin = ex(db.Database), ex(db.Host), db.Port, ex(db.User), ex(db.Container), ex(db.Bin)
 			}
 		}
 		for _, p := range b.Paths {

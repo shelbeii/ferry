@@ -274,6 +274,7 @@ type BackupItem struct {
 	Port         int      `json:"port,omitempty"`
 	User         string   `json:"user,omitempty"`
 	Container    string   `json:"container,omitempty"`
+	Bin          string   `json:"bin,omitempty"` // mysqldump / pg_dump 所在的目录
 	Paths        []string `json:"paths,omitempty"`
 	Command      string   `json:"command,omitempty"`
 	Restore      string   `json:"restore,omitempty"`
@@ -771,6 +772,9 @@ type SoftwareReport struct {
 	MemAvailMB int64 `json:"memAvailMB,omitempty"`
 	// PortUsers 端口被谁占着（键为 tcp/端口、udp/端口）：只有知道是谁的才有
 	PortUsers map[string]string `json:"portUsers,omitempty"`
+	// Kept 卸载时保留了数据的 Ferry 软件（可以恢复）；LastInstall 最近一次安装软件的结果
+	Kept        []KeptSoftware `json:"kept,omitempty"`
+	LastInstall *SwLastInstall `json:"lastInstall,omitempty"`
 }
 
 // OSInfo 服务器的系统（/etc/os-release）。
@@ -801,6 +805,12 @@ type SoftwarePlan struct {
 	FixParents bool `json:"fixParents,omitempty"`
 	// SELinux 开着 SELinux 时给安装目录、端口加的标签（从软件源装的程序受 SELinux 限制）
 	SELinux *PlanSELinux `json:"selinux,omitempty"`
+	// Logrotate 给 Logs 里的日志文件加上按天轮转（软件自己不轮转日志时）
+	Logrotate bool `json:"logrotate,omitempty"`
+	// Variant 用的是模板的第几种装法（记进安装记录，升级时用）
+	Variant int `json:"variant,omitempty"`
+	// Keep 升级时从旧版本带到新版本的文件、目录（安装目录下的相对路径，如 nacos/data）
+	Keep []string `json:"keep,omitempty"`
 
 	Package *PlanPackage `json:"package,omitempty"` // 上传目录里的安装包
 	System  *PlanSystem  `json:"system,omitempty"`  // 用服务器的软件源装的包
@@ -893,10 +903,28 @@ type PlanSELinux struct {
 	Port  string `json:"port,omitempty"`
 }
 
-// SwSELinux 安装时加上的 SELinux 标签（卸载时去掉）：Files 为加了标签的目录。
+// SwSELinux 安装时加上的 SELinux 标签（卸载时去掉）：Files 为加了标签的目录；Types 为用的类型（恢复时重新加上）。
 type SwSELinux struct {
-	Files string `json:"files,omitempty"`
-	Ports []int  `json:"ports,omitempty"`
+	Files string       `json:"files,omitempty"`
+	Ports []int        `json:"ports,omitempty"`
+	Types *PlanSELinux `json:"types,omitempty"`
+}
+
+// KeptSoftware 卸载时保留了安装目录（数据）的软件：以后可以恢复（swrestore），或连数据一起删掉。
+type KeptSoftware struct {
+	SoftwareInstance
+	RemovedAt time.Time `json:"removedAt"`
+	// UnitText 原来的系统服务单元（恢复时照原样写回）；LogrotateText 原来的日志轮转配置
+	UnitText      string `json:"unitText"`
+	LogrotateText string `json:"logrotateText,omitempty"`
+}
+
+// SwLastInstall 这台服务器上最近一次安装软件的结果（连接断开、本机没拿到结果时，回来能看到）。
+type SwLastInstall struct {
+	Name string    `json:"name"`
+	OK   bool      `json:"ok"`
+	Msg  string    `json:"msg,omitempty"`
+	Time time.Time `json:"time"`
 }
 
 // SwChanges 装包会顺带改动的已装包（swinstall 返回 CodeConfirm 时的数据）。
@@ -960,6 +988,11 @@ type SoftwareInstance struct {
 	Notes       []string  `json:"notes,omitempty"`
 	// Account 登录用的账号（密码在本机凭据库里）
 	Account string `json:"account,omitempty"`
+	// Upgradable 用安装包装的（程序单独放在安装目录下的一个位置）：可以换新版本的安装包升级
+	Upgradable bool `json:"upgradable,omitempty"`
+	// Variant 模板的第几种装法；Logrotate 加上的日志轮转配置文件（卸载时删除）
+	Variant   int    `json:"variant,omitempty"`
+	Logrotate string `json:"logrotate,omitempty"`
 	// Unset 没能生效的参数（设置它的步骤失败了，如 Nacos 管理员密码）：生成的值不能当作可用的交给用户
 	Unset   []string             `json:"unset,omitempty"`
 	Configs []SoftwareConfigFile `json:"configs,omitempty"`
@@ -989,10 +1022,12 @@ type Software struct {
 	Inner []string `json:"inner,omitempty"`
 	Path  string   `json:"path,omitempty"` // 程序（Java 软件为 jar 或安装目录）；容器里的为容器内路径
 	// Instance Ferry 安装的软件的实例名（可以启停、看日志、卸载）；其他来源的为空
-	Instance string        `json:"instance,omitempty"`
-	Account  string        `json:"account,omitempty"` // Ferry 安装的：登录用的账号
-	Hosting  *NginxHosting `json:"hosting,omitempty"`
-	Dir      string        `json:"dir,omitempty"` // Ferry 安装的：安装目录
+	Instance string `json:"instance,omitempty"`
+	Account  string `json:"account,omitempty"` // Ferry 安装的：登录用的账号
+	// Upgradable Ferry 用安装包装的：可以升级
+	Upgradable bool          `json:"upgradable,omitempty"`
+	Hosting    *NginxHosting `json:"hosting,omitempty"`
+	Dir        string        `json:"dir,omitempty"` // Ferry 安装的：安装目录
 }
 
 // PortReport ports 的结果：服务器上的端口与防火墙（portset 改完也返回它）。

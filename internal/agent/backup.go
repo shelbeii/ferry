@@ -527,10 +527,21 @@ func dumpCommand(it proto.BackupItem, env []string, restore bool) string {
 		if it.Container == "" || it.Host != "" {
 			flags += " -h " + q(or(it.Host, "127.0.0.1")) + fmt.Sprintf(" -P %d", orInt(it.Port, 3306))
 		}
+		db := " " + q(it.Database)
+		if it.Database == "*" { // 全部库
+			db = ""
+			if !restore {
+				db = " --all-databases"
+			}
+		}
+		client, dump := `"$(command -v mysql || command -v mariadb || echo mysql)"`, `"$(command -v mysqldump || command -v mariadb-dump || echo mysqldump)"`
+		if it.Bin != "" {
+			client, dump = q(it.Bin+"/mysql"), q(it.Bin+"/mysqldump")
+		}
 		if restore {
-			inner = `"$(command -v mysql || command -v mariadb || echo mysql)"` + flags + " " + q(it.Database)
+			inner = client + flags + db
 		} else {
-			inner = `"$(command -v mysqldump || command -v mariadb-dump || echo mysqldump)" --single-transaction --quick --routines --triggers --events --hex-blob` + flags + " " + q(it.Database)
+			inner = dump + " --single-transaction --quick --routines --triggers --events --hex-blob" + flags + db
 		}
 		pwVar, pwFallback = "MYSQL_PWD", "$MYSQL_ROOT_PASSWORD"
 		if user != "root" {
@@ -545,10 +556,21 @@ func dumpCommand(it proto.BackupItem, env []string, restore bool) string {
 		if it.Container == "" || it.Host != "" {
 			flags += " -h " + q(or(it.Host, "127.0.0.1")) + fmt.Sprintf(" -p %d", orInt(it.Port, 5432))
 		}
-		if restore {
-			inner = "psql -q -v ON_ERROR_STOP=1" + flags + " -d " + q(it.Database)
-		} else {
-			inner = "pg_dump --clean --if-exists" + flags + " " + q(it.Database)
+		prog := func(n string) string { // 写了 bin 时用那个目录里的
+			if it.Bin == "" {
+				return n
+			}
+			return q(it.Bin + "/" + n)
+		}
+		switch {
+		case it.Database == "*" && restore: // 全部库：pg_dumpall 的输出连 postgres 库执行
+			inner = prog("psql") + " -q" + flags + " -d postgres"
+		case it.Database == "*":
+			inner = prog("pg_dumpall") + " --clean --if-exists" + flags
+		case restore:
+			inner = prog("psql") + " -q -v ON_ERROR_STOP=1" + flags + " -d " + q(it.Database)
+		default:
+			inner = prog("pg_dump") + " --clean --if-exists" + flags + " " + q(it.Database)
 		}
 		pwVar, pwFallback = "PGPASSWORD", "$POSTGRES_PASSWORD"
 	}

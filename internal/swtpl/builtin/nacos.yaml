@@ -74,6 +74,8 @@ variants:
       workdir: ${dir}/nacos
       ready: {port: "${port}", timeout: 240}
     logs: ["${dir}/nacos/logs/nacos.log"]
+    # 升级：换掉 nacos 目录里的程序，内置存储的数据、日志带过去（配置自动带上）
+    upgrade: {keep: [nacos/data, nacos/logs]}
     configs:
       - {label: Nacos 主配置, path: "${dir}/nacos/conf/application.properties", format: properties, apply: restart}
       - {label: 日志配置, path: "${dir}/nacos/conf/nacos-logback.xml", apply: restart}

@@ -112,6 +112,7 @@ variants:
       workdir: ${dir}
       ready: {port: "${port}", timeout: 120}
     logs: &logs ["${dir}/logs/error.log"]
+    logrotate: true
     configs: &configs
       - {label: MariaDB 配置, path: "${dir}/my.cnf", apply: restart}
     notes: &notes
@@ -127,5 +128,6 @@ variants:
     steps: *steps
     service: *service
     logs: *logs
+    logrotate: true
     configs: *configs
     notes: *notes

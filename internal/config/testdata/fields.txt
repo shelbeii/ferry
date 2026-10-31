@@ -106,6 +106,7 @@ backups.[].command
 backups.[].envFile
 backups.[].keep
 backups.[].mysql
+backups.[].mysql.bin
 backups.[].mysql.container
 backups.[].mysql.database
 backups.[].mysql.host
@@ -114,6 +115,7 @@ backups.[].mysql.user
 backups.[].name
 backups.[].paths
 backups.[].postgres
+backups.[].postgres.bin
 backups.[].postgres.container
 backups.[].postgres.database
 backups.[].postgres.host

@@ -165,7 +165,7 @@ var boolFlags = map[string]bool{
 	"y": true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
-	"local": true, "fix-parents": true, "allow-changes": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
+	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
 	"ai": true,
 }
 

@@ -1103,7 +1103,8 @@ dx a 'systemctl stop redis-fake; rm -f /usr/local/bin/docker /usr/local/bin/redi
 
 step "安装软件：Sentinel、Nacos、MySQL（假的安装包，结构同官方）"
 mkdir -p "$OUT/pkg"
-( cd "$ROOT" && go run ./test/e2e/mkpkg sentinel "$OUT/pkg" && go run ./test/e2e/mkpkg nacos "$OUT/pkg" && go run ./test/e2e/mkpkg nacos "$OUT/pkg" 0.0.1 ) || die "生成安装包失败"
+( cd "$ROOT" && go run ./test/e2e/mkpkg sentinel "$OUT/pkg" && go run ./test/e2e/mkpkg nacos "$OUT/pkg" && go run ./test/e2e/mkpkg nacos "$OUT/pkg" 0.0.1 \
+  && go run ./test/e2e/mkpkg nacos "$OUT/pkg" 3.2.5 && go run ./test/e2e/mkpkg nacos "$OUT/pkg" 3.9.9 ) || die "生成安装包失败"
 # 假的 MySQL：--initialize-insecure 时建数据文件；启动时记下 init-file 的内容，监听 my.cnf 里的端口
 dx a 'p=/tmp/mysqlpkg/mysql-8.4.10-linux-glibc2.17-x86_64-minimal; mkdir -p $p/bin && cat > $p/bin/mysqld <<"EOS"
 #!/bin/sh
@@ -1121,7 +1122,13 @@ echo "$pw" > /tmp/mysql-check-seen; cp "$cnf" /tmp/mysql-check-cnf
 if [ ! -e /tmp/mysql-deny ] && grep -q "BY .$pw.;" /tmp/mysql-init-seen.sql; then echo 1; exit 0; fi
 echo "ERROR 1045 (28000): Access denied for user root@localhost (using password: YES)"; exit 1
 EOS
-chmod 755 $p/bin/mysqld $p/bin/mysql && cd /tmp/mysqlpkg && tar -cJf /tmp/mysql-8.4.10-linux-glibc2.17-x86_64-minimal.tar.xz mysql-8.4.10-linux-glibc2.17-x86_64-minimal'
+cat > $p/bin/mysqldump <<"EOS"
+#!/bin/sh
+# 假的 mysqldump：记下参数和密码（备份用 Ferry 装的这一个）
+echo "$* MYSQL_PWD=$MYSQL_PWD" > /tmp/mysqldump-seen
+echo "-- fake dump"
+EOS
+chmod 755 $p/bin/mysqld $p/bin/mysql $p/bin/mysqldump && cd /tmp/mysqlpkg && tar -cJf /tmp/mysql-8.4.10-linux-glibc2.17-x86_64-minimal.tar.xz mysql-8.4.10-linux-glibc2.17-x86_64-minimal'
 docker cp ferry-e2e-a:/tmp/mysql-8.4.10-linux-glibc2.17-x86_64-minimal.tar.xz "$OUT/pkg/" >/dev/null
 cp "$OUT/pkg/sentinel-dashboard-1.8.10.jar" "$OUT/pkg/sentinel.jar"
 swpw() { FERRY_SOFTWARE_PASSWORD=$1 "${@:2}"; }
@@ -1140,7 +1147,7 @@ t "密码不在单元文件里" ok "0" -- dx a 'grep -c Sentinel-pw1 /etc/system
 t "密码文件只有 root 能读" ok "root 600" -- dx a 'stat -c "%U %a" /opt/ferry-software/sentinel-1.8.10/ferry.env'
 sw=$(F software e2e-a --json 2>&1)
 has "软件列表里标出 Ferry 安装的" '"manager":"Ferry"' "$sw"
-has "软件列表里有实例名与目录" '"instance":"sentinel","account":"sentinel","dir":"/opt/ferry-software/sentinel-1.8.10"' "$sw"
+has "软件列表里有实例名与目录" '"instance":"sentinel","account":"sentinel","upgradable":true,"dir":"/opt/ferry-software/sentinel-1.8.10"' "$sw"
 t "本机保存了密码" ok "Sentinel-pw1" -- F software password e2e-a sentinel
 t "端口已被占用时拒绝：说明被谁占着" fail "已被 Ferry 装的 Sentinel 控制台（sentinel）占用" -- F software install e2e-a sentinel --version 1.8.10 --port 18858
 t "停止" ok "stop 完成" -- F software stop e2e-a sentinel
@@ -1171,6 +1178,16 @@ has "装好后告诉用户账号" "账号：app_user" "$sw"
 t "装系统库时不会升级已装的包" ok "ok" -- dx a 'for p in libaio numactl-libs; do rpm -q --quiet $p && grep -q " $p" /tmp/dnf-calls 2>/dev/null && { echo "$p 已装着还交给了 dnf"; exit 0; }; done; echo ok'
 t "装好后用设置的密码登录了一次" ok "Mysql-pw123" -- dx a 'cat /tmp/mysql-check-seen'
 t "登录用的密码文件已删掉" ok "gone" -- dx a 'test -e /opt/ferry-software/mysql-8.4.10/tmp/ferry-check.cnf && echo left || echo gone'
+# 一键设置数据备份：写好只有 root 能读的密码文件，在配置（副本）的 backups 里加上一项；用 Ferry 装的 mysqldump 备份全部库
+cp "$E2E/ferry.yaml" "$OUT/bk.yaml"
+sed -i 's#identityFile: out/id_test#identityFile: id_test#' "$OUT/bk.yaml"
+BK() { FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/bk.yaml" "$@"; }
+t "设置数据备份" ok "已加上数据备份 mysql" -- BK software backup e2e-a mysql
+t "配置里加上了备份项" ok "bin: '/opt/ferry-software/mysql-8.4.10/mysql/bin'" -- cat "$OUT/bk.yaml"
+t "密码文件只有 root 能读" ok "root 600 MYSQL_PWD=Mysql-pw123" -- dx a 'f=/opt/ferry-software/mysql-8.4.10/ferry-backup.env; echo $(stat -c "%U %a" $f) $(cat $f)'
+t "现在备份一次" ok "" -- BK backup e2e-a run mysql
+t "用 Ferry 装的 mysqldump、选的账号备份全部库" ok "-u app_user -h 127.0.0.1 -P 13306 --all-databases MYSQL_PWD=Mysql-pw123" -- dx a 'cat /tmp/mysqldump-seen'
+t "备份文件在" ok "mysql-" -- dx a 'ls /opt/e2e/backups/mysql'
 t "MySQL 在运行" ok "UP" -- health a 13306
 t "第一次启动时设置了 root 密码" ok "ALTER USER 'root'@'localhost' IDENTIFIED BY 'Mysql-pw123'" -- dx a 'cat /tmp/mysql-init-seen.sql'
 t "建了选的账号，有全部权限" ok "GRANT ALL PRIVILEGES ON *.* TO 'app_user'@'localhost' WITH GRANT OPTION" -- dx a 'cat /tmp/mysql-init-seen.sql'
@@ -1186,12 +1203,47 @@ t "登录不上时撤销了安装" ok "gone gone" -- dx a 'echo $(test -e /opt/f
 t "登录不上时不保存密码" fail "没有保存" -- F software password e2e-a mysql-deny
 dx a 'rm -f /tmp/mysql-deny /usr/local/bin/dnf /tmp/dnf-calls /tmp/mysql-check-seen /tmp/mysql-check-cnf; rm -rf /usr/local/lib/ferry/software/.cache'
 
+# 升级：换掉程序，配置、数据带过去；新版本放不上、起不来时换回旧的
+F software lib import "$OUT/pkg/nacos-server-3.2.5.tar.gz" >/dev/null 2>&1
+F software lib import "$OUT/pkg/nacos-server-3.9.9.tar.gz" >/dev/null 2>&1
+NA=/opt/ferry-software/nacos-3.2.4/nacos
+dx a "mkdir -p $NA/data && echo keep-me > $NA/data/x && echo '# edited' >> $NA/conf/application.properties && chown -R nacos: $NA/data"
+t "跨大版本升级：先停下来说明" fail "跨大版本升级" -- F software upgrade e2e-a nacos --version 4.0.0
+t "升级失败：换回旧版本" fail "已换回 3.2.4 并启动" -- F software upgrade e2e-a nacos --version 3.9.9
+t "换回后照样在运行" ok "UP" -- health a 18848
+t "换回后数据、配置都在" ok "keep-me 1" -- dx a "echo \$(cat $NA/data/x) \$(grep -c '# edited' $NA/conf/application.properties)"
+t "升级到 3.2.5" ok "已升级到 3.2.5" -- F software upgrade e2e-a nacos --version 3.2.5
+t "升级后在运行" ok "UP" -- health a 18848
+t "数据、改过的配置带到了新版本" ok "keep-me 1" -- dx a "echo \$(cat $NA/data/x) \$(grep -c '# edited' $NA/conf/application.properties)"
+t "没有留下旧程序" ok "gone" -- dx a "test -e /opt/ferry-software/nacos-3.2.4/.ferry-old && echo left || echo gone"
+t "列表里是新版本、可以升级" ok '"version":"3.2.5"' -- F software e2e-a --json
+t "已经是这个版本" fail "已经是 3.2.5" -- F software upgrade e2e-a nacos --version 3.2.5
+
+# 告警：开机自启的软件停了要报；在 Ferry 里停掉的（取消了开机自启）不报
+MON e2e-a on --interval 60 >/dev/null 2>&1
+dx a 'systemctl stop ferry-nacos'
+t "软件停了：告警里有" ok "软件 Nacos（nacos）停了" -- F monitor e2e-a check
+F software start e2e-a nacos >/dev/null 2>&1
+stopcheck() { F software stop e2e-a nacos >/dev/null 2>&1; F monitor e2e-a check | grep -q 'Nacos（nacos）' && echo reported || echo ok; }
+t "在 Ferry 里停掉的不报" ok "ok" -- stopcheck
+F monitor e2e-a off >/dev/null 2>&1
+F software start e2e-a nacos >/dev/null 2>&1
+
 t "卸载 Nacos（连数据一起删）" ok "已卸载 nacos" -- F software remove e2e-a nacos --purge
 t "Nacos 目录、单元已删除" ok "gone gone" -- dx a 'echo $(test -e /opt/ferry-software/nacos-3.2.4 && echo left || echo gone) $(test -e /etc/systemd/system/ferry-nacos.service && echo left || echo gone)'
 t "卸载后本机密码也删了" fail "没有保存" -- F software password e2e-a nacos
 t "卸载 Sentinel（保留数据）" ok "已卸载 sentinel" -- F software remove e2e-a sentinel
 t "保留了安装目录" ok "sentinel-dashboard.jar" -- dx a 'ls /opt/ferry-software/sentinel-1.8.10'
 t "目录不空时不能装进去" fail "已存在且不是空的" -- F software install e2e-a sentinel --version 1.8.10 --port 18858
+t "保留了数据的列在软件里" ok '"kept":[{"name":"sentinel"' -- F software e2e-a --json
+t "保留数据时本机密码还在" ok "Sentinel-pw1" -- F software password e2e-a sentinel
+t "同名的不能再装" fail "被卸载时保留了数据的软件占着" -- F software install e2e-a sentinel --version 1.8.10 --port 18859 --dir /opt/ferry-software/sentinel-x
+t "恢复" ok "已恢复 sentinel" -- F software restore e2e-a sentinel
+t "恢复后在运行" ok "UP" -- health a 18858
+F software remove e2e-a sentinel >/dev/null 2>&1
+t "删除保留的数据" ok "已卸载 sentinel" -- F software remove e2e-a sentinel --purge
+t "数据删掉了、列表里没有了" ok "gone" -- dx a 'test -e /opt/ferry-software/sentinel-1.8.10 && echo left || echo gone'
+t "删掉数据后本机密码也删了" fail "没有保存" -- F software password e2e-a sentinel
 t "卸载 MySQL" ok "已卸载 mysql" -- F software remove e2e-a mysql --purge
 
 # 运行用户进不了上级目录（700 的家目录）：上传之前就停下；同意后给它加上进入的权限再装。JDK 装到指定的目录
@@ -1256,6 +1308,7 @@ systemctl daemon-reload && systemctl start redis
 echo "Installed: redis"
 EOS
 chmod 755 /usr/local/bin/dnf'
+dx a 'mkdir -p /etc/logrotate.d'
 sw=$(F software install e2e-a redis --port 16379 2>&1)
 printf '\n### software install redis\n%s\n' "$sw" >> "$LOG"
 has "按服务器系统选了 dnf 的装法" "系统软件源（dnf / yum）" "$sw"
@@ -1263,7 +1316,9 @@ has "从软件源装好并启动" "已安装 redis" "$sw"
 t "Ferry 运行的 Redis 在监听" ok "UP" -- health a 16379
 t "系统自带的 redis.service 被停掉" ok "inactive" -- dx a 'systemctl is-active redis; true'
 t "redis.conf 里是选的端口" ok "port 16379" -- dx a 'cat /opt/ferry-software/redis/redis.conf'
+t "日志按天轮转" ok "copytruncate" -- dx a 'cat /etc/logrotate.d/ferry-redis'
 t "卸载时说明软件源的包没删" ok "没有删除" -- F software remove e2e-a redis --purge
+t "卸载时删掉日志轮转" ok "gone" -- dx a 'test -e /etc/logrotate.d/ferry-redis && echo left || echo gone'
 # 演练出会顺带升级已装的包：停下来说明，什么都不改；同意（--allow-changes）后才装
 dx a 'cat > /usr/local/bin/dnf <<"EOS"
 #!/bin/sh

@@ -33,7 +33,12 @@ var softwareUsage = errors.New(`用法：
       模板写 - 时从环境变量 FERRY_SOFTWARE_TEMPLATE 读模板内容（自定义安装）
   ferry software start|stop|restart <目标> <名称>
   ferry software start|stop|restart|logs <目标> --unit <服务> | --container <容器>   不是 Ferry 装的软件
-  ferry software remove <目标> <名称> [--purge]        --purge 连安装目录（数据）一起删除
+  ferry software remove <目标> <名称> [--purge]        --purge 连安装目录（数据）一起删除；不加时保留数据，以后能恢复
+  ferry software restore <目标> <名称>               恢复卸载时保留了数据的软件
+  ferry software upgrade <目标> <名称> [--version V] [--package 文件名] [--major]
+                     升级用安装包装的软件（不填版本 = 最新）：换掉程序，配置、数据带过去；新版本起不来时换回旧的。
+                     --major：跨大版本升级（可能不兼容，先备份）
+  ferry software backup <目标> <名称> [--database 库名]  给 Ferry 装的数据库设置数据备份（写好密码文件，在 ferry.yaml 的 backups 里加上一项；不填库名 = 全部库）
   ferry software logs <目标> <名称> [-n 200] [--main-log]
   ferry software password <目标> <名称>              安装时保存的密码
   ferry software config list <目标> [名称] [--unit 服务 | --container 容器 | --pid PID]
@@ -162,6 +167,45 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 			con.OK("已卸载 %s", args[1])
 		}
 		return ok(nil)
+
+	case "restore":
+		if err := need(2); err != nil {
+			return fail(err)
+		}
+		in, err := e.SoftwareRestore(args[0], args[1])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			con.OK("已恢复 %s（%s）", in.Name, in.Dir)
+		}
+		return ok(in)
+
+	case "upgrade":
+		if err := need(2); err != nil {
+			return fail(err)
+		}
+		in, err := e.SoftwareUpgrade(args[0], args[1], engine.UpgradeOptions{Version: c.flags["version"], PackageFile: c.flags["package"], Major: c.has("major")})
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			con.OK("%s 已升级到 %s", in.Name, in.Version)
+		}
+		return ok(in)
+
+	case "backup":
+		if err := need(2); err != nil {
+			return fail(err)
+		}
+		item, err := e.SoftwareBackup(args[0], args[1], c.flags["database"])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			con.OK("已加上数据备份 %s：用 ferry backup %s on 打开", item, args[0])
+		}
+		return ok(map[string]string{"backup": item})
 
 	case "logs":
 		if err := need(2); err != nil {

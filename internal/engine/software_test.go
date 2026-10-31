@@ -259,3 +259,11 @@ func TestPortFreeAndDiskRoom(t *testing.T) {
 		}
 	}
 }
+
+func TestMajorOf(t *testing.T) {
+	for v, want := range map[string]string{"3.2.4": "3", "v2.1": "2", "8.4.10": "8", "RELEASE.2024": "release"} {
+		if majorOf(v) != want {
+			t.Errorf("%s：%s", v, majorOf(v))
+		}
+	}
+}

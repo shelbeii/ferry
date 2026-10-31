@@ -275,11 +275,12 @@ const target: SchemaNode = obj('服务器', '一台要部署到的服务器', {
 
 const db = (name: string, tool: string, port: number, user: string): SchemaNode =>
   obj(name, `${name} 数据库（用 ${tool} 导出）；密码写在 envFile 里`, {
-    database: str('库名', '', { required: true }),
+    database: str('库名', '* 为全部库', { required: true }),
     host: str('地址', '', { default: '127.0.0.1（写了容器时在容器里连本机）' }),
     port: num('端口', '', { default: String(port) }),
     user: str('用户', '', { default: user }),
     container: str('Docker 容器', '数据库在 Docker 容器里（如 1Panel 装的 1Panel-mysql-xxxx）：在容器里执行；没写密码时用容器自己的'),
+    bin: str('程序目录', `${tool} 所在的目录（服务器上的绝对路径）；不在 PATH 里时写，如 Ferry 装的 MySQL 的 <安装目录>/mysql/bin`),
   })
 
 const backup: SchemaNode = obj('数据备份', '一项数据备份：MySQL、PostgreSQL、目录、命令写一个', {

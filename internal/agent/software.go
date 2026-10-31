@@ -134,6 +134,7 @@ func (a *Agent) software() int {
 			rep.Disks = append(rep.Disks, proto.Disk{Path: d, FreeMB: diskFreeMB(d)})
 		}
 	}
+	rep.Kept, rep.LastInstall = a.keptList(), a.lastInstall()
 	// 已占用的端口：在监听的，加上 Ferry 装的软件停着时也要用的
 	rep.PortUsers = a.swPortUsers("")
 	tcp, udp := listeningPorts(), listeningUDP()
@@ -217,7 +218,7 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 		if in.Version != "" {
 			it.Version = in.Version
 		}
-		it.Hosting, it.Account = in.Hosting, in.Account
+		it.Hosting, it.Account, it.Upgradable = in.Hosting, in.Account, in.Upgradable
 		if it.Name == "" {
 			it.Name = in.Name
 		}

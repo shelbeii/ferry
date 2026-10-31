@@ -308,6 +308,14 @@ func procPorts(dir string, files []string, state string) map[int]bool {
 // ---------------------------------------------------------------- 安装
 
 func (a *Agent) swinstall() int {
+	code := a.swinstallRun()
+	if pl := a.req.Install; pl != nil && code != proto.CodeConfirm {
+		a.saveLastInstall(pl.Name, code == proto.CodeOK, a.lastMsg)
+	}
+	return code
+}
+
+func (a *Agent) swinstallRun() int {
 	pl := a.req.Install
 	if err := validatePlan(pl); err != nil {
 		return a.result(proto.CodeBadInput, err.Error(), nil)
@@ -341,6 +349,9 @@ func (a *Agent) swinstall() int {
 	}
 	if _, err := os.Stat(a.unitPath(unit)); err == nil {
 		return fail("服务器上已有系统服务 %s：换一个名称", unit)
+	}
+	if _, err := os.Stat(a.keptFile(name)); err == nil {
+		return fail("名称 %s 被卸载时保留了数据的软件占着：先恢复它，或删掉它保留的数据，或换一个名称", name)
 	}
 	created := false
 	if ents, err := os.ReadDir(pl.Dir); err == nil {
@@ -423,6 +434,7 @@ func (a *Agent) swinstall() int {
 	}
 	ok := false
 	var se *proto.SwSELinux
+	rotate := ""
 	defer func() {
 		if ok {
 			return
@@ -430,6 +442,7 @@ func (a *Agent) swinstall() int {
 		// 失败：拆掉装了一半的，方便改了再装（从软件源装的包不删）
 		a.Sys.Systemctl("disable", "--now", unit)
 		a.undoSELinux(name, se)
+		removeLogrotate(rotate)
 		if a.ferryUnitFile(unit) {
 			os.Remove(a.unitPath(unit))
 			a.Sys.Systemctl("daemon-reload")
@@ -484,6 +497,12 @@ func (a *Agent) swinstall() int {
 		a.Sys.Lchown(swEnvFile(pl.Dir), 0, 0)
 	}
 	se = a.swSELinux(pl)
+	if se != nil {
+		se.Types = pl.SELinux
+	}
+	if pl.Logrotate {
+		rotate = a.swLogrotate(name, pl.Logs)
+	}
 	if err := writeFileAtomic(a.unitPath(unit), []byte(swUnitText(pl)), 0o644); err != nil {
 		return fail("写系统服务失败：%v", err)
 	}
@@ -512,7 +531,8 @@ func (a *Agent) swinstall() int {
 		notes = append(notes, "从软件源装了 "+strings.Join(packages, " ")+"（卸载时不会删除这些包）")
 	}
 	inst := proto.SoftwareInstance{Name: name, Kind: pl.Template, Title: pl.Title, Version: pl.Version, Dir: pl.Dir, Unit: unit, User: pl.User,
-		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting, SELinux: se}
+		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting, SELinux: se,
+		Variant: pl.Variant, Logrotate: rotate, Upgradable: pl.Package != nil && (pl.Package.Into != "" || pl.Package.Format == "jar" || pl.Package.Format == "binary")}
 	b, _ := json.MarshalIndent(inst, "", "  ")
 	if err := writeFileAtomic(a.instFile(name), b, 0o644); err != nil {
 		return fail("写安装记录失败：%v", err)
@@ -1216,7 +1236,15 @@ func (a *Agent) swcontrol() int {
 	}
 	label := map[string]string{"start": "启动", "stop": "停止", "restart": "重启"}[action]
 	a.info(proto.EvSoftware, in.Name, "%s %s", label, in.Unit)
-	if err := a.Sys.Systemctl(action, in.Unit); err != nil {
+	// 停止时同时取消开机自启（是有意停的：重启服务器后也不启动，告警也不报）；启动时恢复开机自启
+	args := []string{action, in.Unit}
+	switch action {
+	case "stop":
+		args = []string{"disable", "--now", in.Unit}
+	case "start":
+		args = []string{"enable", "--now", in.Unit}
+	}
+	if err := a.Sys.Systemctl(args...); err != nil {
 		a.fail(proto.EvFail, in.Name, "%v", err)
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
@@ -1233,6 +1261,9 @@ func (a *Agent) swcontrol() int {
 func (a *Agent) swremove() int {
 	in, err := a.loadInstance(a.req.Instance)
 	if err != nil {
+		if k, kerr := a.loadKept(a.req.Instance); kerr == nil {
+			return a.removeKept(k)
+		}
 		return a.result(proto.CodeBadInput, err.Error(), nil)
 	}
 	if in.Hosting != nil {
@@ -1252,6 +1283,13 @@ func (a *Agent) swremove() int {
 	}
 	defer unlock()
 	a.info(proto.EvSoftware, in.Name, "停止并删除系统服务 %s", in.Unit)
+	unitText, _ := os.ReadFile(a.unitPath(in.Unit))
+	rotateText := ""
+	if in.Logrotate != "" {
+		if b, err := os.ReadFile(in.Logrotate); err == nil {
+			rotateText = string(b)
+		}
+	}
 	stopErr := a.Sys.Systemctl("disable", "--now", in.Unit)
 	// 确认停下来了才删：还在运行时删目录，数据会在使用中被删掉（单元文件已经不在、停止报错但进程已退出的可以继续）
 	if p := a.Sys.UnitProps(in.Unit); isRunning(p) || p.Active == "deactivating" || p.PID != 0 {
@@ -1272,6 +1310,7 @@ func (a *Agent) swremove() int {
 	}
 	a.Sys.Systemctl("daemon-reload")
 	a.undoSELinux(in.Name, in.SELinux)
+	removeLogrotate(in.Logrotate)
 	if a.req.Purge {
 		a.info(proto.EvSoftware, in.Name, "删除安装目录 %s（含数据）", in.Dir)
 		if err := os.RemoveAll(in.Dir); err != nil {
@@ -1280,7 +1319,14 @@ func (a *Agent) swremove() int {
 			return a.result(proto.CodeFailed, msg, nil)
 		}
 	} else {
-		a.info(proto.EvSoftware, in.Name, "安装目录 %s（含数据）保留，不需要了可以手动删除", in.Dir)
+		// 记下原来的记录、系统服务：以后可以在「软件」里恢复
+		k := proto.KeptSoftware{SoftwareInstance: *in, RemovedAt: a.Sys.Now(), UnitText: string(unitText), LogrotateText: rotateText}
+		b, _ := json.MarshalIndent(k, "", "  ")
+		os.MkdirAll(a.keptDir(), 0o755)
+		if err := writeFileAtomic(a.keptFile(in.Name), b, 0o644); err != nil {
+			a.warn(proto.EvWarn, in.Name, "记下保留的数据失败（%v）：以后不能在 Ferry 里恢复，目录 %s 还在", err, in.Dir)
+		}
+		a.info(proto.EvSoftware, in.Name, "安装目录 %s（含数据）保留：以后可以在「软件」里恢复，或删掉数据", in.Dir)
 	}
 	if len(in.Packages) > 0 {
 		a.info(proto.EvSoftware, in.Name, "从软件源装的 %s 没有删除（可能还有别的程序在用），不需要的话手动卸载", strings.Join(in.Packages, " "))
@@ -1289,6 +1335,30 @@ func (a *Agent) swremove() int {
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
 	a.info(proto.EvSoftware, in.Name, "已卸载")
+	return a.result(proto.CodeOK, "", nil)
+}
+
+// removeKept 删掉卸载时保留的数据（安装目录）和记录；只是 purge 时才删目录。
+func (a *Agent) removeKept(k *proto.KeptSoftware) int {
+	if !a.req.Purge {
+		return a.result(proto.CodeBadInput, fmt.Sprintf("%s 已经卸载了（保留着数据 %s）：要删掉数据的话选「连数据一起删除」", k.Name, k.Dir), nil)
+	}
+	unlock, err := a.Sys.Lock(a.swLock(), 10*time.Minute)
+	if err != nil {
+		return a.result(proto.CodeLocked, "另一个安装 / 卸载正在进行："+err.Error(), nil)
+	}
+	defer unlock()
+	if _, err := os.Stat(a.instFile(k.Name)); err == nil {
+		return a.result(proto.CodeBadInput, k.Name+" 已经恢复了：先卸载它", nil)
+	}
+	a.info(proto.EvSoftware, k.Name, "删除保留的安装目录 %s（含数据）", k.Dir)
+	if err := os.RemoveAll(k.Dir); err != nil {
+		msg := fmt.Sprintf("删除 %s 失败：%v", k.Dir, err)
+		a.fail(proto.EvFail, k.Name, "%s", msg)
+		return a.result(proto.CodeFailed, msg, nil)
+	}
+	os.Remove(a.keptFile(k.Name))
+	a.info(proto.EvSoftware, k.Name, "已删除")
 	return a.result(proto.CodeOK, "", nil)
 }
 

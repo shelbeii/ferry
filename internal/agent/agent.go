@@ -49,6 +49,7 @@ type Agent struct {
 	readySec   int                  // 最近一次就绪用了几秒（部署时记下来，和上一次比）
 	errorLines int                  // 最近一次启动期间服务输出里的错误行数
 	cmd        string               // 正在执行的命令（deploy、rollback……）
+	lastMsg    string               // 最近一次返回结果的说明
 }
 
 // Run 执行命令，返回退出码。
@@ -118,6 +119,12 @@ func (a *Agent) Run(cmd string, req *proto.Request) int {
 		return a.swcontrol()
 	case "swremove":
 		return a.swremove()
+	case "swinfo":
+		return a.swinfo()
+	case "swrestore":
+		return a.swrestore()
+	case "swupgrade":
+		return a.swupgrade()
 	case "swlogs":
 		return a.swlogs()
 	case "swunit":
@@ -261,6 +268,7 @@ func (a *Agent) fail(code, app, format string, args ...any) {
 
 func (a *Agent) result(code int, msg string, data any) int {
 	r := proto.Result{T: "result", RC: code, Msg: msg}
+	a.lastMsg = msg
 	if data != nil {
 		b, err := json.Marshal(data)
 		if err == nil {

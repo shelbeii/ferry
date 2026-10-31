@@ -61,6 +61,7 @@ variants:
       workdir: ${dir}
       ready: {port: "${port}", timeout: 60}
     logs: &logs ["${dir}/logs/redis.log"]
+    logrotate: true
     configs: &configs
       - {label: Redis 配置, path: "${dir}/redis.conf", apply: restart}
     notes: &notes
@@ -77,5 +78,6 @@ variants:
     steps: *steps
     service: *service
     logs: *logs
+    logrotate: true
     configs: *configs
     notes: *notes

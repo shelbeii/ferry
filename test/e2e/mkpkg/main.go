@@ -1,7 +1,8 @@
 // 生成端到端测试用的软件安装包：文件名、结构与官方的一样，程序换成测试服务（由假 java 启动）。
 //
 //	mkpkg sentinel <目录>          sentinel-dashboard-1.8.10.jar
-//	mkpkg nacos <目录> [版本]      nacos-server-<版本>.tar.gz（版本 0.0.1：缺 conf，安装时出错，测试撤销）
+//	mkpkg nacos <目录> [版本]      nacos-server-<版本>.tar.gz（版本 0.0.1：缺 conf，安装时出错，测试撤销；
+//	                              版本 3.9.9：conf 是文件不是目录，升级时带不过去配置，测试换回旧版本）
 package main
 
 import (
@@ -41,7 +42,9 @@ func main() {
 			tw.Write([]byte(body))
 		}
 		add("target/nacos-server.jar", "fake")
-		if ver != "0.0.1" {
+		if ver == "3.9.9" {
+			add("conf", "not a directory")
+		} else if ver != "0.0.1" {
 			add("conf/application.properties", "nacos.server.main.port=8848\nnacos.console.port=8080\nnacos.core.auth.plugin.nacos.token.secret.key=\nnacos.core.auth.server.identity.key=\nnacos.core.auth.server.identity.value=\n")
 			add("conf/nacos-logback.xml", "<configuration/>\n")
 		}

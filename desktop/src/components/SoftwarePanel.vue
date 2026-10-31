@@ -11,7 +11,7 @@ const errors = reactive<Record<string, { msg: string; unknownHost: boolean }>>({
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Key, Plus, Refresh, Grid, List } from '@element-plus/icons-vue'
-import { call, FerryError, time, type Software, type SoftwareResult } from '../ferry'
+import { call, FerryError, time, type KeptSoftware, type Software, type SoftwareResult } from '../ferry'
 import { secretRequest, startTask, trustRequest, trustedTick, type Task } from '../state'
 import LoadingBlock from './LoadingBlock.vue'
 import GlassPane from './glass/GlassPane.vue'
@@ -23,7 +23,7 @@ import SoftwareConfigDialog from './SoftwareConfigDialog.vue'
 // mode：卡片还是列表（项目页工具栏上切换）
 const props = defineProps<{ config: string; target: string; host: string; connected: boolean }>()
 const mode = defineModel<'card' | 'list'>('mode', { default: 'card' })
-const emit = defineEmits<{ loaded: []; goPort: [port: number] }>()
+const emit = defineEmits<{ loaded: []; goPort: [port: number]; backup: [] }>()
 
 const key = computed(() => `${props.config}|${props.target}`)
 const report = computed(() => cache[key.value])
@@ -131,6 +131,76 @@ async function showPassword(row: Software) {
     ElMessage.error((e as Error).message)
   }
 }
+
+// ---------------------------------------------------------------- 升级、设置备份、恢复保留了数据的
+
+const dbKinds = ['mysql', 'mariadb', 'postgresql']
+const canBackup = (row: Software) => !!row.instance && dbKinds.includes(row.kind ?? '')
+
+const upgrading = ref<{ row: Software; version: string; latest: string; latestError: string; loading: boolean; major: boolean } | null>(null)
+async function openUpgrade(row: Software) {
+  upgrading.value = { row, version: '', latest: '', latestError: '', loading: true, major: false }
+  const u = upgrading.value // 改响应式的那份，界面才会跟着变
+  try {
+    u.latest = (await call<{ version: string }>(['software', 'latest', row.kind!])).version
+  } catch (e) {
+    u.latestError = (e as Error).message
+  } finally {
+    u.loading = false
+  }
+}
+const upTo = computed(() => upgrading.value?.version.trim() || upgrading.value?.latest || '')
+const majorOf = (v?: string) => (v ?? '').replace(/^v/i, '').split('.')[0]
+const upMajor = computed(() => !!upgrading.value?.row.version && !!upTo.value && majorOf(upgrading.value.row.version) !== majorOf(upTo.value))
+function upgrade() {
+  const u = upgrading.value
+  if (!u || !upTo.value) return
+  const args = ['software', 'upgrade', props.target, u.row.instance!, '--version', upTo.value, ...(u.major ? ['--major'] : []), '-c', props.config]
+  startTask(`把 ${props.target} 上的 ${u.row.instance} 升级到 ${upTo.value}`, args, () => load())
+  upgrading.value = null
+}
+
+const backingUp = ref<{ row: Software; database: string; busy: boolean } | null>(null)
+async function setBackup() {
+  const b = backingUp.value
+  if (!b) return
+  b.busy = true
+  try {
+    const db = b.database.trim()
+    const r = await call<{ backup: string }>(['software', 'backup', props.target, b.row.instance!, ...(db ? ['--database', db] : []), '-c', props.config])
+    ElMessage.success(`已在配置里加上数据备份 ${r.backup}：在「数据备份」里打开后每天备份`)
+    backingUp.value = null
+    emit('backup')
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+    b.busy = false
+  }
+}
+
+function backupFromResult() {
+  const r = result.value
+  if (!r) return
+  backingUp.value = { row: { name: r.title || r.kind, instance: r.name, kind: r.kind, state: 'running', via: 'systemd' } as Software, database: '', busy: false }
+  result.value = null
+}
+
+function restore(k: KeptSoftware) {
+  startTask(`恢复 ${props.target} 上的 ${k.name}`, ['software', 'restore', props.target, k.name, '-c', props.config], () => load())
+}
+async function dropKept(k: KeptSoftware) {
+  try {
+    await ElMessageBox.confirm(`删掉 ${k.name} 保留的安装目录 ${k.dir}？里面的数据都会删掉，不能恢复。`, `删除 ${k.name} 的数据`, { type: 'warning', confirmButtonText: '删除' })
+  } catch {
+    return
+  }
+  startTask(`删除 ${props.target} 上 ${k.name} 保留的数据`, ['software', 'remove', props.target, k.name, '--purge', '-y', '-c', props.config], () => load())
+}
+// 最近一次安装没成功、也没有装上：说明原因（连接断开时本机没拿到结果）
+const lastFailed = computed(() => {
+  const l = report.value?.lastInstall
+  if (!l || l.ok || allItems.value.some((i) => i.instance === l.name)) return undefined
+  return Date.now() - new Date(l.time).getTime() < 3 * 24 * 3600 * 1000 ? l : undefined
+})
 
 function remove() {
   const r = removing.value
@@ -245,6 +315,21 @@ function listenTip(l: string): string {
         <span v-if="dockerNote" class="docker-note" :class="{ warn: report.docker }">{{ dockerNote }}</span>
         <span v-for="n in report.notes ?? []" :key="n" class="docker-note warn">{{ n }}</span>
       </div>
+      <el-alert v-if="lastFailed" type="warning" :closable="false" show-icon>
+        <template #title>{{ time(lastFailed.time).slice(5, 16) }} 在这台服务器上安装 {{ lastFailed.name }} 没成功：{{ lastFailed.msg }}</template>
+      </el-alert>
+      <div v-if="report.kept?.length" class="kept">
+        <div class="muted small">卸载时保留了数据的软件：可以恢复（照原样启动），不需要了就删掉数据</div>
+        <div v-for="k in report.kept" :key="k.name" class="kept-row">
+          <b>{{ k.name }}</b>
+          <span class="muted">{{ [k.title, k.version].filter(Boolean).join(' ') }}</span>
+          <span class="mono small">{{ k.dir }}</span>
+          <span class="muted small">{{ time(k.removedAt).slice(5, 16) }} 卸载</span>
+          <span class="spacer" />
+          <el-button link type="primary" size="small" @click="restore(k)">恢复</el-button>
+          <el-button link type="danger" size="small" @click="dropKept(k)">删除数据</el-button>
+        </div>
+      </div>
       <!-- 卡片 -->
       <div v-if="mode === 'card'" class="cards">
         <article v-for="row in items" :key="(row.unit ?? row.container ?? '') + row.name + (row.pid ?? '')" class="card">
@@ -310,6 +395,8 @@ function listenTip(l: string): string {
               </template>
               <el-button link type="primary" size="small" @click="logsName = row.instance">日志</el-button>
               <el-button link type="primary" size="small" @click="showPassword(row)">密码</el-button>
+              <el-button v-if="row.upgradable" link type="primary" size="small" @click="openUpgrade(row)">升级</el-button>
+              <el-button v-if="canBackup(row)" link type="primary" size="small" @click="backingUp = { row, database: '', busy: false }">备份</el-button>
               <span class="spacer" />
               <el-button link type="danger" size="small" @click="removing = { row, purge: false }">卸载</el-button>
             </template>
@@ -393,7 +480,7 @@ function listenTip(l: string): string {
         <el-table-column label="程序 / 镜像" min-width="220" :show-overflow-tooltip="{ showAfter: HOVER_DELAY }">
           <template #default="{ row }"><span class="mono">{{ row.image ?? row.path ?? row.dir ?? '' }}</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="270" fixed="right">
+        <el-table-column label="操作" width="350" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="configOf = row">配置</el-button>
             <template v-if="row.instance">
@@ -404,6 +491,8 @@ function listenTip(l: string): string {
               </template>
               <el-button link type="primary" @click="logsName = row.instance">日志</el-button>
               <el-button link type="primary" @click="showPassword(row)">密码</el-button>
+              <el-button v-if="row.upgradable" link type="primary" @click="openUpgrade(row)">升级</el-button>
+              <el-button v-if="canBackup(row)" link type="primary" @click="backingUp = { row, database: '', busy: false }">备份</el-button>
               <el-button link type="danger" @click="removing = { row, purge: false }">卸载</el-button>
             </template>
             <template v-else-if="controllable(row)">
@@ -463,6 +552,7 @@ function listenTip(l: string): string {
       </p>
       <template #footer>
         <el-button v-if="publicPorts.length" @click="goPort(publicPorts[0])">到「端口」里看看</el-button>
+        <el-button v-if="dbKinds.includes(result.kind)" @click="backupFromResult">设置数据备份</el-button>
         <el-button type="primary" @click="result = null">知道了</el-button>
       </template>
     </el-dialog>
@@ -484,16 +574,67 @@ function listenTip(l: string): string {
     <el-dialog v-if="removing" :model-value="true" append-to-body :title="`卸载 ${removing.row.instance}`" width="480px" @close="removing = null">
       <p>停止并删除系统服务 <span class="mono">{{ removing.row.unit }}</span>。</p>
       <el-checkbox v-model="removing.purge">同时删除安装目录 <span class="mono">{{ removing.row.dir }}</span>（里面的数据都会删掉，不能恢复）</el-checkbox>
-      <p v-if="!removing.purge" class="muted small">不勾选时保留安装目录和数据，不需要了可以以后手动删除。</p>
+      <p v-if="!removing.purge" class="muted small">不勾选时保留安装目录和数据（密码也留着）：以后可以在这里恢复，或再删掉数据。</p>
       <template #footer>
         <el-button @click="removing = null">取消</el-button>
         <el-button type="danger" @click="remove">{{ removing.purge ? '卸载并删除数据' : '卸载' }}</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-if="upgrading" :model-value="true" append-to-body :title="`升级 ${upgrading.row.instance}`" width="520px" @close="upgrading = null">
+      <p>现在是 <b>{{ upgrading.row.version || '（不知道版本）' }}</b>。换掉程序，配置和数据带到新版本；新版本起不来时自动换回现在的版本。</p>
+      <el-form label-width="90px">
+        <el-form-item label="升到">
+          <el-input v-model="upgrading.version" class="mono" :placeholder="upgrading.loading ? '正在查最新版本…' : upgrading.latest || '写要升到的版本'" />
+          <div class="muted small">
+            <template v-if="upgrading.latest">最新 {{ upgrading.latest }}，不填就升到它</template>
+            <template v-else-if="!upgrading.loading">查不到最新版本：写上版本（没有下载地址的软件，先在「安装软件」里导入新版本的安装包）</template>
+          </div>
+        </el-form-item>
+      </el-form>
+      <el-alert v-if="upMajor" type="warning" :closable="false" show-icon>
+        <template #title>从 {{ upgrading.row.version }} 升到 {{ upTo }} 是跨大版本升级：配置、数据可能不兼容</template>
+        <el-checkbox v-model="upgrading.major">我看过新版本的升级说明，已经备份</el-checkbox>
+      </el-alert>
+      <p v-if="canBackup(upgrading.row)" class="muted small">数据库升级前建议先在「数据备份」里备份一次：新版本启动时会升级数据，换回旧版本不一定能用新数据。</p>
+      <template #footer>
+        <el-button @click="upgrading = null">取消</el-button>
+        <el-button type="primary" :disabled="!upTo || upTo === upgrading.row.version || (upMajor && !upgrading.major)" @click="upgrade">升级</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-if="backingUp" :model-value="true" append-to-body :title="`给 ${backingUp.row.instance} 设置数据备份`" width="520px" @close="backingUp = null">
+      <p>在服务器上写好备份用的密码文件（只有 root 能读），在项目配置的 backups 里加上一项。之后在「数据备份」里打开，每天 3 点备份、保留 7 份，也可以随时「现在备份」。</p>
+      <el-form label-width="90px">
+        <el-form-item label="备份哪个库">
+          <el-input v-model="backingUp.database" class="mono" placeholder="不填 = 全部库" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="backingUp = null">取消</el-button>
+        <el-button type="primary" :loading="backingUp.busy" @click="setBackup">设置备份</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <style scoped>
+.kept {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 10px;
+}
+.kept-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.kept-row .spacer {
+  flex: 1;
+}
 .sw {
   display: flex;
   flex-direction: column;

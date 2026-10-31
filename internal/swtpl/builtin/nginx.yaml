@@ -48,6 +48,7 @@ variants:
       prefix: ${dir}
       sites: ${dir}/sites
     logs: &logs ["${dir}/logs/error.log", "${dir}/logs/access.log"]
+    logrotate: true
     notes: ["添加前端项目时选择此 nginx 实例，站点端口、域名、接口代理由项目配置管理"]
   - label: 系统软件源（apt）
     os: [debian, ubuntu]
@@ -59,3 +60,4 @@ variants:
     configs: *configs
     hosting: *hosting
     logs: *logs
+    logrotate: true

@@ -1110,6 +1110,7 @@ function onSaved() {
         v-model:mode="swViewMode"
         @loaded="loadConns"
         @go-port="goPort"
+        @backup="backupOpen = true"
       />
       <SshPanel
         v-else-if="view === 'ssh' && activeTarget"

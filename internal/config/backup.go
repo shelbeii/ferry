@@ -36,6 +36,8 @@ type DBBackup struct {
 	User     string `yaml:"user"` // 默认 root / postgres
 	// Container 数据库在 Docker 容器里（如 1Panel 装的 1Panel-mysql）：在容器里执行 mysqldump / pg_dump
 	Container string `yaml:"container"`
+	// Bin mysqldump / pg_dump 等程序所在的目录（数据库的客户端不在 PATH 里时，如 Ferry 用官方安装包装的 MySQL）
+	Bin string `yaml:"bin"`
 }
 
 // Kind 备份的种类：mysql | postgres | paths | command。
@@ -123,8 +125,11 @@ func checkBackups(f *File, bad func(string, ...any)) {
 			if db == nil {
 				continue
 			}
-			if !reDBName.MatchString(db.Database) {
-				bad("%s：database 要写库名（当前 %q）", at, db.Database)
+			if db.Database != "*" && !reDBName.MatchString(db.Database) {
+				bad("%s：database 要写库名，* 为全部库（当前 %q）", at, db.Database)
+			}
+			if db.Bin != "" && (!strings.HasPrefix(db.Bin, "/") || strings.ContainsAny(db.Bin, " '\"$`;&|")) {
+				bad("%s：bin 要写服务器上的绝对路径（当前 %q）", at, db.Bin)
 			}
 			if db.Host != "" && !reDBHost.MatchString(db.Host) {
 				bad("%s：host 无效 %q", at, db.Host)
