@@ -702,6 +702,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			"package":       str("用本机安装包库里的这个文件（software_templates 的 library 里的 file）；没有下载地址的软件、用户自己导入的包要填"),
 			"network":       str("服务器要从软件源下载时走谁的网络：auto（默认，服务器连不上的经这台电脑）| local（经这台电脑）| server（服务器自己的）"),
 			"java_dir":      str("需要 JDK 的软件：JDK 装在这个目录下；不填 = Ferry 的公共目录（多个软件、应用共用）"),
+			"allow_changes": map[string]any{"type": "boolean", "description": "从软件源装包会顺带升级、删除已装的包时也继续。只有上一次安装因此停下、你把要改动的包告诉用户并且用户同意后才填 true"},
 			"params":        map[string]any{"type": "object", "description": "模板参数（如 port、public）；密码不填时自动生成，用户要自己定密码时先用 ask_secret 让用户填，这里写代号 {{secret:名字}}", "additionalProperties": map[string]any{"type": "string"}},
 		}),
 		Approve: func(ctx context.Context, in json.RawMessage) *ai.Approval {
@@ -728,6 +729,9 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			}
 			if a.JavaDir != "" {
 				fmt.Fprintf(&d, "JDK 目录：%s\n", a.JavaDir)
+			}
+			if a.AllowChanges {
+				d.WriteString("允许顺带升级、删除服务器上已装的包\n")
 			}
 			for k, v := range a.Params {
 				if isSecretParam(tpl, k) {
@@ -759,7 +763,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			r, err := withProgress(e, ctx, func() (any, error) {
 				return e.SoftwareInstall(t.Name, SoftwareOptions{Template: a.Template, TemplateYAML: []byte(a.TemplateYAML),
 					Variant: -1, Name: a.Name, Version: a.Version, Params: params,
-					In: a.In, Dir: a.Dir, PackageFile: a.Package, Network: a.Network, JavaDir: a.JavaDir})
+					In: a.In, Dir: a.Dir, PackageFile: a.Package, Network: a.Network, JavaDir: a.JavaDir, AllowChanges: a.AllowChanges})
 			})
 			if err != nil {
 				return "", err
@@ -814,6 +818,7 @@ type softwareArgs struct {
 	Package      string            `json:"package"`
 	Network      string            `json:"network"`
 	JavaDir      string            `json:"java_dir"`
+	AllowChanges bool              `json:"allow_changes"`
 	Params       map[string]string `json:"params"`
 }
 

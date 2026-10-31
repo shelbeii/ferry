@@ -25,6 +25,7 @@ var softwareUsage = errors.New(`用法：
       --java N  --java-dir 目录（JDK 装到这里，默认装到 Ferry 的公共目录）
       --package 文件名（本机库里的安装包）  --set 参数=值,参数=值
       --fix-parents  运行用户进不了安装目录的上级目录时，给它加上进入的权限
+      --allow-changes  从软件源装包会顺带升级、删除已装的包时也继续（不加时停下来说明会改动哪些）
       --network auto|local|server  服务器要下载东西（从软件源装包等）时走谁的网络：local 经这台电脑，
                      server 用服务器自己的；默认 auto（服务器连不上软件源的经这台电脑）
       常用参数的简写：--port N  --console-port N  --public  --memory 512m  --lower-case-tables
@@ -212,7 +213,7 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 // installOptions 命令行参数 → 安装选项。
 func installOptions(c *cli, cio *cliIO, template string) (engine.SoftwareOptions, error) {
 	o := engine.SoftwareOptions{Template: template, Variant: -1, Name: c.flags["name"], Version: c.flags["version"], Dir: c.flags["dir"], In: c.flags["in"],
-		User: c.flags["user"], PackageFile: c.flags["package"], JavaDir: c.flags["java-dir"], FixParents: c.has("fix-parents"), Network: c.flags["network"], Params: map[string]string{}}
+		User: c.flags["user"], PackageFile: c.flags["package"], JavaDir: c.flags["java-dir"], FixParents: c.has("fix-parents"), AllowChanges: c.has("allow-changes"), Network: c.flags["network"], Params: map[string]string{}}
 	if template == "-" {
 		o.TemplateYAML = []byte(cio.getenv("FERRY_SOFTWARE_TEMPLATE"))
 		if len(o.TemplateYAML) == 0 {

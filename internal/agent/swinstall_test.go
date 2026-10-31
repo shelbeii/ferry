@@ -161,7 +161,7 @@ func TestSystemInstall(t *testing.T) {
 	if err != nil || strings.Join(got, " ") != "libaio" {
 		t.Fatalf("%v %v", got, err)
 	}
-	if c := ran(f, "dnf install"); len(c) != 1 || c[0] != "dnf install -y libaio 2>&1" {
+	if c := ran(f, "dnf install -y"); len(c) != 1 || c[0] != "dnf install -y libaio 2>&1" {
 		t.Errorf("dnf：%v", c)
 	}
 	// 全都装着：不执行 dnf，也不动系统服务
@@ -188,7 +188,7 @@ func TestSystemInstall(t *testing.T) {
 	if err != nil || strings.Join(got, " ") != "libnuma1 libaio1" {
 		t.Fatalf("%v %v", got, err)
 	}
-	if c := ran(f, "DEBIAN_FRONTEND"); len(c) != 1 || c[0] != "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade libnuma1 libaio1 2>&1" {
+	if c := ran(f, "DEBIAN_FRONTEND=noninteractive apt-get install"); len(c) != 1 || c[0] != "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade libnuma1 libaio1 2>&1" {
 		t.Errorf("apt：%v", c)
 	}
 

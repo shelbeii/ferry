@@ -124,6 +124,9 @@ func (a *Agent) software() int {
 	// 安装软件时用：服务器架构、已有的 JDK、各目录的剩余空间、已占用的端口
 	rep.Arch = goruntime.GOARCH
 	rep.OS = osInfo("/etc/os-release")
+	rep.PkgMgr = a.pkgManager()
+	addOSFamily(rep.OS, rep.PkgMgr)
+	rep.MemTotalMB, rep.MemAvailMB = memInfo("/proc/meminfo")
 	rep.Runtimes = a.installedRuntimes()
 	rep.FerryDir = a.ferryDir()
 	for _, d := range []string{"/opt", "/data", "/home", "/srv", "/www"} {
@@ -852,6 +855,85 @@ func (sc *swScan) execStart(unit string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// osFamily 不写 ID_LIKE（或写得不全）的发行版属于哪一系：模板的装法按 rhel、debian 选。
+var osFamily = map[string]string{
+	"openeuler": "rhel", "kylin": "rhel", "anolis": "rhel", "alinux": "rhel", "tencentos": "rhel", "opencloudos": "rhel",
+	"euleros": "rhel", "hce": "rhel", "uos": "rhel", "ctyunos": "rhel", "bclinux": "rhel", "nfs": "rhel", "rocky": "rhel", "almalinux": "rhel", "ol": "rhel",
+	"deepin": "debian", "kali": "debian", "linuxmint": "ubuntu",
+}
+
+// addOSFamily 把发行版所属的系补进 Like：先按名字（osFamily），再按服务器上实际的包管理器
+// （麒麟、统信桌面版用 apt，服务器版用 dnf：同一个 ID 两种都有，以包管理器为准）。
+func addOSFamily(o *proto.OSInfo, mgr string) {
+	if o == nil {
+		return
+	}
+	has := func(f string) bool {
+		if strings.EqualFold(o.ID, f) {
+			return true
+		}
+		for _, l := range o.Like {
+			if strings.EqualFold(l, f) {
+				return true
+			}
+		}
+		return false
+	}
+	add := func(f string) {
+		if !has(f) {
+			o.Like = append(o.Like, f)
+		}
+	}
+	rhel := has("rhel") || has("centos") || has("fedora")
+	deb := has("debian") || has("ubuntu")
+	switch {
+	case mgr == "dnf" || mgr == "yum":
+		if !rhel {
+			add("rhel")
+		}
+	case mgr == "apt-get":
+		if !deb {
+			add("debian")
+		}
+	case !rhel && !deb:
+		if f := osFamily[strings.ToLower(o.ID)]; f != "" {
+			add(f)
+		}
+	}
+}
+
+// pkgManager 服务器上的包管理器：dnf | yum | apt-get；都没有为空。
+func (a *Agent) pkgManager() string {
+	for _, m := range []string{"dnf", "yum", "apt-get"} {
+		if _, err := a.Sys.Shell("command -v "+m, 10*time.Second); err == nil {
+			return m
+		}
+	}
+	return ""
+}
+
+// memInfo 内存总量与可用量（MB）；读不到为 0。
+func memInfo(file string) (total, avail int64) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0, 0
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) < 2 {
+			continue
+		}
+		n, _ := strconv.ParseInt(f[1], 10, 64)
+		switch f[0] {
+		case "MemTotal:":
+			total = n / 1024
+		case "MemAvailable:":
+			avail = n / 1024
+		}
+	}
+	return total, avail
 }
 
 // osInfo /etc/os-release：选模板的装法用。

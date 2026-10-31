@@ -34,9 +34,11 @@ type SoftwareOptions struct {
 	// JavaDir JDK 的安装目录；空 = Ferry 的公共目录（<ferryDir>/runtimes，多个软件、应用共用）
 	JavaDir string
 	// FixParents 运行用户进不了安装目录的上级目录时，给它加上进入的权限（用户已同意）
-	FixParents  bool
-	Params      map[string]string // 模板参数；password 不填时随机生成
-	PackageFile string            // 用本机库里的这个安装包（没有下载地址的装法、自定义安装）
+	FixParents bool
+	// AllowChanges 从软件源装包会顺带升级、删除已装的包时也继续（用户已同意）
+	AllowChanges bool
+	Params       map[string]string // 模板参数；password 不填时随机生成
+	PackageFile  string            // 用本机库里的这个安装包（没有下载地址的装法、自定义安装）
 	// Network 服务器上要下载东西（从软件源装包、模板步骤里的下载）时走谁的网络：
 	// local = 经这台电脑；server = 服务器自己的；空或 auto = 先看服务器连不连得上软件源，连不上的经这台电脑
 	Network string
@@ -198,6 +200,16 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			if err != nil || n < 1 || n > 65535 {
 				return nil, fmt.Errorf("%s 要写 1～65535 的端口：%q", label, val)
 			}
+			// 没指定端口、默认的又被占着：往后找一个空闲的（附加端口一起空闲）
+			if !given && !portFree(p, n, ports, udpPorts, rep) {
+				for q := n + 1; q <= n+1000 && q <= 65535; q++ {
+					if portFree(p, q, ports, udpPorts, rep) {
+						e.Rep.Info("%s 默认的 %d 已被占用：改用 %d", label, n, q)
+						n, val = q, strconv.Itoa(q)
+						break
+					}
+				}
+			}
 			portMap[p.Key] = n
 			for _, off := range append([]int{0}, p.Offsets...) {
 				q := n + off
@@ -294,6 +306,14 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	if chk.DirBusy {
 		return nil, fmt.Errorf("%s 上的安装目录 %s 已存在且不是空的：换一个目录", t.Name, dir)
 	}
+	if err := diskRoom(t.Name, dir, chk, 0); err != nil {
+		return nil, err
+	}
+	for _, p := range tpl.Params {
+		if mem := vars[p.Key]; p.Type == "memory" && rep.MemAvailMB > 0 && memoryMB(mem) > rep.MemAvailMB {
+			e.Rep.Warn("内存设成了 %s，%s 现在可用的内存只有 %d MB：其他程序占着的内存不释放的话，%s 可能起不来或被系统杀掉", mem, t.Name, rep.MemAvailMB, tpl.Name)
+		}
+	}
 	fix := false
 	if len(chk.Blocked) > 0 {
 		if !o.FixParents && !e.Yes {
@@ -316,6 +336,9 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			} else {
 				e.Rep.Info("使用本机已有的 %s（%s）", pkg.File, humanBytes(pkg.Size))
 			}
+		}
+		if err := diskRoom(t.Name, dir, chk, pkg.Size); err != nil {
+			return nil, err
 		}
 		if swtpl.FormatOf(p.Format, pkg.File) == "binary" {
 			if err := checkProgramArch(filepath.Join(lib, pkg.File), s.arch); err != nil {
@@ -382,6 +405,9 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	plan.Name, plan.Dir, plan.User, plan.Version, plan.Account = name, dir, user, version, account
 	plan.Ports, plan.UDPPorts, plan.PortMap = ports, udpPorts, portMap
 	plan.FixParents = fix
+	if plan.System != nil {
+		plan.System.AllowChanges = o.AllowChanges
+	}
 	if javaHome != "" {
 		plan.Reach = []string{javaHome}
 	}
@@ -404,8 +430,21 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	}
 	e.Rep.Step("在 %s 上安装 %s", t.Name, strings.TrimSpace(tpl.Name+" "+version))
 	var inst proto.SoftwareInstance
-	if err := s.callData("swinstall", &proto.Request{Stage: stage, Install: plan}, &inst); err != nil {
+	r, err := s.call("swinstall", &proto.Request{Stage: stage, Install: plan})
+	if err != nil {
 		return nil, err
+	}
+	switch r.RC {
+	case proto.CodeOK:
+		if err := json.Unmarshal(r.Data, &inst); err != nil {
+			return nil, err
+		}
+	case proto.CodeConfirm:
+		var c proto.SwChanges
+		json.Unmarshal(r.Data, &c)
+		return nil, &PkgChangesError{Target: t.Name, Packages: c.Packages, Changes: c.Changes, Msg: r.Msg}
+	default:
+		return nil, &AgentError{Cmd: "swinstall", RC: r.RC, Msg: r.Msg}
 	}
 	res := &SoftwareResult{SoftwareInstance: inst, Target: t.Name, Password: password, Public: publicMode(tpl, vars)}
 	if res.Public != "" {
@@ -424,6 +463,57 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		}
 	}
 	return res, nil
+}
+
+// portFree 端口参数 p 用 n 时，它要占的端口（含附加端口、按 TCP / UDP）都没被占用，也没和前面的端口参数重复。
+func portFree(p swtpl.Param, n int, tcp, udp []int, rep proto.SoftwareReport) bool {
+	for _, off := range append([]int{0}, p.Offsets...) {
+		q := n + off
+		if q < 1 || q > 65535 ||
+			p.TCP() && (slices.Contains(tcp, q) || slices.Contains(rep.Ports, q)) ||
+			p.UDP() && (slices.Contains(udp, q) || slices.Contains(rep.UDPPorts, q)) {
+			return false
+		}
+	}
+	return true
+}
+
+// diskRoom 安装目录所在分区够不够：只读、inode 用完、空间不够时在下载、上传之前就停下。
+// size 为安装包大小（还不知道时为 0）：上传、解压、软件自己的数据大约要三倍，再留 300 MB。
+func diskRoom(target, dir string, chk proto.SwCheck, size int64) error {
+	if chk.ReadOnly {
+		return fmt.Errorf("%s 上安装目录 %s 所在的分区是只读的：换一个安装位置", target, dir)
+	}
+	if chk.Inodes >= 0 && chk.Inodes < 5000 {
+		return fmt.Errorf("%s 上安装目录 %s 所在的分区文件个数（inode）快用完了，只剩 %d：先清理小文件，或换一个安装位置", target, dir, chk.Inodes)
+	}
+	need := size*3/(1<<20) + 300
+	if chk.FreeMB >= 0 && chk.FreeMB < need {
+		return fmt.Errorf("%s 上安装目录 %s 所在的分区只剩 %d MB，至少要 %d MB：先清理，或换一个空间大的安装位置", target, dir, chk.FreeMB, need)
+	}
+	if size > 0 && chk.StageFreeMB >= 0 && chk.StageFreeMB < size/(1<<20)+100 {
+		return fmt.Errorf("%s 上放上传文件的分区（Ferry 组件目录所在）只剩 %d MB，放不下 %s 的安装包：先清理", target, chk.StageFreeMB, humanBytes(size))
+	}
+	return nil
+}
+
+// memoryMB 512m、2g 这样的内存写法换成 MB；写错的为 0。
+func memoryMB(s string) int64 {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if len(s) < 2 {
+		return 0
+	}
+	n, err := strconv.ParseInt(s[:len(s)-1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	switch s[len(s)-1] {
+	case 'm':
+		return n
+	case 'g':
+		return n * 1024
+	}
+	return 0
 }
 
 // publicMode 装好后其他机器能不能连（见 SoftwareResult.Public）：模板有 bool 参数 public 时看它的值，没有时算作总是能连。
@@ -448,6 +538,22 @@ func SoftwareFolder(name, version string) string {
 		return name
 	}
 	return name + "-" + v
+}
+
+// PkgChangesError 从软件源装包会顺带升级、删除已装的包（桌面版据此询问要不要继续）；服务器上还没有改动。
+type PkgChangesError struct {
+	Target            string
+	Packages, Changes []string
+	Msg               string
+}
+
+func (e *PkgChangesError) Error() string {
+	return e.Msg + "。确认没问题的话加上 --allow-changes 重新安装"
+}
+
+// JSONDetail --json 输出的附加信息。
+func (e *PkgChangesError) JSONDetail() map[string]any {
+	return map[string]any{"kind": "pkg-changes", "target": e.Target, "packages": e.Packages, "changes": e.Changes}
 }
 
 // BlockedDirsError 运行用户进不了安装目录的上级目录（桌面版据此询问要不要加上权限再装）。
@@ -530,6 +636,7 @@ func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swp
 	for _, c := range v.Configs {
 		pl.Configs = append(pl.Configs, proto.SoftwareConfigFile{Label: c.Label, Path: x(c.Path), Format: c.Format, Apply: c.Apply})
 	}
+	pl.SELinux = v.SELinux
 	if h := v.Hosting; h != nil {
 		pl.Hosting = &proto.NginxHosting{Binary: x(h.Binary), Config: x(h.Config), Prefix: x(h.Prefix), Sites: x(h.Sites)}
 	}

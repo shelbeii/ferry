@@ -37,6 +37,8 @@ func (a *Agent) swcheck() int {
 			out.DirBusy = true
 		}
 		out.Blocked = a.blockedDirs(c.User, c.Dir, false)
+		out.FreeMB, out.Inodes, out.ReadOnly = diskInfo(nearestDir(c.Dir))
+		out.StageFreeMB, _, _ = diskInfo(nearestDir(a.incomingDir()))
 	}
 	if c.JavaDir != "" {
 		if err := validInstallDir(c.JavaDir); err != nil {
@@ -58,6 +60,20 @@ func (a *Agent) swcheck() int {
 		}
 	}
 	return a.result(proto.CodeOK, "", out)
+}
+
+// nearestDir p 或它最近的已经存在的上级目录。
+func nearestDir(p string) string {
+	for {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return p
+		}
+		p = parent
+	}
 }
 
 func blockedHas(list []proto.BlockedDir, p string) bool {

@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft, Search, Plus, Upload } from '@element-plus/icons-vue'
 import { stringify } from 'yaml'
-import { call, variantMisfit, type SoftwareReport, type SwPackage, type SwParam, type SwTemplate, type SwTemplates, type SwVariant } from '../ferry'
+import { call, variantMisfit, type Software, type SoftwareReport, type SwPackage, type SwParam, type SwTemplate, type SwTemplates, type SwVariant } from '../ferry'
 import { startTask, type Task } from '../state'
 import { pickFile } from '../platform'
 import LoadingBlock from './LoadingBlock.vue'
@@ -105,6 +105,30 @@ function open(t: SwTemplate) {
     else if (p.type === 'port' || p.type === 'number') values.value[p.key] = Number(p.default ?? 0)
     else values.value[p.key] = p.default ?? ''
   }
+  // 默认的端口被占着：换成后面空闲的（附加端口一起避开），说明原因
+  hints.value = {}
+  for (const p of params.value) {
+    if (p.type !== 'port') continue
+    const why = paramError(p)
+    if (!why) continue
+    const q = nextFree(p)
+    if (q) {
+      hints.value[p.key] = { value: q, text: `默认的 ${values.value[p.key]} ${why.replace(/^\d+(（\+\d+）)? ?/, '')}，已换成 ${q}` }
+      values.value[p.key] = q
+    }
+  }
+  // 默认内存超过服务器可用内存的一半：调小
+  const avail = props.report?.memAvailMB ?? 0
+  for (const p of params.value) {
+    if (p.type !== 'memory' || !avail) continue
+    const v = String(values.value[p.key])
+    if (memMB(v) * 2 <= avail) continue
+    const fit = [...memOptions].reverse().find((m) => memMB(m) * 2 <= avail) ?? memOptions[0]
+    if (fit !== v) {
+      values.value[p.key] = fit
+      hints.value[p.key] = { value: fit, text: `服务器现在可用内存约 ${gb(avail)}，默认的 ${v} 偏大，已改成 ${fit}` }
+    }
+  }
   applyVariant()
   view.value = 'template'
 }
@@ -205,9 +229,83 @@ const protos = (p: SwParam) => (p.proto === 'udp' ? ['udp'] : p.proto === 'both'
 const portsOf = (p: SwParam) => [0, ...(p.offsets ?? [])].map((off) => Number(values.value[p.key]) + off)
 function portTaken(pr: string, n: number): string {
   if (!(pr === 'udp' ? usedUDP : used).value.has(n)) return ''
-  const who = props.report?.portUsers?.[`${pr}/${n}`]
+  const who = portOwner(pr, n)
   return who ? `已被 ${who}占用` : '已被占用'
 }
+/** 端口被谁占着：Ferry 装的软件看 portUsers，其他的看软件列表里谁在监听它 */
+function portOwner(pr: string, n: number): string {
+  const who = props.report?.portUsers?.[`${pr}/${n}`]
+  if (who || pr !== 'tcp') return who ?? ''
+  const it = (props.report?.items ?? []).find((i) => (i.listen ?? []).some((l) => l.endsWith(`:${n}`)))
+  return it ? `${it.name}${it.version ? ' ' + it.version : ''}（${it.unit || (it.container ? '容器 ' + it.container : '进程')}）` : ''
+}
+/** 端口参数 p 用 n 时它要占的端口都空着，也不和别的端口参数重复 */
+function portOk(p: SwParam, n: number): boolean {
+  for (const pr of protos(p)) {
+    const others = params.value.filter((q) => q.type === 'port' && q.key !== p.key && protos(q).includes(pr)).flatMap(portsOf)
+    for (const off of [0, ...(p.offsets ?? [])]) {
+      const q = n + off
+      if (q < 1 || q > 65535 || (pr === 'udp' ? usedUDP : used).value.has(q) || others.includes(q)) return false
+    }
+  }
+  return true
+}
+/** 往后找一个能用的端口；找不到为 0 */
+function nextFree(p: SwParam): number {
+  const n = Number(values.value[p.key])
+  for (let q = n + 1; q <= Math.min(65535, n + 1000); q++) if (portOk(p, q)) return q
+  return 0
+}
+// 打开表单时替用户改了默认值的原因（端口被占、内存太大）：用户再改了就不显示
+const hints = ref<Record<string, { value: string | number; text: string }>>({})
+const memOptions = ['256m', '512m', '1g', '2g', '4g']
+const memMB = (s: string) => {
+  const m = /^(\d+)([mg])$/i.exec(s.trim())
+  return m ? Number(m[1]) * (m[2].toLowerCase() === 'g' ? 1024 : 1) : 0
+}
+/** 内存设得比服务器现在可用的还大：提醒（不拦着） */
+function memWarn(p: SwParam): string {
+  const avail = props.report?.memAvailMB ?? 0
+  const mb = memMB(String(values.value[p.key]))
+  return avail && mb > avail ? `服务器现在可用内存只有约 ${gb(avail)}，设得比这还大可能起不来或被系统杀掉` : ''
+}
+
+// 服务器上已经有同类软件：提醒可以直接用它
+const kindFamily: Record<string, string[]> = { mysql: ['mysql', 'mariadb'], mariadb: ['mysql', 'mariadb'], redis: ['redis', 'valkey'] }
+const sameKind = computed(() => {
+  const t = tpl.value
+  if (!t) return []
+  const kinds = kindFamily[t.id] ?? [t.id]
+  return (props.report?.items ?? []).filter((i) => i.kind && kinds.includes(i.kind))
+})
+const viaLabel = (i: Software) => (i.instance ? 'Ferry 装的' : i.via === 'docker' ? '容器' : i.via === 'systemd' ? '系统服务' : '进程')
+
+// 安装时会做的事：装之前看清楚
+const summary = computed<string[]>(() => {
+  const v = variant.value
+  if (!v) return []
+  const out: string[] = []
+  const sys = pkgMgrApt.value ? v.system?.apt : v.system?.dnf
+  if (sys?.length) {
+    const names = sys.map((x) => x.split('|').join(' 或 ')).join('、')
+    out.push(`${v.package ? '需要的系统库' : '程序'}从服务器的软件源装：${names}（已经装着的直接用、不升级；会顺带升级或删除别的已装包时先问你）`)
+  }
+  if (v.package?.url && !form.value.pkg) {
+    out.push(localPkg.value ? `上传本机已有的 ${localPkg.value.file}` : `下载 ${tpl.value?.name} ${shownVersion.value || ''}（${v.package.size || '大小未知'}）到这台电脑，再上传到服务器`)
+  } else if (v.package) {
+    out.push(form.value.pkg ? `上传本机库里的 ${form.value.pkg}` : '上传选的安装包')
+  }
+  if (v.java && (form.value.javaDir.trim() || !jdkReady(form.value.java))) out.push(`装 JDK ${form.value.java}（本机没有时先下载，约 190 MB）`)
+  out.push(`运行用户 ${form.value.user}（没有会创建不能登录的系统用户）`)
+  out.push(`装到 ${installDir.value}，建系统服务 ferry-${form.value.name} 并开机自动启动`)
+  const tcp = params.value.filter((p) => p.type === 'port' && protos(p).includes('tcp')).flatMap(portsOf)
+  const udp = params.value.filter((p) => p.type === 'port' && protos(p).includes('udp')).flatMap(portsOf)
+  if (tcp.length || udp.length) out.push(`占用端口 ${[...tcp, ...udp.map((x) => `${x}/UDP`)].join('、')}`)
+  if (v.selinux) out.push('服务器开着 SELinux 时，给安装目录和端口加上 SELinux 标签（程序才能读写、监听）')
+  out.push('启动后等端口能连上；有密码的软件再用设置的账号和密码登录一次，登录不上就撤销安装')
+  return out
+})
+const pkgMgrApt = computed(() => props.report?.pkgMgr === 'apt-get')
 function paramError(p: SwParam): string {
   const v = values.value[p.key]
   switch (p.type) {
@@ -445,6 +543,12 @@ async function installCustom() {
         <template #title>这个模板是 AI 助手写的：安装时下面这些会以 root 执行，先看一下</template>
         <pre class="mono ai-steps">{{ aiSteps }}</pre>
       </el-alert>
+      <el-alert v-if="sameKind.length" type="info" :closable="false" show-icon class="ai-tpl">
+        <template #title>
+          这台服务器上已经有：{{ sameKind.map((i) => `${i.name}${i.version ? ' ' + i.version : ''}（${viaLabel(i)}，${i.state === 'running' ? '运行中' : '已停止'}${i.listen?.length ? '，' + i.listen.join(' ') : ''}）`).join('；') }}。
+          直接用它的话不用再装；要另装一个独立的，继续往下填（端口已自动避开）。
+        </template>
+      </el-alert>
       <el-form label-width="120px" class="form">
         <el-form-item label="装法">
           <el-select v-model="vi" class="wide">
@@ -455,8 +559,8 @@ async function installCustom() {
           </el-select>
           <div v-if="misfit" class="err small">{{ misfit }}</div>
           <div v-if="variant.note" class="muted small">{{ variant.note }}</div>
-          <div v-if="variant.system" class="muted small">
-            从服务器的软件源安装：{{ [...(variant.system.dnf ?? []).map((p) => `dnf ${p}`), ...(variant.system.apt ?? []).map((p) => `apt ${p}`)].join('、') }}；由 Ferry 单独运行一个实例
+          <div v-if="variant.system && !variant.package" class="muted small">
+            从服务器的软件源安装：{{ [...(variant.system.dnf ?? []).map((p) => `dnf ${p.split('|').join(' 或 ')}`), ...(variant.system.apt ?? []).map((p) => `apt ${p.split('|').join(' 或 ')}`)].join('、') }}；由 Ferry 单独运行一个实例
           </div>
         </el-form-item>
 
@@ -515,16 +619,20 @@ async function installCustom() {
           <el-input-number v-if="p.type === 'port' || p.type === 'number'" v-model="values[p.key] as number" :min="1" :max="65535" :controls="false" class="port" />
           <el-checkbox v-else-if="p.type === 'bool'" v-model="values[p.key] as boolean">{{ p.label || p.key }}</el-checkbox>
           <el-select v-else-if="p.type === 'memory'" v-model="values[p.key] as string" class="short" filterable allow-create>
-            <el-option v-for="m in ['256m', '512m', '1g', '2g', '4g']" :key="m" :value="m" :label="m" />
+            <el-option v-for="m in memOptions" :key="m" :value="m" :label="m" />
           </el-select>
           <el-select v-else-if="p.type === 'select'" v-model="values[p.key] as string" class="short">
             <el-option v-for="o in p.options ?? []" :key="o" :value="o" :label="o" />
           </el-select>
           <el-input v-else-if="p.type === 'password'" v-model="values[p.key] as string" show-password class="mono" placeholder="不填 = 随机生成" />
           <el-input v-else v-model="values[p.key] as string" class="mono" />
+          <span v-if="p.type === 'memory' && report?.memAvailMB" class="muted small ml">服务器内存 {{ gb(report.memTotalMB ?? 0) }}，现在可用约 {{ gb(report.memAvailMB) }}</span>
+          <el-button v-if="p.type === 'port' && paramError(p) && nextFree(p)" link type="primary" size="small" class="ml" @click="values[p.key] = nextFree(p)">换成 {{ nextFree(p) }}</el-button>
           <div v-if="p.help || p.type === 'password'" class="muted small">
             {{ p.help }}<template v-if="p.type === 'password' && p.key === 'password'">{{ p.help ? '。' : '' }}装好后显示，并存进本机的系统凭据库</template>
           </div>
+          <div v-if="hints[p.key] && hints[p.key].value === values[p.key]" class="muted small">{{ hints[p.key].text }}</div>
+          <div v-if="p.type === 'memory' && memWarn(p)" class="err small">{{ memWarn(p) }}</div>
         </el-form-item>
 
         <el-form-item label="运行用户">
@@ -540,6 +648,11 @@ async function installCustom() {
         <el-form-item v-if="variant.java" label="JDK 安装目录" :error="javaDirError">
           <el-input v-model="form.javaDir" class="mono" clearable :placeholder="`留空：${sharedJdk(form.java)}（公共目录）`" />
           <div class="muted small">{{ javaDirHint(form.java) }}</div>
+        </el-form-item>
+        <el-form-item label="安装时会">
+          <ul class="summary small">
+            <li v-for="s in summary" :key="s">{{ s }}</li>
+          </ul>
         </el-form-item>
       </el-form>
     </template>
@@ -721,6 +834,11 @@ async function installCustom() {
 .opt-why {
   float: right;
   margin-left: 16px;
+}
+.summary {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--el-text-color-regular);
 }
 </style>
 

@@ -23,6 +23,7 @@ const (
 	CodeBadInput = 2 // 请求无效
 	CodeVerify   = 3 // 上传文件校验未通过，未改动任何应用
 	CodeLocked   = 4 // 另一个部署/回滚/启停正在进行
+	CodeConfirm  = 5 // 要用户同意后才能继续（数据里说明要同意什么），服务器上没有改动
 )
 
 // 应用类型。
@@ -763,6 +764,11 @@ type SoftwareReport struct {
 	Disks    []Disk          `json:"disks,omitempty"`    // 常用目录所在分区的剩余空间
 	Ports    []int           `json:"ports,omitempty"`    // 已被占用的 TCP 端口（在监听的，和 Ferry 装的软件停着时也要用的）
 	UDPPorts []int           `json:"udpPorts,omitempty"` // 已被占用的 UDP 端口
+	// PkgMgr 服务器上的包管理器：dnf | yum | apt-get；没有为空
+	PkgMgr string `json:"pkgMgr,omitempty"`
+	// MemTotalMB、MemAvailMB 内存总量与可用量（推荐 Java 软件的内存）
+	MemTotalMB int64 `json:"memTotalMB,omitempty"`
+	MemAvailMB int64 `json:"memAvailMB,omitempty"`
 	// PortUsers 端口被谁占着（键为 tcp/端口、udp/端口）：只有知道是谁的才有
 	PortUsers map[string]string `json:"portUsers,omitempty"`
 }
@@ -793,6 +799,8 @@ type SoftwarePlan struct {
 	Reach []string `json:"reach,omitempty"`
 	// FixParents 运行用户进不了安装目录（或 Reach）的上级目录时，给它加上进入的权限（用户已同意）
 	FixParents bool `json:"fixParents,omitempty"`
+	// SELinux 开着 SELinux 时给安装目录、端口加的标签（从软件源装的程序受 SELinux 限制）
+	SELinux *PlanSELinux `json:"selinux,omitempty"`
 
 	Package *PlanPackage `json:"package,omitempty"` // 上传目录里的安装包
 	System  *PlanSystem  `json:"system,omitempty"`  // 用服务器的软件源装的包
@@ -854,6 +862,12 @@ type SwCheck struct {
 	JavaHome string `json:"javaHome,omitempty"`
 	// Cached 服务器上留着这个安装包（上次安装失败时）
 	Cached bool `json:"cached,omitempty"`
+	// 安装目录所在分区（目录还不存在时看最近的上级目录）：可用空间（MB，-1 = 不知道）、可用 inode（-1 = 不限制）、是否只读
+	FreeMB   int64 `json:"freeMB"`
+	Inodes   int64 `json:"inodes"`
+	ReadOnly bool  `json:"readOnly,omitempty"`
+	// StageFreeMB 上传安装包的目录（Ferry 组件目录下）所在分区的可用空间
+	StageFreeMB int64 `json:"stageFreeMB"`
 }
 
 // BlockedDir 运行用户进不去的目录。
@@ -869,6 +883,26 @@ type PlanSystem struct {
 	APT     []string `json:"apt,omitempty"`
 	Disable []string `json:"disable,omitempty"` // 装包时系统自带、被自动启动的服务：停掉并禁用（原来就在运行的不动）
 	Require string   `json:"require,omitempty"`
+	// AllowChanges 用户同意了装包时顺带升级、删除已装的包（没同意时演练出有这些变化就停下来问）
+	AllowChanges bool `json:"allowChanges,omitempty"`
+}
+
+// PlanSELinux 安装目录、端口的 SELinux 类型（如 redis_var_lib_t、redis_port_t）。
+type PlanSELinux struct {
+	Files string `json:"files,omitempty"`
+	Port  string `json:"port,omitempty"`
+}
+
+// SwSELinux 安装时加上的 SELinux 标签（卸载时去掉）：Files 为加了标签的目录。
+type SwSELinux struct {
+	Files string `json:"files,omitempty"`
+	Ports []int  `json:"ports,omitempty"`
+}
+
+// SwChanges 装包会顺带改动的已装包（swinstall 返回 CodeConfirm 时的数据）。
+type SwChanges struct {
+	Packages []string `json:"packages"` // 要装的包
+	Changes  []string `json:"changes"`  // 如「openssl-libs（升级）」
 }
 
 // PlanFile 要写的文件。
@@ -930,6 +964,7 @@ type SoftwareInstance struct {
 	Unset   []string             `json:"unset,omitempty"`
 	Configs []SoftwareConfigFile `json:"configs,omitempty"`
 	Hosting *NginxHosting        `json:"hosting,omitempty"`
+	SELinux *SwSELinux           `json:"selinux,omitempty"`
 }
 
 // Software 服务器上找到的一个软件（一个运行中的实例，或装了没运行的服务 / 容器）。

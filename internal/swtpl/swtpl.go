@@ -87,6 +87,8 @@ type Variant struct {
 	Notes   []string            `yaml:"notes,omitempty" json:"notes,omitempty"`
 	Configs []ConfigFile        `yaml:"configs,omitempty" json:"configs,omitempty"`
 	Hosting *proto.NginxHosting `yaml:"hosting,omitempty" json:"hosting,omitempty"`
+	// SELinux 开着 SELinux 时给安装目录、端口加的类型（从软件源装的程序受 SELinux 限制），如 {files: redis_var_lib_t, port: redis_port_t}
+	SELinux *proto.PlanSELinux `yaml:"selinux,omitempty" json:"selinux,omitempty"`
 }
 
 type ConfigFile struct {
@@ -234,6 +236,13 @@ func (t *Template) Validate() error {
 		for _, c := range v.Configs {
 			if c.Path == "" || (c.Apply != "" && c.Apply != "reload" && c.Apply != "restart") {
 				return fmt.Errorf("%s：configs 需要 path，apply 只能是 reload 或 restart", where)
+			}
+		}
+		if se := v.SELinux; se != nil {
+			for _, x := range []string{se.Files, se.Port} {
+				if x != "" && !regexp.MustCompile(`^[a-z][a-z0-9_]*_t$`).MatchString(x) {
+					return fmt.Errorf("%s：selinux 的类型要写成 xxx_t：%q", where, x)
+				}
 			}
 		}
 		if v.Hosting != nil && t.ID != "nginx" {

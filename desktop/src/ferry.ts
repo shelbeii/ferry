@@ -41,6 +41,9 @@ export interface ErrorDetail {
   /** blocked-dirs：运行用户 user 进不了的上级目录 */
   user?: string
   dirs?: string[]
+  /** pkg-changes：从软件源要装的包，和会顺带改动的已装包（如「openssl-libs（升级）」） */
+  packages?: string[]
+  changes?: string[]
 }
 
 /** 被本机程序占着的产物（Windows 锁住正在运行的 jar） */
@@ -462,6 +465,11 @@ export interface SoftwareReport {
   udpPorts?: number[]
   /** 端口被谁占着：键为 tcp/端口、udp/端口 */
   portUsers?: Record<string, string>
+  /** 服务器上的包管理器：dnf | yum | apt-get */
+  pkgMgr?: string
+  /** 内存总量与可用量（MB） */
+  memTotalMB?: number
+  memAvailMB?: number
 }
 
 /** ferry who：服务器上一个已登录的 SSH 连接 */
@@ -626,6 +634,8 @@ export interface SwVariant {
   user: string
   package?: { url?: string; file?: string; github?: string; fallback?: string; size?: string; format?: string; strip?: number; into?: string }
   system?: { dnf?: string[]; apt?: string[]; disable?: string[]; require?: string }
+  /** 开着 SELinux 时给安装目录、端口加的标签 */
+  selinux?: { files?: string; port?: string }
   files?: { path: string }[] | null
   steps?: { run?: string; http?: { post: string } }[] | null
   service?: { exec: string }

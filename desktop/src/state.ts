@@ -278,10 +278,34 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
     } else if (d?.kind === 'blocked-dirs' && !args.includes('--fix-parents')) {
       // 安装软件：运行用户进不了上级目录（还没上传、没改动）。问一下，同意就加上权限接着装
       askFixParents(d).then((yes) => yes && task.retryWith?.(['--fix-parents']))
+    } else if (d?.kind === 'pkg-changes' && !args.includes('--allow-changes')) {
+      // 安装软件：从软件源装包会顺带升级、删除已装的包（还没改动）。问一下，同意就接着装
+      askPkgChanges(d).then((yes) => yes && task.retryWith?.(['--allow-changes']))
     }
     onDone?.(task)
   })
   return task
+}
+
+/** 从软件源装包会顺带升级、删除服务器上已装的包：列出来，问要不要继续 */
+export async function askPkgChanges(d: ErrorDetail): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      `从软件源装 ${(d.packages ?? []).join(' ')} 时，还会改动服务器上已经装着的这些包：
+
+${(d.changes ?? []).join('\n')}
+
+` +
+        `升级后，正在用这些包的程序要重启才会用上新版本；删除的包，用到它的程序会受影响。确认没问题再继续。
+
+还没有安装，服务器上没有做任何改动。`,
+      '会改动已装的包',
+      { type: 'warning', confirmButtonText: '同意并继续安装', cancelButtonText: '不装了', customStyle: { whiteSpace: 'pre-line' } },
+    )
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 运行用户进不了安装目录的上级目录：说明会改什么，问要不要改 */

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Loading, RefreshRight, Search } from '@element-plus/icons-vue'
-import { tasks, drawerOpen, selectedTaskId as selectedId, loadTaskDetail, removeTasks, askFixParents, aiAskRequest, currentPath, selectProject, type Task } from '../state'
+import { tasks, drawerOpen, selectedTaskId as selectedId, loadTaskDetail, removeTasks, askFixParents, askPkgChanges, aiAskRequest, currentPath, selectProject, type Task } from '../state'
 import { bytes, call, evLabel, padWidth, type FerryLine, type DeployReport, type AppOutcome } from '../ferry'
 import { ElMessage } from 'element-plus'
 
@@ -69,6 +69,11 @@ async function useRuntime(t: Task) {
 /** 运行用户进不了上级目录：确认后加上权限重新安装 */
 async function fixParents(t: Task) {
   if (t.detail && (await askFixParents(t.detail))) t.retryWith?.(['--fix-parents'])
+}
+
+/** 装包会顺带改动已装的包：确认后接着安装 */
+async function allowChanges(t: Task) {
+  if (t.detail && (await askPkgChanges(t.detail))) t.retryWith?.(['--allow-changes'])
 }
 
 function lineClass(l: FerryLine): string {
@@ -307,6 +312,10 @@ async function clearFinished() {
             可以给运行用户 {{ selected.detail.user }} 加上进入 {{ selected.detail.dirs?.join('、') }} 的权限（只能进入，看不到里面有哪些文件），然后接着安装
           </template>
           <el-button type="primary" size="small" class="fix-btn" @click="fixParents(selected)">加上权限并继续安装</el-button>
+        </el-alert>
+        <el-alert v-if="selected.detail?.kind === 'pkg-changes' && selected.retryWith" type="warning" :closable="false" show-icon class="tip">
+          <template #title>装 {{ selected.detail.packages?.join(' ') }} 会顺带改动已装的包：{{ selected.detail.changes?.join('、') }}</template>
+          <el-button type="primary" size="small" class="fix-btn" @click="allowChanges(selected)">同意并继续安装</el-button>
         </el-alert>
         <el-alert v-if="selected.detail?.kind === 'java-mismatch' && selected.config && selected.retry" type="info" :closable="false" show-icon class="tip">
           <template #title>

@@ -9,6 +9,7 @@ variants:
     os: [rhel, centos, fedora]
     user: nginx
     system: {dnf: [nginx], disable: [nginx.service], require: /usr/sbin/nginx}
+    selinux: {files: httpd_sys_rw_content_t, port: http_port_t}
     files: &files
       - path: ${dir}/nginx.conf
         mode: "0644"

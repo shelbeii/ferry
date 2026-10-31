@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/swpkg"
 	"github.com/captain/ferry/internal/swtpl"
 )
@@ -218,5 +219,43 @@ func TestCheckProgramArch(t *testing.T) {
 	os.WriteFile(sh, []byte("#!/bin/sh\necho hi\n"), 0o755)
 	if err := checkProgramArch(sh, "amd64"); err != nil {
 		t.Errorf("脚本不管架构：%v", err)
+	}
+}
+
+func TestPortFreeAndDiskRoom(t *testing.T) {
+	rep := proto.SoftwareReport{Ports: []int{8848, 9849}, UDPPorts: []int{9000}}
+	nacos := swtpl.Param{Key: "port", Type: "port", Offsets: []int{1000}}
+	if portFree(nacos, 8848, nil, nil, rep) || !portFree(nacos, 8850, nil, nil, rep) || portFree(nacos, 8849, nil, nil, rep) {
+		t.Error("nacos 端口")
+	}
+	srt := swtpl.Param{Key: "srt", Type: "port", Proto: "udp"}
+	if portFree(srt, 9000, nil, nil, rep) || !portFree(srt, 8848, nil, nil, rep) {
+		t.Error("UDP 端口")
+	}
+	if portFree(nacos, 8850, []int{9850}, nil, rep) {
+		t.Error("和前面的端口参数重复")
+	}
+
+	ok := proto.SwCheck{FreeMB: 10000, Inodes: -1, StageFreeMB: 10000}
+	if err := diskRoom("a", "/opt/x", ok, 220<<20); err != nil {
+		t.Error(err)
+	}
+	for what, c := range map[string]proto.SwCheck{
+		"只读":    {FreeMB: 10000, Inodes: -1, ReadOnly: true},
+		"空间不够":  {FreeMB: 500, Inodes: -1, StageFreeMB: 10000},
+		"inode": {FreeMB: 10000, Inodes: 100, StageFreeMB: 10000},
+		"上传目录":  {FreeMB: 10000, Inodes: -1, StageFreeMB: 50},
+	} {
+		if err := diskRoom("a", "/opt/x", c, 220<<20); err == nil {
+			t.Errorf("%s：应当停下", what)
+		}
+	}
+	if err := diskRoom("a", "/opt/x", proto.SwCheck{FreeMB: -1, Inodes: -1, StageFreeMB: -1}, 1<<30); err != nil {
+		t.Errorf("不知道空间时不拦：%v", err)
+	}
+	for s, want := range map[string]int64{"512m": 512, "2g": 2048, "x": 0, "": 0} {
+		if memoryMB(s) != want {
+			t.Errorf("%s：%d", s, memoryMB(s))
+		}
 	}
 }

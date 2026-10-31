@@ -28,6 +28,7 @@ variants:
     system:
       dnf: [postgresql-server]
       disable: [postgresql.service]
+    selinux: {files: postgresql_db_t, port: postgresql_port_t}
     files: &files
       - path: ${dir}/tmp/pwfile
         mode: "0600"

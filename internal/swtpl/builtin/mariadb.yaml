@@ -32,6 +32,7 @@ variants:
     system:
       dnf: [mariadb-server]
       disable: [mariadb.service]
+    selinux: {files: mysqld_db_t, port: mysqld_port_t}
     files: &files
       - path: ${dir}/my.cnf
         content: |

@@ -19,12 +19,14 @@ params:
 variants:
   - label: 系统软件源（dnf / yum）
     os: [rhel, centos, fedora]
-    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑。RHEL / Rocky 10 起没有 redis 包（改名 valkey）
+    note: 用服务器配置的软件源；服务器连不上时下载可以经这台电脑。RHEL / Rocky 10 起软件源里没有 redis：自动改装兼容 Redis 的 Valkey
     user: redis
     system:
-      dnf: [redis]
-      disable: [redis.service]
+      # RHEL / Rocky 10、新版 Fedora 只有 Valkey：valkey-compat-redis 提供 redis-server、redis-cli
+      dnf: ["redis|valkey-compat-redis"]
+      disable: [redis.service, valkey.service]
       require: /usr/bin/redis-server
+    selinux: {files: redis_var_lib_t, port: redis_port_t}
     files: &files
       - path: ${dir}/redis.conf
         content: |

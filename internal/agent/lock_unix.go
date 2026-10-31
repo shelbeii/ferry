@@ -38,6 +38,19 @@ func flockFile(path string, wait time.Duration) (func(), error) {
 	}
 }
 
+// diskInfo 路径所在分区的可用空间（MB）、可用 inode（文件个数；不限制的文件系统为 -1）、是否只读；读不到时空间为 -1。
+func diskInfo(path string) (freeMB, inodes int64, readOnly bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return -1, -1, false
+	}
+	inodes = int64(st.Ffree)
+	if st.Files == 0 { // btrfs 等不限制 inode
+		inodes = -1
+	}
+	return int64(st.Bavail) * int64(st.Bsize) / (1 << 20), inodes, uint64(st.Flags)&1 != 0 // ST_RDONLY / MNT_RDONLY
+}
+
 // diskFreeMB 路径所在分区的可用空间。
 func diskFreeMB(path string) int64 {
 	var st syscall.Statfs_t

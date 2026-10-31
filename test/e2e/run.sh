@@ -1248,6 +1248,8 @@ F software remove e2e-a demo-b --purge >/dev/null 2>&1
 dx a 'cat > /usr/local/bin/dnf <<"EOS"
 #!/bin/sh
 [ "$1" = install ] || exit 1
+# 演练（--assumeno）：只有新装的包，没有要改动的已装包
+case "$*" in *--assumeno*) echo "Installing:"; echo " redis x86_64 6.2 appstream 1 M"; exit 1;; esac
 cp /usr/local/bin/demoserver /usr/bin/redis-server
 printf "[Service]\nEnvironment=PORT=16380\nExecStart=/usr/local/bin/demoserver\n" > /etc/systemd/system/redis.service
 systemctl daemon-reload && systemctl start redis
@@ -1262,6 +1264,20 @@ t "Ferry 运行的 Redis 在监听" ok "UP" -- health a 16379
 t "系统自带的 redis.service 被停掉" ok "inactive" -- dx a 'systemctl is-active redis; true'
 t "redis.conf 里是选的端口" ok "port 16379" -- dx a 'cat /opt/ferry-software/redis/redis.conf'
 t "卸载时说明软件源的包没删" ok "没有删除" -- F software remove e2e-a redis --purge
+# 演练出会顺带升级已装的包：停下来说明，什么都不改；同意（--allow-changes）后才装
+dx a 'cat > /usr/local/bin/dnf <<"EOS"
+#!/bin/sh
+[ "$1" = install ] || exit 1
+case "$*" in *--assumeno*) printf "Installing:\n redis x86_64 6.2 appstream 1 M\nUpgrading:\n openssl-libs x86_64 1:3.2 baseos 2 M\n\nTransaction Summary\n"; exit 1;; esac
+cp /usr/local/bin/demoserver /usr/bin/redis-server
+echo "Installed: redis"
+EOS
+chmod 755 /usr/local/bin/dnf; rm -f /usr/bin/redis-server'
+t "装包会顺带升级已装的包：先停下来说明" fail "openssl-libs（升级）" -- F software install e2e-a redis --name redis-chg --port 16384 --network server
+t "没同意时服务器上没有改动" ok "gone gone" -- dx a 'echo $(test -e /opt/ferry-software/redis-chg && echo left || echo gone) $(test -e /usr/bin/redis-server && echo left || echo gone)'
+t "--json 里说明要改动哪些包" fail '"kind":"pkg-changes"' -- F software install e2e-a redis --name redis-chg --port 16384 --network server --json
+t "同意后接着装" ok "已安装 redis-chg" -- F software install e2e-a redis --name redis-chg --port 16384 --network server --allow-changes
+F software remove e2e-a redis-chg --purge >/dev/null 2>&1
 
 # 下载经这台电脑：「软件源」在这台电脑的 127.0.0.2 上，服务器直接访问不到，只能经 SSH 反向端口由这台电脑代为下载
 mkdir -p "$OUT/repo" && echo rpm-via-ferry > "$OUT/repo/redis.rpm"
@@ -1271,6 +1287,8 @@ for i in $(seq 1 40); do curl -s -m 1 -o /dev/null http://127.0.0.2:18931/redis.
 dx a 'cat > /usr/local/bin/dnf <<"EOS"
 #!/bin/sh
 [ "$1" = install ] || exit 1
+# 演练（--assumeno）：只有新装的包，没有要改动的已装包
+case "$*" in *--assumeno*) echo "Installing:"; echo " redis x86_64 6.2 appstream 1 M"; exit 1;; esac
 curl -fsS http://127.0.0.2:18931/redis.rpm -o /tmp/redis.rpm || { echo "下载失败"; exit 1; }
 grep -q rpm-via-ferry /tmp/redis.rpm || exit 1
 cp /usr/local/bin/demoserver /usr/bin/redis-server

@@ -83,7 +83,7 @@ func TestPick(t *testing.T) {
 	rocky := OS{ID: "rocky", Like: []string{"rhel", "centos", "fedora"}, Pretty: "Rocky Linux 9"}
 	ubuntu := OS{ID: "ubuntu", Like: []string{"debian"}, Pretty: "Ubuntu 24.04"}
 	alpine := OS{ID: "alpine", Pretty: "Alpine Linux"}
-	if i, err := redis.Pick(rocky, "amd64", -1); err != nil || redis.Variants[i].System.DNF[0] != "redis" {
+	if i, err := redis.Pick(rocky, "amd64", -1); err != nil || !strings.HasPrefix(redis.Variants[i].System.DNF[0], "redis|") {
 		t.Errorf("rocky：%d %v", i, err)
 	}
 	if i, err := redis.Pick(ubuntu, "arm64", -1); err != nil || redis.Variants[i].System.APT[0] != "redis-server" {

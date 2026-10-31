@@ -225,6 +225,13 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 			return errors.New("nginx 托管路径无效")
 		}
 	}
+	if se := pl.SELinux; se != nil {
+		for _, x := range []string{se.Files, se.Port} {
+			if x != "" && !reSELinuxType.MatchString(x) {
+				return fmt.Errorf("SELinux 类型无效：%q", x)
+			}
+		}
+	}
 	for k := range pl.Env {
 		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(k) {
 			return fmt.Errorf("环境变量名无效：%q", k)
@@ -388,6 +395,11 @@ func (a *Agent) swinstall() int {
 	if s := pl.System; s != nil {
 		var err error
 		if packages, err = a.systemInstall(name, s, proxyEnvPrefix(pl), pl.Package != nil); err != nil {
+			var pc *pkgChangesError
+			if errors.As(err, &pc) {
+				a.warn(proto.EvWarn, name, "%v", err)
+				return a.result(proto.CodeConfirm, err.Error(), proto.SwChanges{Packages: pc.pkgs, Changes: pc.changes})
+			}
 			return fail("%v", err)
 		}
 	}
@@ -410,12 +422,14 @@ func (a *Agent) swinstall() int {
 		return fail("%v", err)
 	}
 	ok := false
+	var se *proto.SwSELinux
 	defer func() {
 		if ok {
 			return
 		}
 		// 失败：拆掉装了一半的，方便改了再装（从软件源装的包不删）
 		a.Sys.Systemctl("disable", "--now", unit)
+		a.undoSELinux(name, se)
 		if a.ferryUnitFile(unit) {
 			os.Remove(a.unitPath(unit))
 			a.Sys.Systemctl("daemon-reload")
@@ -469,6 +483,7 @@ func (a *Agent) swinstall() int {
 		}
 		a.Sys.Lchown(swEnvFile(pl.Dir), 0, 0)
 	}
+	se = a.swSELinux(pl)
 	if err := writeFileAtomic(a.unitPath(unit), []byte(swUnitText(pl)), 0o644); err != nil {
 		return fail("写系统服务失败：%v", err)
 	}
@@ -482,6 +497,7 @@ func (a *Agent) swinstall() int {
 	spec := readySpec(name, pl.Logs, pl.ReadyPort, pl.ReadyTimeout)
 	if err := a.waitReady(spec, unit); err != nil {
 		a.diag(spec, unit)
+		a.selinuxHint(name)
 		return a.result(proto.CodeFailed, "启动失败："+err.Error(), nil)
 	}
 	notes := append([]string{}, pl.Notes...)
@@ -496,7 +512,7 @@ func (a *Agent) swinstall() int {
 		notes = append(notes, "从软件源装了 "+strings.Join(packages, " ")+"（卸载时不会删除这些包）")
 	}
 	inst := proto.SoftwareInstance{Name: name, Kind: pl.Template, Title: pl.Title, Version: pl.Version, Dir: pl.Dir, Unit: unit, User: pl.User,
-		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting}
+		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting, SELinux: se}
 	b, _ := json.MarshalIndent(inst, "", "  ")
 	if err := writeFileAtomic(a.instFile(name), b, 0o644); err != nil {
 		return fail("写安装记录失败：%v", err)
@@ -529,14 +545,8 @@ func clearDir(dir string) {
 // env 不为空时下载经这台电脑（proxyEnvPrefix）。deps 为 true 时只是安装包需要的系统库：没有包管理器时跳过（后面的检查会说缺什么）。
 // 包名可以写几个候选（a|b）：用已经装着的，或软件源里有的第一个（不同发行版、版本包名不同，如 libaio1t64|libaio1）。
 func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps bool) ([]string, error) {
-	var mgr string
 	var pkgs []string
-	for _, m := range []string{"dnf", "yum", "apt-get"} {
-		if _, err := a.Sys.Shell("command -v "+m, 10*time.Second); err == nil {
-			mgr = m
-			break
-		}
-	}
+	mgr := a.pkgManager()
 	switch mgr {
 	case "dnf", "yum":
 		pkgs = s.DNF
@@ -590,6 +600,18 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	if env != "" {
 		via = "下载经这台电脑"
 	}
+	// 先演练一遍：软件源里没有这个包时说清楚；会顺带升级、删除已装的包时停下来问用户（升级会让用到它们的程序换版本）
+	a.info(proto.EvSoftware, name, "检查软件源里的 %s（%s，%s）", strings.Join(pkgs, " "), mgr, via)
+	changes, err := a.pkgChanges(mgr, env, pkgs)
+	if err != nil {
+		return nil, err
+	}
+	if len(changes) > 0 && !s.AllowChanges {
+		return nil, &pkgChangesError{pkgs: pkgs, changes: changes}
+	}
+	if len(changes) > 0 {
+		a.warn(proto.EvWarn, name, "装 %s 会顺带改动已装的包：%s（已同意）", strings.Join(pkgs, " "), strings.Join(changes, "、"))
+	}
 	a.info(proto.EvSoftware, name, "从软件源安装 %s（%s，%s，可能要几分钟）", strings.Join(pkgs, " "), mgr, via)
 	cmd := env + mgr + " install -y " + strings.Join(pkgs, " ")
 	if mgr == "apt-get" {
@@ -632,6 +654,95 @@ func (a *Agent) checkRequire(s *proto.PlanSystem) error {
 		}
 	}
 	return nil
+}
+
+// pkgChangesError 装包会顺带升级、删除已装的包：要用户同意（服务器上还没有改动）。
+type pkgChangesError struct{ pkgs, changes []string }
+
+func (e *pkgChangesError) Error() string {
+	return fmt.Sprintf("从软件源装 %s 会顺带改动服务器上已装的包：%s。用到这些包的程序可能要重启才会用上新版本；还没有安装，服务器上没有改动",
+		strings.Join(e.pkgs, " "), strings.Join(e.changes, "、"))
+}
+
+// pkgChanges 演练装包（dnf --assumeno、apt-get -s）：会升级、降级、删除的已装包（新装的不算）。
+// 软件源里没有要装的包时返回错误；演练本身不成功（如连不上软件源）时返回空，交给真正安装时报错。
+func (a *Agent) pkgChanges(mgr, env string, pkgs []string) ([]string, error) {
+	list := strings.Join(pkgs, " ")
+	cmd := env + mgr + " install --assumeno " + list + " 2>&1"
+	if mgr == "apt-get" {
+		cmd = "DEBIAN_FRONTEND=noninteractive apt-get -s install --no-upgrade " + list + " 2>&1"
+	}
+	out, _ := a.Sys.Shell(cmd, 20*time.Minute) // dnf --assumeno 总是返回 1
+	missing := missingPkgs(out, pkgs)
+	if len(missing) > 0 && mgr == "apt-get" {
+		// 软件包索引太旧时先更新再试
+		a.Sys.Shell(env+"DEBIAN_FRONTEND=noninteractive apt-get update 2>&1", 10*time.Minute)
+		out, _ = a.Sys.Shell(cmd, 20*time.Minute)
+		missing = missingPkgs(out, pkgs)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("服务器的软件源里没有 %s：这个系统的软件源可能不提供它（或改了名字），换一种装法，或先给服务器加上提供它的软件源", strings.Join(missing, " "))
+	}
+	return parsePkgChanges(out), nil
+}
+
+// missingPkgs 演练输出里说找不到的包。
+func missingPkgs(out string, pkgs []string) []string {
+	var miss []string
+	for _, p := range pkgs {
+		for _, pat := range []string{"No match for argument: " + p, "No package " + p + " available", "Unable to locate package " + p, "Package '" + p + "' has no installation candidate", "Package " + p + " is not available"} {
+			if strings.Contains(out, pat) {
+				miss = append(miss, p)
+				break
+			}
+		}
+	}
+	return miss
+}
+
+// parsePkgChanges 演练输出里要升级、降级、删除的已装包：dnf / yum 按段落标题（Upgrading:、Updating for dependencies:、Removing:……），
+// apt 按 Inst 包名 [旧版本]、Remv 包名。
+func parsePkgChanges(out string) []string {
+	var changes []string
+	seen := map[string]bool{}
+	add := func(name, what string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			changes = append(changes, name+"（"+what+"）")
+		}
+	}
+	what, wrapped := "", false
+	for _, l := range splitLines(out) {
+		f := strings.Fields(l)
+		if wrapped { // 包名太长时 dnf 把后面几列折到下一行
+			wrapped = false
+			continue
+		}
+		switch {
+		case len(f) >= 3 && f[0] == "Inst" && strings.HasPrefix(f[2], "["):
+			add(f[1], "升级")
+		case len(f) >= 2 && f[0] == "Remv":
+			add(f[1], "删除")
+		case strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), "transaction summary"):
+			what = ""
+		case l != "" && l[0] != ' ' && strings.HasSuffix(strings.TrimSpace(l), ":"):
+			h := strings.ToLower(l)
+			switch {
+			case strings.Contains(h, "upgrad") || strings.Contains(h, "updat"):
+				what = "升级"
+			case strings.Contains(h, "downgrad"):
+				what = "降级"
+			case strings.Contains(h, "remov") || strings.Contains(h, "eras"):
+				what = "删除"
+			default:
+				what = ""
+			}
+		case what != "" && len(f) > 0 && l[0] == ' ' && f[0] != "replacing" && !strings.HasPrefix(f[0], "="):
+			add(f[0], what)
+			wrapped = len(f) == 1
+		}
+	}
+	return changes
 }
 
 // pickPackages 候选包名里软件源中有的第一个（apt 的索引里一个都没有时先更新索引）；都查不到时用第一个，装的时候报错。
@@ -1160,6 +1271,7 @@ func (a *Agent) swremove() int {
 		}
 	}
 	a.Sys.Systemctl("daemon-reload")
+	a.undoSELinux(in.Name, in.SELinux)
 	if a.req.Purge {
 		a.info(proto.EvSoftware, in.Name, "删除安装目录 %s（含数据）", in.Dir)
 		if err := os.RemoveAll(in.Dir); err != nil {
