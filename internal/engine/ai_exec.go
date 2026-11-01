@@ -16,6 +16,7 @@ import (
 // AIExecTools 编程软件能经 ferry ai-exec 用的工具；值为 true 的是只读的，ferry mcp 自己执行，不用确认。
 var AIExecTools = map[string]bool{
 	"run_command": false, "write_file": false, "software_install": false, "save_software_template": false,
+	"software_upgrade": false, "software_restore": false, "software_backup": false,
 	"software_templates": true, "template_guide": true,
 }
 

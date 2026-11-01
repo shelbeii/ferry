@@ -184,6 +184,7 @@ function askAboutApp(s: AppStatus) {
   openAi(activeTarget.value, parts.join('；') + '。\n请查看它的状态、最近的日志（有需要也看看配置、端口、磁盘），找出原因，告诉我怎么修。先只查看，不要改动。')
 }
 const editorOpen = ref(false)
+const editorUsed = ref(false)
 const keygenOpen = ref(false)
 // 配置免密登录的目标（从本机设置里点的可能不是当前服务器）
 const keygenTarget = ref('')
@@ -342,6 +343,7 @@ function fieldTip(field: string): string {
 function openEditor(field?: string) {
   targetDetails.value = false
   editorFocus.value = field ? ['targets', activeTarget.value, field] : undefined
+  editorUsed.value = true
   editorOpen.value = true
 }
 
@@ -580,7 +582,8 @@ const visibleRows = computed(() => {
   if (f === 'attention') return matching.filter(needsAttention)
   return matching
 })
-watch([table, visibleRows], syncSelection)
+// 工具栏全选在两种布局里共用；列表已挂载时，外部勾选也要同步到表格。
+watch([table, visibleRows, selection], syncSelection)
 
 const stats = computed(() => {
   const r = rows.value
@@ -1069,7 +1072,7 @@ function onSaved() {
           </el-button-group>
           <el-button class="history-btn" :icon="Clock" aria-label="部署历史" title="部署历史" @click="historyOpen = true"><span class="action-label">部署历史</span></el-button>
           <el-checkbox
-            v-if="viewMode === 'card' && visibleRows.length"
+            v-if="visibleRows.length"
             :model-value="allShownSelected"
             :indeterminate="someShownSelected"
             @change="toggleAllShown"
@@ -1360,7 +1363,7 @@ function onSaved() {
       @saved="loadInspect().then(() => loadStatus())"
       @keygen="openKeygen"
     />
-    <ConfigEditor v-if="editorOpen" :path="project.path" :focus="editorFocus" @close="editorOpen = false" @saved="onSaved" />
+    <ConfigEditor v-if="editorUsed" v-model="editorOpen" :path="project.path" :focus="editorFocus" @saved="onSaved" />
     <KeygenDialog
       v-if="keygenOpen && keygenFor && info"
       :config="project.path"

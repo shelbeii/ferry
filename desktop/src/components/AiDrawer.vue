@@ -3,8 +3,8 @@
 // （执行命令、写文件、启停应用、装软件、保存软件模板），但每个改动都先停下来给用户看，用户同意后才执行。
 // 每句话（或每次确认）调用一次 ferry ai，对话的上下文和待确认的操作保存在 ferry 那边（按对话 ID 接着来）。
 // 能看图片的模型可以附图片：粘贴截图、选文件、拖进输入框。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
+import { ElMessage, type PopoverInstance } from 'element-plus'
 import { Promotion, VideoPause, Plus, Setting, CaretRight, CaretBottom, Loading, WarningFilled, Clock, Delete, Cpu, Opportunity, ArrowDown, EditPen, Download, Close, Picture, FullScreen, Lock } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import { call, ferry, isSecretKind, type FerryLine } from '../ferry'
@@ -14,6 +14,7 @@ import { EFFORT_LABELS, effortOptions, addUsage, zeroUsage, usageText, findModel
 import { supportsImages, prepareImage, base64Blob, imageUrl, MAX_IMAGES, type AiImage } from '../ai'
 import GlassPane from './glass/GlassPane.vue'
 import { glass, setVar } from '../glass/runtime'
+import { glassMotionKey } from '../glass/context'
 import GlassSwitch from './glass/GlassSwitch.vue'
 import SecretForm, { type SecretField, type SecretValue } from './SecretForm.vue'
 
@@ -29,6 +30,9 @@ const props = defineProps<{
 }>()
 const expandedPanel = ref(false)
 const open = defineModel<boolean>({ required: true })
+// 首次生成位移图会占用主线程和显卡，滑入/滑出时暂停计算，已有玻璃材质继续复用。
+const moving = ref(true)
+provide(glassMotionKey, moving)
 
 interface Call {
   id: string
@@ -67,7 +71,7 @@ const conv = ref('')
 const box = ref<HTMLElement>()
 const following = ref(true)
 const stopping = ref(false)
-const loadingConversation = ref(false)
+const loadingConversation = ref(true)
 let conversationSeq = 0
 let disposed = false
 let kill: (() => Promise<void>) | undefined
@@ -233,19 +237,26 @@ function measureLayout() {
 function observeLayout() {
   layoutObserver?.disconnect()
   const panel = box.value?.closest<HTMLElement>('.el-drawer')
-  if (!panel || !glass.enabled) return
+  if (!panel) return
   layoutObserver = new ResizeObserver(() => {
-    const atBottom = following.value
-    measureLayout()
-    if (atBottom) scroll()
+    if (glass.enabled) {
+      const atBottom = following.value
+      measureLayout()
+      if (atBottom) scroll()
+    }
+    // 改变抽屉宽度、工具栏换行后，历史仍跟在按钮下面，不留在原来的位置。
+    if (historyOpen.value) void historyPopover.value?.popperRef?.popperInstanceRef?.update()
   })
   for (const selector of ['.el-drawer__header', '.pending-banner', '.ai-input']) {
     const element = panel.querySelector(selector)
     if (element) layoutObserver.observe(element)
   }
-  measureLayout()
+  if (glass.enabled) measureLayout()
 }
-watch([open, () => !!waitingItem.value, () => glass.enabled], () => nextTick(observeLayout), { immediate: true })
+watch([open, () => !!waitingItem.value, () => glass.enabled], () => {
+  if (open.value) nextTick(observeLayout)
+  else layoutObserver?.disconnect()
+}, { immediate: true })
 
 function removeImage(i: number) {
   attachments.value.splice(i, 1)
@@ -531,6 +542,7 @@ defineExpose({ ask })
 
 function newConv() {
   if (running.value) return
+  restored = true // 用户主动新建对话时不再恢复上次的。
   conversationSeq++
   loadingConversation.value = false
   following.value = true
@@ -566,30 +578,42 @@ interface ConvSummary {
 }
 const history = ref<ConvSummary[]>([])
 const historyOpen = ref(false)
+const historyPopover = ref<PopoverInstance>()
 const historyLoading = ref(false)
+const historyReady = ref(false)
 const historyError = ref('')
 const historyQuery = ref('')
 const matchingHistory = computed(() => history.value.filter((h) => (h.title ?? '').toLowerCase().includes(historyQuery.value.trim().toLowerCase())))
 let historySeq = 0
+let historyRequest: Promise<boolean> | undefined
 
-async function loadHistory() {
+function loadHistory(force = false): Promise<boolean> {
+  // 自动恢复对话与打开历史可能同时发生，共用正在进行的读取。
+  if (historyRequest && !force) return historyRequest
   const seq = ++historySeq
   historyLoading.value = true
   historyError.value = ''
-  try {
-    const r = await call<{ items: ConvSummary[] }>(['ai-history', 'list', '-c', props.config, props.target])
-    if (seq !== historySeq) return false
-    history.value = r.items ?? []
-    return true
-  } catch (e) {
-    if (seq === historySeq) historyError.value = (e as Error).message
-    return false
-  } finally {
-    if (seq === historySeq) historyLoading.value = false
-  }
+  historyRequest = (async () => {
+    try {
+      const r = await call<{ items: ConvSummary[] }>(['ai-history', 'list', '-c', props.config, props.target])
+      if (seq !== historySeq || disposed) return false
+      history.value = r.items ?? []
+      historyReady.value = true
+      return true
+    } catch (e) {
+      if (seq === historySeq && !disposed) historyError.value = (e as Error).message
+      return false
+    } finally {
+      if (seq === historySeq) {
+        historyLoading.value = false
+        historyRequest = undefined
+      }
+    }
+  })()
+  return historyRequest
 }
 
-async function openConv(id: string) {
+async function openConv(id: string, closeHistory = true) {
   if (running.value) return
   const seq = ++conversationSeq
   loadingConversation.value = true
@@ -602,7 +626,7 @@ async function openConv(id: string) {
     editing.value = 0
     input.value = ''
     attachments.value = []
-    historyOpen.value = false
+    if (closeHistory) historyOpen.value = false
     scroll(true)
   } catch (e) {
     if (seq !== conversationSeq) return
@@ -615,8 +639,9 @@ async function openConv(id: string) {
 async function deleteConv(id: string) {
   try {
     await call(['ai-history', 'delete', id])
+    history.value = history.value.filter((h) => h.id !== id)
     if (id === conv.value) newConv()
-    await loadHistory()
+    await loadHistory(true)
   } catch (e) {
     ElMessage.error((e as Error).message)
   }
@@ -629,18 +654,36 @@ function when(t: string) {
   return sameDay ? `今天 ${p(d.getHours())}:${p(d.getMinutes())}` : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-// 第一次打开时接着上次的对话
+// 动画结束后再读取、渲染上次的对话，避免把 Markdown 和长列表排版塞进滑入动画。
 let restored = false
-watch(
-  open,
-  async (v) => {
-    if (!v || restored) return
-    restored = true
+function onOpen() {
+  moving.value = true
+  if (!restored) loadingConversation.value = true
+}
+function onOpened() {
+  moving.value = false
+  observeLayout()
+  restoreConversation()
+}
+function onClose() {
+  moving.value = true
+  historyOpen.value = false
+  layoutObserver?.disconnect()
+}
+async function restoreConversation() {
+  if (!open.value || restored || disposed) return
+  restored = true
+  const seq = conversationSeq
+  try {
     const available = await loadHistory()
-    if (available && !items.value.length && !conv.value && history.value.length && !asking) await openConv(history.value[0].id)
-  },
-  { immediate: true },
-)
+    if (seq !== conversationSeq || disposed) return
+    if (!open.value || moving.value) { restored = false; return }
+    // 自动恢复不关闭用户刚打开的历史列表，只有主动选中对话时才收起。
+    if (available && !items.value.length && !conv.value && history.value.length && !asking) await openConv(history.value[0].id, false)
+  } finally {
+    if (seq === conversationSeq) loadingConversation.value = false
+  }
+}
 
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && editing.value) { e.preventDefault(); cancelEdit(); return }
@@ -681,6 +724,12 @@ function callTitle(c: Call): string {
       return `安装软件 ${i.template || '（自定义模板）'}${i.version ? ' ' + i.version : ''}`
     case 'software_control':
       return `${verbs[i.action] ?? i.action}软件 ${i.name}`
+    case 'software_upgrade':
+      return `升级软件 ${i.name}${i.version ? ' 到 ' + i.version : ''}`
+    case 'software_restore':
+      return `恢复软件 ${i.name}`
+    case 'software_backup':
+      return `给 ${i.name} 设置数据备份`
     case 'server_ports':
       return '查看端口和防火墙'
     case 'ssh_sessions':
@@ -759,51 +808,74 @@ function copy(text: string) {
 </script>
 
 <template>
-  <el-drawer v-model="open" direction="rtl" :size="expandedPanel ? 'min(1120px, 94vw)' : 'min(720px, 92vw)'" append-to-body class="ai-drawer" :class="{ 'ai-glass': glass.enabled }">
+  <el-drawer v-model="open" direction="rtl" :size="expandedPanel ? 'min(1120px, 94vw)' : 'min(720px, 92vw)'" append-to-body class="ai-drawer" :class="{ 'ai-glass': glass.enabled }" @open="onOpen" @opened="onOpened" @close="onClose">
     <template #header>
       <div class="ai-head">
-        <span class="ai-title">AI 助手 · {{ title }}</span>
-        <el-tag v-if="production" size="small" type="danger" effect="dark">生产</el-tag>
-        <el-tooltip
-          :show-after="HOVER_DELAY"
-          :content="
-            noChanges
-              ? '配置里设成了不允许 AI 改动这台服务器（aiChanges: false），只能查看'
-              : allowChange
-                ? '助手可以改动服务器，每个改动都先给你看，你同意后才执行'
-                : '助手只查看服务器，不做改动'
-          "
-          placement="bottom"
-        >
-          <GlassSwitch v-model="allowChange" size="small" active-text="允许改动" inactive-text="只读" :disabled="running || noChanges" aria-label="允许 AI 改动服务器" />
-        </el-tooltip>
-        <span class="spacer" />
-        <el-popover v-model:visible="historyOpen" placement="bottom-end" :width="380" trigger="click" :hide-after="0" @show="loadHistory">
-          <template #reference>
-            <el-button text size="small" :icon="Clock" :disabled="running">历史</el-button>
-          </template>
-          <el-input v-model="historyQuery" class="hist-search" placeholder="搜索历史对话" clearable size="small" aria-label="搜索历史对话" />
-          <div v-if="historyLoading" class="muted small hist-empty" role="status">正在读取历史对话…</div>
-          <div v-else-if="historyError" class="small hist-empty"><span class="warn">{{ historyError }}</span><el-button link type="primary" @click="loadHistory">重试</el-button></div>
-          <div v-else-if="!matchingHistory.length" class="muted small hist-empty">{{ historyQuery.trim() ? '没有匹配的对话' : '还没有历史对话' }}</div>
-          <div v-else class="hist">
-            <div v-for="h in matchingHistory" :key="h.id" class="hist-row" :class="{ cur: h.id === conv }" role="button" tabindex="0" @click="openConv(h.id)" @keydown.enter="openConv(h.id)" @keydown.space.prevent="openConv(h.id)">
-              <div class="hist-main">
-                <div class="hist-title">{{ h.title || '（空）' }}</div>
-                <div class="muted small">
-                  {{ when(h.updated) }} · {{ h.messages }} 句<span v-if="h.pending" class="hist-pending"> · 有等确认的操作</span>
+        <div class="ai-title-row">
+          <span class="ai-title el-drawer__title" :title="`AI 助手 · ${title}`">AI 助手 · {{ title }}</span>
+        </div>
+        <div class="ai-toolbar">
+          <div class="ai-permission">
+            <el-tag v-if="production" size="small" type="danger" effect="dark">生产</el-tag>
+            <el-tooltip
+              :show-after="HOVER_DELAY"
+              :content="
+                noChanges
+                  ? '配置里设成了不允许 AI 改动这台服务器（aiChanges: false），只能查看'
+                  : allowChange
+                    ? '助手可以改动服务器，每个改动都先给你看，你同意后才执行'
+                    : '助手只查看服务器，不做改动'
+              "
+              placement="bottom"
+            >
+              <GlassSwitch v-model="allowChange" size="small" active-text="允许改动" inactive-text="只读" :disabled="running || noChanges" aria-label="允许 AI 改动服务器" />
+            </el-tooltip>
+          </div>
+          <div class="ai-actions">
+            <el-popover ref="historyPopover" v-model:visible="historyOpen" popper-class="ai-history-popper" placement="bottom-end" :width="380" trigger="click" :hide-after="0" @before-enter="loadHistory()">
+              <template #reference>
+                <el-button text size="small" :icon="Clock" :disabled="running" :aria-expanded="historyOpen">历史</el-button>
+              </template>
+              <div class="hist-panel">
+                <el-input v-model="historyQuery" class="hist-search" placeholder="搜索历史对话" clearable aria-label="搜索历史对话" />
+                <div class="hist-content" :aria-busy="historyLoading">
+                  <div v-if="!historyReady" class="muted small hist-empty" role="status">
+                    <template v-if="historyError"><span class="warn">{{ historyError }}</span><el-button link type="primary" @click="loadHistory()">重试</el-button></template>
+                    <template v-else><el-icon class="is-loading"><Loading /></el-icon>正在读取历史对话…</template>
+                  </div>
+                  <div v-else-if="!matchingHistory.length" class="muted small hist-empty">{{ historyQuery.trim() ? '没有匹配的对话' : '还没有历史对话' }}</div>
+                  <div v-else class="hist">
+                    <div v-for="h in matchingHistory" :key="h.id" class="hist-row" :class="{ cur: h.id === conv }" role="button" tabindex="0" @click="openConv(h.id)" @keydown.enter="openConv(h.id)" @keydown.space.prevent="openConv(h.id)">
+                      <div class="hist-main">
+                        <div class="hist-title">{{ h.title || '（空）' }}</div>
+                        <div class="muted small">
+                          {{ when(h.updated) }} · {{ h.messages }} 句<span v-if="h.pending" class="hist-pending"> · 有等确认的操作</span>
+                        </div>
+                      </div>
+                      <el-popconfirm title="删除这段历史对话？此操作无法撤销。" confirm-button-text="删除" cancel-button-text="取消" @confirm="deleteConv(h.id)"><template #reference><el-button text size="small" :icon="Delete" :aria-label="`删除对话 ${h.title}`" @click.stop @keydown.stop /></template></el-popconfirm>
+                    </div>
+                  </div>
+                </div>
+                <div class="hist-status muted small" role="status">
+                  <template v-if="historyReady && historyError"><span class="hist-status-text warn" :title="historyError">{{ historyError }}</span><el-button link type="primary" @click="loadHistory()">重试</el-button></template>
+                  <template v-else-if="historyReady && historyLoading"><el-icon class="is-loading"><Loading /></el-icon>正在更新历史…</template>
                 </div>
               </div>
-              <el-popconfirm title="删除这段历史对话？此操作无法撤销。" confirm-button-text="删除" cancel-button-text="取消" @confirm="deleteConv(h.id)"><template #reference><el-button text size="small" :icon="Delete" :aria-label="`删除对话 ${h.title}`" @click.stop @keydown.stop /></template></el-popconfirm>
+            </el-popover>
+            <el-button size="small" type="primary" plain :icon="Plus" :disabled="running" @click="newConv">新对话</el-button>
+            <div class="ai-tools">
+              <el-tooltip :show-after="HOVER_DELAY" content="导出对话为 Markdown" placement="bottom">
+                <el-button text size="small" :icon="Download" :disabled="running || !conv" aria-label="导出对话" @click="exportConv" />
+              </el-tooltip>
+              <el-tooltip :show-after="HOVER_DELAY" content="模型设置" placement="bottom">
+                <el-button text size="small" :icon="Setting" aria-label="模型设置" @click="openSettings" />
+              </el-tooltip>
+              <el-tooltip :show-after="HOVER_DELAY" :content="expandedPanel ? '收窄 AI 面板' : '展开 AI 面板'" placement="bottom">
+                <el-button text size="small" :icon="FullScreen" :aria-label="expandedPanel ? '收窄 AI 面板' : '展开 AI 面板'" :aria-pressed="expandedPanel" @click="expandedPanel = !expandedPanel" />
+              </el-tooltip>
             </div>
           </div>
-        </el-popover>
-        <el-tooltip :show-after="HOVER_DELAY" content="把这个对话导出成 Markdown 文件" placement="bottom">
-          <el-button text size="small" :icon="Download" :disabled="running || !conv" @click="exportConv">导出</el-button>
-        </el-tooltip>
-        <el-button text size="small" :icon="Setting" aria-label="模型设置" @click="openSettings" />
-        <el-button text size="small" :icon="FullScreen" :aria-label="expandedPanel ? '收窄 AI 面板' : '展开 AI 面板'" :aria-pressed="expandedPanel" @click="expandedPanel = !expandedPanel" />
-        <el-button text size="small" :icon="Plus" :disabled="running" @click="newConv">新对话</el-button>
+        </div>
       </div>
       <!-- 放在后面：抽屉标题栏让第一个子元素占满宽度，那得是上面这一行。
            抽屉自己的底色是固定的，不跟着背后内容换深浅（深色代码块滚过时也不会闪） -->
@@ -1027,16 +1099,12 @@ function copy(text: string) {
   font-size: 12px;
   padding: 4px 16px 6px;
 }
-.ai-drawer .el-drawer__header {
-  margin-bottom: 0;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
 .ai-drawer .el-drawer__body {
   padding: 0;
   display: flex;
   flex-direction: column;
 }
+.ai-drawer .el-drawer__header { padding: 18px 20px 14px; }
 /* 液态玻璃：标题栏、提示条、输入框浮在对话上，对话占满整个抽屉、从它们下面滚过（比下面 scoped 的规则多一个类，才能盖过它们） */
 .ai-drawer.ai-glass .el-drawer__header { position: absolute; top: 0; left: 0; right: 0; z-index: 3; border-bottom: 0; }
 .ai-drawer.ai-glass .el-drawer__body { position: relative; }
@@ -1062,13 +1130,61 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
 <style scoped>
 .ai-head {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  min-width: 0;
+  gap: 14px;
+}
+.ai-title-row {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  padding-inline: 40px;
 }
 .ai-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
   color: var(--el-text-color-primary);
+}
+.ai-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+}
+.ai-permission,
+.ai-actions,
+.ai-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ai-permission { flex: none; }
+.ai-actions {
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.ai-head .el-button {
+  height: 32px;
+  margin: 0;
+  padding: 0 10px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.ai-tools {
+  gap: 2px;
+  padding-left: 8px;
+  border-left: 1px solid var(--ferry-overlay-line);
+}
+.ai-tools .el-button {
+  width: 32px;
+  padding: 0;
+  font-size: 15px;
 }
 .spacer {
   flex: 1;
@@ -1408,25 +1524,57 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
 .decision.no {
   color: var(--el-color-danger);
 }
-.hist-search {
+.hist-panel {
   display: flex;
-  margin-bottom: 8px;
+  flex-direction: column;
+  gap: 10px;
+}
+.hist-search { margin: 0; }
+/* 首次读取、刷新、空列表与搜索共用稳定的可视区域，不让弹层缩小后再撑开。 */
+.hist-content {
+  height: min(320px, calc(100dvh - 240px));
+  min-height: 80px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .hist-empty {
-  padding: 8px 4px;
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px 12px;
+  text-align: center;
 }
-.hist {
-  max-height: 360px;
-  overflow: auto;
-  margin: 0;
-  padding: 4px;
-}
-.hist-row {
+.hist-status {
+  height: 24px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border-radius: 4px;
+  gap: 8px;
+  line-height: 20px;
+}
+.hist-status-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.hist {
+  margin: 0;
+  padding: 2px;
+}
+.hist-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 60px;
+  padding: 10px 8px;
+  border-radius: 10px;
   cursor: pointer;
 }
 .hist-row:hover {

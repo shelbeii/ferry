@@ -35,7 +35,7 @@ async function run(action: 'check' | 'save') {
 </script>
 
 <template>
-  <el-dialog :model-value="true" :title="title" width="900px" top="4vh" class="fit-dialog" :close-on-click-modal="false" @close="emit('close')">
+  <el-dialog :model-value="true" :title="title" width="900px" top="4vh" class="fit-dialog" append-to-body :close-on-click-modal="false" @close="emit('close')">
     <el-input v-model="text" type="textarea" :rows="24" class="mono editor" spellcheck="false" />
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="msg" />
     <el-alert v-if="okMsg" type="success" :title="okMsg" :closable="false" show-icon class="msg" />

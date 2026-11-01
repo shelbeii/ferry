@@ -68,3 +68,19 @@ func TestDumpCommandBin(t *testing.T) {
 		t.Errorf("pg 恢复全部库：%s", got)
 	}
 }
+
+func TestCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{max: 10}
+	for i := 0; i < 100; i++ {
+		b.Write([]byte("0123456789"))
+	}
+	b.Write([]byte("END"))
+	if s := b.String(); !strings.HasSuffix(s, "3456789END") || !strings.Contains(s, "993 字节") {
+		t.Errorf("%q", s)
+	}
+	small := &cappedBuffer{max: 10}
+	small.Write([]byte("abc"))
+	if small.String() != "abc" {
+		t.Errorf("%q", small.String())
+	}
+}

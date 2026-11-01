@@ -339,7 +339,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="release ? `日志：${app}（${target}）· 版本 ${release}` : `日志：${app}（${target}）`" :width="expandedLogs ? '96vw' : 'min(1180px, 94vw)'" top="4vh" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="release ? `日志：${app}（${target}）· 版本 ${release}` : `日志：${app}（${target}）`" :width="expandedLogs ? '96vw' : 'min(1180px, 94vw)'" top="4vh" append-to-body @closed="emit('close')">
     <div class="logs-workspace">
     <div class="log-context"><span><i :class="{ live: isCurrent && follow && streaming && !paused }" />{{ loading ? '正在读取日志' : isCurrent && follow ? streaming ? paused ? '显示已暂停' : '持续接收日志' : '接收已结束' : '日志快照' }}</span><span class="muted small">{{ lines.length }} 行已加载<span v-if="paused && buffered"> · {{ buffered }} 行待显示</span></span><el-button v-if="!result && lines.length" size="small" text @click="copyLog">复制日志</el-button><el-button v-if="!result && !around && !stickBottom" size="small" text type="primary" @click="followLatest">回到最新输出</el-button><el-button size="small" text class="expand-logs" @click="expandedLogs = !expandedLogs">{{ expandedLogs ? '还原宽度' : '展开工作区' }}</el-button></div>
     <div class="bar">

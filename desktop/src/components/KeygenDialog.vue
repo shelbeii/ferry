@@ -45,7 +45,7 @@ function start() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`配置免密登录：${target.name}`" width="600px" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="`配置免密登录：${target.name}`" width="600px" append-to-body @closed="emit('close')">
     <ol class="steps">
       <li>在这台电脑上生成一对 ed25519 密钥（已有则复用），默认保存在 Ferry 数据目录的 <span class="mono">keys/{{ project }}-{{ target.name }}_ed25519</span>；</li>
       <li>用下面的密码登录 <span class="mono">{{ target.user }}@{{ target.host }}:{{ target.port }}</span> 一次，把公钥加入该账号的 <span class="mono">~/.ssh/authorized_keys</span>（已有不重复添加，并修正权限）；</li>

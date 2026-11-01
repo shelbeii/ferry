@@ -78,12 +78,30 @@ func patternHitsSensitive(cmd string) bool {
 	return false
 }
 
+// maxBraceWords {a,b} 最多展开成多少个词。
+const maxBraceWords = 256
+
 // expandBraces 展开 {a,b}（像 bash 那样），最多展开几层。
 func expandBraces(w string, depth int) []string {
 	i := strings.Index(w, "{")
 	j := strings.Index(w, "}")
 	if depth > 3 || i < 0 || j < i || !strings.Contains(w[i:j], ",") {
 		return []string{w}
+	}
+	// 先算会展开成多少个：每层几百项、连写几层时会有上亿个，不展开，按原样检查
+	if depth == 0 {
+		n, rest := 1, w
+		for k := 0; k < 4 && n <= maxBraceWords; k++ {
+			a, b := strings.Index(rest, "{"), strings.Index(rest, "}")
+			if a < 0 || b < a {
+				break
+			}
+			n *= strings.Count(rest[a:b], ",") + 1
+			rest = rest[b+1:]
+		}
+		if n > maxBraceWords {
+			return []string{w}
+		}
 	}
 	var out []string
 	for _, part := range strings.Split(w[i+1:j], ",") {

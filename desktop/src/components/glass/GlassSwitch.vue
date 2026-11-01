@@ -44,6 +44,10 @@ const springs = createSprings([
   const solid = element.querySelector<HTMLElement>('.cg-switch-solid')
   const fill = root.value.querySelector<HTMLElement>('.cg-switch-fill')
   if (solid) solid.style.opacity = (1 - Math.min(1, lift * 1.5)).toFixed(3)
+  // 静止时白色的面整个盖住滑块，滑块的磨砂、折射看不见却照样每帧跟着背后重算：不浮起时藏起来
+  const optic = element.querySelector<HTMLElement>(':scope > .cg-optic')
+  const hidden = lift < .004 ? 'hidden' : ''
+  if (optic && optic.style.visibility !== hidden) optic.style.visibility = hidden
   if (fill) fill.style.opacity = Math.min(1, Math.max(0, position)).toFixed(3)
   if (landing && !press && Math.abs(position - springs.target(0)) < .04) {
     landing = false
@@ -95,6 +99,13 @@ function up(event: PointerEvent) {
   press = undefined
   settle(value)
 }
+// 按下被系统打断（pointercancel）不算点击：滑回当前的值，不改
+function cancel(event: PointerEvent) {
+  if (!press || event.pointerId !== press.id) return
+  if (root.value?.hasPointerCapture(event.pointerId)) root.value.releasePointerCapture(event.pointerId)
+  press = undefined
+  slide(props.modelValue, false)
+}
 // 键盘（空格、回车）触发的 click 的 detail 是 0；鼠标点击已经在 pointerup 里处理过
 function click(event: MouseEvent) { if (event.detail === 0 && !blocked.value) settle(!props.modelValue) }
 
@@ -112,7 +123,7 @@ onBeforeUnmount(() => { observer?.disconnect(); springs.stop() })
 <template>
   <button ref="root" type="button" class="cg-switch" :class="[`cg-switch-${size}`, { 'is-on': modelValue, 'has-text': sizer, 'is-loading': loading }]"
     role="switch" :aria-checked="modelValue" :disabled="disabled" :aria-busy="loading || undefined"
-    @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="up" @click="click">
+    @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="cancel" @click="click">
     <span class="cg-switch-track" aria-hidden="true" />
     <span class="cg-switch-fill" aria-hidden="true" />
     <template v-if="sizer">
@@ -120,7 +131,7 @@ onBeforeUnmount(() => { observer?.disconnect(); springs.stop() })
       <span class="cg-switch-text cg-switch-on-text" aria-hidden="true">{{ activeText }}</span>
       <span class="cg-switch-text cg-switch-off-text" aria-hidden="true">{{ inactiveText }}</span>
     </template>
-    <GlassPane ref="thumb" variant="clear" radius="pill" :magnify=".24" class="cg-drop cg-switch-thumb" aria-hidden="true">
+    <GlassPane ref="thumb" variant="clear" radius="pill" :magnify=".24" :adaptive="false" :lit="false" class="cg-drop cg-switch-thumb" aria-hidden="true">
       <span class="cg-switch-solid" />
       <el-icon v-if="loading" class="cg-switch-spin is-loading"><Loading /></el-icon>
     </GlassPane>

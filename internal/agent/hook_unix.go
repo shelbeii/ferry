@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/captain/ferry/internal/safe"
 )
 
 func (realSystem) RunHook(h HookExec, line func(string)) error {
@@ -41,6 +43,7 @@ func (realSystem) RunHook(h HookExec, line func(string)) error {
 	read := make(chan struct{})
 	go func() {
 		defer close(read)
+		defer safe.Recover("读钩子输出", nil)
 		sc := bufio.NewScanner(pr)
 		sc.Buffer(make([]byte, 64<<10), 1<<20)
 		for sc.Scan() {

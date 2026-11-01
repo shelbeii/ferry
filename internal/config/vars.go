@@ -50,6 +50,16 @@ func (sc *Scope) ExpandMap(in map[string]string) (map[string]string, error) {
 	return out, nil
 }
 
+// maxExpanded 一个值展开变量后最长多少。
+const maxExpanded = 1 << 20
+
+func clipText(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
 func (sc *Scope) expand(s string, depth int) (string, error) {
 	if depth > 8 {
 		return "", fmt.Errorf("变量引用层数过多（循环引用？）：%q", s)
@@ -75,6 +85,9 @@ func (sc *Scope) expand(s string, depth int) (string, error) {
 				return "", err
 			}
 			b.WriteString(v)
+			if b.Len() > maxExpanded { // 变量里层层重复引用别的变量时，展开后会成倍变长
+				return "", fmt.Errorf("变量展开后太长（超过 %d KB，是不是层层重复引用了变量？）：%q", maxExpanded>>10, clipText(s, 80))
+			}
 			i += 3 + end
 			continue
 		}

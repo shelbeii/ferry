@@ -42,3 +42,15 @@ func TestAddBackup(t *testing.T) {
 		}
 	}
 }
+
+// 变量层层重复引用：展开到一定长度就报错
+func TestVarsBomb(t *testing.T) {
+	vars := map[string]string{"v0": "x"}
+	for i := 1; i <= 6; i++ {
+		vars["v"+itoa(i)] = strings.Repeat("${v"+itoa(i-1)+"}", 40)
+	}
+	sc := &Scope{Layers: []map[string]string{vars}}
+	if _, err := sc.Expand("${v6}"); err == nil || !strings.Contains(err.Error(), "太长") {
+		t.Errorf("%v", err)
+	}
+}

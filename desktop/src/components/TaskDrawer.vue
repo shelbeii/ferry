@@ -201,7 +201,7 @@ async function clearFinished() {
 </script>
 
 <template>
-  <el-drawer v-model="drawerOpen" title="任务中心" size="min(1080px, 94vw)" direction="rtl">
+  <el-drawer v-model="drawerOpen" title="任务中心" size="min(1080px, 94vw)" direction="rtl" append-to-body>
     <div class="wrap">
       <div class="list">
         <div class="list-head">

@@ -243,16 +243,36 @@ type prefixWriter struct {
 }
 
 func (p *prefixWriter) Write(b []byte) (int, error) {
-	p.buf = append(p.buf, b...)
+	p.buf = splitLines(append(p.buf, b...), func(l string) { p.c.println(p.c.paint(dim, "    │ "+l)) })
+	return len(b), nil
+}
+
+// lineMax 一直不换行的输出最多攒多少就先当一行输出。
+const lineMax = 64 << 10
+
+// splitLines 输出 buf 里完整的行，返回剩下的半行。构建工具常用 \r 刷新同一行的进度（不换行）：
+// 只留最后一次刷新的内容，不然攒着越来越多；一直不换行、超过 lineMax 的先输出。
+func splitLines(buf []byte, emit func(string)) []byte {
 	for {
-		i := strings.IndexByte(string(p.buf), '\n')
+		i := bytes.IndexByte(buf, '\n')
 		if i < 0 {
 			break
 		}
-		p.c.println(p.c.paint(dim, "    │ "+strings.TrimRight(string(p.buf[:i]), "\r")))
-		p.buf = p.buf[i+1:]
+		line := bytes.TrimRight(buf[:i], "\r")
+		if j := bytes.LastIndexByte(line, '\r'); j >= 0 {
+			line = line[j+1:]
+		}
+		emit(string(line))
+		buf = buf[i+1:]
 	}
-	return len(b), nil
+	if j := bytes.LastIndexByte(buf, '\r'); j >= 0 && j < len(buf)-1 {
+		buf = buf[j+1:]
+	}
+	if len(buf) > lineMax {
+		emit(string(buf))
+		buf = nil
+	}
+	return append([]byte(nil), buf...)
 }
 
 func truncate(s string, n int) string {
@@ -330,15 +350,7 @@ type jsonLineWriter struct {
 }
 
 func (w *jsonLineWriter) Write(b []byte) (int, error) {
-	w.buf = append(w.buf, b...)
-	for {
-		i := bytes.IndexByte(w.buf, '\n')
-		if i < 0 {
-			break
-		}
-		w.j.emit("build", map[string]any{"msg": strings.TrimRight(string(w.buf[:i]), "\r")})
-		w.buf = w.buf[i+1:]
-	}
+	w.buf = splitLines(append(w.buf, b...), func(l string) { w.j.emit("build", map[string]any{"msg": l}) })
 	return len(b), nil
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "ferry-desktop",
   "private": true,
-  "version": "0.13.28",
+  "version": "0.13.39",
   "type": "module",
   "scripts": {
     "sidecar": "node scripts/build-sidecar.mjs",

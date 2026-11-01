@@ -14,7 +14,8 @@ const current = computed(() => terminals.find((t) => t.id === activeTerminal.val
 async function close(t: TermTab) {
   if (t.state === 'open') {
     try {
-      await ElMessageBox.confirm(`关闭 ${t.title} 的终端？里面正在运行的命令会被结束。`, '关闭终端', { type: 'warning', confirmButtonText: '关闭' })
+      // 工作台本身固定在窗口内，只滚动内部区域；确认时不改 body 的宽度或滚动状态。
+      await ElMessageBox.confirm(`关闭 ${t.title} 的终端？里面正在运行的命令会被结束。`, '关闭终端', { type: 'warning', confirmButtonText: '关闭', lockScroll: false })
     } catch {
       return
     }

@@ -47,7 +47,7 @@ function newTab() {
 async function closeTab(t: TermTab) {
   if (t.state === 'open') {
     try {
-      await ElMessageBox.confirm(`关闭「${t.title}」？里面正在运行的命令会被结束。`, '关闭终端', { type: 'warning', confirmButtonText: '关闭' })
+      await ElMessageBox.confirm(`关闭「${t.title}」？里面正在运行的命令会被结束。`, '关闭终端', { type: 'warning', confirmButtonText: '关闭', lockScroll: false })
     } catch {
       return
     }
@@ -237,14 +237,5 @@ h2 {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-</style>
-<style>
-.ssh-drawer .el-drawer__header {
-  margin-bottom: 0;
-  padding: 12px 16px;
-}
-.ssh-drawer .el-drawer__body {
-  padding: 12px 16px;
 }
 </style>

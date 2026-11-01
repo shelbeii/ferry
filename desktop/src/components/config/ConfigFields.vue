@@ -352,7 +352,7 @@ const kindText: Record<string, string> = { list: '列表', map: '名字 → 值'
   flex-wrap: wrap;
   align-items: baseline;
   gap: 2px 6px;
-  padding-top: 3px;
+  padding-top: 6px;
 }
 .row:not(.set) .label {
   color: var(--el-text-color-regular);
@@ -375,6 +375,9 @@ const kindText: Record<string, string> = { list: '列表', map: '名字 → 值'
   display: flex;
   align-items: flex-start;
   gap: 6px;
+}
+.row-ctl > .del {
+  margin-top: 6px;
 }
 .del {
   color: var(--el-text-color-secondary);

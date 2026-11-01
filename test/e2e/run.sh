@@ -1188,6 +1188,11 @@ t "密码文件只有 root 能读" ok "root 600 MYSQL_PWD=Mysql-pw123" -- dx a '
 t "现在备份一次" ok "" -- BK backup e2e-a run mysql
 t "用 Ferry 装的 mysqldump、选的账号备份全部库" ok "-u app_user -h 127.0.0.1 -P 13306 --all-databases MYSQL_PWD=Mysql-pw123" -- dx a 'cat /tmp/mysqldump-seen'
 t "备份文件在" ok "mysql-" -- dx a 'ls /opt/e2e/backups/mysql'
+# AI 助手、编程软件（用户同意后桌面版用 ai-exec 执行）：同一个库再设置一次，备份项换个名字
+AIX() { local tool=$1 input=$2; shift 2; FERRY_AI_INPUT="$input" FERRY_HOME="$OUT/home" "$FERRY" -c "${CFG:-$E2E/ferry.yaml}" ai-exec e2e-a "$tool" --scope mcp-e2e; }
+AIXB() { CFG="$OUT/bk.yaml" AIX "$@"; }
+t "ai-exec software_backup：设置数据备份" ok "已在配置的 backups 里加上 mysql-e2e-a" -- AIXB software_backup '{"name":"mysql","database":"shop"}'
+t "备份项是选的库" ok "database: 'shop'" -- cat "$OUT/bk.yaml"
 t "MySQL 在运行" ok "UP" -- health a 13306
 t "第一次启动时设置了 root 密码" ok "ALTER USER 'root'@'localhost' IDENTIFIED BY 'Mysql-pw123'" -- dx a 'cat /tmp/mysql-init-seen.sql'
 t "建了选的账号，有全部权限" ok "GRANT ALL PRIVILEGES ON *.* TO 'app_user'@'localhost' WITH GRANT OPTION" -- dx a 'cat /tmp/mysql-init-seen.sql'
@@ -1218,6 +1223,8 @@ t "数据、改过的配置带到了新版本" ok "keep-me 1" -- dx a "echo \$(c
 t "没有留下旧程序" ok "gone" -- dx a "test -e /opt/ferry-software/nacos-3.2.4/.ferry-old && echo left || echo gone"
 t "列表里是新版本、可以升级" ok '"version":"3.2.5"' -- F software e2e-a --json
 t "已经是这个版本" fail "已经是 3.2.5" -- F software upgrade e2e-a nacos --version 3.2.5
+t "ai-exec software_upgrade：已经是这个版本" fail "已经是 3.2.5" -- AIX software_upgrade '{"name":"nacos","version":"3.2.5"}'
+t "ai-exec software_upgrade：跨大版本要先问用户" fail "major: true" -- AIX software_upgrade '{"name":"nacos","version":"4.0.0"}'
 
 # 告警：开机自启的软件停了要报；在 Ferry 里停掉的（取消了开机自启）不报
 MON e2e-a on --interval 60 >/dev/null 2>&1
@@ -1241,6 +1248,10 @@ t "同名的不能再装" fail "被卸载时保留了数据的软件占着" -- F
 t "恢复" ok "已恢复 sentinel" -- F software restore e2e-a sentinel
 t "恢复后在运行" ok "UP" -- health a 18858
 F software remove e2e-a sentinel >/dev/null 2>&1
+t "ai-exec software_restore：恢复" ok "已恢复并启动" -- AIX software_restore '{"name":"sentinel"}'
+F software remove e2e-a sentinel >/dev/null 2>&1
+t "ai-exec software_install：用模板安装（进度照常显示）" ok '"name": "sentinel-ai"' -- AIX software_install '{"template":"sentinel","version":"1.8.10","name":"sentinel-ai","params":{"port":"18861"}}'
+F software remove e2e-a sentinel-ai --purge >/dev/null 2>&1
 t "删除保留的数据" ok "已卸载 sentinel" -- F software remove e2e-a sentinel --purge
 t "数据删掉了、列表里没有了" ok "gone" -- dx a 'test -e /opt/ferry-software/sentinel-1.8.10 && echo left || echo gone'
 t "删掉数据后本机密码也删了" fail "没有保存" -- F software password e2e-a sentinel

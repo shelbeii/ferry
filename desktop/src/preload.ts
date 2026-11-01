@@ -2,8 +2,9 @@
 // （编辑器、设置有几十到上百毫秒），弹出动画会卡一下。所以启动后等界面空闲，挨个把它们先加载好：
 // 只加载代码、不显示任何东西；之后真正打开时直接用已经加载好的。
 const modules = [
-  () => import('./components/SettingsDialog.vue'),
+  // AI 助手优先，避免排在设置、编辑器这些较大模块后面。
   () => import('./components/AiDrawer.vue'),
+  () => import('./components/SettingsDialog.vue'),
   () => import('./components/ConfigEditor.vue'),
   () => import('./components/DeployDialog.vue'),
   () => import('./components/LogsDialog.vue'),

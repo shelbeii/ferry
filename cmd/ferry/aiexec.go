@@ -21,9 +21,11 @@ func aiExecCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, fail func(erro
 	if len(input) == 0 {
 		input = json.RawMessage("{}")
 	}
+	// 工具执行期间 e.Rep 换成了把进度转给这里的那个（withProgress）：这里要用原来的，不然进度在里面绕圈，直到内存用完
+	rep := e.Rep
 	out, err := e.AIExec(c.pos[0], c.flags["scope"], c.pos[1], input, func(text string) {
 		for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-			e.Rep.Info("%s", l)
+			rep.Info("%s", l)
 		}
 	})
 	if err != nil {

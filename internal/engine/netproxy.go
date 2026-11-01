@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/captain/ferry/internal/safe"
 )
 
 // 经这台电脑下载：服务器连不上软件源时，在服务器上开一个只监听 127.0.0.1 的端口（SSH 反向转发），
@@ -79,7 +81,9 @@ func serveNetProxy(ln net.Listener) *netProxy {
 			MaxIdleConnsPerHost:   8,
 		},
 	}
+	// 代理跑在桌面版的后台进程里：出错只断这一条连接，不能让整个进程退出
 	go func() {
+		defer safe.Recover("下载代理", nil)
 		for {
 			c, err := ln.Accept()
 			if err != nil {
@@ -87,6 +91,7 @@ func serveNetProxy(ln net.Listener) *netProxy {
 			}
 			p.track(c, true)
 			go func() {
+				defer safe.Recover("下载代理的连接", nil)
 				defer p.track(c, false)
 				defer c.Close()
 				p.serve(c)
@@ -181,6 +186,7 @@ func (p *netProxy) tunnel(c net.Conn, br *bufio.Reader, host string) {
 	}
 	done := make(chan struct{}, 2)
 	go func() {
+		defer safe.Recover("下载代理转发", nil)
 		io.Copy(up, br) // 客户端在 CONNECT 后马上发的数据可能已经读进 br 里了
 		if tc, ok := up.(*net.TCPConn); ok {
 			tc.CloseWrite()
@@ -188,6 +194,7 @@ func (p *netProxy) tunnel(c net.Conn, br *bufio.Reader, host string) {
 		done <- struct{}{}
 	}()
 	go func() {
+		defer safe.Recover("下载代理转发", nil)
 		n, _ := io.Copy(c, up)
 		p.bytes.Add(n)
 		done <- struct{}{}

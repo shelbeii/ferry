@@ -177,6 +177,13 @@ function up(event: PointerEvent) {
   press = undefined
   choose(value)
 }
+// 按下被系统打断（pointercancel）不算选择：液滴回到当前选中的一项
+function cancel(event: PointerEvent) {
+  if (!press || event.pointerId !== press.id) return
+  if (trackEl()?.hasPointerCapture(event.pointerId)) trackEl()!.releasePointerCapture(event.pointerId)
+  press = undefined
+  go(model.value)
+}
 function keydown(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
   event.preventDefault()
@@ -208,13 +215,13 @@ watch(model, (value) => go(value))
 
 <template>
   <GlassPane ref="track" variant="regular" radius="pill" class="cg-tabs" role="radiogroup" :aria-label="label"
-    @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="up" @keydown="keydown">
+    @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="cancel" @keydown="keydown">
     <span ref="pill" class="cg-tabs-pill" aria-hidden="true" />
     <button v-for="option in options" :key="option.value" type="button" class="cg-tab" role="radio" :data-value="option.value"
       :aria-checked="model === option.value" :tabindex="model === option.value ? 0 : -1" @click="choose(option.value)">
       <el-icon v-if="option.icon"><component :is="option.icon" /></el-icon>{{ option.label }}
     </button>
-    <GlassPane ref="drop" variant="clear" radius="pill" :dispersion="false" class="cg-drop cg-tabs-drop" aria-hidden="true" />
+    <GlassPane ref="drop" variant="clear" radius="pill" :dispersion="false" :adaptive="false" class="cg-drop cg-tabs-drop" aria-hidden="true" />
     <span ref="view" class="cg-tabs-view" aria-hidden="true">
       <span ref="lens" class="cg-tabs-lens">
         <span v-for="option in options" :key="option.value" class="cg-tab" :aria-checked="model === option.value">

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -52,8 +53,15 @@ type Agent struct {
 	lastMsg    string               // 最近一次返回结果的说明
 }
 
-// Run 执行命令，返回退出码。
-func (a *Agent) Run(cmd string, req *proto.Request) int {
+// Run 执行命令，返回退出码。内部出错（panic）时各步骤的撤销照常执行（defer），并返回失败的结果，
+// 不让本机只看到「agent 没有返回结果」。
+func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "ferry-agent：%s 出现内部错误：%v\n%s", cmd, r, debug.Stack())
+			code = a.result(proto.CodeFailed, fmt.Sprintf("服务器上的 Ferry 组件执行 %s 时出现内部错误：%v（已撤销能撤销的改动；请把任务输出发给开发者）", cmd, r), nil)
+		}
+	}()
 	a.req = req
 	a.cmd = cmd
 	if req.Proto != proto.Version {

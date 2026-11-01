@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/captain/ferry/internal/proto"
+	"github.com/captain/ferry/internal/safe"
 )
 
 // 软件源探测：从软件源装软件前看服务器自己连不连得上它用的软件源（dnf / yum 的 .repo，apt 的 sources），
@@ -193,6 +194,7 @@ func probeHosts(hosts []proto.RepoHost) []proto.RepoHost {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer safe.Recover("探测软件源", nil)
 			h := &hosts[i]
 			addr := net.JoinHostPort(h.Host, strconv.Itoa(h.Port))
 			if h.Scheme != "http" && h.Scheme != "https" {

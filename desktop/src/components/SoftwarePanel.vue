@@ -78,11 +78,37 @@ function onInstalled(t: Task) {
   load()
 }
 
-async function control(row: Software, action: 'start' | 'stop' | 'restart') {
-  const label = { start: '启动', stop: '停止', restart: '重启' }[action]
-	const target=props.target,config=props.config
-	if(row.hosting && action!=='start'){try{await ElMessageBox.confirm(`${label}此 nginx 实例会影响它托管的所有站点。确定继续？`,`${label} nginx`,{type:'warning',confirmButtonText:label})}catch{return}}
-	startTask(`${label} ${target} 上的 ${row.instance}`, ['software', action, target, row.instance!, '-c', config], () => load())
+const controlLabels = { start: '启动', stop: '停止', restart: '重启' }
+type ControlAction = keyof typeof controlLabels
+
+async function confirmControl(row: Software, action: ControlAction, target: string): Promise<boolean> {
+  const label = controlLabels[action]
+  const name = row.instance || row.name
+  const what = row.via === 'docker' ? `容器 ${row.container}` : row.unit ? `系统服务 ${row.unit}` : ''
+  const warn: string[] = []
+  if (action !== 'start') {
+    if (row.hosting) warn.push(`${label}此 nginx 实例会影响它托管的所有站点。`)
+    if (row.kind === 'docker') warn.push(`${label} Docker 会让这台服务器上的全部容器${action === 'stop' ? '停止' : '重启'}。`)
+    if (row.kind === '1panel') warn.push(`${label}期间 1Panel 面板打不开。`)
+    if (row.manager === '1Panel') warn.push('这是 1Panel 装的，1Panel 里会看到状态变化。')
+    if (row.listen?.length) warn.push(`连着它的程序（端口 ${row.listen.map((l) => l.slice(l.lastIndexOf(':') + 1)).join('、')}）会断开。`)
+  }
+  try {
+    await ElMessageBox.confirm(`${label} ${target} 上的 ${name}${what ? `（${what}）` : ''}？${warn.join('')}`, `${label} ${name}`, {
+      type: action === 'start' ? 'info' : 'warning',
+      confirmButtonText: label,
+      cancelButtonText: '取消',
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function control(row: Software, action: ControlAction) {
+  const target = props.target, config = props.config, instance = row.instance!
+  if (!await confirmControl(row, action, target)) return
+  startTask(`${controlLabels[action]} ${target} 上的 ${instance}`, ['software', action, target, instance, '-c', config], () => load())
 }
 
 // ---------------------------------------------------------------- 不是 Ferry 装的：按系统服务或容器启停
@@ -101,26 +127,13 @@ function readonlyWhy(row: Software): string {
   return '只能查看'
 }
 
-async function controlOther(row: Software, action: 'start' | 'stop' | 'restart') {
-  const label = { start: '启动', stop: '停止', restart: '重启' }[action]
+async function controlOther(row: Software, action: ControlAction) {
+  const label = controlLabels[action]
+  const target = props.target, config = props.config
   const what = row.via === 'docker' ? `容器 ${row.container}` : `系统服务 ${row.unit}`
-  if (action !== 'start') {
-    const warn: string[] = []
-    if (row.kind === 'docker') warn.push(`${label} Docker 会让这台服务器上的全部容器${action === 'stop' ? '停止' : '重启'}。`)
-    if (row.kind === '1panel') warn.push(`${label}期间 1Panel 面板打不开。`)
-    if (row.manager === '1Panel') warn.push('这是 1Panel 装的，1Panel 里会看到状态变化。')
-    if (row.listen?.length) warn.push(`连着它的程序（端口 ${row.listen.map((l) => l.slice(l.lastIndexOf(':') + 1)).join('、')}）会断开。`)
-    try {
-      await ElMessageBox.confirm(`${label} ${props.target} 上的 ${row.name}（${what}）？${warn.join('')}`, `${label} ${row.name}`, {
-        type: 'warning',
-        confirmButtonText: label,
-      })
-    } catch {
-      return
-    }
-  }
-  const args = ['software', action, props.target, ...(row.via === 'docker' ? ['--container', row.container!] : ['--unit', row.unit!]), '-y', '-c', props.config]
-  startTask(`${label} ${props.target} 上的 ${row.name}（${what}）`, args, () => load())
+  const args = ['software', action, target, ...(row.via === 'docker' ? ['--container', row.container!] : ['--unit', row.unit!]), '-y', '-c', config]
+  if (!await confirmControl(row, action, target)) return
+  startTask(`${label} ${target} 上的 ${row.name}（${what}）`, args, () => load())
 }
 
 async function showPassword(row: Software) {
@@ -527,7 +540,7 @@ function listenTip(l: string): string {
       @close="logsOf = null"
     />
 
-    <el-dialog v-if="result" :model-value="true" append-to-body title="安装完成" width="560px" @close="result = null">
+    <el-dialog v-if="result" :model-value="true" append-to-body title="安装完成" width="max-content" class="software-info-dialog" @close="result = null">
       <p>
         {{ result.target }} 上已安装 <b>{{ result.name }}</b>（{{ [result.title || result.kind, result.version].filter(Boolean).join(' ') }}），系统服务 <span class="mono">{{ result.unit }}</span>，安装目录
         <span class="mono">{{ result.dir }}</span>。
@@ -557,7 +570,7 @@ function listenTip(l: string): string {
       </template>
     </el-dialog>
 
-    <el-dialog v-if="pwShow" :model-value="true" append-to-body :title="`${pwShow.name} 的${pwShow.account ? '账号和' : ''}密码`" width="460px" @close="pwShow = null">
+    <el-dialog v-if="pwShow" :model-value="true" append-to-body :title="`${pwShow.name} 的${pwShow.account ? '账号和' : ''}密码`" width="max-content" class="software-info-dialog" @close="pwShow = null">
       <div v-if="pwShow.account" class="pw">
         <span>账号：</span>
         <span class="mono pw-val">{{ pwShow.account }}</span>
@@ -619,6 +632,13 @@ function listenTip(l: string): string {
 </template>
 
 <style scoped>
+:global(.el-dialog.software-info-dialog) {
+  min-width: min(460px, calc(100vw - 40px));
+  max-width: min(960px, calc(100vw - 40px));
+}
+:global(.software-info-dialog .el-dialog__body) {
+  overflow-wrap: anywhere;
+}
 .kept {
   display: flex;
   flex-direction: column;
@@ -701,11 +721,17 @@ function listenTip(l: string): string {
   margin: 10px 0 4px;
 }
 .pw-val {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
   font-size: 15px;
   padding: 2px 8px;
   background: var(--el-fill-color-light);
   border-radius: 4px;
   user-select: all;
+}
+.pw > :not(.pw-val) {
+  flex-shrink: 0;
 }
 .notes {
   margin: 8px 0 0;

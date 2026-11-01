@@ -18,7 +18,8 @@ import (
 // 用户填的密码只在 Ferry 里填、只记在桌面版：编程软件只拿到代号，执行时由桌面版换成真值，交回的输出里遮住。
 
 // aiActionTool 请求的操作 → 用服务器助手的哪个工具执行。
-var aiActionTool = map[string]string{"exec": "run_command", "write-file": "write_file", "install": "software_install", "tpl-save": "save_software_template"}
+var aiActionTool = map[string]string{"exec": "run_command", "write-file": "write_file", "install": "software_install", "tpl-save": "save_software_template",
+	"sw-upgrade": "software_upgrade", "sw-restore": "software_restore", "sw-backup": "software_backup"}
 
 type changeCmdIn struct {
 	targetIn
@@ -48,6 +49,28 @@ type swInstallIn struct {
 	AllowChanges bool              `json:"allow_changes,omitempty" jsonschema:"从软件源装包会顺带升级、删除已装的包时也继续。只有上一次安装因此停下、你把要改动的包告诉用户并且用户同意后才填 true"`
 	Params       map[string]string `json:"params,omitempty" jsonschema:"模板参数（如 port、public）；密码不填时自动生成，用户要自己定密码时先用 ask_secret 让用户填，这里写代号 {{secret:名字}}"`
 	Reason       string            `json:"reason" jsonschema:"为什么要装（显示在确认框里）"`
+}
+
+type swUpgradeIn struct {
+	targetIn
+	Name    string `json:"name" jsonschema:"Ferry 装的软件的实例名（server_software 结果里 upgradable 为 true 的 instance）"`
+	Version string `json:"version,omitempty" jsonschema:"要升到的版本；不填 = 最新"`
+	Package string `json:"package,omitempty" jsonschema:"用本机安装包库里的这个文件（software_templates 的 library 里的 file）"`
+	Major   bool   `json:"major,omitempty" jsonschema:"跨大版本升级：只有告诉用户风险、用户同意后才填 true"`
+	Reason  string `json:"reason" jsonschema:"为什么要升级（显示在确认框里）"`
+}
+
+type swRestoreIn struct {
+	targetIn
+	Name   string `json:"name" jsonschema:"卸载时保留了数据的软件的实例名（server_software 结果里 kept 的 name）"`
+	Reason string `json:"reason" jsonschema:"为什么要恢复（显示在确认框里）"`
+}
+
+type swBackupIn struct {
+	targetIn
+	Name     string `json:"name" jsonschema:"Ferry 装的 MySQL、MariaDB、PostgreSQL 的实例名（server_software 里的 instance）"`
+	Database string `json:"database,omitempty" jsonschema:"备份哪个库；不填 = 全部库"`
+	Reason   string `json:"reason" jsonschema:"为什么要设置（显示在确认框里）"`
 }
 
 type tplSaveIn struct {
@@ -125,6 +148,40 @@ func (s *server) addAITools(m *mcp.Server) {
 			input := map[string]any{"template": in.Template, "template_yaml": in.TemplateYAML, "version": in.Version, "name": in.Name, "params": in.Params,
 				"in": in.In, "dir": in.Dir, "package": in.Package, "network": in.Network, "java_dir": in.JavaDir, "allow_changes": in.AllowChanges}
 			return s.aiChange(ctx, req, in.targetIn, "install", input, in.Reason)
+		}))
+
+	addTool(s, m, &mcp.Tool{Name: "software_upgrade", Title: "升级 Ferry 装的软件",
+		Description: "把 Ferry 用安装包装的软件（server_software 里 upgradable 为 true 的）升级到新版本：换掉程序，配置、数据带到新版本，新版本放不上、起不来时自动换回旧版本。" +
+			"version 不填 = 最新；没有下载地址的软件先让用户在 Ferry 里导入新版本的安装包，用 package 指定。跨大版本升级可能不兼容：先告诉用户风险、建议先备份（backup_run），用户同意后再填 major: true。" +
+			"从软件源装的软件不能在这里升级。" + how,
+		Annotations: change()},
+		loggedReq(s, "software_upgrade", func(ctx context.Context, req *mcp.CallToolRequest, in swUpgradeIn) (any, error) {
+			if !reSoftware.MatchString(in.Name) {
+				return nil, fmt.Errorf("软件名称不对：%q（用 server_software 结果里的 instance）", in.Name)
+			}
+			input := map[string]any{"name": in.Name, "version": in.Version, "package": in.Package, "major": in.Major}
+			return s.aiChange(ctx, req, in.targetIn, "sw-upgrade", input, in.Reason)
+		}))
+
+	addTool(s, m, &mcp.Tool{Name: "software_restore", Title: "恢复保留了数据的软件",
+		Description: "恢复卸载时保留了数据的 Ferry 软件（server_software 结果里 kept 列出的）：照原样建回系统服务、启动，密码还是原来的。" + how,
+		Annotations: change()},
+		loggedReq(s, "software_restore", func(ctx context.Context, req *mcp.CallToolRequest, in swRestoreIn) (any, error) {
+			if !reSoftware.MatchString(in.Name) {
+				return nil, fmt.Errorf("软件名称不对：%q（用 server_software 结果里 kept 的 name）", in.Name)
+			}
+			return s.aiChange(ctx, req, in.targetIn, "sw-restore", map[string]any{"name": in.Name}, in.Reason)
+		}))
+
+	addTool(s, m, &mcp.Tool{Name: "software_backup", Title: "给 Ferry 装的数据库设置备份",
+		Description: "给 Ferry 装的 MySQL、MariaDB、PostgreSQL 设置数据备份：在服务器上写好只有 root 能读的备份密码文件，在项目 ferry.yaml 的 backups 里加上一项。" +
+			"加好后要用户在 Ferry 的「数据备份」里打开才按时备份（你不能替用户打开）；现在就要备份一份用 backup_run。" + how,
+		Annotations: change()},
+		loggedReq(s, "software_backup", func(ctx context.Context, req *mcp.CallToolRequest, in swBackupIn) (any, error) {
+			if !reSoftware.MatchString(in.Name) {
+				return nil, fmt.Errorf("软件名称不对：%q（用 server_software 结果里的 instance）", in.Name)
+			}
+			return s.aiChange(ctx, req, in.targetIn, "sw-backup", map[string]any{"name": in.Name, "database": in.Database}, in.Reason)
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "save_software_template", Title: "保存软件模板",

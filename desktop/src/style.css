@@ -159,15 +159,237 @@ html.dark .el-radio-button { --el-radio-button-checked-text-color: #10182b; }
 .el-table td.el-table__cell { padding: 11px 0; }
 .el-table--border .el-table__cell { border-right-color: transparent; }
 .el-table .cell { line-height: 1.6; }
-.el-dialog { display: flex; flex-direction: column; max-width: calc(100vw - 40px); max-height: calc(100dvh - var(--el-dialog-margin-top, 15vh) - 24px); margin-bottom: 24px; padding: 0; border: 1px solid var(--ferry-stroke); border-radius: 16px; box-shadow: 0 24px 80px #0a152b30; overflow: hidden; }
-.el-dialog__header { padding: 22px 60px 18px 24px; margin: 0; border-bottom: 1px solid var(--el-border-color-lighter); }
-.el-dialog__title { font-size: 18px; font-weight: 600; letter-spacing: -.3px; overflow-wrap: anywhere; }
-.el-dialog__headerbtn { top: 12px; right: 12px; }
-.el-dialog__body { min-height: 0; overflow: auto; padding: 22px 24px; }
-.el-dialog__footer { padding: 16px 24px; border-top: 1px solid var(--el-border-color-lighter); background: var(--el-fill-color-light); }
-.el-drawer { border-left: 1px solid var(--ferry-stroke); }
-.el-drawer__header { padding: 20px 24px; margin-bottom: 0; border-bottom: 1px solid var(--el-border-color-lighter); color: var(--el-text-color-primary); font-weight: 600; }
-.el-drawer__body { padding: 20px 24px; }
+/* 所有弹层共用材质和排版；包括挂在 body 上、由 ElMessageBox 创建的确认框和输入框。 */
+:root {
+  --ferry-overlay-radius: 22px;
+  --ferry-overlay-space: 24px;
+  --ferry-overlay-line: var(--el-border-color-lighter);
+  --ferry-overlay-footer: var(--el-fill-color-light);
+  --ferry-overlay-glass: linear-gradient(145deg, rgb(255 255 255 / clamp(.78, calc(.94 * var(--cg-k, 1)), .98)), rgb(242 246 255 / clamp(.7, calc(.86 * var(--cg-k, 1)), .96)));
+  --ferry-overlay-shadow: inset 1px 1.5px 1px -1px rgb(255 255 255 / .95), inset -1px -1px 1px -.5px rgb(255 255 255 / .5), 0 24px 80px -20px rgb(28 42 72 / .32), 0 6px 20px -8px rgb(28 42 72 / .16);
+}
+html.dark {
+  --ferry-overlay-glass: linear-gradient(145deg, rgb(43 53 76 / clamp(.8, calc(.94 * var(--cg-k, 1)), .98)), rgb(21 30 49 / clamp(.74, calc(.88 * var(--cg-k, 1)), .97)));
+  --ferry-overlay-shadow: inset 1px 1.5px 1px -1px rgb(255 255 255 / .34), inset -1px -1px 1px -.5px rgb(255 255 255 / .12), 0 28px 80px -20px rgb(0 0 0 / .64), 0 6px 20px -8px rgb(0 0 0 / .4);
+}
+:is(.el-dialog, .el-message-box, .el-drawer) {
+  box-sizing: border-box;
+  color: var(--el-text-color-regular);
+  border: 1px solid var(--ferry-stroke);
+  border-radius: var(--ferry-overlay-radius);
+  box-shadow: 0 24px 80px -20px rgb(10 21 43 / .3);
+  overflow: hidden;
+}
+.el-dialog {
+  --el-dialog-margin-top: min(8vh, 64px);
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100dvh - var(--el-dialog-margin-top) - 24px);
+  margin-bottom: 24px;
+  padding: 0;
+}
+.el-dialog.is-align-center { max-height: calc(100dvh - 48px); }
+.el-dialog.is-fullscreen { max-width: 100vw; max-height: 100dvh; border-radius: 0; }
+.el-message-box {
+  --el-messagebox-width: 520px;
+  display: inline-flex;
+  flex-direction: column;
+  width: var(--el-messagebox-width);
+  max-width: calc(100vw - 40px);
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+}
+.el-drawer.rtl { border-radius: var(--ferry-overlay-radius) 0 0 var(--ferry-overlay-radius); }
+.el-drawer.ltr { border-radius: 0 var(--ferry-overlay-radius) var(--ferry-overlay-radius) 0; }
+.el-drawer.ttb { border-radius: 0 0 var(--ferry-overlay-radius) var(--ferry-overlay-radius); }
+.el-drawer.btt { border-radius: var(--ferry-overlay-radius) var(--ferry-overlay-radius) 0 0; }
+:is(.el-dialog__header, .el-message-box__header, .el-drawer__header) {
+  flex: none;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 20px 64px 18px;
+  border-bottom: 1px solid var(--ferry-overlay-line);
+  color: var(--el-text-color-primary);
+  text-align: center;
+}
+/* Element Plus 的 show-close 规则有更高优先级，标题也要留足关闭按钮的位置。 */
+:is(.el-dialog__header, .el-message-box__header).show-close { padding-right: 64px; }
+:is(.el-dialog__title, .el-message-box__title, .el-drawer__title) {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: -.3px;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+:is(.el-dialog__headerbtn, .el-message-box__headerbtn, .el-drawer__close-btn) {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 18px;
+  color: var(--el-text-color-secondary);
+}
+:is(.el-dialog__headerbtn, .el-message-box__headerbtn, .el-drawer__close-btn):hover {
+  background: var(--el-color-primary-light-9);
+}
+:is(.el-dialog__body, .el-message-box__content, .el-drawer__body) {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 20px var(--ferry-overlay-space);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.7;
+}
+.el-dialog__body > :first-child { margin-top: 0; }
+.el-dialog__body > :last-child { margin-bottom: 0; }
+.el-message-box__container { align-items: flex-start; gap: 12px; }
+/* 提示图标放在标题栏左侧，正文从内容区左边缘开始；标题两侧留相同空间，始终居中。 */
+.el-message-box__status {
+  position: absolute;
+  top: 20px;
+  left: var(--ferry-overlay-space);
+  margin: 0;
+  font-size: 24px;
+}
+.el-message-box__message { flex: 1; min-width: 0; }
+.el-message-box__message p { line-height: inherit; white-space: pre-wrap; }
+.el-message-box__input { padding-top: 16px; }
+.el-message-box__errormsg { margin-top: 4px; line-height: 1.5; }
+:is(.el-dialog__footer, .el-message-box__btns, .el-drawer__footer) {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px var(--ferry-overlay-space);
+  border-top: 1px solid var(--ferry-overlay-line);
+  background: var(--ferry-overlay-footer);
+  text-align: center;
+}
+:is(.el-dialog__footer, .el-message-box__btns, .el-drawer__footer) > .el-button {
+  min-width: 80px;
+  min-height: 36px;
+  height: auto;
+  margin: 0;
+  padding: 8px 18px;
+  border-radius: 12px;
+  white-space: normal;
+  line-height: 1.4;
+}
+.el-dialog__footer > span { flex-basis: 100%; min-width: 0; margin: 0; text-align: center; overflow-wrap: anywhere; }
+.el-dialog__footer > .preview-footer { width: 100%; flex-wrap: wrap; }
+.el-dialog__body .el-form-item__content { min-width: 0; }
+.el-dialog__body .el-checkbox { height: auto; min-height: 28px; white-space: normal; }
+.el-dialog__body .el-checkbox__label { white-space: normal; line-height: 1.6; }
+
+/* 弹窗统一使用舒适的表单尺寸，不能被各处遗留的 size="small" 压回 24px。 */
+:is(.el-dialog, .el-message-box) .el-input {
+  --el-input-height: 36px;
+  --el-input-inner-height: 24px;
+  font-size: 14px;
+}
+:is(.el-dialog, .el-message-box) .el-input__wrapper { padding: 6px 12px; }
+:is(.el-dialog, .el-message-box) .el-select__wrapper {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 14px;
+  line-height: 24px;
+}
+:is(.el-dialog, .el-message-box) .el-select__input { height: 24px; }
+:is(.el-dialog, .el-message-box) .el-select__selection.is-near { margin-left: 0; }
+:is(.el-dialog, .el-message-box) .el-select .el-tag { height: 24px; padding: 0 8px; font-size: 14px; }
+:is(.el-dialog, .el-message-box) .el-textarea__inner { padding: 8px 12px; font-size: 14px; line-height: 1.6; }
+:is(.el-dialog, .el-message-box) .el-radio-button__inner {
+  min-height: 36px;
+  padding: 8px 16px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.el-dialog .el-form-item__label { height: auto; min-height: 36px; padding-block: 6px; line-height: 24px; }
+.el-dialog .el-form-item__content { min-height: 36px; }
+/* 数字框给两侧加减按钮单独留位，文字不能被按钮盖住；兼容右侧上下排列及隐藏按钮。 */
+:is(.el-dialog, .el-message-box) .el-input-number { --ferry-number-control-width: 32px; line-height: 34px; }
+:is(.el-dialog, .el-message-box) .el-input-number .el-input .el-input__wrapper { padding-inline: calc(var(--ferry-number-control-width) + 8px); }
+:is(.el-dialog, .el-message-box) .el-input-number :is(.el-input-number__increase, .el-input-number__decrease) { width: var(--ferry-number-control-width); font-size: 14px; }
+:is(.el-dialog, .el-message-box) .el-input-number.is-controls-right .el-input .el-input__wrapper { padding-left: 12px; }
+:is(.el-dialog, .el-message-box) .el-input-number.is-controls-right :is(.el-input-number__increase, .el-input-number__decrease) { --el-input-number-controls-height: 17px; height: 17px; line-height: 17px; }
+:is(.el-dialog, .el-message-box) .el-input-number.is-without-controls .el-input .el-input__wrapper { padding-inline: 12px; }
+
+/* 弹层需要读文字、填表单：透明度和磨砂保留下限，背后的内容只透出颜色与轮廓。 */
+html.cg-on {
+  --ferry-overlay-line: rgb(106 126 165 / .14);
+  --ferry-overlay-footer: rgb(237 243 255 / .28);
+}
+html.dark.cg-on {
+  --ferry-overlay-line: rgb(196 211 244 / .12);
+  --ferry-overlay-footer: rgb(12 20 36 / .22);
+}
+html.cg-on .el-overlay {
+  background-color: rgb(23 35 58 / .24);
+}
+html.dark.cg-on .el-overlay { background-color: rgb(3 8 18 / .44); }
+/* Element Plus 弹出、关闭对话框和确认框时，让遮罩和外层整体淡入淡出。外层半透明期间，浏览器不给里面的玻璃做背后的磨砂：
+   背后的文字清楚地透出来，动画结束才突然变模糊。所以遮罩只渐变底色，由弹窗自己淡入淡出（自己半透明不影响磨砂）。
+   位移用 translate，不和可拖动对话框写在 transform 上的位置冲突。 */
+html.cg-on .el-overlay.dialog-fade-enter-active { animation: ferry-mask-in var(--el-transition-duration); }
+html.cg-on .el-overlay.dialog-fade-leave-active { animation: ferry-mask-in var(--el-transition-duration) reverse; }
+html.cg-on .el-overlay.fade-in-linear-enter-from,
+html.cg-on .el-overlay.fade-in-linear-leave-to { opacity: 1; background-color: transparent; }
+html.cg-on .el-overlay:is(.fade-in-linear-enter-active, .fade-in-linear-leave-active) { transition: background-color var(--el-transition-duration) linear; }
+html.cg-on :is(.dialog-fade-enter-active, .dialog-fade-leave-active) .el-overlay-dialog,
+html.cg-on :is(.fade-in-linear-enter-active, .fade-in-linear-leave-active) .el-overlay-message-box { animation: none; }
+html.cg-on :is(.dialog-fade-enter-active .el-dialog, .fade-in-linear-enter-active .el-message-box) { animation: ferry-pop-in var(--el-transition-duration) both; }
+/* 子层比遮罩先结束一帧时也保持透明，避免关闭末尾恢复原样而闪回。 */
+html.cg-on :is(.dialog-fade-leave-active .el-dialog, .fade-in-linear-leave-active .el-message-box) { animation: ferry-pop-in var(--el-transition-duration) reverse both; }
+@keyframes ferry-mask-in { from { background-color: transparent; } }
+@keyframes ferry-pop-in { from { opacity: 0; translate: 0 -20px; } }
+html.cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) {
+  background: var(--ferry-overlay-glass);
+  border-color: rgb(255 255 255 / .56);
+  -webkit-backdrop-filter: blur(max(18px, calc(28px * var(--cg-blur-k, 1)))) saturate(1.6);
+  backdrop-filter: blur(max(18px, calc(28px * var(--cg-blur-k, 1)))) saturate(1.6);
+  box-shadow: var(--ferry-overlay-shadow);
+}
+html.dark.cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) { border-color: rgb(207 223 255 / .16); }
+.el-popper { box-sizing: border-box; max-width: calc(100vw - 24px); }
+/* 整个界面固定在窗口里，body 从不出现滚动条。但 YAML 编辑器把悬停说明的容器挂在 body 最下面（窗口之外），
+   Element Plus 打开弹窗时以为 body 有滚动条，把 body 宽度减去一条滚动条（10px）：主页整体缩一下，关掉又弹回去 */
+body.el-popup-parent--hidden { width: 100% !important; }
+html.cg-on :is(.el-popper, .cm-tooltip) { border-radius: 14px; color: var(--el-text-color-primary); }
+html.cg-on .el-popper .el-popper__arrow { display: none; }
+html.cg-on .el-popover { line-height: 1.7; overflow-wrap: anywhere; }
+.el-popconfirm__main { align-items: flex-start; line-height: 1.6; }
+.el-popconfirm__icon { flex: none; margin-top: 3px; }
+.el-popconfirm__action { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 14px; }
+.el-popconfirm__action .el-button { margin: 0; border-radius: 9px; }
+
+@media (max-width: 600px) {
+  :root { --ferry-overlay-space: 18px; --ferry-overlay-radius: 18px; }
+  :is(.el-dialog__header, .el-message-box__header, .el-drawer__header) { padding-top: 18px; padding-bottom: 16px; }
+  .el-message-box__status { top: 18px; }
+  :is(.el-dialog__body, .el-message-box__content, .el-drawer__body) { padding-top: 18px; padding-bottom: 18px; }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  html.cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) { background: var(--el-bg-color-overlay) !important; }
+}
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  html.cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) {
+    background: var(--el-bg-color-overlay) !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    border-color: var(--el-border-color);
+  }
+}
 .el-alert { border-radius: 9px; }
 .el-empty__description p { max-width: 360px; line-height: 1.8; }
 * { scrollbar-width: thin; scrollbar-color: var(--el-border-color) transparent; }
@@ -292,4 +514,130 @@ html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__poppe
 }
 html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover)[data-popper-placement^=top]:is(.el-zoom-in-top-enter-from, .el-zoom-in-top-leave-active) {
   transform: translateY(6px) scale(.9);
+}
+/* 液态玻璃的分段切换（html.cg-on）：所有 el-radio-button 组成的分段是一条浅色凹槽，选中项是凹槽里一块白色的玻璃选中块
+   （四边各缩进 2px，凹槽和按钮的大小都和原来一样，和旁边的输入框、按钮对齐）；切换时选中块变成一颗清透的液滴滑过去
+   （.cg-seg-drop，见 glass/segments.ts）。液滴放进来之前由选中项的 ::before 画出同样的选中块 */
+html.cg-on .el-radio-group:has(> .el-radio-button) {
+  position: relative;
+  isolation: isolate;
+  border-radius: 10px;
+  /* 透明度调低时 --cg-k 最大为 4，凹槽的灰色不能跟着加深成实心色块。 */
+  background: rgb(118 118 128 / clamp(.1, calc(.16 * var(--cg-k, 1)), .18));
+  box-shadow: inset 0 0 0 .5px rgb(16 24 40 / .08), inset 0 1px 2px rgb(16 24 40 / .06);
+}
+html.dark.cg-on .el-radio-group:has(> .el-radio-button) {
+  background: rgb(0 0 0 / clamp(.16, calc(.26 * var(--cg-k, 1)), .3));
+  box-shadow: inset 0 0 0 .5px rgb(255 255 255 / .08), inset 0 1px 2px rgb(0 0 0 / .25);
+}
+html.cg-on .el-radio-group:has(> .el-radio-button--small) { border-radius: 9px; }
+html.cg-on .el-radio-group > .el-radio-button .el-radio-button__inner,
+html.cg-on .el-radio-group > .el-radio-button:is(:first-child, :last-child) .el-radio-button__inner,
+html.cg-on .el-radio-group > .el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner,
+html.cg-on .el-radio-group > .el-radio-button .el-radio-button__original-radio:disabled + .el-radio-button__inner {
+  border: 0;
+  border-radius: 8px;
+  outline: 0;
+  background: transparent;
+  box-shadow: none !important;
+  color: var(--el-text-color-regular);
+  transition: color .2s;
+}
+html.cg-on .el-radio-group > .el-radio-button .el-radio-button__inner:hover { color: var(--el-text-color-primary); }
+html.cg-on .el-radio-group > .el-radio-button .el-radio-button__original-radio:disabled + .el-radio-button__inner { color: var(--el-disabled-text-color); }
+html.cg-on .el-radio-group > .el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner,
+html.dark.cg-on .el-radio-group > .el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner { color: var(--el-color-primary); }
+html.cg-on .el-radio-group > .el-radio-button .el-radio-button__original-radio:focus-visible + .el-radio-button__inner { outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
+html.cg-on .el-radio-group:not(:has(> .cg-seg-drop.is-on)) > .el-radio-button.is-active:not(:has(input:disabled))::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  z-index: -1;
+  border-radius: 8px;
+}
+html.cg-on .el-radio-group:has(> .el-radio-button--small) > .el-radio-button::before,
+html.cg-on .el-radio-group:has(> .el-radio-button--small) > .cg-seg-drop { border-radius: 7px; }
+/* 选中块：白色底 + 上沿亮边 + 一点投影。液滴（.cg-seg-drop 和里面的 .cg-seg-fill）静止时和它一模一样 */
+html.cg-on .el-radio-group:not(:has(> .cg-seg-drop.is-on)) > .el-radio-button.is-active:not(:has(input:disabled))::before,
+.cg-seg-fill {
+  background: linear-gradient(180deg, rgb(255 255 255 / .98), rgb(246 247 252 / .92));
+  box-shadow:
+    inset 0 .5px 0 rgb(255 255 255 / 1),
+    0 3px 8px -2px rgb(16 24 40 / .16),
+    0 1px 2px rgb(16 24 40 / .08),
+    0 0 0 .5px rgb(16 24 40 / .06);
+}
+html.dark.cg-on .el-radio-group:not(:has(> .cg-seg-drop.is-on)) > .el-radio-button.is-active:not(:has(input:disabled))::before,
+html.dark .cg-seg-fill {
+  background: linear-gradient(180deg, rgb(255 255 255 / .2), rgb(255 255 255 / .12));
+  box-shadow:
+    inset 0 .5px 0 rgb(255 255 255 / .35),
+    0 3px 8px -2px rgb(0 0 0 / .5),
+    0 0 0 .5px rgb(255 255 255 / .08);
+}
+.cg-seg-drop {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: -1;
+  border-radius: 8px;
+  pointer-events: none;
+  visibility: hidden;
+  transform-origin: center;
+  /* 浮起时白底淡去，剩下这层：清透的玻璃，内沿一圈亮边 */
+  background: rgb(255 255 255 / .14);
+  box-shadow:
+    inset 1px 1.5px 1px -1px rgb(255 255 255 / .9),
+    inset -1px -1.5px 1px -1px rgb(255 255 255 / .5),
+    inset 0 0 0 .5px rgb(255 255 255 / .5),
+    0 6px 16px -6px rgb(16 24 40 / .28);
+}
+.cg-seg-drop.is-on { visibility: visible; }
+.cg-seg-fill { position: absolute; inset: 0; border-radius: inherit; }
+html:not(.cg-on) .cg-seg-drop { display: none; }
+html.dark .cg-seg-drop {
+  background: rgb(255 255 255 / .05);
+  box-shadow:
+    inset 1px 1.5px 1px -1px rgb(255 255 255 / .4),
+    inset -1px -1.5px 1px -1px rgb(255 255 255 / .15),
+    inset 0 0 0 .5px rgb(255 255 255 / .14),
+    0 6px 16px -6px rgb(0 0 0 / .6);
+}
+/* 液态玻璃的输入框（html.cg-on）：输入框、多行输入、下拉选择的框是一块浅浅的玻璃：半透明底（跟着「玻璃透明度」，但至少保留一些，
+   免得看不出是输入框），上半部分一层亮光，细边框，圆角大一些；聚焦时主色边框外面再亮一圈。
+   不做背景磨砂：输入框固定在弹窗、页面里，后面没有内容滑过，几十个输入框各自磨砂只会让显卡更忙。
+   校验出错（红框）、禁用的样式仍用 Element Plus 自己的 */
+html.cg-on :is(.el-input, .el-textarea) {
+  --el-input-bg-color: rgb(255 255 255 / max(.32, calc(.7 * var(--cg-k, 1))));
+  --el-input-border-color: rgb(16 24 40 / .12);
+  --el-input-hover-border-color: rgb(16 24 40 / .24);
+  --el-input-border-radius: 9px;
+}
+html.dark.cg-on :is(.el-input, .el-textarea) {
+  --el-input-bg-color: rgb(8 12 22 / max(.24, calc(.5 * var(--cg-k, 1))));
+  --el-input-border-color: rgb(255 255 255 / .12);
+  --el-input-hover-border-color: rgb(255 255 255 / .24);
+}
+html.cg-on :is(.el-input--small, .el-select--small, .el-textarea--small) { --el-input-border-radius: 7px; }
+html.cg-on :is(.el-input__wrapper, .el-textarea__inner, .el-select__wrapper) {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .28), rgb(255 255 255 / 0) 60%);
+}
+html.dark.cg-on :is(.el-input__wrapper, .el-textarea__inner, .el-select__wrapper) {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / .04), rgb(255 255 255 / 0) 60%);
+}
+html.cg-on .el-select__wrapper {
+  border-radius: 9px;
+  background-color: var(--el-input-bg-color, rgb(255 255 255 / max(.32, calc(.7 * var(--cg-k, 1)))));
+  box-shadow: 0 0 0 1px rgb(16 24 40 / .12) inset;
+}
+html.cg-on .el-select--small .el-select__wrapper { border-radius: 7px; }
+html.cg-on .el-select__wrapper.is-hovering:not(.is-focused) { box-shadow: 0 0 0 1px rgb(16 24 40 / .24) inset; }
+html.dark.cg-on .el-select__wrapper { background-color: rgb(8 12 22 / max(.24, calc(.5 * var(--cg-k, 1)))); box-shadow: 0 0 0 1px rgb(255 255 255 / .12) inset; }
+html.dark.cg-on .el-select__wrapper.is-hovering:not(.is-focused) { box-shadow: 0 0 0 1px rgb(255 255 255 / .24) inset; }
+html.cg-on :is(.el-input__wrapper.is-focus, .el-textarea__inner:focus, .el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset, 0 0 0 3px color-mix(in srgb, var(--el-color-primary) 18%, transparent);
+}
+html.cg-on :is(.el-input.is-disabled .el-input__wrapper, .el-textarea.is-disabled .el-textarea__inner, .el-select__wrapper.is-disabled) {
+  background-color: rgb(118 118 128 / .1);
+  background-image: none;
 }

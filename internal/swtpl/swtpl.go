@@ -277,21 +277,34 @@ func (t *Template) Validate() error {
 				return fmt.Errorf("%s：步骤的 sets 要写参数名，没有参数 %s", where, s.Sets)
 			}
 		}
-		// 用到的变量都要有
-		var unknown []string
+		// 用到的变量都要有；随机串不能太长（AI 写错成很大的数时会一下子用掉大量内存）
+		var unknown, badRandom []string
 		walk(&v, func(s string) {
+			for _, m := range reRandom.FindAllStringSubmatch(s, -1) {
+				if n, err := strconv.Atoi(m[2]); err != nil || n < 1 || n > maxRandom {
+					badRandom = append(badRandom, m[0])
+				}
+			}
 			for _, name := range varNames(s) {
 				if !keys[name] && !builtinVars[name] {
 					unknown = append(unknown, name)
 				}
 			}
 		})
+		if len(badRandom) > 0 {
+			return fmt.Errorf("%s：随机串 %s 的长度要写 1～%d", where, strings.Join(dedupe(badRandom), "、"), maxRandom)
+		}
 		if len(unknown) > 0 {
 			return fmt.Errorf("%s：用到了没有定义的变量 %s", where, strings.Join(dedupe(unknown), "、"))
 		}
 	}
 	return nil
 }
+
+// maxRandom ${random:N} 最长多少。
+const maxRandom = 1024
+
+var reRandom = regexp.MustCompile(`\$\{(base64)?random:([^}]*)\}`)
 
 var builtinVars = map[string]bool{"name": true, "dir": true, "user": true, "version": true, "java": true, "package": true, "host": true, "random": true, "base64random": true}
 
@@ -506,42 +519,64 @@ func (vs Vars) Expand(s string) (string, error) {
 	return strings.ReplaceAll(s, escaped, "${"), err
 }
 
+// maxExpanded 一个字符串展开后最长多少：参数值里又层层引用参数时会成倍变长，不能把内存用完。
+const maxExpanded = 4 << 20
+
 func (vs Vars) expandOnce(s string) (string, error) {
 	var err error
+	total := len(s)
 	out := reVar.ReplaceAllStringFunc(s, func(m string) string {
-		e := m[2 : len(m)-1]
-		switch {
-		case strings.HasPrefix(e, "random:"):
-			n, _ := strconv.Atoi(e[7:])
-			return RandomString(n)
-		case strings.HasPrefix(e, "base64random:"):
-			n, _ := strconv.Atoi(e[13:])
-			return base64.StdEncoding.EncodeToString([]byte(RandomString(n)))
+		if total > maxExpanded {
+			return ""
 		}
-		if i := strings.IndexByte(e, '?'); i >= 0 {
-			yes, no, _ := strings.Cut(e[i+1:], "|")
-			if Truthy(vs[strings.TrimSpace(e[:i])]) {
-				return yes
-			}
-			return no
-		}
-		if i := strings.IndexByte(e, '+'); i >= 0 {
-			a, err1 := strconv.Atoi(vs[strings.TrimSpace(e[:i])])
-			b, err2 := strconv.Atoi(strings.TrimSpace(e[i+1:]))
-			if err1 != nil || err2 != nil {
-				err = fmt.Errorf("%s 不是数字", m)
-				return m
-			}
-			return strconv.Itoa(a + b)
-		}
-		v, ok := vs[strings.TrimSpace(e)]
-		if !ok {
-			err = fmt.Errorf("没有变量 %s", m)
-			return m
+		v := vs.expandOne(m, &err)
+		if total += len(v) - len(m); total > maxExpanded {
+			err = fmt.Errorf("展开变量后太长（超过 %d MB，是不是参数里层层重复引用了变量？）", maxExpanded>>20)
+			return ""
 		}
 		return v
 	})
 	return out, err
+}
+
+// expandOne 一个 ${…} 换成的值；不对时把错误记进 err、原样返回。
+func (vs Vars) expandOne(m string, err *error) string {
+	e := m[2 : len(m)-1]
+	switch {
+	case strings.HasPrefix(e, "random:"), strings.HasPrefix(e, "base64random:"):
+		_, ns, _ := strings.Cut(e, ":")
+		n, err1 := strconv.Atoi(ns)
+		if err1 != nil || n < 1 || n > maxRandom {
+			*err = fmt.Errorf("%s：长度要写 1～%d", m, maxRandom)
+			return m
+		}
+		if strings.HasPrefix(e, "base64") {
+			return base64.StdEncoding.EncodeToString([]byte(RandomString(n)))
+		}
+		return RandomString(n)
+	}
+	if i := strings.IndexByte(e, '?'); i >= 0 {
+		yes, no, _ := strings.Cut(e[i+1:], "|")
+		if Truthy(vs[strings.TrimSpace(e[:i])]) {
+			return yes
+		}
+		return no
+	}
+	if i := strings.IndexByte(e, '+'); i >= 0 {
+		a, err1 := strconv.Atoi(vs[strings.TrimSpace(e[:i])])
+		b, err2 := strconv.Atoi(strings.TrimSpace(e[i+1:]))
+		if err1 != nil || err2 != nil {
+			*err = fmt.Errorf("%s 不是数字", m)
+			return m
+		}
+		return strconv.Itoa(a + b)
+	}
+	v, ok := vs[strings.TrimSpace(e)]
+	if !ok {
+		*err = fmt.Errorf("没有变量 %s", m)
+		return m
+	}
+	return v
 }
 
 // Cond if 条件：参数名（为 true 时）或 !参数名（为 false 时）；空 = 总是。

@@ -131,7 +131,7 @@ function keygen(name: string) {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="current ? `本机设置 · ${current.name}` : '本机设置'" width="760px" top="6vh" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="current ? `本机设置 · ${current.name}` : '本机设置'" width="760px" top="6vh" append-to-body @closed="emit('close')">
     <el-skeleton v-if="loading" :rows="5" animated />
     <template v-else-if="rep && current && tf">
       <p class="muted intro">
@@ -234,9 +234,11 @@ h4 {
 }
 .key-line {
   display: flex;
+  align-items: center;
   gap: 8px;
   margin-top: 8px;
 }
+.key-line > .el-button { height: 36px; font-size: 14px; }
 .hint {
   margin-top: 6px;
 }

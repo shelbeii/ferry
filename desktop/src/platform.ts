@@ -207,7 +207,7 @@ export async function writeConfig(path: string, content: string): Promise<void> 
 
 /** 选择 ferry.yaml（浏览器调试时手工输入路径）。 */
 export async function pickConfig(): Promise<string | null> {
-  if (!isTauri) return window.prompt('ferry.yaml 的绝对路径')
+  if (!isTauri) return promptPath('ferry.yaml 的绝对路径')
   const picked = await open({
     title: '选择 ferry.yaml',
     multiple: false,
@@ -238,6 +238,17 @@ export async function storeSet(key: string, value: unknown): Promise<void> {
 
 // ---------------------------------------------------------------- 其他
 
+/** 浏览器调试时也用应用内的输入弹窗，和桌面版保持相同的主题与排版。 */
+async function promptPath(title: string, value = ''): Promise<string | null> {
+  const { ElMessageBox } = await import('element-plus')
+  try {
+    const result = await ElMessageBox.prompt('请输入本机上的路径。', title, { inputValue: value, confirmButtonText: '确定', cancelButtonText: '取消' })
+    return result.value
+  } catch {
+    return null
+  }
+}
+
 /** 在资源管理器 / Finder 中显示（浏览器调试时不可用）。 */
 export async function reveal(path: string): Promise<boolean> {
   if (!isTauri) return false
@@ -249,20 +260,20 @@ export async function reveal(path: string): Promise<boolean> {
 /** 选择文件夹（浏览器调试时手工输入）。 */
 /** 选择一个文件（浏览器调试时手工输入路径）；extensions 为空 = 不限类型（私钥这类没有扩展名的文件）。 */
 export async function pickFile(title: string, name: string, extensions: string[]): Promise<string | null> {
-  if (!isTauri) return window.prompt(title)
+  if (!isTauri) return promptPath(title)
   const picked = await open({ title, multiple: false, directory: false, filters: extensions.length ? [{ name, extensions }] : undefined })
   return picked ? String(picked) : null
 }
 
 /** 选择保存到哪里（浏览器调试时手工输入路径）。 */
 export async function pickSaveFile(title: string, defaultName: string, name: string, extensions: string[]): Promise<string | null> {
-  if (!isTauri) return window.prompt(title, defaultName)
+  if (!isTauri) return promptPath(title, defaultName)
   const picked = await save({ title, defaultPath: defaultName, filters: [{ name, extensions }] })
   return picked ? String(picked) : null
 }
 
 export async function pickDir(title: string): Promise<string | null> {
-  if (!isTauri) return window.prompt(title)
+  if (!isTauri) return promptPath(title)
   const picked = await open({ title, directory: true, multiple: false })
   return picked ? String(picked) : null
 }
@@ -270,7 +281,7 @@ export async function pickDir(title: string): Promise<string | null> {
 /** 选择多个文件或文件夹（浏览器调试时手工输入，多个用 | 分开）。 */
 export async function pickMany(title: string, directory: boolean): Promise<string[]> {
   if (!isTauri) {
-    const v = window.prompt(title)
+    const v = await promptPath(title)
     return v ? v.split('|').map((s) => s.trim()).filter(Boolean) : []
   }
   const picked = await open({ title, directory, multiple: true })

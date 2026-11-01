@@ -486,7 +486,7 @@ async function installCustom() {
     <template #header>
       <div class="head">
         <el-button v-if="view !== 'store'" :icon="ArrowLeft" link @click="view = 'store'">软件池</el-button>
-        <span class="title">
+        <span class="el-dialog__title">
           {{ view === 'store' ? `在 ${target} 上安装软件` : view === 'custom' ? '自定义安装' : tpl?.name }}
         </span>
         <span v-if="osName" class="muted small">这台服务器：{{ osName }}（{{ arch }}）</span>
@@ -734,12 +734,11 @@ async function installCustom() {
 .head {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
+  flex-wrap: wrap;
 }
-.title {
-  font-size: 16px;
-  font-weight: 500;
-}
+.head > .el-dialog__title { flex-basis: 100%; order: -1; }
 .bar {
   display: flex;
   align-items: center;

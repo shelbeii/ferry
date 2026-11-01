@@ -244,7 +244,7 @@ func (e *Engine) aiSystemPrompt(s *session, t *config.Target, mode string) strin
 	if mode == AIConfirm {
 		b.WriteString(`你能做的：
 - 查看：只读命令` + map[bool]string{true: "", false: "、应用状态和日志、已装的软件、端口和防火墙、登录用户、部署前检查、部署会带上线的改动、构建日志"}[t.Plain] + `。这些自动执行。
-- 改动：执行改动服务器的命令、写文件` + map[bool]string{true: "", false: "、部署、启停 / 重启 / 回滚项目里的应用、用软件模板安装软件、启停 Ferry 装的软件、放行 / 关闭端口、打开防火墙、断开 SSH 连接、现在备份"}[t.Plain] + `、保存软件模板。每个改动都会先把完整内容给用户看，用户同意后才执行；用户也可能拒绝。
+- 改动：执行改动服务器的命令、写文件` + map[bool]string{true: "", false: "、部署、启停 / 重启 / 回滚项目里的应用、用软件模板安装软件、启停 / 升级 / 恢复 Ferry 装的软件、给 Ferry 装的数据库设置数据备份、放行 / 关闭端口、打开防火墙、断开 SSH 连接、现在备份"}[t.Plain] + `、保存软件模板。每个改动都会先把完整内容给用户看，用户同意后才执行；用户也可能拒绝。
 
 做法：
 1. 先查清楚现状再动手。动手前用一两句话说明计划（分几步、每步做什么）。
@@ -490,9 +490,10 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			return buf.String(), err
 		},
 	}, ai.Tool{
-		Name:        "list_software",
-		Description: "列出服务器上已有的软件（数据库、缓存、Nacos、Nginx、Docker 容器等，包括 1Panel、宝塔装的）：版本、运行状态、监听端口、运行方式；以及系统、磁盘剩余空间、已占用的端口。",
-		Schema:      schema(map[string]any{}),
+		Name: "list_software",
+		Description: "列出服务器上已有的软件（数据库、缓存、Nacos、Nginx、Docker 容器等，包括 1Panel、宝塔装的）：版本、运行状态、监听端口、运行方式；以及系统、磁盘剩余空间、已占用的端口。" +
+			"Ferry 装的有 instance（实例名），upgradable 为 true 的能用 software_upgrade 升级；kept 是卸载时保留了数据的（能用 software_restore 恢复）；lastInstall 是最近一次安装的结果。",
+		Schema: schema(map[string]any{}),
 		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
 			r, err := e.Software(t.Name)
 			if err != nil {
@@ -619,6 +620,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 	if !change {
 		return tools
 	}
+	tools = append(tools, e.aiSoftwareLife(t)...)
 	return append(tools, ai.Tool{
 		Name:        "app_control",
 		Description: "启动、停止或重启项目里的应用（走 Ferry 的流程：等健康检查通过）。",
@@ -860,6 +862,9 @@ func withProgress(e *Engine, ctx context.Context, fn func() (any, error)) (any, 
 
 var reMode = regexp.MustCompile(`^[0-7]{3,4}$`)
 
+// writeFileDiffMax 写文件前读原文件算差异，最多读这么多。
+const writeFileDiffMax = 2 << 20
+
 // aiWriteFile 写文件：确认时显示和原文件的差异，写之前把原文件备份成 <文件>.ferry-bak-<时间>。
 func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool {
 	sudo := ""
@@ -867,12 +872,18 @@ func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool 
 		sudo = "sudo -n "
 	}
 	type args struct{ Path, Content, Mode string }
-	read := func(p string) (string, bool) {
-		out, res, err := s.c.Output(sudo + "cat -- " + ai.ShellQuote(p) + " 2>/dev/null")
+	// read 原文件（算差异用）：只读普通文件，最多读 writeFileDiffMax 字节；更大的（或 /dev/zero 这种读不完的）当作「太大」，
+	// 不然模型给错路径时会一直读下去，把内存用完
+	read := func(p string) (old string, exists, tooBig bool) {
+		q := ai.ShellQuote(p)
+		out, res, err := s.c.Output(sudo + "sh -c " + ai.ShellQuote(fmt.Sprintf("[ -f %s ] && head -c %d -- %s", q, writeFileDiffMax+1, q)) + " 2>/dev/null")
 		if err != nil || res.Code != 0 {
-			return "", false
+			return "", false, false
 		}
-		return out, true
+		if len(out) > writeFileDiffMax {
+			return "", true, true
+		}
+		return out, true, false
 	}
 	check := func(a args) error {
 		if !strings.HasPrefix(a.Path, "/") {
@@ -905,7 +916,10 @@ func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool 
 			if ap.Once == "" && ai.UsesSecrets(a.Content) {
 				ap.Once = "写入你填的密码"
 			}
-			if old, ok := read(a.Path); ok {
+			if old, ok, big := read(a.Path); big {
+				ap.Detail = fmt.Sprintf("（原文件超过 %d MB，不显示差异）新内容：\n%s", writeFileDiffMax>>20, ai.Clip(a.Content, 8000))
+				ap.Title = "修改文件 " + a.Path
+			} else if ok {
 				if strings.TrimRight(old, "\n") == strings.TrimRight(a.Content, "\n") {
 					return nil // 内容没变：执行时直接告诉模型
 				}
@@ -943,7 +957,7 @@ func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool 
 			if err != nil {
 				return "", err
 			}
-			if old, ok := read(a.Path); ok && strings.TrimRight(old, "\n") == strings.TrimRight(content, "\n") {
+			if old, ok, big := read(a.Path); ok && !big && strings.TrimRight(old, "\n") == strings.TrimRight(content, "\n") {
 				return "内容和原文件一样，不用写。", nil
 			}
 			if !strings.HasSuffix(content, "\n") {

@@ -590,7 +590,7 @@ async function pickKeyDir() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="设置" width="min(1120px, 94vw)" top="4vh" class="settings-dialog" @close="restoreTheme" @closed="emit('close')">
+  <el-dialog v-model="visible" title="设置" width="min(1120px, 94vw)" top="4vh" class="settings-dialog" append-to-body @close="restoreTheme" @closed="emit('close')">
     <div v-if="form && info" class="settings-workspace">
       <aside class="settings-navigation" aria-label="设置分类">
         <el-input v-model="settingsQuery" placeholder="搜索设置" clearable size="small" aria-label="搜索设置分类" />
@@ -1028,8 +1028,8 @@ async function pickKeyDir() {
           </el-form-item>
           <el-form-item label="液态玻璃">
             <div>
-              <GlassToggle v-model="form.ui.glass">项目页顶部的按钮、功能切换，以及 AI 助手的标题栏和输入框用玻璃材质</GlassToggle>
-              <div class="muted small">半透明、会折射背后的内容，按下时有弹性动画；电脑较慢或觉得晃眼时可以关掉，关掉后是普通按钮</div>
+              <GlassToggle v-model="form.ui.glass">按钮、功能切换、所有弹窗和抽屉使用液态玻璃</GlassToggle>
+              <div class="muted small">半透明材质、边缘高光与弹性动画；弹窗保留适度磨砂，方便阅读和填写。电脑较慢或觉得晃眼时可以关掉，恢复实心样式</div>
             </div>
           </el-form-item>
           <el-form-item v-if="form.ui.glass" label="玻璃透明度">

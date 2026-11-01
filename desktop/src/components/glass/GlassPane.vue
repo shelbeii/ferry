@@ -2,8 +2,9 @@
 // 玻璃材质本身。分四层：光学层（对背后的真实内容做磨砂 + 折射 + 提饱和）、染色层、
 // 边缘高光层、内容。内容是普通 DOM，不经过任何滤镜，文字始终清晰。
 // 设置里关掉「液态玻璃效果」时（glass.enabled 为 false）变成普通的实心底，不做任何计算和监听。
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, useId, watch } from 'vue'
+import { computed, inject, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, useId, watch } from 'vue'
 import { cachedLensImage, glass, lensImage, trackLight, trackTone, viewport, type LensImage } from '../../glass/runtime'
+import { glassMotionKey } from '../../glass/context'
 import type { LensSpec } from '../../glass/optics'
 
 const props = withDefaults(defineProps<{
@@ -16,21 +17,28 @@ const props = withDefaults(defineProps<{
   magnify?: number
   /** 根据背后内容的明暗换深浅；液滴这类附在别的玻璃上的不需要 */
   adaptive?: boolean
-  /** 边缘色散；不填跟随全局设置。液滴上关掉：文字边上出彩边会显得糊 */
+  /** 边缘色散：要多算两遍折射。不填时只有 clear（按钮这类小块）有；regular 的大面板（工具栏条、标签栏）没有，
+   *  列表在它们下面滚动时每帧都要重算，色散让滚动的开销多一半，而磨砂后彩边也看不太出来。液滴上关掉：文字边上出彩边会显得糊 */
   dispersion?: boolean
-}>(), { as: 'div', variant: 'regular', radius: 20, magnify: 0, adaptive: true, dispersion: undefined })
+  /** 边缘高光跟着指针转；被别的东西盖住的（开关的滑块静止时盖着白色的面）不需要 */
+  lit?: boolean
+}>(), { as: 'div', variant: 'regular', radius: 20, magnify: 0, adaptive: true, dispersion: undefined, lit: true })
 
 const root = ref<HTMLElement>()
 const beam = ref<HTMLElement>()
 const id = `cg-${useId().replace(/[^\w-]/g, '')}`
 const size = ref({ width: 0, height: 0 })
 const image = ref<LensImage | null>(null)
+const moving = inject(glassMotionKey, ref(false))
+const paused = computed(() => moving.value || viewport.resizing)
 
 const radius = computed(() => {
   const { width, height } = size.value
   return props.radius === 'pill' ? Math.min(width, height) / 2 : Math.min(props.radius, width / 2, height / 2)
 })
+// 动画期间只暂停新贴图的计算，已有滤镜始终保留，避免每次打开都从磨砂切回折射。
 const scale = computed(() => (glass.enabled ? image.value?.scale ?? 0 : 0) * glass.refraction)
+const dispersed = computed(() => glass.dispersion && (props.dispersion ?? props.variant === 'clear'))
 const style = computed(() => ({
   '--cg-r': props.radius === 'pill' && !size.value.height ? '999px' : `${radius.value}px`,
   '--cg-frost-k': String(glass.frost),
@@ -61,6 +69,7 @@ function queueRefresh() {
   const spec = lensSpec()
   const hit = spec && cachedLensImage(spec)
   if (!spec || hit) { image.value = hit ?? null; return }
+  if (paused.value) return
   pending = window.setTimeout(() => {
     pending = undefined
     idle = requestIdleCallback(() => { idle = undefined; refresh() }, { timeout: 300 })
@@ -72,7 +81,7 @@ let untrack: (() => void) | undefined
 function start() {
   const element = root.value
   if (!element || untrack || !glass.enabled) return
-  const unlight = trackLight(element)
+  const unlight = props.lit ? trackLight(element) : () => {}
   const untone = props.adaptive ? trackTone(element) : () => {}
   untrack = () => { unlight(); untone() }
 }
@@ -85,6 +94,8 @@ onMounted(() => {
   observer = new ResizeObserver(() => {
     // 用布局尺寸而不是 getBoundingClientRect：按压、液滴放大用的是 transform，不该触发重算
     const width = element.offsetWidth, height = element.offsetHeight
+    // 抽屉用 display:none 隐藏时保留最后一次有效尺寸，滤镜和圆角下次打开可以直接复用。
+    if (width < 2 || height < 2) return
     if (width !== size.value.width || height !== size.value.height) size.value = { width, height }
   })
   observer.observe(element)
@@ -102,15 +113,12 @@ watch(size, ({ width, height }) => {
   // 高光的锥形渐变要盖住整块玻璃：边长取对角线（尺寸变化时才改，不是每帧）
   const side = `${Math.ceil(Math.hypot(width, height)) + 2}px`
   if (beam.value && beam.value.style.width !== side) beam.value.style.width = beam.value.style.height = side
-  // 正在拖动窗口时折射是关着的（见 runtime.ts 的 viewport）：位移图等停下再换
-  if (viewport.resizing) stale = true
-  else queueRefresh()
-})
-let stale = false
-watch(() => viewport.resizing, (resizing) => {
-  if (resizing || !stale) return
-  stale = false
+  // 优先复用已有贴图，未缓存的尺寸等滑动抽屉或拖动窗口结束再计算。
   queueRefresh()
+})
+watch(paused, (value) => {
+  if (value) cancelRefresh()
+  else queueRefresh()
 })
 watch(() => [props.radius, props.bezel, props.magnify], queueRefresh)
 watch(() => glass.enabled, (on) => {
@@ -127,7 +135,7 @@ defineExpose({ el: root })
     <svg v-if="image && scale > 0" class="cg-defs" aria-hidden="true" focusable="false" width="0" height="0">
       <filter :id="id" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
         <feImage :href="image.url" x="0" y="0" :width="size.width" :height="size.height" preserveAspectRatio="none" result="map" />
-        <template v-if="glass.dispersion && dispersion !== false">
+        <template v-if="dispersed">
           <!-- 色散：三个通道折射量差 ±4%，边缘出现很淡的彩边 -->
           <feDisplacementMap in="SourceGraphic" in2="map" :scale="scale * .96" xChannelSelector="R" yChannelSelector="G" result="shiftR" />
           <feColorMatrix in="shiftR" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="red" />

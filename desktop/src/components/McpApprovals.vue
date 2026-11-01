@@ -21,7 +21,7 @@ interface McpRequest {
   client?: string
   action:
     | 'deploy' | 'start' | 'stop' | 'restart' | 'rollback' | 'sw-start' | 'sw-stop' | 'sw-restart' | 'port-open' | 'port-close' | 'fw-enable' | 'ssh-kick' | 'backup-run' | 'create'
-    | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret'
+    | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret' | 'sw-upgrade' | 'sw-restore' | 'sw-backup'
   project: string
   config: string
   target: string
@@ -77,9 +77,12 @@ const VERBS: Record<string, string> = {
   install: '安装软件',
   'tpl-save': '保存软件模板',
   secret: '填写密码',
+  'sw-upgrade': '升级软件',
+  'sw-restore': '恢复软件',
+  'sw-backup': '设置数据备份',
 }
 // 用服务器助手的工具执行的操作：确认内容按命令、差异整块显示，每次都要确认
-const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save']
+const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save', 'sw-upgrade', 'sw-restore', 'sw-backup']
 const isAI = (r: McpRequest) => AI_ACTIONS.includes(r.action)
 
 const queue = ref<McpRequest[]>([])
@@ -116,7 +119,7 @@ const canGrant = (r: McpRequest) =>
   r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick' && r.action !== 'secret' && !isAI(r)
 const titleOf = (r: McpRequest) => {
   if (r.action === 'create') return `新建项目 ${r.project}`
-  if (r.action.startsWith('sw-')) return `${VERBS[r.action]} ${r.software ?? ''}`
+  if (r.action.startsWith('sw-')) return `${VERBS[r.action]} ${r.software ?? String(r.input?.name ?? '')}`
   if (r.action.startsWith('port-')) return `${VERBS[r.action]} ${r.port ?? ''}`
   if (r.action === 'fw-enable') return VERBS[r.action]
   if (r.action === 'ssh-kick') return `${VERBS[r.action]}（PID ${(r.pids ?? []).join('、')}）`

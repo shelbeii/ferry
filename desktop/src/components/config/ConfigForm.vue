@@ -359,54 +359,58 @@ function isSel(s: Section, key?: string | number) {
         </template>
       </nav>
 
-      <section ref="panel" class="panel">
+      <section class="panel">
         <template v-if="current">
-          <div class="panel-head">
-            <h3>{{ current.title }}</h3>
-            <span class="spacer" />
-            <el-radio-group v-model="onlySet" size="small">
-              <el-radio-button :value="false">全部配置</el-radio-button>
-              <el-radio-button :value="true">只看写了的</el-radio-button>
-            </el-radio-group>
-            <template v-if="sel.s !== 'project'">
-              <el-button v-if="sel.s === 'builds' || sel.s === 'targets'" size="small" :icon="EditPen" @click="renameSel">改名</el-button>
-              <template v-if="sel.s === 'apps' || sel.s === 'backups'">
-                <el-button size="small" :icon="ArrowUp" :disabled="sel.key === 0" title="上移" aria-label="上移" @click="moveSel(-1)" />
-                <el-button size="small" :icon="ArrowDown" :disabled="sel.key === listLen(sel.s) - 1" title="下移" aria-label="下移" @click="moveSel(1)" />
+          <header class="panel-heading">
+            <div class="panel-head">
+              <h3>{{ current.title }}</h3>
+              <span class="spacer" />
+              <el-radio-group v-model="onlySet" size="small">
+                <el-radio-button :value="false">全部配置</el-radio-button>
+                <el-radio-button :value="true">只看写了的</el-radio-button>
+              </el-radio-group>
+              <template v-if="sel.s !== 'project'">
+                <el-button v-if="sel.s === 'builds' || sel.s === 'targets'" size="small" :icon="EditPen" @click="renameSel">改名</el-button>
+                <template v-if="sel.s === 'apps' || sel.s === 'backups'">
+                  <el-button size="small" :icon="ArrowUp" :disabled="sel.key === 0" title="上移" aria-label="上移" @click="moveSel(-1)" />
+                  <el-button size="small" :icon="ArrowDown" :disabled="sel.key === listLen(sel.s) - 1" title="下移" aria-label="下移" @click="moveSel(1)" />
+                </template>
+                <el-button v-if="sel.s === 'apps'" size="small" :icon="CopyDocument" @click="copySel">复制</el-button>
+                <el-button size="small" type="danger" plain :icon="Delete" @click="removeSel">删除</el-button>
               </template>
-              <el-button v-if="sel.s === 'apps'" size="small" :icon="CopyDocument" @click="copySel">复制</el-button>
-              <el-button size="small" type="danger" plain :icon="Delete" @click="removeSel">删除</el-button>
-            </template>
-          </div>
-          <p class="muted desc">{{ current.node.doc }}</p>
-          <div v-if="selErrors.length" class="errs">
-            <div v-for="(e, i) in selErrors" :key="i" class="ev-error">{{ e }}</div>
-          </div>
-          <div v-if="otherErrors > 0" class="muted small other-errs">其他地方还有 {{ otherErrors }} 个问题（左边标了红点）</div>
-          <!-- 项目页：服务器、构建、数据备份、应用在左边单独列，这里也列出来，没写的也看得到 -->
-          <div v-if="sel.s === 'project'" class="overview">
-            <div v-for="sec in sections" :key="sec.s" class="ov-card">
-              <div class="ov-head">
-                <span class="ov-label">{{ sec.label }}</span>
-                <span class="key mono">{{ sec.s }}</span>
-                <span :class="listLen(sec.s) ? 'muted' : schema.fields![sec.s].required ? 'ev-error' : 'muted'" class="small">
-                  {{ listLen(sec.s) ? `${listLen(sec.s)} ${sec.unit}` : schema.fields![sec.s].required ? '还没有，至少要一个' : '还没有' }}
-                </span>
-                <span class="spacer" />
-                <el-button v-if="listLen(sec.s)" size="small" @click="openSection(sec.s)">查看</el-button>
-                <el-button size="small" type="primary" plain :icon="Plus" @click="startAdd(sec.s)">{{ sec.add }}</el-button>
-              </div>
-              <div class="muted small">{{ schema.fields![sec.s].doc }}</div>
             </div>
+            <p class="muted desc">{{ current.node.doc }}</p>
+          </header>
+          <div ref="panel" class="panel-content">
+            <div v-if="selErrors.length" class="errs">
+              <div v-for="(e, i) in selErrors" :key="i" class="ev-error">{{ e }}</div>
+            </div>
+            <div v-if="otherErrors > 0" class="muted small other-errs">其他地方还有 {{ otherErrors }} 个问题（左边标了红点）</div>
+            <!-- 项目页：服务器、构建、数据备份、应用在左边单独列，这里也列出来，没写的也看得到 -->
+            <div v-if="sel.s === 'project'" class="overview">
+              <div v-for="sec in sections" :key="sec.s" class="ov-card">
+                <div class="ov-head">
+                  <span class="ov-label">{{ sec.label }}</span>
+                  <span class="key mono">{{ sec.s }}</span>
+                  <span :class="listLen(sec.s) ? 'muted' : schema.fields![sec.s].required ? 'ev-error' : 'muted'" class="small">
+                    {{ listLen(sec.s) ? `${listLen(sec.s)} ${sec.unit}` : schema.fields![sec.s].required ? '还没有，至少要一个' : '还没有' }}
+                  </span>
+                  <span class="spacer" />
+                  <el-button v-if="listLen(sec.s)" size="small" @click="openSection(sec.s)">查看</el-button>
+                  <el-button size="small" type="primary" plain :icon="Plus" @click="startAdd(sec.s)">{{ sec.add }}</el-button>
+                </div>
+                <div class="muted small">{{ schema.fields![sec.s].doc }}</div>
+              </div>
+            </div>
+            <ConfigFields
+              :key="JSON.stringify(current.path)"
+              :path="current.path"
+              :node="current.node"
+              :app-type="current.appType"
+              :keep="current.path.length"
+              :exclude="sel.s === 'project' ? projectExclude : undefined"
+            />
           </div>
-          <ConfigFields
-            :key="JSON.stringify(current.path)"
-            :path="current.path"
-            :node="current.node"
-            :app-type="current.appType"
-            :keep="current.path.length"
-            :exclude="sel.s === 'project' ? projectExclude : undefined"
-          />
         </template>
       </section>
     </template>
@@ -546,28 +550,47 @@ function isSel(s: Section, key?: string | number) {
 .panel {
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-left: 16px;
+}
+.panel-heading {
+  flex: none;
+  padding: 8px 8px 12px 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--ferry-overlay-line, var(--el-border-color-lighter));
+}
+.panel-content {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 0 8px 24px 16px;
+  scrollbar-gutter: stable;
+  padding: 0 8px 24px 0;
 }
 .panel-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--el-bg-color);
-  padding: 4px 0 6px;
+  min-height: 32px;
+  margin-bottom: 6px;
 }
 .panel-head h3 {
   margin: 0;
   font-size: 16px;
+  color: var(--el-text-color-primary);
+  overflow-wrap: anywhere;
+}
+.panel-head > .el-button {
+  margin-left: 0;
 }
 .panel-head .el-radio-group {
   margin-right: 8px;
 }
 .desc {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 12.5px;
 }
 .errs {

@@ -61,7 +61,8 @@ type statusTaskIn struct {
 var actionNames = map[string]string{"deploy": "部署", "start": "启动", "stop": "停止", "restart": "重启", "rollback": "回滚",
 	"sw-start": "启动软件", "sw-stop": "停止软件", "sw-restart": "重启软件", "port-open": "放行端口", "port-close": "关闭端口",
 	"fw-enable": "打开防火墙", "ssh-kick": "断开 SSH 连接", "backup-run": "现在备份", "create": "新建项目",
-	"exec": "执行命令", "write-file": "写文件", "install": "安装软件", "tpl-save": "保存软件模板", "secret": "填写密码"}
+	"exec": "执行命令", "write-file": "写文件", "install": "安装软件", "tpl-save": "保存软件模板", "secret": "填写密码",
+	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份"}
 
 // reSoftware Ferry 装的软件的名称（安装时的 --name）。
 var reSoftware = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -708,7 +709,13 @@ func opTitle(r approve.Request) string {
 	case r.Action == "create":
 		return "新建项目 " + r.Project + "（" + r.Config + "）"
 	case strings.HasPrefix(r.Action, "sw-"):
-		return actionNames[r.Action] + " " + r.Software + "（" + r.Target + "）"
+		name := r.Software
+		if r.Tool != "" { // 升级、恢复、设置备份：名称在给助手工具的参数里
+			var in struct{ Name string }
+			json.Unmarshal(r.Input, &in)
+			name = in.Name
+		}
+		return actionNames[r.Action] + " " + name + "（" + r.Target + "）"
 	case strings.HasPrefix(r.Action, "port-"):
 		return actionNames[r.Action] + " " + r.Port + "（" + r.Target + "）"
 	case r.Action == "fw-enable" || r.Action == "exec" || r.Action == "install" || r.Action == "tpl-save":

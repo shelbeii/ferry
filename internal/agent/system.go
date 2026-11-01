@@ -253,14 +253,57 @@ func (realSystem) LookupUser(name string) (int, int, error) {
 
 func (realSystem) Lchown(path string, uid, gid int) error { return os.Lchown(path, uid, gid) }
 
+// shellOutputMax 命令输出最多留多少（留最后这些）：输出没完没了的命令不能把 agent 的内存撑满
+// （内存用完时进程直接被杀，撤销步骤来不及执行，会留下装了一半的东西）。
+const shellOutputMax = 8 << 20
+
 func (realSystem) Shell(cmd string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "/bin/sh", "-c", cmd).CombinedOutput()
+	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	out := &cappedBuffer{max: shellOutputMax}
+	c.Stdout, c.Stderr = out, out
+	// 超时时连它启动的子进程一起杀掉；命令结束后，留在后台的子进程还占着输出也最多再等 5 秒，不会一直卡住
+	setPgid(c)
+	c.WaitDelay = 5 * time.Second
+	err := c.Run()
 	if ctx.Err() != nil {
-		return string(out), fmt.Errorf("超时（%s）", timeout)
+		return out.String(), fmt.Errorf("超时（%s）", timeout)
 	}
-	return string(out), err
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil // 命令本身成功结束了，只是后台还有进程开着输出
+	}
+	return out.String(), err
+}
+
+// cappedBuffer 只留最后 max 字节的输出，前面省略的在开头注明。
+type cappedBuffer struct {
+	b       []byte
+	max     int
+	dropped int64
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.b = append(c.b, p...)
+	if len(c.b) > 2*c.max { // 攒到两倍再裁，不用每次都搬
+		cut := len(c.b) - c.max
+		c.dropped += int64(cut)
+		c.b = append(c.b[:0], c.b[cut:]...)
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string {
+	b := c.b
+	dropped := c.dropped
+	if len(b) > c.max {
+		dropped += int64(len(b) - c.max)
+		b = b[len(b)-c.max:]
+	}
+	if dropped > 0 {
+		return fmt.Sprintf("（前面 %d 字节的输出太多，省略了）\n%s", dropped, b)
+	}
+	return string(b)
 }
 
 func (realSystem) Pipe(cmd string, env []string, stdin io.Reader, stdout io.Writer, timeout time.Duration) error {

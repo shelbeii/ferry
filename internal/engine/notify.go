@@ -9,6 +9,7 @@ import (
 
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/notify"
+	"github.com/captain/ferry/internal/safe"
 	"github.com/captain/ferry/internal/secret"
 )
 
@@ -58,6 +59,7 @@ func (e *Engine) sendNotify(ev notify.Event) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer safe.Recover("发部署通知", &errs[i])
 			errs[i] = notify.Send(ctx, t, ev)
 		}()
 	}

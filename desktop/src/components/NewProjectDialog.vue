@@ -868,7 +868,7 @@ const levelIcon = { ok: CircleCheckFilled, warn: WarningFilled, error: CircleClo
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="新建项目" width="min(1080px, 94vw)" top="4vh" class="project-wizard" :close-on-click-modal="false" @closed="emit('close')">
+  <el-dialog v-model="visible" title="新建项目" width="min(1080px, 94vw)" top="4vh" class="project-wizard" append-to-body :close-on-click-modal="false" @closed="emit('close')">
     <el-steps :active="createdPath ? 4 : step" finish-status="success" simple class="steps">
       <el-step title="项目目录" />
       <el-step title="应用" />

@@ -95,7 +95,9 @@ export function lensImage(spec: LensSpec): LensImage | null {
   const canvas = document.createElement('canvas')
   canvas.width = field.width
   canvas.height = field.height
-  const context = canvas.getContext('2d')
+  // 画布默认放在显卡上，toDataURL 要等显卡画完手头的帧再读回来：抽屉滑出时一张小图要等 7～19 毫秒（平时不到 1 毫秒），
+  // 滑出动画因此掉帧。willReadFrequently 让画布留在内存里，编码不用等显卡
+  const context = canvas.getContext('2d', { willReadFrequently: true })
   if (!context) return null
   const image = context.createImageData(field.width, field.height)
   image.data.set(field.pixels)
@@ -108,43 +110,58 @@ export function lensImage(spec: LensSpec): LensImage | null {
 
 // 高光方向跟着指针：玻璃边缘朝向指针的一侧最亮，指针靠近时整体更亮。
 // 所有玻璃共用一个 pointermove 监听，按帧合并更新。只改 transform 和 opacity，
-// 不改 CSS 变量（WebView2 131 每帧改 CSS 变量、同时拖动窗口时会崩溃，见 GlassPane 的样式说明）
+// 不改 CSS 变量（WebView2 131 每帧改 CSS 变量、同时拖动窗口时会崩溃，见 GlassPane 的样式说明）。
+// 高光一变，浏览器就要把这块玻璃的磨砂、折射整个重算一遍（实测指针移动时 GPU 进程占满一个多核，关掉高光后不到十分之一）。
+// 所以只有指针附近（220px 内）的玻璃实时跟着转；远处的等指针停下 0.25 秒后一起转过去（有 0.4 秒过渡）；
+// 指针在弹窗、抽屉上时，被它们盖住的玻璃不动
 const lit = new Map<HTMLElement, { angle: number; near: number; sheen?: HTMLElement; beam?: HTMLElement }>()
-let pointer: { x: number; y: number } | undefined
+let pointer: { x: number; y: number; cover?: Element } | undefined
 let frame: number | undefined
+let rest: number | undefined
+const REACH = 220
+const REST = 250
 
-function paint() {
+function paint(all = false) {
   frame = undefined
   if (!pointer) return
+  let waiting = false
   for (const [element, state] of lit) {
+    // 被指针所在的弹窗盖住：只把亮度退回去，方向不变
+    const covered = !!pointer.cover && !pointer.cover.contains(element)
+    if (covered && !state.near) continue
     const box = element.getBoundingClientRect()
     if (!box.width) continue
+    const dx = Math.max(box.left - pointer.x, 0, pointer.x - box.right)
+    const dy = Math.max(box.top - pointer.y, 0, pointer.y - box.bottom)
+    const near = covered ? 0 : Math.round(Math.max(0, 1 - Math.hypot(dx, dy) / REACH) * 50) / 50
+    if (!near && !state.near && !all) { waiting = true; continue }
     state.sheen ??= element.querySelector<HTMLElement>(':scope > .cg-rim > .cg-sheen') ?? undefined
     state.beam ??= state.sheen?.querySelector<HTMLElement>('.cg-beam') ?? undefined
     if (!state.sheen || !state.beam) continue
-    const cx = box.left + box.width / 2, cy = box.top + box.height / 2
-    let angle = Math.atan2(pointer.x - cx, cy - pointer.y) * 180 / Math.PI
-    // 角度连续变化，过渡时不绕远路
-    while (angle - state.angle > 180) angle -= 360
-    while (angle - state.angle < -180) angle += 360
-    const dx = Math.max(box.left - pointer.x, 0, pointer.x - box.right)
-    const dy = Math.max(box.top - pointer.y, 0, pointer.y - box.bottom)
-    const near = Math.round(Math.max(0, 1 - Math.hypot(dx, dy) / 220) * 50) / 50
-    // 变化很小时不动，免得一直重绘
-    if (Math.abs(angle - state.angle) >= 1) {
-      state.angle = angle
-      state.beam.style.transform = `rotate(${angle.toFixed(1)}deg)`
+    if (!covered) {
+      const cx = box.left + box.width / 2, cy = box.top + box.height / 2
+      let angle = Math.atan2(pointer.x - cx, cy - pointer.y) * 180 / Math.PI
+      // 角度连续变化，过渡时不绕远路
+      while (angle - state.angle > 180) angle -= 360
+      while (angle - state.angle < -180) angle += 360
+      // 变化很小时不动，免得一直重绘
+      if (Math.abs(angle - state.angle) >= 1) {
+        state.angle = angle
+        state.beam.style.transform = `rotate(${angle.toFixed(1)}deg)`
+      }
     }
     if (near !== state.near) {
       state.near = near
       state.sheen.style.opacity = (.62 + .38 * near).toFixed(2)
     }
   }
+  clearTimeout(rest)
+  rest = waiting ? window.setTimeout(() => paint(true), REST) : undefined
 }
 
 function move(event: PointerEvent) {
-  pointer = { x: event.clientX, y: event.clientY }
-  if (frame === undefined) frame = requestAnimationFrame(paint)
+  pointer = { x: event.clientX, y: event.clientY, cover: (event.target as Element | null)?.closest?.('.el-overlay') ?? undefined }
+  if (frame === undefined) frame = requestAnimationFrame(() => paint())
 }
 
 export function trackLight(element: HTMLElement): () => void {
@@ -155,7 +172,8 @@ export function trackLight(element: HTMLElement): () => void {
     if (lit.size) return
     window.removeEventListener('pointermove', move)
     if (frame !== undefined) cancelAnimationFrame(frame)
-    frame = undefined
+    clearTimeout(rest)
+    frame = rest = undefined
   }
 }
 

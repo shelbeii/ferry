@@ -167,3 +167,27 @@ variants:
 		t.Error("未知字段应当报错")
 	}
 }
+
+// 随机串太长：模板通不过检查，展开时也报错（不会一下子用掉大量内存）
+func TestRandomLimit(t *testing.T) {
+	tpl := "id: x\nname: X\nvariants:\n  - user: x\n    system: {dnf: [x]}\n    files: [{path: '${dir}/a', content: '%s'}]\n    service: {exec: /x, ready: {port: '1'}}\n"
+	if _, err := Parse([]byte(fmt.Sprintf(tpl, "${random:24}"))); err != nil {
+		t.Errorf("正常长度：%v", err)
+	}
+	for _, bad := range []string{"${random:99999999999}", "${base64random:0}", "${random:x}"} {
+		if _, err := Parse([]byte(fmt.Sprintf(tpl, bad))); err == nil || !strings.Contains(err.Error(), "长度") {
+			t.Errorf("%s 应当拒绝：%v", bad, err)
+		}
+		if _, err := (Vars{}).Expand(bad); err == nil {
+			t.Errorf("%s 展开时应当报错", bad)
+		}
+	}
+}
+
+// 参数里层层重复引用变量：展开到一定长度就报错，不会把内存用完
+func TestExpandBomb(t *testing.T) {
+	vs := Vars{"a": strings.Repeat("${a}", 100)}
+	if _, err := vs.Expand("${a}"); err == nil || !strings.Contains(err.Error(), "太长") {
+		t.Errorf("%v", err)
+	}
+}

@@ -92,7 +92,7 @@ function start() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="审阅部署" width="820px" top="6vh" @closed="emit('close')">
+  <el-dialog v-model="visible" title="审阅部署" width="820px" top="6vh" append-to-body @closed="emit('close')">
     <div class="deploy-summary"><div><span>目标服务器</span><strong>{{ targets.length }} <small>台</small></strong></div><div><span>本次应用</span><strong>{{ appList.length }} <small>个</small></strong></div><div><span>执行顺序</span><b>预检 → 构建 → 上传 → 切换</b></div></div>
     <el-form label-width="90px">
       <el-form-item label="目标">

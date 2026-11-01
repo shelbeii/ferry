@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { call, NOTIFY_KINDS } from '../ferry'
 import { appSettings, settingsRequest } from '../state'
 import LoadingBlock from './LoadingBlock.vue'
+import GlassToggle from './glass/GlassToggle.vue'
 
 const props = defineProps<{ config: string; target: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -33,6 +34,10 @@ const busy = ref('')
 const checked = ref<Problem[]>()
 const form = reactive({ channels: [] as string[], interval: 5, disk: 90, certDays: 14 })
 const channels = computed(() => (appSettings.value?.notify?.channels ?? []).filter((c) => !c.off))
+
+function setChannel(id: string, enabled: boolean) {
+  form.channels = enabled ? [...new Set([...form.channels, id])] : form.channels.filter((c) => c !== id)
+}
 
 async function run<T>(action: string, extra: string[] = []): Promise<T | undefined> {
   busy.value = action
@@ -97,7 +102,7 @@ const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`服务器告警（${target}）`" width="600px" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="`服务器告警（${target}）`" width="600px" append-to-body @closed="emit('close')">
     <LoadingBlock v-if="!status && !error" :text="`正在连接 ${target}…`" :rows="4" min-height="200px" />
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="block" />
     <template v-if="status">
@@ -121,9 +126,9 @@ const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '
           <div v-if="!channels.length" class="muted small">
             还没有地方发告警：先在<el-button link type="primary" @click="settingsRequest = 'notify'">设置 → 通知</el-button>里添加群机器人
           </div>
-          <el-checkbox-group v-else v-model="form.channels">
-            <el-checkbox v-for="c in channels" :key="c.id" :value="c.id">{{ c.name }}（{{ NOTIFY_KINDS[c.kind] }}）</el-checkbox>
-          </el-checkbox-group>
+          <div v-else class="channel-list" role="group" aria-label="告警接收渠道">
+            <GlassToggle v-for="c in channels" :key="c.id" :model-value="form.channels.includes(c.id)" size="default" :disabled="!!busy" @update:model-value="(enabled: boolean) => setChannel(c.id, enabled)">{{ c.name }}（{{ NOTIFY_KINDS[c.kind] }}）</GlassToggle>
+          </div>
         </el-form-item>
         <!-- 三个数字框左边对齐，单位和说明都放在后面 -->
         <el-form-item label="检查间隔">
@@ -163,6 +168,13 @@ const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '
 }
 .num {
   width: 130px;
+}
+.channel-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding-block: 3px;
 }
 .block {
   margin-bottom: 10px;

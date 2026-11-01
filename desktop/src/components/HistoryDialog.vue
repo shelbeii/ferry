@@ -41,7 +41,7 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`部署历史（${target}）`" width="1000px" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="`部署历史（${target}）`" width="1000px" append-to-body @closed="emit('close')">
     <div>
       <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon />
       <LoadingBlock v-if="loading" :text="`正在连接 ${target}，读取部署历史…`" :rows="10" min-height="60vh" />

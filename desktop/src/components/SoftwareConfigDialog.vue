@@ -14,6 +14,8 @@ const error = ref('')
 const report = ref<SoftwareConfigs>()
 const selected = ref<SoftwareConfigFile>()
 const projectConfig = ref(false)
+const projectConfigUsed = ref(false)
+watch(projectConfig, (open) => { if (open) projectConfigUsed.value = true })
 const identity = computed(() => props.software.instance ? [props.software.instance] : props.software.container ? ['--container', props.software.container] : props.software.unit ? ['--unit', props.software.unit] : ['--pid', String(props.software.pid)])
 const args = (op: string, file?: SoftwareConfigFile) => ['software', 'config', op, props.target, ...identity.value, ...(file ? ['--id', file.id] : [])]
 function handle(e: unknown) {
@@ -69,7 +71,7 @@ watch(() => [props.config, props.target, props.software], () => { selected.value
     <template #footer><el-button v-if="software.manager === 'Ferry' && !software.instance && !config.endsWith('connections.yaml')" @click="projectConfig = true">打开项目配置</el-button><el-button @click="visible = false">关闭</el-button></template>
   </el-dialog>
   <FilePreviewDialog v-if="selected" :key="selected.id" :config="config" :target="target" :path="selected.path" :read-args="args('read', selected)" :save-args="args('save', selected)" :downloadable="false" @close="selected = undefined" @saved="load" />
-  <ConfigEditor v-if="projectConfig" :path="config" @close="projectConfig = false" />
+  <ConfigEditor v-if="projectConfigUsed" v-model="projectConfig" :path="config" />
 </template>
 
 <style scoped>

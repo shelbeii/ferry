@@ -59,7 +59,7 @@ function rowClass({ row }: { row: ReleaseInfo }) {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`${app} 的版本（${target}）`" width="min(1120px, 94vw)" top="6vh" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="`${app} 的版本（${target}）`" width="min(1120px, 94vw)" top="6vh" append-to-body @closed="emit('close')">
     <!-- 加载前后同样的最小高度：对话框不会先撑大再缩小 -->
     <div class="content">
       <LoadingBlock v-if="loading" :text="`正在连接 ${target}，读取 ${app} 的版本…`" :rows="6" min-height="300px" />

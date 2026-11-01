@@ -79,7 +79,7 @@ async function save(connect: boolean) {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="editing ? '修改连接' : '新建连接'" width="520px" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="editing ? '修改连接' : '新建连接'" width="520px" append-to-body @closed="emit('close')">
     <el-form label-width="84px" @submit.prevent>
       <el-form-item label="主机" required>
         <div class="row">

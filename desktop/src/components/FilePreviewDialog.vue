@@ -254,7 +254,8 @@ onBeforeUnmount(() => { disposed = true; cancel() })
 .preview-message { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; box-sizing: border-box; padding: 24px; overflow-y: auto; }
 .preview-message p { max-width: 540px; line-height: 1.7; }
 .preview-message :deep(.el-alert__title) { overflow-wrap: anywhere; }
-.preview-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
+.preview-footer { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; font-size: 12px; }
+.preview-footer > span { flex-basis: 100%; text-align: center; }
 .preview-dirty { color: var(--el-color-warning); }
 .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .compare section { min-width: 0; }

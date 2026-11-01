@@ -44,7 +44,7 @@ async function submit() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="title" width="520px" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="title" width="520px" append-to-body @closed="emit('close')">
     <el-alert
       v-if="rejected"
       type="error"

@@ -194,7 +194,7 @@ const example = `backups:
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`数据备份（${target}）`" width="820px" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="`数据备份（${target}）`" width="820px" append-to-body @closed="emit('close')">
     <LoadingBlock v-if="!status && !error" :text="`正在连接 ${target}…`" :rows="4" min-height="200px" />
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="block">
       <el-button v-if="preRestoreFailed && lastRestore" size="small" type="danger" plain @click="forceRestore(lastRestore)">不备份，照样恢复</el-button>

@@ -12,15 +12,17 @@ import ConfigForm from './config/ConfigForm.vue'
 
 // focus：打开后定位到的字段路径，如 ['targets', 'prod-b', 'root']
 const props = defineProps<{ path: string; focus?: string[] }>()
-const emit = defineEmits<{ close: []; saved: [] }>()
+const emit = defineEmits<{ saved: [] }>()
 
-const visible = ref(true)
+const visible = defineModel<boolean>({ required: true })
 const host = ref<HTMLElement>()
 const editor = shallowRef<FerryEditor>()
 const form = ref<InstanceType<typeof ConfigForm>>()
 const original = ref('')
 const text = ref('')
 const loading = ref(true)
+const loaded = ref(false)
+const refreshing = ref(false)
 const saving = ref(false)
 const loadError = ref('')
 const saveMsg = ref<{ ok: boolean; text: string } | null>(null)
@@ -31,6 +33,13 @@ const focusHint = ref('')
 // 文件原来用 CRLF 换行时，保存时保持（编辑器内部统一用 LF）
 let crlf = false
 let observer: MutationObserver | undefined
+let disposed = false
+let active = false
+let opened = false
+let readSeq = 0
+let idle: number | undefined
+let focusPending = false
+let pendingRead: { raw: string; baseline: string } | { error: string } | undefined
 
 // 「表单」「YAML」两页编辑同一份内容；记住上次用的哪页
 const TAB_KEY = 'ferry.configEditor.tab'
@@ -51,6 +60,7 @@ watch(tab, (t) => {
   if (t === 'yaml') {
     // 隐藏时编辑器量不了尺寸，显示后重新量；还没建好（打开时停在表单页）就现在建
     nextTick(() => {
+      if (!active || !opened) return
       buildEditor()
       editor.value?.view.requestMeasure()
       editor.value?.view.focus()
@@ -60,7 +70,7 @@ watch(tab, (t) => {
 
 // 实时校验：内容经环境变量交给 ferry（不用先保存）；Windows 单个环境变量上限约 32K 字符
 async function validate(content: string): Promise<string | null> {
-  if (content.length > 30000) return null
+  if (!active || content.length > 30000) return null
   checking.value = true
   try {
     const r = await ferry(['validate', '-c', props.path, '--from-env'], undefined, { FERRY_CONFIG_CONTENT: content }).done
@@ -76,10 +86,11 @@ let formTimer: ReturnType<typeof setTimeout> | undefined
 let formSeq = 0
 function checkForm() {
   clearTimeout(formTimer)
+  if (!active || !opened || !loaded.value) return
   formTimer = setTimeout(async () => {
     const seq = ++formSeq
     const err = await validate(text.value)
-    if (seq === formSeq) formErrors.value = err ?? ''
+    if (seq === formSeq && active && !disposed) formErrors.value = err ?? ''
   }, 500)
 }
 watch(text, () => {
@@ -95,13 +106,8 @@ function onFormText(t: string) {
 
 const isDark = () => document.documentElement.classList.contains('dark')
 
-// 表单和编辑器第一次建出来要几十毫秒：等对话框弹出的动画结束再建，动画过程中不做重活，打开时不卡一下
-// （读配置期间本来就盖着「加载中」）。没收到「已打开」也最多等 0.6 秒
-let shown!: () => void
-const opened = Promise.race([new Promise<void>((resolve) => (shown = resolve)), new Promise<void>((resolve) => setTimeout(resolve, 600))])
-
 function buildEditor() {
-  if (editor.value || !host.value || loadError.value || loading.value) return
+  if (!active || !opened || disposed || editor.value || !host.value || !loaded.value) return
   editor.value = createEditor({
     parent: host.value,
     doc: text.value,
@@ -117,39 +123,135 @@ function buildEditor() {
   })
 }
 
-onMounted(async () => {
+// 首次打开才等待文件读取、创建表单；之后保留实例和位置，不再重复显示加载遮罩。
+// 每次打开仍在后台读一次文件，外部改过的内容也能同步；结果等弹出动画结束再应用。
+async function refreshFile() {
+  const seq = ++readSeq
+  const baseline = original.value
+  pendingRead = undefined
+  refreshing.value = true
+  loadError.value = ''
   try {
     const raw = await readConfig(props.path)
-    crlf = raw.includes('\r\n')
-    original.value = raw.replace(/\r\n?/g, '\n')
-    text.value = original.value
+    if (seq !== readSeq || disposed || !active) return
+    pendingRead = { raw, baseline }
   } catch (e) {
-    loadError.value = String(e)
+    if (seq !== readSeq || disposed || !active) return
+    pendingRead = { error: String(e) }
   }
-  await opened
+  await applyRead()
+}
+
+async function applyRead() {
+  if (!opened || !active || !pendingRead) return
+  const result = pendingRead
+  pendingRead = undefined
+  refreshing.value = false
   loading.value = false
+  if ('error' in result) {
+    loadError.value = result.error
+    return
+  }
+  const content = result.raw.replace(/\r\n?/g, '\n')
+  if (loaded.value && content !== result.baseline) {
+    const seq = readSeq
+    // 表单输入到失焦时才提交；先收下仍在输入框里的草稿，再判断能否同步。
+    if (tab.value === 'form') (document.activeElement as HTMLElement | null)?.blur?.()
+    await nextTick()
+    if (seq !== readSeq || !active || !opened || disposed) return
+  }
+  // 后台读文件期间用户可能已经开始编辑，不能用旧快照覆盖刚输入的内容。
+  if (loaded.value && content !== result.baseline && text.value !== result.baseline) {
+    loadError.value = '配置文件已在外部修改，请关闭后重新打开以加载最新内容。当前修改不会自动覆盖文件。'
+    return
+  }
+  crlf = result.raw.includes('\r\n')
+  if (!loaded.value || content !== original.value) {
+    focusPending = !!props.focus?.length
+    original.value = content
+    text.value = content
+    // 文件内容换了，旧的撤销记录也不能带进来。
+    destroyEditor()
+    formErrors.value = ''
+  }
+  loaded.value = true
   await nextTick()
-  if (!host.value || loadError.value) return
-  // YAML 页、或要定位到某个字段时马上建编辑器；停在表单页时编辑器还看不见，等空闲再建（切到 YAML 时也会马上建）
-  if (tab.value === 'yaml' || props.focus?.length) buildEditor()
-  else requestIdleCallback(buildEditor, { timeout: 1000 })
+  prepareContent()
   checkForm()
-  if (props.focus?.length && editor.value) {
-    // 表单里选中那台服务器、闪一下那个字段；YAML 页也先定位好
+}
+
+function prepareContent() {
+  if (!active || !opened || !loaded.value || disposed) return
+  if (tab.value === 'yaml' || props.focus?.length) buildEditor()
+  else if (!editor.value && idle === undefined) idle = requestIdleCallback(() => {
+    idle = undefined
+    buildEditor()
+  }, { timeout: 1000 })
+  editor.value?.view.requestMeasure()
+  if (focusPending && props.focus?.length && editor.value) {
+    focusPending = false
     form.value?.focusPath(props.focus)
-    const loc = locate(original.value, props.focus)
+    const loc = locate(text.value, props.focus)
     if (loc) reveal(editor.value.view, loc)
     if (loc && !loc.found) focusHint.value = `配置里没有设置 ${props.focus.join('.')}，当前用的是默认值`
   } else if (tab.value === 'yaml') editor.value?.view.focus()
+}
+
+watch(visible, (value) => {
+  if (!value) return
+  active = true
+  opened = false
+  focusPending = !!props.focus?.length
+  focusHint.value = ''
+  saveMsg.value = null
+  if (!loaded.value) loading.value = true
+  if (focusPending) tab.value = 'form'
+  void refreshFile()
+}, { immediate: true })
+
+async function onOpened() {
+  opened = true
+  if (pendingRead) await applyRead()
+  else prepareContent()
+}
+
+function onClosing() {
+  active = opened = false
+  ++readSeq
+  ++formSeq
+  pendingRead = undefined
+  refreshing.value = false
+  clearTimeout(formTimer)
+  if (idle !== undefined) cancelIdleCallback(idle)
+  idle = undefined
+}
+
+function destroyEditor() {
+  editor.value?.view.destroy()
+  editor.value = undefined
+}
+
+function onClosed() {
+  // 只在弹窗完全隐藏之后丢弃已确认放弃的修改，退出动画期间保持画面不变。
+  if (text.value !== original.value) {
+    text.value = original.value
+    destroyEditor()
+  }
+  reviewing.value = false
+  visible.value = false
+}
+
+onMounted(() => {
   // 跟随界面主题
   observer = new MutationObserver(() => editor.value?.setDark(isDark()))
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  onClosing()
   observer?.disconnect()
-  clearTimeout(formTimer)
-  editor.value?.view.destroy()
+  destroyEditor()
 })
 
 // ---------------------------------------------------------------- 保存：先看改了什么
@@ -159,7 +261,7 @@ const hunks = computed(() => (reviewing.value ? diffHunks(original.value, text.v
 const changeCount = computed(() => hunks.value.reduce((n, h) => n + h.lines.filter((l) => l.t !== ' ').length, 0))
 
 async function save() {
-  if (saving.value) return
+  if (!active || !loaded.value || refreshing.value || loadError.value || saving.value) return
   // 表单里正在输入的先写回（离开输入框时才写回）
   ;(document.activeElement as HTMLElement | null)?.blur?.()
   await nextTick()
@@ -171,7 +273,7 @@ async function save() {
 }
 
 async function doSave() {
-  if (saving.value) return
+  if (!active || refreshing.value || loadError.value || saving.value) return
   saving.value = true
   saveMsg.value = null
   try {
@@ -223,6 +325,9 @@ function check() {
 }
 
 async function beforeClose(done: () => void) {
+  if (saving.value) return
+  ;(document.activeElement as HTMLElement | null)?.blur?.()
+  await nextTick()
   if (text.value !== original.value) {
     try {
       await ElMessageBox.confirm('有未保存的修改，确定关闭？', '关闭', { type: 'warning' })
@@ -238,6 +343,7 @@ async function beforeClose(done: () => void) {
   <!-- Esc 留给编辑器（关闭补全、搜索）；关闭对话框用右上角，有修改时先确认 -->
   <el-dialog
     v-model="visible"
+    append-to-body
     title="编辑配置"
     width="88%"
     top="3vh"
@@ -245,10 +351,11 @@ async function beforeClose(done: () => void) {
     :close-on-press-escape="false"
     :close-on-click-modal="false"
     class="cfg-dialog"
-    @opened="shown()"
-    @closed="emit('close')"
+    @opened="onOpened"
+    @close="onClosing"
+    @closed="onClosed"
   >
-    <div v-show="!reviewing" @keydown="onKeydown">
+    <div v-show="!reviewing" class="cfg-content" @keydown="onKeydown">
       <div class="bar">
         <el-radio-group v-model="tab" size="small">
           <el-radio-button value="form">表单</el-radio-button>
@@ -262,7 +369,7 @@ async function beforeClose(done: () => void) {
       <el-alert v-if="loadError" type="error" :title="loadError" :closable="false" show-icon />
       <el-alert v-if="focusHint && tab === 'yaml'" type="info" :title="focusHint" show-icon class="hint" @close="focusHint = ''" />
       <div v-loading="loading" class="body">
-        <ConfigForm v-if="!loading && !loadError" v-show="tab === 'form'" ref="form" :text="text" :errors="formErrors" @update:text="onFormText" />
+        <ConfigForm v-if="loaded" v-show="tab === 'form'" ref="form" :text="text" :errors="formErrors" @update:text="onFormText" />
         <div v-show="tab === 'yaml'" class="editor-wrap">
           <div ref="host" class="editor-host" />
         </div>
@@ -291,7 +398,7 @@ async function beforeClose(done: () => void) {
       <span v-if="saveMsg" :class="saveMsg.ok ? 'ev-ok' : 'ev-error'" class="foot-msg">{{ saveMsg.text }}</span>
       <span v-else class="muted foot-tip">密码等敏感信息不要写进配置</span>
       <el-button :disabled="text === original" @click="restore">撤销全部修改</el-button>
-      <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+      <el-button type="primary" :loading="saving" :disabled="!loaded || refreshing || !!loadError" @click="save">保存</el-button>
       </template>
     </template>
 
@@ -314,11 +421,26 @@ async function beforeClose(done: () => void) {
 </template>
 
 <style scoped>
+:global(.cfg-dialog) {
+  height: min(1000px, 94dvh);
+}
+:global(.cfg-dialog .el-dialog__body) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cfg-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .inline-review { height: clamp(180px, calc(100dvh - 250px), 55vh); min-height: 0; display: flex; flex-direction: column; }
 .inline-review .diff { flex: 1; min-height: 0; max-height: none; }
 .inline-review h3 { margin: 0 0 10px; font-size: 16px; }
 .bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin: -6px 0 8px;
@@ -337,7 +459,8 @@ async function beforeClose(done: () => void) {
   flex: 1;
 }
 .body {
-  height: clamp(160px, calc(100dvh - 270px), 66vh);
+  flex: 1;
+  min-height: 0;
 }
 .editor-wrap {
   height: 100%;

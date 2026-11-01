@@ -24,6 +24,7 @@ import (
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/engine"
 	"github.com/captain/ferry/internal/proto"
+	"github.com/captain/ferry/internal/safe"
 	"github.com/captain/ferry/internal/settings"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -40,7 +41,7 @@ const instructions = `Ferry 是把后端（Java、Go 等原生程序、Python、
   list_projects 里的 machine 是这台电脑上缺的东西（别的电脑上的私钥、源码目录），要用户在 Ferry 的「本机设置」里补上。
 - 改动服务器：deploy 部署（先在本机构建）、app_control 启动 / 停止 / 重启、rollback 回滚。用户在 Ferry 设置里打开了「允许编程软件请求改动」才能用，
   每次都要用户确认（在 Ferry 桌面版弹窗，或者用户设置了在编程软件里确认时在这里），用户同意后由桌面版执行（最多等 5 分钟确认）；生产服务器不允许。用户拒绝后不要换个办法做同样的事，先问用户。
-  run_change_command 执行改动服务器的命令，write_file 写文件（改配置文件用它，确认时显示差异、自动备份原文件），software_templates / software_install 用模板装软件，
+  run_change_command 执行改动服务器的命令，write_file 写文件（改配置文件用它，确认时显示差异、自动备份原文件），software_templates / software_install 用模板装软件，software_upgrade 升级、software_restore 恢复卸载时保留了数据的、software_backup 给装好的数据库设置数据备份（Ferry 装的软件），
   template_guide / save_software_template 写、存软件模板；要用户提供密码、账号时用 ask_secret（用户在 Ferry 里填，你只拿到代号 {{secret:名字}}，
   命令里用环境变量 "$FERRY_SECRET_<名字大写>"，写文件、装软件的参数里写代号），不要让用户在对话里发密码。
   backup_run 现在备份一次（改数据库、数据目录前先备份）。打开 / 关闭告警和数据备份、恢复备份只能由用户在 Ferry 里做。
@@ -146,7 +147,8 @@ func newServer(o Options) (*server, *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "server_software", Title: "服务器上的软件",
 		Description: "某台服务器上已有的软件（MySQL、Redis、Nacos、Nginx、Docker 容器等，包括 1Panel、宝塔装的）：版本、运行状态、监听端口、运行方式；" +
-			"以及系统版本、磁盘剩余空间、已占用的端口。",
+			"以及系统版本、磁盘剩余空间、已占用的端口。Ferry 装的有 instance（实例名），upgradable 为 true 的能用 software_upgrade 升级；" +
+			"kept 是卸载时保留了数据的（能用 software_restore 恢复）；lastInstall 是最近一次安装的结果（连接断开没拿到结果时看它）。",
 		Annotations: readOnly},
 		logged(s, "server_software", func(ctx context.Context, in targetIn) (any, error) {
 			return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
@@ -468,7 +470,11 @@ func clientName(req *mcp.CallToolRequest) string {
 func loggedReq[In any](s *server, name string, fn func(context.Context, *mcp.CallToolRequest, In) (any, error)) mcp.ToolHandlerFor[In, any] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		start := time.Now()
-		v, err := fn(ctx, req, in)
+		// 工具内部出错（panic）只让这一次调用失败，不让整个 ferry mcp 退出（编程软件里 Ferry 的工具会全部断开）
+		v, err := func() (v any, err error) {
+			defer safe.Recover("工具 "+name, &err)
+			return fn(ctx, req, in)
+		}()
 		client := clientName(req)
 		args, _ := json.Marshal(in)
 		writeLog(callEntry{Time: start, Client: client, Tool: name, Args: args, OK: err == nil, Error: errText(err),

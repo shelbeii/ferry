@@ -47,7 +47,7 @@ function close() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`核对主机公钥：${target}`" width="620px" @closed="emit('close')">
+  <el-dialog v-model="visible" :title="`核对主机公钥：${target}`" width="620px" append-to-body @closed="emit('close')">
     <div class="body">
       <LoadingBlock v-if="loading" :text="`正在连接 ${target}，读取主机公钥…`" :rows="3" min-height="140px" />
       <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon />
