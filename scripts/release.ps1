@@ -24,11 +24,17 @@ function Fail($text) { Write-Host "`n✗ $text" -ForegroundColor Red; exit 1 }
 # Windows PowerShell 5.1 会把原生命令的 stderr 当作错误记录，先收集再按退出码判断。
 function Invoke-Git([string[]]$GitArgs) {
     $savedPreference = $ErrorActionPreference
+    $savedEncoding = [Console]::OutputEncoding
     $ErrorActionPreference = 'Continue'
     try {
-        $output = @(& git @GitArgs 2>&1)
+        # PowerShell 5.1 按 Console.OutputEncoding 解码外部程序；与 Git 的 UTF-8 输出保持一致。
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $output = @(& git -c i18n.logOutputEncoding=utf-8 @GitArgs 2>&1)
         $code = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $savedPreference }
+    } finally {
+        [Console]::OutputEncoding = $savedEncoding
+        $ErrorActionPreference = $savedPreference
+    }
     if ($code -ne 0) { throw "git $($GitArgs -join ' ') 失败（退出码 $code）：`n$($output -join "`n")" }
     $output | ForEach-Object { $_.ToString() }
 }

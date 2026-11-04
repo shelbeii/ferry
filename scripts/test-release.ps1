@@ -8,6 +8,7 @@ $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
 $testRoot = Join-Path $tempParent ('ferry-release-tests-' + [Guid]::NewGuid().ToString('N'))
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $checks = 0
+$unicodeSubject = 'Release ' + (-join ([char[]]@(0x4e2d, 0x6587, 0x53d1, 0x5e03))) + ' ' + [char]::ConvertFromUtf32(0x1f6a2)
 
 function Write-TestFile([string]$path, [string]$content) {
     New-Item -ItemType Directory -Force (Split-Path -Parent $path) | Out-Null
@@ -51,11 +52,15 @@ function New-Fixture([string]$name) {
     $bootstrap = @'
 param([switch]$DryRun, [switch]$Yes, [switch]$NoOpen)
 function git {
-    if (($args -join ' ') -eq 'remote get-url origin') {
+    $queryArgs = $args
+    if ($args.Count -ge 3 -and $args[0] -eq '-c' -and $args[1] -eq 'i18n.logOutputEncoding=utf-8') {
+        $queryArgs = $args[2..($args.Count - 1)]
+    }
+    if (($queryArgs -join ' ') -eq 'remote get-url origin') {
         $global:LASTEXITCODE = 0
         return 'https://github.com/ferry-release-tests/ferry.git'
     }
-    if ($env:FERRY_RELEASE_TEST_FAIL_QUERY -and $args[0] -eq $env:FERRY_RELEASE_TEST_FAIL_QUERY) {
+    if ($env:FERRY_RELEASE_TEST_FAIL_QUERY -and $queryArgs[0] -eq $env:FERRY_RELEASE_TEST_FAIL_QUERY) {
         $global:LASTEXITCODE = 128
         return 'Simulated remote query failure'
     }
@@ -77,7 +82,9 @@ exit $LASTEXITCODE
     Test-Git -GitArgs @('-C', $repo, 'tag', 'v1.2.2') | Out-Null
     Write-TestFile (Join-Path $repo 'README.md') 'New release content'
     Test-Git -GitArgs @('-C', $repo, 'add', 'README.md') | Out-Null
-    Test-Git -GitArgs @('-C', $repo, 'commit', '-m', 'Release changes') | Out-Null
+    $message = Join-Path $repo '.git\test-commit-message'
+    Write-TestFile $message $unicodeSubject
+    Test-Git -GitArgs @('-C', $repo, 'commit', '-F', $message) | Out-Null
     Test-Git -GitArgs @('-C', $repo, 'push', '-u', 'origin', 'main', '--tags') | Out-Null
     return @{ Repo = $repo; Bare = $bare; Script = $runner }
 }
@@ -94,6 +101,29 @@ function Run-Release($fixture, [string[]]$ScriptArgs, [int]$want) {
 
 try {
     $f = New-Fixture 'normal'
+    # Load the real Git reader without executing the release flow, and exercise legacy console decoding.
+    $tokens, $parseErrors = $null, $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($releaseScript, [ref]$tokens, [ref]$parseErrors)
+    $helper = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-Git' }, $true)
+    . ([scriptblock]::Create($helper.Extent.Text))
+    $savedEncoding = [Console]::OutputEncoding
+    Push-Location $f.Repo
+    try {
+        [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936)
+        $subject = Invoke-Git -GitArgs @('log', '-1', '--format=%s')
+        Assert ($subject -ceq $unicodeSubject) 'Chinese and emoji commit messages survive a GBK console'
+        $subjects = @(Invoke-Git -GitArgs @('log', '-2', '--format=%s'))
+        Assert ($subjects.Count -eq 2 -and $subjects[0] -ceq $unicodeSubject -and $subjects[1] -eq 'Initial release fixture') 'Git commit lines remain separate after decoding'
+        Assert ([Console]::OutputEncoding.CodePage -eq 936) 'Git reading restores the original console encoding'
+        Test-Git -GitArgs @('config', 'i18n.logOutputEncoding', 'GB18030') | Out-Null
+        $subject = Invoke-Git -GitArgs @('log', '-1', '--format=%s')
+        Assert ($subject -ceq $unicodeSubject) 'Commit messages are UTF-8 even with legacy Git log output settings'
+        Assert ((Test-Git -GitArgs @('config', '--get', 'i18n.logOutputEncoding')) -eq 'GB18030') 'Git reading leaves repository encoding settings unchanged'
+        Test-Git -GitArgs @('config', '--unset', 'i18n.logOutputEncoding') | Out-Null
+    } finally {
+        [Console]::OutputEncoding = $savedEncoding
+        Pop-Location
+    }
     Run-Release $f @('-DryRun') 0
     Assert (-not (Test-Git -GitArgs @('-C', $f.Repo, 'tag', '--list', 'v1.2.3'))) 'DryRun does not create a local tag'
     Assert (-not (Test-Git -GitArgs @('-C', $f.Repo, 'ls-remote', '--tags', 'origin', 'refs/tags/v1.2.3'))) 'DryRun does not push a tag'
