@@ -271,6 +271,14 @@ const target: SchemaNode = obj('服务器', '一台要部署到的服务器', {
   deployers: list('谁能部署', '只有这些人能部署、回滚、启停（各自在设置 → 部署里填的名字，或 用户@电脑名）；防误操作的简单名单，不是权限控制', { default: '谁都可以' }),
   apps: list('只部署这些应用', '应用名', { default: '全部应用' }),
   vars: strMap('变量', '这台服务器的变量（优先于项目变量）'),
+  appRuntimes: { label: '应用运行环境', doc: '只覆盖当前服务器上的指定应用；由运行情况中的切换功能填写', kind: 'objMap', type: '映射', map: obj('运行环境', '选择与应用类型一致的一项', {
+    java: str('Java 程序', '已安装 JDK 的 java 绝对路径'),
+    nginxInstance: str('Nginx 实例', '已有共享 Nginx 实例名，或 system:nginx.service'),
+    python: str('Python 程序', '解释器绝对路径；项目虚拟环境会使用它重建'),
+    node: str('Node 程序', 'Node 绝对路径；服务及安装依赖使用相同版本'),
+    dotnet: str('.NET 主机', 'dotnet 绝对路径，适用于通过 dotnet 启动的应用'),
+    port: str('网站端口', '切换 Nginx 时可同时调整本站点端口'),
+  }, { oneOf: [['java','nginxInstance','python','node','dotnet']], oneOfRequired: true }) },
 })
 
 const db = (name: string, tool: string, port: number, user: string): SchemaNode =>

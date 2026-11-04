@@ -8,7 +8,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from './platform'
 import { call, FerryError, type Connection, type Inspect } from './ferry'
 import { connectionsPath as connPath, CONN_PREFIX, pageTerminals, loadTaskHistory } from './state'
-import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, uiPref, setUiPref } from './state'
+import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, projectTraits, uiPref, setUiPref } from './state'
+import ProjectScene from './components/ProjectScene.vue'
 import ProjectView from './components/ProjectView.vue'
 import TaskDrawer from './components/TaskDrawer.vue'
 import TrustDialog from './components/TrustDialog.vue'
@@ -16,6 +17,7 @@ import SecretDialog from './components/SecretDialog.vue'
 import TerminalHost from './components/TerminalHost.vue'
 import ConnectionView from './components/ConnectionView.vue'
 import McpApprovals from './components/McpApprovals.vue'
+import { completeRequest, requestKey } from './requestQueue'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const SettingsDialog = defineAsyncComponent(() => import('./components/SettingsDialog.vue'))
@@ -99,9 +101,22 @@ const sideWidth = computed(() => RAIL + (listOpen.value ? LIST : 0))
 const AVATAR_COLORS = ['#4f46e5', '#0891b2', '#059669', '#d97706', '#db2777', '#7c3aed', '#2563eb', '#dc2626']
 // 记录了主机公钥：页面重新读取；是任务碰到的，接着执行那个任务（关窗口会清掉 trustRequest，先取出来）
 function onTrusted() {
+  if (trustRequest.value) completeRequest(trustRequest.value)
   const retry = trustRequest.value?.retry
   trustedTick.value++
   retry?.()
+}
+function onSecretDone() {
+  const request = secretRequest.value
+  if (!request) return
+  completeRequest(request)
+  request.retry()
+}
+function onBusyRetry() {
+  const request = busyRequest.value
+  if (!request) return
+  completeRequest(request)
+  request.retry()
 }
 
 function avatarStyle(name: string) {
@@ -263,7 +278,7 @@ async function moveConfig(path: string) {
       </el-tooltip>
     </nav>
     <aside v-show="listOpen" class="aside">
-      <div class="workspace-brand"><strong>Ferry<span> / </span></strong><span>部署工作台</span></div>
+      <ProjectScene v-if="listOpen" :identity="current?.path ?? currentConn?.name ?? ''" :name="current?.name ?? currentConn?.title ?? ''" :mode="current ? 'project' : currentConn ? 'connection' : 'welcome'" :traits="current ? projectTraits[current.path] : undefined" :summary="current ? projectSummary[current.path] : undefined" :connected="!!(currentConn && connState[currentConn.name]?.open)" />
       <div class="navigation-search"><el-input ref="navigationSearch" v-model="navigationQuery" :prefix-icon="Search" placeholder="搜索项目或连接" clearable size="small" aria-label="搜索项目或连接" title="Ctrl / ⌘ + K 快速定位" /></div>
       <div class="aside-title"><span>项目</span></div>
       <el-empty v-if="loaded && !startupError && projects.length === 0 && connections.length === 0" description="点最左边的 + 新建项目、添加已有的 ferry.yaml，或新建连接" :image-size="60" />
@@ -382,6 +397,7 @@ async function moveConfig(path: string) {
     <NewProjectDialog v-if="newOpen" @close="newOpen = false" />
     <TrustDialog
       v-if="trustRequest && (trustRequest.config || current)"
+      :key="requestKey(trustRequest)"
       :config="trustRequest.config || current!.path"
       :target="trustRequest.target"
       :retrying="!!trustRequest.retry"
@@ -391,18 +407,19 @@ async function moveConfig(path: string) {
     <ConnectionDialog v-if="connEdit !== undefined" :conn="connEdit ?? undefined" @close="connEdit = undefined" />
     <BusyDialog
       v-if="busyRequest"
+      :key="requestKey(busyRequest)"
       :config="busyRequest.config"
       :target="busyRequest.target"
       :items="busyRequest.items"
-      @retry="busyRequest.retry()"
+      @retry="onBusyRetry"
       @close="busyRequest = null"
     />
     <SecretDialog
       v-if="secretRequest"
-      :key="secretRequest.detail.env + secretRequest.detail.kind"
+      :key="requestKey(secretRequest)"
       :detail="secretRequest.detail"
       :config="secretRequest.config"
-      @done="secretRequest.retry()"
+      @done="onSecretDone"
       @close="secretRequest = null"
     />
   </el-container>
@@ -411,9 +428,6 @@ async function moveConfig(path: string) {
 <style scoped>
 .startup-error { max-width: 740px; margin: 24px auto; }
 .startup-error p { white-space: pre-wrap; overflow-wrap: anywhere; }
-.workspace-brand { display: flex; align-items: baseline; gap: 8px; padding: 22px 16px 16px; font-size: 11px; color: var(--el-text-color-secondary); }
-.workspace-brand strong { font-size: 20px; color: var(--el-text-color-primary); letter-spacing: -.7px; }
-.workspace-brand strong span { color: var(--el-color-primary); }
 .navigation-search { padding: 0 12px 14px; }
 .nav-empty { padding: 12px 16px; font-size: 12px; color: var(--el-text-color-secondary); }
 .welcome { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; max-width: 820px; min-height: 70vh; margin: auto; padding: 24px; box-sizing: border-box; }

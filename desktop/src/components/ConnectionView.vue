@@ -52,8 +52,9 @@ async function closeTab(t: TermTab) {
       return
     }
   }
-  drop(t)
   const i = tabs.indexOf(t)
+  if (i < 0) return
+  drop(t)
   tabs.splice(i, 1)
   if (active.value === t.id) active.value = tabs[Math.min(i, tabs.length - 1)]?.id ?? 0
 }

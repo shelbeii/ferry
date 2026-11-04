@@ -89,6 +89,8 @@ const usage = `ferry —— 后端 / 前端部署工具
   deploy   <目标>[,<目标>…] [应用…]  构建、上传、逐个切换；失败自动回滚该应用并停止后续应用和目标
   status   <目标> [应用…]        查看状态
   start | stop | restart <目标> [应用…]
+  app-info <目标> <应用>         查看实际运行环境、进程、服务配置与部署位置
+  app-runtimes <目标> <应用>     列出服务器上可切换的运行环境
   releases <目标> [应用…]        列出各版本
   changes  <目标> [应用…]        这次部署会带上线的改动：线上运行的版本、本地的提交、中间新增的提交（不改动服务器）
   monitor  <目标> [status | on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14] | off | check | test]
@@ -124,6 +126,7 @@ const usage = `ferry —— 后端 / 前端部署工具
   terminal <目标> [--cols 120 --rows 30]   打开服务器的交互式终端（只在 serve 里，桌面版使用）
   files    ls <目标> [目录] | mkdir <目标> <目录> | mv <目标> <从> <到> | rm <目标> <路径…>
   files    preview <目标> <文件>   只读预览文本内容（最多读取前 1 MiB）
+  files    size <目标> <路径>      按需统计文件或目录的逻辑大小，目录内部链接不展开
   files    save <目标> <文件>      保存文本；版本及内容从 FERRY_FILE_VALUE 的 JSON 读取
   files    upload <目标> --dir <远程目录> [--overwrite] <本机文件…> | download <目标> --to <本机目录> [--overwrite] <远程路径…>
                                 服务器上的文件（SFTP，以登录用户的身份）
@@ -162,7 +165,8 @@ var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": t
 	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true,
 	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true}
 var boolFlags = map[string]bool{
-	"y": true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
+	"with-secrets": true,
+	"y":            true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
@@ -394,6 +398,8 @@ func run(argv []string, cio *cliIO) int {
 	if cmd == "validate" && c.has("from-env") {
 		// 编辑器实时校验：内容来自环境变量，相对路径仍按 -c 指定的文件位置计算
 		f, err = config.LoadContent([]byte(cio.getenv("FERRY_CONFIG_CONTENT")), path)
+	} else if cmd == "probe" && c.has("from-env") {
+		f, err = config.LoadProbeContent([]byte(cio.getenv("FERRY_CONFIG_CONTENT")), path)
 	} else {
 		f, err = config.LoadWithLocal(path)
 	}
@@ -746,6 +752,45 @@ func run(argv []string, cio *cliIO) int {
 		printStatus(con, st)
 		return 0
 
+	case "app-runtimes":
+		if len(c.pos) != 2 {
+			return fail(errors.New("用法：ferry app-runtimes <目标> <应用>"))
+		}
+		data, err := e.AppRuntimes(c.pos[0], c.pos[1])
+		if err != nil {
+			return fail(err)
+		}
+		if js != nil {
+			return ok(data)
+		}
+		for _, choice := range data.Choices {
+			fmt.Fprintf(cio.stdout, "%s\t%s\t%s\n", choice.Path, choice.Version, choice.Disabled)
+		}
+		fmt.Fprintln(cio.stdout, data.Reason)
+		return 0
+
+	case "app-info":
+		if len(c.pos) != 2 {
+			return fail(errors.New("用法：ferry app-info <目标> <应用>"))
+		}
+		data, err := e.AppInfo(c.pos[0], c.pos[1])
+		if err != nil {
+			return fail(err)
+		}
+		if js != nil {
+			return ok(data)
+		}
+		for _, section := range data.Sections {
+			fmt.Fprintln(cio.stdout, section.Title)
+			for _, field := range section.Fields {
+				fmt.Fprintf(cio.stdout, "  %s：%s\n", field.Label, field.Value)
+			}
+		}
+		for _, note := range data.Notes {
+			fmt.Fprintln(cio.stdout, note)
+		}
+		return 0
+
 	case "start", "stop", "restart":
 		t, apps, err := targetArgs()
 		if err != nil {
@@ -862,9 +907,9 @@ const logsLoadedMark = "\x00ferry:loaded"
 var connCommands = map[string]bool{"software": true, "terminal": true, "files": true, "trust": true, "hostkey": true, "secret": true,
 	"pool": true, "disconnect": true, "validate": true, "inspect": true, "ai": true, "probe": true, "who": true, "server-info": true}
 
-// filesCmd ferry files ls|preview|save|mkdir|mv|rm|upload|download <目标> …
+// filesCmd ferry files ls|size|preview|save|mkdir|mv|rm|upload|download <目标> …
 func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail func(error) int) int {
-	usage := errors.New("用法：ferry files ls|preview|save|mkdir|mv|rm|upload|download <目标> …（ferry help 查看）")
+	usage := errors.New("用法：ferry files ls|size|preview|save|mkdir|mv|rm|upload|download <目标> …（ferry help 查看）")
 	if len(c.pos) < 2 {
 		return fail(usage)
 	}
@@ -894,6 +939,15 @@ func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console
 			}
 		}
 		return done(l, "")
+	case "size":
+		if len(rest) != 1 {
+			return fail(usage)
+		}
+		size, err := e.FileSize(target, rest[0])
+		if err != nil {
+			return fail(err)
+		}
+		return done(size, fmt.Sprintf("%s：%s（%d 字节）", size.Path, human(size.Bytes), size.Bytes))
 	case "preview":
 		if len(rest) != 1 {
 			return fail(usage)
@@ -1581,7 +1635,7 @@ func secretCmd(f *config.File, c *cli, cio *cliIO, con *ui.Console) (map[string]
 	return nil, errors.New("secret 只支持 set、delete、status")
 }
 
-// settingsCmd ferry settings [save]
+// settingsCmd ferry settings [save [--with-secrets]]
 func settingsCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Settings, fail func(error) int) int {
 	if len(c.pos) > 0 && c.pos[0] == "save" {
 		raw := cio.getenv("FERRY_SETTINGS_VALUE")
@@ -1592,10 +1646,18 @@ func settingsCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.S
 		if err := json.Unmarshal([]byte(raw), &next); err != nil {
 			return fail(fmt.Errorf("设置格式错误：%w", err))
 		}
-		if err := settings.Save(next); err != nil {
+		var changes []settings.SecretChange
+		if c.has("with-secrets") {
+			value := cio.getenv("FERRY_SETTINGS_SECRETS")
+			if value == "" || json.Unmarshal([]byte(value), &changes) != nil {
+				return fail(errors.New("用环境变量 FERRY_SETTINGS_SECRETS 提供凭据变更 JSON 数组"))
+			}
+		}
+		var err error
+		st, err = settings.SaveWithSecrets(next, changes)
+		if err != nil {
 			return fail(err)
 		}
-		st, _ = settings.Load()
 		if cio.pool != nil {
 			cio.pool.SetIdle(st.IdleTimeout())
 		}
@@ -1604,7 +1666,7 @@ func settingsCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.S
 		}
 	}
 	out := map[string]any{"settings": st, "dataDir": appdir.Current(), "file": appdir.SettingsFile(),
-		"keyDir": st.KeyDir(), "legacyDir": appdir.LegacyDir()}
+		"keyDir": st.KeyDir(), "legacyDir": appdir.LegacyDir(), "secretsTransaction": 1}
 	if js != nil {
 		js.Result(true, out, nil)
 		return 0

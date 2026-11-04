@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { ferry, type AppChange, type Inspect, type Running } from '../ferry'
+import { type AppChange, type Inspect } from '../ferry'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { appSettings, startTask } from '../state'
 import { deploymentTargets } from '../deploymentReview'
 
-const props = defineProps<{ config: string; info: Inspect; target: string; apps: string[] }>()
+const props = defineProps<{ config: string; info: Inspect; target: string; apps: string[]; initialTargets?: string[] }>()
 const emit = defineEmits<{ close: []; started: [id: number]; finished: [] }>()
 
 const visible = ref(true)
-const targets = ref<string[]>([props.target])
+const targets = ref<string[]>(props.initialTargets?.length ? [...props.initialTargets] : [props.target])
 const skipBuild = ref(appSettings.value?.deploy.skipBuild ?? false)
 const full = ref(appSettings.value?.deploy.full ?? false)
 const noRollback = ref(false)
@@ -34,7 +35,7 @@ const changes = ref<AppChange[]>()
 const changesError = ref('')
 const changesLoading = ref(false)
 const reviewTarget = ref(props.target)
-let comparing: Running<AppChange[]> | undefined
+const reads = useReadRequests()
 let compareSeq = 0
 watch(targets, (names) => {
   if (!names.includes(reviewTarget.value)) reviewTarget.value = names[0] ?? ''
@@ -42,28 +43,25 @@ watch(targets, (names) => {
 }, { deep: true })
 async function loadChanges() {
   const seq = ++compareSeq
-  comparing?.kill()
+  reads.cancelAll()
   changes.value = undefined
   changesError.value = ''
   changesLoading.value = false
   if (!reviewTarget.value || conflicts.value.some((p) => p.target.name === reviewTarget.value)) return
   changesLoading.value = true
-  const proc = ferry<AppChange[]>(['changes', reviewTarget.value, ...(props.apps.length ? [props.apps.join(',')] : []), '-c', props.config])
-  comparing = proc
   try {
-    const r = await proc.done
+    const r = await reads.run('changes', (s) => readCall<AppChange[]>(['changes', reviewTarget.value, ...(props.apps.length ? [props.apps.join(',')] : []), '-c', props.config], s))
     if (seq !== compareSeq) return
-    if (!r.ok) throw new Error(r.error ?? '比较失败')
-    changes.value = r.data ?? []
+    changes.value = r ?? []
   } catch (e) {
-    if (seq !== compareSeq) return
+    if (seq !== compareSeq || e instanceof ReadCanceled) return
     changesError.value = (e as Error).message
   } finally {
     if (seq === compareSeq) changesLoading.value = false
   }
 }
 watch(reviewTarget, loadChanges, { immediate: true })
-onBeforeUnmount(() => { compareSeq++; comparing?.kill() })
+onBeforeUnmount(() => { compareSeq++; reads.cancelAll() })
 // 线上版本相同的应用写在一起
 const changeGroups = computed(() => {
   const groups: { apps: string[]; c: AppChange }[] = []

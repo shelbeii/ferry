@@ -4,14 +4,62 @@ import { Loading, RefreshRight, Search } from '@element-plus/icons-vue'
 import { tasks, drawerOpen, selectedTaskId as selectedId, loadTaskDetail, removeTasks, askFixParents, askPkgChanges, aiAskRequest, currentPath, selectProject, type Task } from '../state'
 import { bytes, call, evLabel, padWidth, type FerryLine, type DeployReport, type AppOutcome } from '../ferry'
 import { ElMessage } from 'element-plus'
+import { useTaskList } from '../taskList'
 
-const query = ref('')
-const statusFilter = ref('all')
-const filteredTasks = computed(() => tasks.filter((t) => (statusFilter.value === 'all' || (statusFilter.value === 'finished' ? t.status !== 'running' : t.status === statusFilter.value)) && `${t.title} ${t.target ?? ''} ${t.error ?? ''}`.toLowerCase().includes(query.value.trim().toLowerCase())))
-const selected = computed<Task | undefined>(() => filteredTasks.value.find((t) => t.id === selectedId.value) ?? filteredTasks.value[0])
+const { query, statusFilter, filteredTasks, visibleTasks, hasMore, reset, loadMore } = useTaskList(tasks)
+const selected = computed<Task | undefined>(() => visibleTasks.value.find((t) => t.id === selectedId.value) ?? visibleTasks.value[0])
+const listBox = ref<HTMLElement>()
+let listResize: ResizeObserver | undefined
+let listReady = false
+let resettingList = false
+
+async function resetTaskList() {
+  resettingList = true
+  reset()
+  if (!visibleTasks.value.some((t) => t.id === selectedId.value)) selectedId.value = visibleTasks.value[0]?.id ?? null
+  await nextTick()
+  if (listBox.value) listBox.value.scrollTop = 0
+  resettingList = false
+}
+watch([query, statusFilter], resetTaskList)
+watch(drawerOpen, (open) => { listReady = false; if (open) void resetTaskList() })
+async function onDrawerOpened() {
+  await resetTaskList()
+  listReady = true
+  void fillTaskViewport()
+}
+function onTaskListScroll() {
+  const box = listBox.value
+  if (drawerOpen.value && listReady && !resettingList && box && box.scrollTop > 0 && box.scrollHeight - box.scrollTop - box.clientHeight <= 80) loadMore()
+}
+// 大窗口或列表变短后不足一屏时补齐，避免没有滚动条而无法继续加载。
+let fillingList = false
+async function fillTaskViewport() {
+  if (fillingList) return
+  fillingList = true
+  try {
+    await nextTick()
+    const box = listBox.value
+    while (drawerOpen.value && listReady && !resettingList && box && box.clientHeight > 0 && box.scrollHeight <= box.clientHeight && hasMore.value) {
+      loadMore()
+      await nextTick()
+    }
+  } finally {
+    fillingList = false
+  }
+}
+watch(listBox, (box) => {
+  listResize?.disconnect()
+  if (box) {
+    listResize = new ResizeObserver(() => { void fillTaskViewport() })
+    listResize.observe(box)
+  }
+})
+watch([visibleTasks, drawerOpen], () => { void fillTaskViewport() })
+onBeforeUnmount(() => listResize?.disconnect())
 watch(
   () => tasks.map((t) => t.id),
-  () => { if (!tasks.some((t) => t.id === selectedId.value)) selectedId.value = tasks[0]?.id ?? null },
+  () => { if (!tasks.some((t) => t.id === selectedId.value)) selectedId.value = visibleTasks.value[0]?.id ?? null },
 )
 watch(selectedId, (id) => { if (tasks.some((t) => t.id === id) && !filteredTasks.value.some((t) => t.id === id)) { query.value = ''; statusFilter.value = 'all' } })
 // 以前的任务：选中时才读输出
@@ -201,37 +249,43 @@ async function clearFinished() {
 </script>
 
 <template>
-  <el-drawer v-model="drawerOpen" title="任务中心" size="min(1080px, 94vw)" direction="rtl" append-to-body>
+  <el-drawer v-model="drawerOpen" title="任务中心" size="min(1080px, 94vw)" direction="rtl" append-to-body @opened="onDrawerOpened">
     <div class="wrap">
       <div class="list">
         <div class="list-head">
-          <span class="muted">{{ filteredTasks.length }} / {{ tasks.length }} 个</span>
+          <span class="muted task-count" aria-live="polite">已加载 {{ visibleTasks.length }} / {{ filteredTasks.length }} 个</span>
           <el-button text size="small" :disabled="!tasks.some((t) => t.status !== 'running')" @click="clearFinished">清除已完成</el-button>
         </div>
         <el-input v-model="query" :prefix-icon="Search" placeholder="搜索任务或服务器" clearable size="small" aria-label="搜索任务" />
         <el-select v-model="statusFilter" size="small" class="task-filter" aria-label="任务状态"><el-option label="全部任务" value="all" /><el-option label="进行中" value="running" /><el-option label="失败" value="failed" /><el-option label="已结束" value="finished" /></el-select>
-        <div
-          v-for="t in filteredTasks"
-          :key="t.id"
-          class="item"
-          :class="{ active: selected && t.id === selected.id }"
-          @click="selectedId = t.id"
-          role="button"
-          :aria-pressed="selected?.id === t.id"
-          tabindex="0"
-          @keydown.enter="selectedId = t.id"
-          @keydown.space.prevent="selectedId = t.id"
-        >
-          <div class="item-title">{{ t.title }}</div>
-          <div class="item-meta">
-            <el-tag v-if="t.status === 'running'" size="small" class="running-tag"><el-icon class="spin"><Loading /></el-icon>进行中</el-tag>
-            <el-tag v-else-if="t.status === 'ok'" size="small" type="success">完成</el-tag>
-            <el-tag v-else-if="t.status === 'interrupted'" size="small" type="warning">中断</el-tag>
-            <el-tag v-else size="small" type="danger">失败</el-tag>
-            <span class="muted">{{ clock(t.startedAt) }} · {{ elapsed(t) }}</span>
+        <div ref="listBox" class="task-list" role="region" aria-label="任务列表" tabindex="0" @scroll.passive="onTaskListScroll">
+          <div
+            v-for="t in visibleTasks"
+            :key="t.id"
+            class="item"
+            :class="{ active: selected && t.id === selected.id }"
+            @click="selectedId = t.id"
+            role="button"
+            :aria-pressed="selected?.id === t.id"
+            tabindex="0"
+            @keydown.enter="selectedId = t.id"
+            @keydown.space.prevent="selectedId = t.id"
+          >
+            <div class="item-title">{{ t.title }}</div>
+            <div class="item-meta">
+              <el-tag v-if="t.status === 'running'" size="small" class="running-tag"><el-icon class="spin"><Loading /></el-icon>进行中</el-tag>
+              <el-tag v-else-if="t.status === 'ok'" size="small" type="success">完成</el-tag>
+              <el-tag v-else-if="t.status === 'interrupted'" size="small" type="warning">中断</el-tag>
+              <el-tag v-else size="small" type="danger">失败</el-tag>
+              <span class="muted">{{ clock(t.startedAt) }} · {{ elapsed(t) }}</span>
+            </div>
+          </div>
+          <el-empty v-if="!filteredTasks.length" :description="tasks.length ? '没有匹配的任务' : '还没有任务'" :image-size="50" />
+          <div v-else class="list-end">
+            <template v-if="hasMore"><span>向下滚动加载更多</span><el-button link type="primary" size="small" @click="loadMore">继续加载</el-button></template>
+            <span v-else>已加载全部 {{ filteredTasks.length }} 个任务</span>
           </div>
         </div>
-        <el-empty v-if="!filteredTasks.length" :description="tasks.length ? '没有匹配的任务' : '还没有任务'" :image-size="50" />
       </div>
       <div v-if="selected" class="detail">
         <div class="detail-head">
@@ -373,12 +427,20 @@ async function clearFinished() {
 .list {
   width: 210px;
   flex-shrink: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   border-right: 1px solid var(--el-border-color-lighter);
   padding-right: 8px;
 }
+.list > .el-input, .task-filter, .list-head { flex-shrink: 0; }
+.task-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.task-count { font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.list-end { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 4px; font-size: 12px; color: var(--el-text-color-secondary); }
 .list-head {
   display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 6px;

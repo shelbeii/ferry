@@ -326,7 +326,7 @@ func (a *Agent) swinstallRun() int {
 		if filepath.Dir(stage) != a.incomingDir() {
 			return a.result(proto.CodeBadInput, "上传目录不在 "+a.incomingDir()+" 下", nil)
 		}
-		defer os.RemoveAll(stage)
+		defer a.finishUpload(stage)
 	}
 	if err := os.MkdirAll(a.swDir(), 0o755); err != nil {
 		return a.result(proto.CodeFailed, err.Error(), nil)

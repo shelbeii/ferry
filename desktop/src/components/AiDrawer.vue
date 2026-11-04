@@ -162,10 +162,13 @@ async function addImages(blobs: Blob[]) {
     return
   }
   if (blobs.length > room) ElMessage.warning(`一次最多附 ${MAX_IMAGES} 张图片，多的没有加上`)
+  const conversation = conversationSeq
   for (const b of blobs.slice(0, room)) {
     adding++
     try {
-      attachments.value.push(await prepareImage(b))
+      const image = await prepareImage(b)
+      if (disposed || conversation !== conversationSeq) return
+      attachments.value.push(image)
     } catch (e) {
       ElMessage.error((e as Error).message)
     } finally {
@@ -505,7 +508,9 @@ async function send(text = input.value, retry = false, images = attachments.valu
     attachments.value = []
   }
   following.value = true
+  const conversation = conversationSeq
   await run(text, undefined, () => {
+    if (disposed || conversation !== conversationSeq) return
     secureValues.push(...secrets)
     send(text, true, images)
   }, rewind, images, secrets)
@@ -516,7 +521,8 @@ async function decide(it: Item, choice: 'approve' | 'always' | 'reject', secrets
   it.waiting = false
   it.decision = choice
   if (choice === 'reject') it.done = true
-  await run('', choice, () => decide(it, choice, secrets), 0, [], secrets)
+  const conversation = conversationSeq
+  await run('', choice, () => { if (!disposed && conversation === conversationSeq) decide(it, choice, secrets) }, 0, [], secrets)
 }
 
 async function stop() {
@@ -552,15 +558,19 @@ function newConv() {
   editing.value = 0
   attachments.value = []
   input.value = ''
+  secureValues = []
+  secureOpen.value = false
+  secureLabel.value = ''
 }
 
 // 导出成 Markdown 文件
 async function exportConv() {
   if (!conv.value || running.value) return
-  const file = await pickSaveFile('导出对话', `AI助手-${props.title}-${conv.value.slice(0, 15)}.md`, 'Markdown', ['md'])
+  const id = conv.value
+  const file = await pickSaveFile('导出对话', `AI助手-${props.title}-${id.slice(0, 15)}.md`, 'Markdown', ['md'])
   if (!file) return
   try {
-    await call(['ai-history', 'export', conv.value, '--out', file])
+    await call(['ai-history', 'export', id, '--out', file])
     ElMessage.success('已导出')
   } catch (e) {
     ElMessage.error((e as Error).message)
@@ -1103,14 +1113,17 @@ function copy(text: string) {
   padding: 0;
   display: flex;
   flex-direction: column;
+  background: var(--ferry-surface);
+  color: var(--el-text-color-regular);
 }
 .ai-drawer .el-drawer__header { padding: 18px 20px 14px; }
 /* 液态玻璃：标题栏、提示条、输入框浮在对话上，对话占满整个抽屉、从它们下面滚过（比下面 scoped 的规则多一个类，才能盖过它们） */
 .ai-drawer.ai-glass .el-drawer__header { position: absolute; top: 0; left: 0; right: 0; z-index: 3; border-bottom: 0; }
 .ai-drawer.ai-glass .el-drawer__body { position: relative; }
-/* 标题栏和输入框上字小、要打字：玻璃比按钮厚（磨砂更重、底色更实），滚过去的对话只透出颜色和轮廓 */
-.cg.ai-head-glass { position: absolute; inset: 0; z-index: -1; --cg-frost: 18px; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.72 * var(--cg-k, 1))), rgb(255 255 255 / calc(.58 * var(--cg-k, 1)))); box-shadow: 0 1px 0 rgb(16 24 40 / .06); }
-html.dark .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(24 30 44 / calc(.78 * var(--cg-k, 1))), rgb(20 26 38 / calc(.66 * var(--cg-k, 1)))); box-shadow: 0 1px 0 rgb(0 0 0 / .4); }
+/* 阅读与输入区域保留最低磨砂和底色，高透明度时也不让对话文字干扰标题、输入内容。 */
+.cg.ai-head-glass, .cg.composer-glass { --cg-blur: max(12px, calc(var(--cg-frost) * var(--cg-frost-k, 1) * var(--cg-blur-k, 1))); }
+.cg.ai-head-glass { position: absolute; inset: 0; z-index: -1; --cg-frost: 18px; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / clamp(.8, calc(.92 * var(--cg-k, 1)), .98)), rgb(255 255 255 / clamp(.72, calc(.86 * var(--cg-k, 1)), .96))); box-shadow: 0 1px 0 rgb(16 24 40 / .06); }
+html.dark .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(24 30 44 / clamp(.84, calc(.94 * var(--cg-k, 1)), .98)), rgb(20 26 38 / clamp(.78, calc(.88 * var(--cg-k, 1)), .96))); box-shadow: 0 1px 0 rgb(0 0 0 / .4); }
 .ai-drawer.ai-glass .pending-banner { position: absolute; top: var(--ai-head, 0px); left: 0; right: 0; z-index: 2; }
 .ai-drawer.ai-glass .ai-body { padding-top: calc(var(--ai-head, 0px) + var(--ai-banner, 0px) + 14px); padding-bottom: calc(var(--ai-input, 0px) + 4px); scroll-padding-top: calc(var(--ai-head, 0px) + var(--ai-banner, 0px)); }
 .ai-drawer.ai-glass .ai-input { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; pointer-events: none; }
@@ -1119,8 +1132,8 @@ html.dark .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(24 30 44 / 
 .ai-drawer.ai-glass .ai-input::before { content: ''; position: absolute; inset: 45% 0 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, transparent, var(--el-drawer-bg-color, var(--el-bg-color)) 55%); }
 .ai-drawer.ai-glass .composer { position: relative; isolation: isolate; background: transparent; border-color: transparent; }
 .ai-drawer.ai-glass .composer:focus-within { border-color: color-mix(in srgb, var(--el-color-primary) 45%, transparent); }
-.cg.composer-glass { position: absolute; inset: -1px; z-index: -1; --cg-frost: 16px; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.74 * var(--cg-k, 1))), rgb(255 255 255 / calc(.62 * var(--cg-k, 1)))); }
-html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 / calc(.8 * var(--cg-k, 1))), rgb(22 28 42 / calc(.7 * var(--cg-k, 1)))); }
+.cg.composer-glass { position: absolute; inset: -1px; z-index: -1; --cg-frost: 16px; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / clamp(.82, calc(.94 * var(--cg-k, 1)), .98)), rgb(255 255 255 / clamp(.76, calc(.9 * var(--cg-k, 1)), .96))); }
+html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 / clamp(.86, calc(.96 * var(--cg-k, 1)), .98)), rgb(22 28 42 / clamp(.8, calc(.92 * var(--cg-k, 1)), .97))); }
 .ai-drawer.ai-glass .conversation-position { pointer-events: none; }
 .position-pill { display: inline-flex; align-items: center; gap: 12px; }
 .ai-drawer.ai-glass .position-pill { gap: 10px; padding: 2px 6px 2px 14px; pointer-events: auto; }
@@ -1194,6 +1207,8 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
 }
 .ai-body {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
   padding: 14px 16px;
   display: flex;
@@ -1236,6 +1251,7 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   line-height: 1.8;
   text-rendering: optimizeLegibility;
 }
+.bot-answer { min-width: 0; }
 .msg.bot > :deep(:first-child) {
   margin-top: 0;
 }
@@ -1299,21 +1315,22 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
 .msg.bot :deep(code) {
   /* 显式选择屏幕等宽字体，避免通用 monospace 在 Windows 上回退到细碎的字形。 */
   font-family: 'Cascadia Mono', Consolas, 'SFMono-Regular', Menlo, Monaco, 'Liberation Mono', 'Microsoft YaHei UI', monospace;
-  font-size: 13px;
+  font-size: .92em;
   font-weight: 400;
   font-variant-ligatures: none;
   letter-spacing: 0;
-  color: var(--el-text-color-primary);
-  background: var(--el-fill-color-light);
-  padding: 2px 5px;
+  color: inherit;
+  background: color-mix(in srgb, var(--el-text-color-secondary) 9%, var(--ferry-surface));
+  padding: 1px 4px;
   border-radius: 4px;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
 .msg.bot :deep(pre) {
   background: var(--el-fill-color-light);
-  padding: 8px 10px;
-  border-radius: 6px;
+  border: 1px solid var(--ferry-stroke);
+  padding: 10px 12px;
+  border-radius: 8px;
   overflow: auto;
   margin: 6px 0;
   line-height: 1.65;
@@ -1326,17 +1343,23 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
 }
 .msg.bot :deep(.table-wrap) {
   overflow-x: auto;
-  margin: 6px 0;
+  max-width: 100%;
+  margin: 10px 0;
+  border: 1px solid var(--ferry-stroke);
+  border-radius: 8px;
+  background: var(--ferry-surface);
 }
 .msg.bot :deep(table) {
+  width: 100%;
   border-collapse: collapse;
   font-size: inherit;
   line-height: 1.7;
 }
 .msg.bot :deep(th),
 .msg.bot :deep(td) {
-  border: 1px solid var(--el-border-color-lighter);
-  padding: 4px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--ferry-stroke);
+  padding: 8px 12px;
   text-align: left;
   vertical-align: top;
 }
@@ -1345,8 +1368,8 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   font-weight: 600;
   white-space: nowrap;
 }
-.msg.bot :deep(tr:nth-child(even) td) {
-  background: var(--el-fill-color-lighter);
+.msg.bot :deep(tbody tr:last-child td) {
+  border-bottom: 0;
 }
 .user-row {
   align-self: flex-end;
@@ -1428,11 +1451,12 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   text-overflow: ellipsis;
 }
 .tool {
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
-  padding: 6px 10px;
+  min-width: 0;
+  border: 1px solid var(--ferry-stroke);
+  border-radius: 8px;
+  padding: 10px 12px;
   font-size: 13px;
-  background: var(--el-fill-color-blank);
+  background: var(--el-fill-color-light);
 }
 .tool.bad {
   border-color: var(--el-color-danger-light-5);
@@ -1450,7 +1474,7 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   white-space: nowrap;
 }
 .purpose {
-  margin: 2px 0 0 20px;
+  margin: 4px 0 0 20px;
 }
 .tool-out {
   margin: 6px 0 2px;
@@ -1459,9 +1483,10 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-  background: var(--el-fill-color-light);
-  padding: 6px 8px;
-  border-radius: 4px;
+  background: var(--ferry-surface);
+  border: 1px solid var(--ferry-stroke);
+  padding: 10px 12px;
+  border-radius: 6px;
 }
 .tool.change {
   border-color: var(--el-color-primary-light-7);

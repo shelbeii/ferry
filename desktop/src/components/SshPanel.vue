@@ -9,12 +9,14 @@ const errors = reactive<Record<string, { msg: string; unknownHost: boolean }>>({
 
 <script setup lang="ts">
 // 服务器上连着的 SSH：谁、从哪里、什么时候连上、在干什么；可以断开（本机 Ferry 自己的连接除外）。
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Key, Refresh, SwitchButton } from '@element-plus/icons-vue'
 import { call, FerryError, type SSHSession } from '../ferry'
 import { secretRequest, trustRequest, trustedTick } from '../state'
 import LoadingBlock from './LoadingBlock.vue'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{
   config: string
@@ -26,37 +28,44 @@ const props = defineProps<{
 const emit = defineEmits<{ loaded: [] }>()
 
 const key = computed(() => `${props.config}|${props.target}`)
+const captureContext = useInteractionScope(() => key.value)
 const report = computed(() => cache[key.value])
 const error = computed(() => errors[key.value])
 const sessions = computed<SSHSession[]>(() => report.value?.sessions ?? [])
 const sessionQuery = defineModel<string>('query', { default: '' })
 const matchingSessions = computed(() => sessions.value.filter((s) => `${s.user} ${s.from ?? ''} ${s.kind} ${(s.cmds ?? []).join(' ')}`.toLowerCase().includes(sessionQuery.value.trim().toLowerCase())))
-const loading = ref(false)
+const reads = useReadRequests()
+const loading = computed(() => !!reads.loading.value[key.value])
+onBeforeUnmount(reads.cancelAll)
 const kicking = ref(false)
 const selected = ref<SSHSession[]>([])
 
-async function load() {
+async function load(_background = false, signal?: AbortSignal) {
   const k = key.value
-  loading.value = true
+  const config = props.config
+  const target = props.target
   try {
-    cache[k] = await call<typeof cache[string]>(['who', props.target, '-c', props.config])
-    delete errors[k]
+    await reads.run(k, async (s) => {
+      cache[k] = await readCall<typeof cache[string]>(['who', target, '-c', config], s)
+      delete errors[k]
+    }, { signal })
   } catch (e) {
+    if (e instanceof ReadCanceled || signal?.aborted) return
     const err = e as FerryError
     errors[k] = { msg: err.message, unknownHost: err instanceof FerryError && err.unknownHost }
     if (err instanceof FerryError && err.needSecret && err.detail) {
-      secretRequest.value = { detail: err.detail, config: props.config, retry: load }
+      secretRequest.value = { detail: err.detail, config, retry: () => { if (key.value === k) load() } }
     }
   } finally {
-    loading.value = false
-    emit('loaded')
+    if (key.value === k) emit('loaded')
   }
 }
 
 // 连着的人随时在变：每次打开都重新查（先显示上次的结果）
 watch(
   key,
-  () => {
+  (_, previous) => {
+    if (previous) reads.cancel(previous)
     selected.value = []
     load()
   },
@@ -123,6 +132,9 @@ function desc(s: SSHSession): string {
 }
 
 async function kick(rows: SSHSession[]) {
+  if (kicking.value) return
+  const current = captureContext()
+  const config = props.config, target = props.target, k = key.value
   rows = rows.filter((r) => r.kick && !r.self)
   if (!rows.length) return
   const what = rows.length === 1 ? desc(rows[0]) : `这 ${rows.length} 个连接`
@@ -137,19 +149,22 @@ async function kick(rows: SSHSession[]) {
   } catch {
     return
   }
-  const k = key.value
+  if (!current()) return
+  reads.cancel(k)
   kicking.value = true
   try {
-    cache[k] = await call<typeof cache[string]>(['who', 'kick', props.target, ...rows.map((r) => String(r.pid)), '-y', '-c', props.config])
+    cache[k] = await call<typeof cache[string]>(['who', 'kick', target, ...rows.map((r) => String(r.pid)), '-y', '-c', config])
+    if (!current()) return
     ElMessage.success(rows.length === 1 ? '已断开' : `已断开 ${rows.length} 个连接`)
   } catch (e) {
+    if (!current()) return
     ElMessage.error({ message: (e as Error).message, duration: 6000 })
     load()
   } finally {
-    kicking.value = false
-    selected.value = []
+    if (current()) { kicking.value = false; selected.value = [] }
   }
 }
+watch(key, () => { kicking.value = false })
 
 const kickSelected = () => kick(selected.value)
 
@@ -163,7 +178,7 @@ defineExpose({ load, loading, error, counts, selected, kicking, kickSelected })
       <el-button type="danger" plain :icon="SwitchButton" :disabled="!selected.length" :loading="kicking" @click="kickSelected">
         断开{{ selected.length ? `（${selected.length}）` : '所选' }}
       </el-button>
-      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load" />
+      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load()" />
       <span class="spacer" />
       <span v-if="counts" class="muted">{{ counts.total }} 个连接 · {{ counts.users }} 个用户 · {{ counts.ips }} 个来源 IP</span>
     </div>

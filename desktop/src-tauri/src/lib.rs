@@ -95,7 +95,7 @@ pub fn run() {
             // 主窗口在这里创建：WebView2 的缓存放在 Ferry 的数据目录里（默认安装目录下），不放到系统盘的用户目录
             #[cfg_attr(target_os = "macos", allow(unused_mut))] // macOS 上不改 WebView 数据目录
             let mut w = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("Ferry 部署")
+                .title("Ferry")
                 .inner_size(1320.0, 840.0)
                 .min_inner_size(1000.0, 620.0)
                 // 先不显示：界面画好、主题切好后由页面显示（main.ts），免得先闪白底或浅色

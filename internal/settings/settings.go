@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/captain/ferry/internal/appdir"
@@ -391,8 +392,16 @@ func (s *Settings) normalize() {
 	s.Notify.Channels = chans
 }
 
+var saveMu sync.Mutex
+
 // Save 保存设置。
 func Save(s Settings) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	return save(s)
+}
+
+func save(s Settings) error {
 	s.normalize()
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

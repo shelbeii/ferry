@@ -171,6 +171,10 @@ func TestSoftwareScan(t *testing.T) {
 				}
 				return "file is not owned by any package\n", nil
 			}
+			if strings.HasPrefix(cmd, "docker inspect --format ") {
+				return `{"id":"` + redisID + `","mounts":[{"Type":"bind","Source":"/srv/redis","Destination":"/data"}]}` + "\n" +
+					`{"id":"` + strings.Repeat("c", 64) + `","mounts":[{"Type":"volume","Source":"/var/lib/docker/volumes/mysql/_data","Destination":"/var/lib/mysql"}]}`, nil
+			}
 			if out, ok := outputs[cmd]; ok {
 				return out, nil
 			}
@@ -218,6 +222,11 @@ func TestSoftwareScan(t *testing.T) {
 	if rep.Docker != "ok" {
 		t.Errorf("Docker：%q", rep.Docker)
 	}
+	for _, index := range []int{1, 2} {
+		if len(rep.Items[index].Locations) != 1 {
+			t.Fatalf("运行中与停止的容器都应提供主机位置：%+v", rep.Items[index])
+		}
+	}
 	if it := rep.Items[0]; it.Since != time.Unix(1700000050, 0).Format(time.RFC3339) {
 		t.Errorf("启动时间：%q", it.Since)
 	}
@@ -248,4 +257,33 @@ func TestSoftwareDockerDown(t *testing.T) {
 		t.Errorf("%+v", rep)
 	}
 	var _ = proto.SoftwareReport{}
+}
+
+func TestSoftwareDockerLocations(t *testing.T) {
+	sc := &swScan{run: func(cmd string, _ time.Duration) (string, error) {
+		if !strings.HasPrefix(cmd, "docker inspect --format ") || !strings.HasSuffix(cmd, "'redis' 'mysql'") {
+			t.Fatalf("应一次读取全部容器的位置：%s", cmd)
+		}
+		return `{"id":"redis","mounts":[{"Type":"bind","Source":"/srv/cache/data","Destination":"/data"},{"Type":"bind","Source":"/srv/cache/","Destination":"/config"},{"Type":"tmpfs","Source":"/tmp/internal","Destination":"/tmp"},{"Type":"bind","Source":"relative","Destination":"/invalid"}]}` + "\n" +
+			`{"id":"mysql","mounts":[{"Type":"volume","Source":"/var/lib/docker/volumes/mysql/_data","Destination":"/var/lib/mysql"}]}`, nil
+	}}
+	got := sc.dockerLocations([]dockerPS{
+		{ID: "redis", Labels: "com.docker.compose.project.working_dir=/srv/cache"},
+		{ID: "mysql"},
+	})
+	want := map[string][]proto.SoftwareLocation{
+		"redis": {{Label: "Compose 目录", Path: "/srv/cache"}, {Label: "挂载 /data", Path: "/srv/cache/data"}},
+		"mysql": {{Label: "挂载 /var/lib/mysql", Path: "/var/lib/docker/volumes/mysql/_data"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("容器应提供去重后的主机位置：%+v", got)
+	}
+}
+
+func TestSoftwareDockerLocationInspectFailure(t *testing.T) {
+	sc := &swScan{run: func(string, time.Duration) (string, error) { return "", errors.New("container removed") }}
+	got := sc.dockerLocations([]dockerPS{{ID: "app", Labels: "com.docker.compose.project.working_dir=/srv/app"}})
+	if !reflect.DeepEqual(got["app"], []proto.SoftwareLocation{{Label: "Compose 目录", Path: "/srv/app"}}) {
+		t.Fatalf("读取挂载失败仍可使用 Compose 目录：%+v", got)
+	}
 }

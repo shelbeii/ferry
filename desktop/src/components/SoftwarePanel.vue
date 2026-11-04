@@ -8,7 +8,7 @@ const errors = reactive<Record<string, { msg: string; unknownHost: boolean }>>({
 </script>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Key, Plus, Refresh, Grid, List } from '@element-plus/icons-vue'
 import { call, FerryError, time, type KeptSoftware, type Software, type SoftwareResult } from '../ferry'
@@ -19,6 +19,12 @@ import { glass } from '../glass/runtime'
 import InstallSoftwareDialog from './InstallSoftwareDialog.vue'
 import SoftwareLogsDialog from './SoftwareLogsDialog.vue'
 import SoftwareConfigDialog from './SoftwareConfigDialog.vue'
+import RowActions from './RowActions.vue'
+import type { RowAction } from '../rowActions'
+import { softwareLocations, type FileLocation } from '../fileLocations'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useInteractionScope } from '../interactionScope'
+const FilesDrawer = defineAsyncComponent(() => import('./FilesDrawer.vue'))
 
 // mode：卡片还是列表（项目页工具栏上切换）
 const props = defineProps<{ config: string; target: string; host: string; connected: boolean }>()
@@ -26,32 +32,38 @@ const mode = defineModel<'card' | 'list'>('mode', { default: 'card' })
 const emit = defineEmits<{ loaded: []; goPort: [port: number]; backup: [] }>()
 
 const key = computed(() => `${props.config}|${props.target}`)
+const captureContext = useInteractionScope(() => key.value)
 const report = computed(() => cache[key.value])
 const error = computed(() => errors[key.value])
-const loading = ref(false)
+const reads = useReadRequests()
+const loading = computed(() => !!reads.loading.value[key.value])
+onBeforeUnmount(reads.cancelAll)
 
-async function load() {
+async function load(_background = false, signal?: AbortSignal) {
   const k = key.value
   const t = props.target
-  loading.value = true
+  const config = props.config
   try {
-    cache[k] = await call<SoftwareReport>(['software', t, '-c', props.config])
-    delete errors[k]
+    await reads.run(k, async (s) => {
+      cache[k] = await readCall<SoftwareReport>(['software', t, '-c', config], s)
+      delete errors[k]
+    }, { signal })
   } catch (e) {
+    if (e instanceof ReadCanceled || signal?.aborted) return
     const err = e as FerryError
     errors[k] = { msg: err.message, unknownHost: err instanceof FerryError && err.unknownHost }
     if (err instanceof FerryError && err.needSecret && err.detail) {
-      secretRequest.value = { detail: err.detail, config: props.config, retry: load }
+      secretRequest.value = { detail: err.detail, config, retry: () => { if (key.value === k) load() } }
     }
   } finally {
-    loading.value = false
-    emit('loaded')
+    if (key.value === k) emit('loaded')
   }
 }
 
 watch(
   key,
-  () => {
+  (_, previous) => {
+    if (previous) reads.cancel(previous)
     if (!cache[key.value]) load()
   },
   { immediate: true },
@@ -68,12 +80,49 @@ const logsOf = ref<{ title: string; unit?: string; container?: string } | null>(
 const result = ref<SoftwareResult | null>(null)
 const pwShow = ref<{ name: string; account?: string; password: string } | null>(null)
 const removing = ref<{ row: Software; purge: boolean } | null>(null)
+const filesOpen = ref(false)
+const fileLocations = ref<FileLocation[]>([])
+const filesTitle = ref('')
+watch(key, () => { filesOpen.value = false; fileLocations.value = [] })
+
+function showLocation(row: Software) {
+  const locations = softwareLocations(row)
+  if (!locations.length) return
+  fileLocations.value = locations
+  filesTitle.value = `${row.instance || row.name} · ${props.target}`
+  filesOpen.value = true
+}
+
+function rowActions(row: Software): RowAction[] {
+  const locations = softwareLocations(row)
+  const actions: RowAction[] = [
+    { id: 'location', label: '查看位置', run: () => showLocation(row), disabled: !locations.length,
+      title: locations.length ? locations[0].path : row.via === 'docker' ? '未识别到可浏览的主机目录：容器需提供 Compose 目录或持久化挂载' : '未识别到此软件的程序或安装位置' },
+    { id: 'config', label: '配置', run: () => { configOf.value = row } },
+  ]
+  if (row.instance || controllable(row)) {
+    actions.push({ id: 'logs', label: '日志', run: () => {
+      if (row.instance) logsName.value = row.instance
+      else logsOf.value = { title: row.name, unit: row.via === 'systemd' ? row.unit : undefined, container: row.via === 'docker' ? row.container : undefined }
+    } })
+    const controls: ControlAction[] = row.state === 'running' ? ['restart', 'stop'] : ['start']
+    for (const action of controls) actions.push({ id: action, label: controlLabels[action], run: () => { if (row.instance) control(row, action); else controlOther(row, action) } })
+  }
+  if (row.instance) {
+    actions.push({ id: 'password', label: '密码', run: () => { showPassword(row) } })
+    if (row.upgradable) actions.push({ id: 'upgrade', label: '升级', run: () => { openUpgrade(row) } })
+    if (canBackup(row)) actions.push({ id: 'backup', label: '备份', run: () => { backingUp.value = { row, database: '', busy: false } } })
+    actions.push({ id: 'remove', label: '卸载', danger: true, run: () => { removing.value = { row, purge: false } } })
+  }
+  return actions
+}
 
 function openInstall() {
   installOpen.value = true
 }
 
 function onInstalled(t: Task) {
+  if (t.target !== props.target || t.config !== props.config) return
   if (t.status === 'ok' && t.data) result.value = t.data as SoftwareResult
   load()
 }
@@ -106,8 +155,10 @@ async function confirmControl(row: Software, action: ControlAction, target: stri
 }
 
 async function control(row: Software, action: ControlAction) {
+  const current = captureContext()
   const target = props.target, config = props.config, instance = row.instance!
   if (!await confirmControl(row, action, target)) return
+  if (!current()) return
   startTask(`${controlLabels[action]} ${target} 上的 ${instance}`, ['software', action, target, instance, '-c', config], () => load())
 }
 
@@ -128,19 +179,24 @@ function readonlyWhy(row: Software): string {
 }
 
 async function controlOther(row: Software, action: ControlAction) {
+  const current = captureContext()
   const label = controlLabels[action]
   const target = props.target, config = props.config
   const what = row.via === 'docker' ? `容器 ${row.container}` : `系统服务 ${row.unit}`
   const args = ['software', action, target, ...(row.via === 'docker' ? ['--container', row.container!] : ['--unit', row.unit!]), '-y', '-c', config]
   if (!await confirmControl(row, action, target)) return
+  if (!current()) return
   startTask(`${label} ${target} 上的 ${row.name}（${what}）`, args, () => load())
 }
 
 async function showPassword(row: Software) {
+  const current = captureContext()
   try {
     const r = await call<{ password: string }>(['software', 'password', props.target, row.instance!, '-c', props.config])
+    if (!current()) return
     pwShow.value = { name: row.instance!, account: row.account, password: r.password }
   } catch (e) {
+    if (!current()) return
     ElMessage.error((e as Error).message)
   }
 }
@@ -175,16 +231,19 @@ function upgrade() {
 
 const backingUp = ref<{ row: Software; database: string; busy: boolean } | null>(null)
 async function setBackup() {
+  const current = captureContext()
   const b = backingUp.value
   if (!b) return
   b.busy = true
   try {
     const db = b.database.trim()
     const r = await call<{ backup: string }>(['software', 'backup', props.target, b.row.instance!, ...(db ? ['--database', db] : []), '-c', props.config])
+    if (!current()) return
     ElMessage.success(`已在配置里加上数据备份 ${r.backup}：在「数据备份」里打开后每天备份`)
     backingUp.value = null
     emit('backup')
   } catch (e) {
+    if (!current()) return
     ElMessage.error((e as Error).message)
     b.busy = false
   }
@@ -201,12 +260,15 @@ function restore(k: KeptSoftware) {
   startTask(`恢复 ${props.target} 上的 ${k.name}`, ['software', 'restore', props.target, k.name, '-c', props.config], () => load())
 }
 async function dropKept(k: KeptSoftware) {
+  const current = captureContext()
+  const target = props.target, config = props.config
   try {
     await ElMessageBox.confirm(`删掉 ${k.name} 保留的安装目录 ${k.dir}？里面的数据都会删掉，不能恢复。`, `删除 ${k.name} 的数据`, { type: 'warning', confirmButtonText: '删除' })
   } catch {
     return
   }
-  startTask(`删除 ${props.target} 上 ${k.name} 保留的数据`, ['software', 'remove', props.target, k.name, '--purge', '-y', '-c', props.config], () => load())
+  if (!current()) return
+  startTask(`删除 ${target} 上 ${k.name} 保留的数据`, ['software', 'remove', target, k.name, '--purge', '-y', '-c', config], () => { if (current()) load() })
 }
 // 最近一次安装没成功、也没有装上：说明原因（连接断开时本机没拿到结果）
 const lastFailed = computed(() => {
@@ -222,6 +284,12 @@ function remove() {
   startTask(`卸载 ${props.target} 上的 ${r.row.instance}`, args, () => load())
   removing.value = null
 }
+watch(key, () => {
+  installOpen.value = false
+  configOf.value = undefined
+  logsName.value = ''
+  logsOf.value = pwShow.value = result.value = upgrading.value = backingUp.value = removing.value = null
+})
 
 async function copy(text: string) {
   try {
@@ -301,7 +369,7 @@ function listenTip(l: string): string {
       <GlassPane v-if="glass.enabled" class="cg-strip" :radius="14" :adaptive="false" aria-hidden="true" />
       <el-input v-model="softwareQuery" class="software-search" placeholder="搜索软件、版本或端口" clearable aria-label="搜索服务器软件" />
       <el-button type="primary" :icon="Plus" @click="openInstall">安装软件</el-button>
-      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load" />
+      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load()" />
       <el-radio-group v-model="mode" class="view-switch" aria-label="显示方式">
         <el-tooltip :show-after="HOVER_DELAY" content="卡片" placement="bottom"><el-radio-button value="card" aria-label="卡片"><el-icon><Grid /></el-icon></el-radio-button></el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="列表" placement="bottom"><el-radio-button value="list" aria-label="列表"><el-icon><List /></el-icon></el-radio-button></el-tooltip>
@@ -399,38 +467,8 @@ function listenTip(l: string): string {
             </div>
           </dl>
           <div class="card-foot">
-            <el-button link type="primary" size="small" @click="configOf = row">配置</el-button>
-            <template v-if="row.instance">
-              <el-button v-if="row.state !== 'running'" link type="primary" size="small" @click="control(row, 'start')">启动</el-button>
-              <template v-else>
-                <el-button link type="primary" size="small" @click="control(row, 'restart')">重启</el-button>
-                <el-button link type="primary" size="small" @click="control(row, 'stop')">停止</el-button>
-              </template>
-              <el-button link type="primary" size="small" @click="logsName = row.instance">日志</el-button>
-              <el-button link type="primary" size="small" @click="showPassword(row)">密码</el-button>
-              <el-button v-if="row.upgradable" link type="primary" size="small" @click="openUpgrade(row)">升级</el-button>
-              <el-button v-if="canBackup(row)" link type="primary" size="small" @click="backingUp = { row, database: '', busy: false }">备份</el-button>
-              <span class="spacer" />
-              <el-button link type="danger" size="small" @click="removing = { row, purge: false }">卸载</el-button>
-            </template>
-            <template v-else-if="controllable(row)">
-              <el-button v-if="row.state !== 'running'" link type="primary" size="small" @click="controlOther(row, 'start')">启动</el-button>
-              <template v-else>
-                <el-button link type="primary" size="small" @click="controlOther(row, 'restart')">重启</el-button>
-                <el-button link type="primary" size="small" @click="controlOther(row, 'stop')">停止</el-button>
-              </template>
-              <el-button
-                link
-                type="primary"
-                size="small"
-                @click="logsOf = { title: row.name, unit: row.via === 'systemd' ? row.unit : undefined, container: row.via === 'docker' ? row.container : undefined }"
-              >
-                日志
-              </el-button>
-            </template>
-            <el-tooltip :show-after="HOVER_DELAY" v-else :content="readonlyWhy(row)" placement="top">
-              <span class="muted small">只读</span>
-            </el-tooltip>
+            <RowActions :key="key" :actions="rowActions(row)" :label="row.instance || row.name" :inline-count="0" />
+            <el-tooltip :show-after="HOVER_DELAY" v-if="!row.instance && !controllable(row)" :content="readonlyWhy(row)" placement="top"><span class="muted small">只读</span></el-tooltip>
           </div>
         </article>
         <el-empty v-if="!items.length" :description="softwareQuery.trim() ? '没有匹配的软件，请调整搜索条件' : '没有找到认得的软件（数据库、缓存、Nacos、Nginx、Docker 容器等）'" :image-size="60" class="cards-empty" />
@@ -493,42 +531,19 @@ function listenTip(l: string): string {
         <el-table-column label="程序 / 镜像" min-width="220" :show-overflow-tooltip="{ showAfter: HOVER_DELAY }">
           <template #default="{ row }"><span class="mono">{{ row.image ?? row.path ?? row.dir ?? '' }}</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="350" fixed="right">
+        <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="configOf = row">配置</el-button>
-            <template v-if="row.instance">
-              <el-button v-if="row.state !== 'running'" link type="primary" @click="control(row, 'start')">启动</el-button>
-              <template v-else>
-                <el-button link type="primary" @click="control(row, 'restart')">重启</el-button>
-                <el-button link type="primary" @click="control(row, 'stop')">停止</el-button>
-              </template>
-              <el-button link type="primary" @click="logsName = row.instance">日志</el-button>
-              <el-button link type="primary" @click="showPassword(row)">密码</el-button>
-              <el-button v-if="row.upgradable" link type="primary" @click="openUpgrade(row)">升级</el-button>
-              <el-button v-if="canBackup(row)" link type="primary" @click="backingUp = { row, database: '', busy: false }">备份</el-button>
-              <el-button link type="danger" @click="removing = { row, purge: false }">卸载</el-button>
-            </template>
-            <template v-else-if="controllable(row)">
-              <el-button v-if="row.state !== 'running'" link type="primary" @click="controlOther(row, 'start')">启动</el-button>
-              <template v-else>
-                <el-button link type="primary" @click="controlOther(row, 'restart')">重启</el-button>
-                <el-button link type="primary" @click="controlOther(row, 'stop')">停止</el-button>
-              </template>
-              <el-button link type="primary" @click="logsOf = { title: row.name, unit: row.via === 'systemd' ? row.unit : undefined, container: row.via === 'docker' ? row.container : undefined }">
-                日志
-              </el-button>
-            </template>
-            <el-tooltip :show-after="HOVER_DELAY" v-else :content="readonlyWhy(row)" placement="left">
-              <span class="muted small">只读</span>
-            </el-tooltip>
+            <RowActions :key="key" :actions="rowActions(row)" :label="row.instance || row.name" :inline-count="0" />
+            <el-tooltip :show-after="HOVER_DELAY" v-if="!row.instance && !controllable(row)" :content="readonlyWhy(row)" placement="left"><span class="muted small ml">只读</span></el-tooltip>
           </template>
         </el-table-column>
       </el-table>
       </div>
     </template>
 
+    <FilesDrawer v-if="fileLocations.length" v-model="filesOpen" :config="config" :target="target" :title="filesTitle" :path="fileLocations[0].path" :locations="fileLocations" />
     <InstallSoftwareDialog v-if="installOpen" :config="config" :target="target" :report="report" :done="onInstalled" @close="installOpen = false" />
-    <SoftwareConfigDialog v-if="configOf" :key="key" :config="config" :target="target" :software="configOf" @close="configOf = undefined" @changed="load" />
+    <SoftwareConfigDialog v-if="configOf" :key="key" :config="config" :target="target" :software="configOf" @close="configOf = undefined" @changed="load()" />
     <SoftwareLogsDialog v-if="logsName" :config="config" :target="target" :name="logsName" @close="logsName = ''" />
     <SoftwareLogsDialog
       v-if="logsOf"

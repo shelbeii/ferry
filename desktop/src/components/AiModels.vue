@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // 设置 → AI 的模型列表：可以配置多个模型（各自的服务商、地址、模型名、API Key、默认思考强度），选一个作为默认。
-// API Key 存在系统凭据库，按模型 ID 区分；改动在设置「保存」时才写入（applyKeys）。
-import { computed, onMounted, reactive, ref } from 'vue'
+// API Key 存在系统凭据库，按模型 ID 区分；与设置一起提交，成功后才清理草稿。
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { call, type AiModel, type AppSettings } from '../ferry'
 import { EFFORT_LABELS, THINKING_STYLES, effortOptions, plainHttpOutside, supportsImages, thinkingStyle } from '../ai'
+import { aiSecretChanges } from '../settingsSecrets'
 
 const props = defineProps<{ ai: AppSettings['ai'] }>()
 
@@ -129,6 +130,7 @@ function deleteDraftKey() {
 
 // 用编辑框里（还没保存）的值测试
 async function test() {
+  const sequence = ++testSequence
   testing.value = true
   testResult.value = undefined
   const env: Record<string, string> = {
@@ -143,26 +145,27 @@ async function test() {
   else if (draft.id && !pendingDeletes.has(draft.id)) env.FERRY_AI_MODEL_ID = draft.id
   try {
     const r = await call<{ reply: string; model: string; seconds: number }>(['ai-test'], env)
+    if (sequence !== testSequence) return
     testResult.value = { ok: true, msg: `${r.model} 回复「${r.reply}」，用时 ${r.seconds.toFixed(1)} 秒` }
   } catch (e) {
-    testResult.value = { ok: false, msg: (e as Error).message }
+    if (sequence === testSequence) testResult.value = { ok: false, msg: (e as Error).message }
   } finally {
-    testing.value = false
+    if (sequence === testSequence) testing.value = false
   }
 }
+let testSequence = 0
+watch(() => [editing.value, JSON.stringify(draft), draftKey.value], () => { testSequence++; testing.value = false; testResult.value = undefined }, { flush: 'sync' })
 
-/** 设置保存时调用：写入新填的 API Key、删除删掉的模型的 Key */
-async function applyKeys() {
+function getSecretChanges() { return aiSecretChanges(pendingKeys, pendingDeletes) }
+function acceptSecretChanges() {
   for (const id of pendingDeletes) {
-    if (!pendingKeys[id]) await call(['ai-key', 'delete', '--model', id])
+    if (!pendingKeys[id]) keyStored.value[id] = false
   }
-  for (const [id, v] of Object.entries(pendingKeys)) {
-    await call(['ai-key', 'set', '--model', id], { FERRY_SECRET_VALUE: v })
-  }
+  for (const id of Object.keys(pendingKeys)) keyStored.value[id] = true
   pendingDeletes.clear()
   for (const k of Object.keys(pendingKeys)) delete pendingKeys[k]
 }
-defineExpose({ applyKeys })
+defineExpose({ getSecretChanges, acceptSecretChanges })
 </script>
 
 <template>

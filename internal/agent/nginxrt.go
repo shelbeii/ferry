@@ -79,7 +79,7 @@ func (a *Agent) installNginx(r *proto.RuntimeSpec) int {
 	if filepath.Dir(stage) != a.incomingDir() {
 		return a.result(proto.CodeBadInput, "上传目录不在 "+a.incomingDir()+" 下", nil)
 	}
-	defer os.RemoveAll(stage)
+	defer a.finishUpload(stage)
 	dir := a.nginxDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return a.result(proto.CodeFailed, err.Error(), nil)

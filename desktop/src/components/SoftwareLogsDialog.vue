@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Loading, Refresh } from '@element-plus/icons-vue'
-import { ferry, type Running } from '../ferry'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 
 // name：Ferry 装的软件的实例名；不是 Ferry 装的给 unit（系统服务）或 container（容器），name 只用来显示
 const props = defineProps<{ config: string; target: string; name: string; unit?: string; container?: string }>()
@@ -18,11 +18,11 @@ const box = ref<HTMLElement>()
 const waited = ref(0)
 let waitTimer: ReturnType<typeof setInterval> | undefined
 let serial = 0
-let request: Running<{ from: string; lines: string[] | null }> | undefined
+const reads = useReadRequests()
 
 async function load() {
   const seq = ++serial
-  request?.kill()
+  reads.cancelAll()
   loading.value = true
   error.value = ''
   waited.value = 0
@@ -32,18 +32,15 @@ async function load() {
     const args = other
       ? ['software', 'logs', props.target, ...(props.unit ? ['--unit', props.unit] : ['--container', props.container!]), '-n', '500', '-c', props.config]
       : ['software', 'logs', props.target, props.name, '-n', '500', ...(source.value === 'main' ? ['--main-log'] : []), '-c', props.config]
-    const proc = ferry<{ from: string; lines: string[] | null }>(args)
-    request = proc
-    const result = await proc.done
+    const r = await reads.run('logs', (s) => readCall<{ from: string; lines: string[] | null }>(args, s))
     if (seq !== serial) return
-    if (!result.ok || !result.data) throw new Error(result.error ?? '日志读取失败')
-    const r = result.data
+    if (!r) throw new Error('日志读取失败')
     lines.value = r.lines ?? []
     from.value = r.from
     await nextTick()
     box.value?.scrollTo({ top: box.value.scrollHeight })
   } catch (e) {
-    if (seq !== serial) return
+    if (seq !== serial || e instanceof ReadCanceled) return
     lines.value = []
     error.value = (e as Error).message
   } finally {
@@ -54,7 +51,7 @@ async function load() {
   }
 }
 onMounted(load)
-onBeforeUnmount(() => { serial++; request?.kill(); clearInterval(waitTimer) })
+onBeforeUnmount(() => { serial++; reads.cancelAll(); clearInterval(waitTimer) })
 watch(source, load)
 </script>
 

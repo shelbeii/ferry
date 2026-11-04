@@ -4,7 +4,7 @@
 //
 //	<root>/.ferry/lock                 部署/回滚/启停互斥（flock）
 //	<root>/.ferry/history.jsonl        部署历史
-//	<root>/.ferry/cache/lib/<sha>.jar  增量上传的依赖缓存
+//	<root>/.ferry/cache/<id>/lib/<sha>.jar  本次增量上传的依赖（结束即删）
 //	<root>/.ferry/incoming/<id>/       每次部署独立的上传目录
 //	<root>/apps/<app>/                 一个应用：running/（运行中的版本）、versions/、data/、.ferry/（见 layout.go）
 //
@@ -46,6 +46,7 @@ type Agent struct {
 	mu         sync.Mutex
 	req        *proto.Request
 	appRoots   map[string]string    // 应用 → 单独设置的部署根目录
+	nginxLocks map[string]bool      // 当前事务已按实例名排序持有的 Nginx 锁。
 	waitStart  map[string]time.Time // 单元 → 最近一次开始等待就绪的时间（诊断只看这之后的日志）
 	readySec   int                  // 最近一次就绪用了几秒（部署时记下来，和上一次比）
 	errorLines int                  // 最近一次启动期间服务输出里的错误行数
@@ -91,6 +92,8 @@ func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
 		return a.preflight()
 	case "prepare":
 		return a.prepare()
+	case "discard":
+		return a.discardUpload()
 	case "deploy":
 		return a.deploy()
 	case "rollback":
@@ -99,6 +102,10 @@ func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
 		return a.control()
 	case "status":
 		return a.status()
+	case "appinfo":
+		return a.appInfo()
+	case "appruntimes":
+		return a.appRuntimes()
 	case "releases":
 		return a.releases()
 	case "history":
@@ -290,7 +297,7 @@ func (a *Agent) result(code int, msg string, data any) int {
 // ---------------------------------------------------------------- 路径
 
 func (a *Agent) meta() string                { return filepath.Join(a.req.Root, ".ferry") }
-func (a *Agent) cacheDir() string            { return filepath.Join(a.meta(), "cache", "lib") }
+func (a *Agent) cacheRootDir() string        { return filepath.Join(a.meta(), "cache") }
 func (a *Agent) incomingDir() string         { return filepath.Join(a.meta(), "incoming") }
 func (a *Agent) appDir(app string) string    { return filepath.Join(a.appRoot(app), "apps", app) }
 func (a *Agent) unitPath(unit string) string { return filepath.Join(a.Sys.UnitDir(), unit) }
@@ -326,7 +333,7 @@ func (a *Agent) ensureAppRoot(app string) error {
 
 // ensureMeta 创建 .ferry 与 apps 目录（root 所有、不能是符号链接）。
 func (a *Agent) ensureMeta() error {
-	for _, d := range []string{a.req.Root, a.meta(), a.cacheDir(), a.incomingDir(), filepath.Join(a.req.Root, "apps")} {
+	for _, d := range []string{a.req.Root, a.meta(), a.cacheRootDir(), a.incomingDir(), filepath.Join(a.req.Root, "apps")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

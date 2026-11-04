@@ -56,10 +56,19 @@ func (a *Agent) installDeps(s *proto.AppSpec, release string, gid int) error {
 	var key []byte
 	var link, cmd, label string
 	env := append(os.Environ(), "PATH="+servicePath, "HOME=/root")
+	nodePath := servicePath
+	if d.Node != "" {
+		nodePath = filepath.Dir(d.Node) + ":" + servicePath
+		env = append(env, "PATH="+nodePath)
+	}
 	switch d.Kind {
 	case proto.TypePython:
 		req, err := os.ReadFile(filepath.Join(release, "requirements.txt"))
-		if err != nil {
+		hasRequirements := err == nil
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err != nil && d.Python == "" {
 			a.info(proto.EvInfo, s.Name, "没有 requirements.txt：不装依赖")
 			return nil
 		}
@@ -80,7 +89,10 @@ func (a *Agent) installDeps(s *proto.AppSpec, release string, gid int) error {
 		if d.Registry != "" {
 			pip += " --index-url " + shellQuote(d.Registry)
 		}
-		cmd = shellQuote(py) + " -m venv {venv} && " + pip + " -r requirements.txt"
+		cmd = shellQuote(py) + " -m venv {venv}"
+		if hasRequirements {
+			cmd += " && " + pip + " -r requirements.txt"
+		}
 		env = append(env, "PIP_ROOT_USER_ACTION=ignore")
 	case proto.TypeNode:
 		pj, err := os.ReadFile(filepath.Join(release, "package.json"))
@@ -110,11 +122,11 @@ func (a *Agent) installDeps(s *proto.AppSpec, release string, gid int) error {
 			}
 		}
 		tool := strings.Fields(mgr)[0]
-		ver, err := a.Sys.Shell("PATH="+servicePath+" node -v && PATH="+servicePath+" "+tool+" -v", 30*time.Second)
+		ver, err := a.Sys.Shell("PATH="+shellQuote(nodePath)+" node -v && PATH="+shellQuote(nodePath)+" "+tool+" -v", 30*time.Second)
 		if err != nil {
 			return fmt.Errorf("服务器上没有 node 或 %s（装依赖用）：装上 Node.js（%s）", tool, strings.TrimSpace(ver))
 		}
-		key = append(key, []byte(ver+d.Registry)...)
+		key = append(key, []byte(d.Node+ver+d.Registry)...)
 		link, label, cmd = "node_modules", "Node 依赖", mgr
 		env = append(env, "NODE_ENV=production", "npm_config_update_notifier=false")
 		if d.Registry != "" {

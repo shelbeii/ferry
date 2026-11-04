@@ -615,6 +615,14 @@ func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int
 		}
 		return "读取容器列表失败：" + msg
 	}
+	var containers []dockerPS
+	for _, line := range splitLines(out) {
+		var c dockerPS
+		if json.Unmarshal([]byte(line), &c) == nil && c.ID != "" {
+			containers = append(containers, c)
+		}
+	}
+	locations := sc.dockerLocations(containers)
 	// 容器的顶层进程：没认出软件的运行中容器也要 PID、端口、启动时间
 	top := map[string]int{}
 	for pid, p := range sc.procs {
@@ -628,11 +636,7 @@ func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int
 			top[p.container] = pid
 		}
 	}
-	for _, line := range splitLines(out) {
-		var c dockerPS
-		if json.Unmarshal([]byte(line), &c) != nil || c.ID == "" {
-			continue
-		}
+	for _, c := range containers {
 		name := strings.TrimPrefix(strings.Split(c.Names, ",")[0], "/")
 		repo, tag := splitImage(c.Image)
 		manager := containerManager(name, c.Labels)
@@ -640,6 +644,7 @@ func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int
 		ports := dockerPorts(c.Ports)
 		fill := func(it *proto.Software) {
 			it.Via, it.Container, it.Image, it.Status = "docker", name, c.Image, c.Status
+			it.Locations = locations[c.ID]
 			if manager != "" {
 				it.Manager = manager
 			}
@@ -682,6 +687,48 @@ func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int
 		rep.Items = append(rep.Items, it)
 	}
 	return "ok"
+}
+
+// dockerLocations 只返回主机上可用的 Compose 目录与持久化挂载；不把容器内部路径当成主机路径。
+func (sc *swScan) dockerLocations(containers []dockerPS) map[string][]proto.SoftwareLocation {
+	locations := map[string][]proto.SoftwareLocation{}
+	add := func(id, label, p string) {
+		if !path.IsAbs(p) {
+			return
+		}
+		p = path.Clean(p)
+		for _, loc := range locations[id] {
+			if loc.Path == p {
+				return
+			}
+		}
+		locations[id] = append(locations[id], proto.SoftwareLocation{Label: label, Path: p})
+	}
+	var ids []string
+	for _, c := range containers {
+		ids = append(ids, shellQuote(c.ID))
+		add(c.ID, "Compose 目录", parseLabels(c.Labels)["com.docker.compose.project.working_dir"])
+	}
+	if len(ids) == 0 {
+		return locations
+	}
+	// 只取位置所需的字段，避免读取并传回容器环境变量等敏感配置。
+	out, _ := sc.run(`docker inspect --format '{"id":{{json .Id}},"mounts":{{json .Mounts}}}' `+strings.Join(ids, " "), 15*time.Second)
+	for _, line := range splitLines(out) {
+		var c struct {
+			ID     string
+			Mounts []struct{ Type, Source, Destination string }
+		}
+		if json.Unmarshal([]byte(line), &c) != nil || c.ID == "" {
+			continue
+		}
+		for _, m := range c.Mounts {
+			if m.Type == "bind" || m.Type == "volume" {
+				add(c.ID, "挂载 "+m.Destination, m.Source)
+			}
+		}
+	}
+	return locations
 }
 
 // splitImage registry:5000/a/mysql:8.4@sha256:… → mysql、8.4。

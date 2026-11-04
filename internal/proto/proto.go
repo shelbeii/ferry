@@ -45,6 +45,7 @@ type Deps struct {
 	Kind     string `json:"kind"`               // python | node
 	Registry string `json:"registry,omitempty"` // pip 的 index-url / npm 的 registry
 	Python   string `json:"python,omitempty"`   // 建 venv 用的 Python，默认 python3
+	Node     string `json:"node,omitempty"`     // 指定 Node 安装路径，依赖安装与服务使用同一 Node。
 }
 
 // Request 一次 agent 调用的输入。不同命令只用到其中一部分字段。
@@ -1025,9 +1026,15 @@ type Software struct {
 	Instance string `json:"instance,omitempty"`
 	Account  string `json:"account,omitempty"` // Ferry 安装的：登录用的账号
 	// Upgradable Ferry 用安装包装的：可以升级
-	Upgradable bool          `json:"upgradable,omitempty"`
-	Hosting    *NginxHosting `json:"hosting,omitempty"`
-	Dir        string        `json:"dir,omitempty"` // Ferry 安装的：安装目录
+	Upgradable bool               `json:"upgradable,omitempty"`
+	Hosting    *NginxHosting      `json:"hosting,omitempty"`
+	Dir        string             `json:"dir,omitempty"`       // Ferry 安装的：安装目录
+	Locations  []SoftwareLocation `json:"locations,omitempty"` // 容器在主机上的位置
+}
+
+type SoftwareLocation struct {
+	Label string `json:"label"`
+	Path  string `json:"path"`
 }
 
 // PortReport ports 的结果：服务器上的端口与防火墙（portset 改完也返回它）。

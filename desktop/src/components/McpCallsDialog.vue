@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // 编程软件经 MCP 的调用记录（设置 → 命令行与 MCP → 查看调用记录）：筛选、分页。
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Refresh } from '@element-plus/icons-vue'
 import { call, time } from '../ferry'
 import { reveal } from '../platform'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 
 const props = defineProps<{ dataDir?: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -131,11 +132,13 @@ function args(): string[] {
 }
 
 let seq = 0
+const reads = useReadRequests()
 async function load() {
   const my = ++seq
+  reads.cancelAll()
   loading.value = true
   try {
-    const r = await call<{ items: CallEntry[]; total: number; count: number; clients: string[]; tools: string[] }>(args())
+    const r = await reads.run('calls', s => readCall<{ items: CallEntry[]; total: number; count: number; clients: string[]; tools: string[] }>(args(), s))
     if (my !== seq) return
     rows.value = r.items
     total.value = r.total
@@ -147,7 +150,7 @@ async function load() {
     const last = Math.max(1, Math.ceil(r.total / pageSize.value))
     if (page.value > last) page.value = last
   } catch (e) {
-    if (my !== seq) return
+    if (my !== seq || e instanceof ReadCanceled) return
     error.value = (e as Error).message
     rows.value = []
     total.value = 0
@@ -159,6 +162,7 @@ onMounted(load)
 
 // 筛选条件变了回到第一页；关键字停下输入再查
 let timer: ReturnType<typeof setTimeout> | undefined
+onBeforeUnmount(() => { seq++; clearTimeout(timer) })
 watch([range, client, tools, result, changes], () => (page.value === 1 ? load() : (page.value = 1)), { deep: true })
 watch(keyword, () => {
   clearTimeout(timer)

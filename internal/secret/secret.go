@@ -17,9 +17,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/zalando/go-keyring"
 )
+
+// 设置批量保存和普通凭据写入不能交错，避免回滚覆盖另一项操作的新值。
+var vaultMu sync.Mutex
 
 // 凭据种类。
 const (
@@ -105,6 +109,12 @@ func normPath(p string) string {
 
 // Get 读凭据库。没有时 ok 为 false。
 func Get(account string) (string, bool, error) {
+	vaultMu.Lock()
+	defer vaultMu.Unlock()
+	return get(account)
+}
+
+func get(account string) (string, bool, error) {
 	v, err := keyring.Get(service(), account)
 	if errors.Is(err, keyring.ErrNotFound) {
 		return "", false, nil
@@ -117,6 +127,12 @@ func Get(account string) (string, bool, error) {
 
 // Set 写凭据库。
 func Set(account, value string) error {
+	vaultMu.Lock()
+	defer vaultMu.Unlock()
+	return set(account, value)
+}
+
+func set(account, value string) error {
 	if value == "" {
 		return errors.New("不能保存空值")
 	}
@@ -129,7 +145,9 @@ func Set(account, value string) error {
 
 // SetLabeled 写凭据库，设置页里显示 label（为空时按账户名生成）。
 func SetLabeled(account, value, label string) error {
-	if err := Set(account, value); err != nil {
+	vaultMu.Lock()
+	defer vaultMu.Unlock()
+	if err := set(account, value); err != nil {
 		return err
 	}
 	if label != "" {
@@ -140,6 +158,8 @@ func SetLabeled(account, value, label string) error {
 
 // Delete 删除凭据（不存在不算错）。
 func Delete(account string) error {
+	vaultMu.Lock()
+	defer vaultMu.Unlock()
 	err := keyring.Delete(service(), account)
 	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
 		return fmt.Errorf("删除系统凭据失败：%w", err)

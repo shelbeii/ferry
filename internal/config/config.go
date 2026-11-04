@@ -85,10 +85,11 @@ type Target struct {
 	KeepReleases  int    `yaml:"keepReleases"`  // 每个应用保留的版本数，默认 5
 	UploadStreams int    `yaml:"uploadStreams"` // 上传并行连接数（0 = 用设置里的默认值）；VPN 等对单条连接限速时调大
 	// FerryDir 服务器上存放 ferry 组件的目录：agent 与 Ferry 提供的运行环境（JDK）。默认 /usr/local/lib/ferry；必须归 root、他人不可写
-	FerryDir string            `yaml:"ferryDir"`
-	Confirm  *bool             `yaml:"confirm"` // 部署前是否要求确认，默认 true
-	Apps     []string          `yaml:"apps"`    // 可选：只允许部署这些应用
-	Vars     map[string]string `yaml:"vars"`
+	FerryDir    string                `yaml:"ferryDir"`
+	Confirm     *bool                 `yaml:"confirm"` // 部署前是否要求确认，默认 true
+	Apps        []string              `yaml:"apps"`    // 可选：只允许部署这些应用
+	Vars        map[string]string     `yaml:"vars"`
+	AppRuntimes map[string]AppRuntime `yaml:"appRuntimes"` // 当前服务器各应用的运行环境覆盖。
 	// Title 显示名（「新建连接」保存的服务器，可以是中文）
 	Title string `yaml:"title"`
 	// Production 生产服务器：AI 助手的每个改动都要确认（不能「同类不再询问」），界面上标出「生产」

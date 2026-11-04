@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/captain/ferry/internal/agentbin"
 	"github.com/captain/ferry/internal/appdir"
@@ -309,6 +311,22 @@ func (s *session) callData(cmd string, req *proto.Request, out any) error {
 		return json.Unmarshal(r.Data, out)
 	}
 	return nil
+}
+
+// discardStage 取消后也尝试清理本次上传和依赖；连接已断时由下次 prepare 回收残留。
+func (s *session) discardStage(stage string) {
+	if stage == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	e := *s.e
+	e.Ctx = ctx
+	sc := *s
+	sc.e = &e
+	if err := sc.callData("discard", &proto.Request{Stage: stage}, nil); err != nil {
+		s.e.Rep.Warn("上传残留暂未清理，下次连接并准备上传时重试：%v", err)
+	}
 }
 
 // AgentError agent 返回了非 0 结果码。

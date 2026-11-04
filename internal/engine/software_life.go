@@ -192,6 +192,7 @@ func (e *Engine) SoftwareUpgrade(target, name string, o UpgradeOptions) (*proto.
 		e.Rep.Step("上传 %s 到 %s", pkg.File, t.Name)
 		item := remote.UploadItem{Local: filepath.Join(lib, pkg.File), Remote: remote.Join(stage, pkg.File), Mode: 0o640, Size: pkg.Size}
 		if err := e.uploadItems(s, []remote.UploadItem{item}, pkg.Size, pkg.Size); err != nil {
+			s.discardStage(stage)
 			return nil, fmt.Errorf("上传安装包失败：%w", err)
 		}
 	}

@@ -192,7 +192,7 @@ apps:
 
 ### 上传
 
-- **增量上传**：Spring Boot fat jar 拆成「依赖 jar」和「其余字节」，服务器按 sha256 缓存依赖，一般只要上传业务代码（商城项目的 System：上传 2.0 MB，jar 共 151.8 MB）。拼回的文件和本地逐字节一致。缓存损坏时自动删掉坏文件、改成全量重传，在这之前不动任何服务。
+- **增量上传**：Spring Boot fat jar 拆成「依赖 jar」和「其余字节」，每次上传从服务器现有版本提取可复用依赖，一般只要上传业务代码（商城项目的 System：上传 2.0 MB，jar 共 151.8 MB）。拼回的文件和本地逐字节一致。依赖按上传任务隔离，成功、失败或取消后删除，不长期保留展开的副本；并行上传互不影响。缓存损坏时自动删掉坏文件、改成全量重传，在这之前不动任何服务。
 - **多连接切片**：一次上传超过 8 MB 时切成 4 MB 的片，多条 SSH 连接同时写（默认 6 路，每个目标可单独设置 `uploadStreams`），应对 VPN 等对单条连接的限速。
 
 ### 运行环境（JDK、nginx）
@@ -442,6 +442,7 @@ apps:
 | --- | --- |
 | `files ls <目标> [目录]` / `mkdir` / `mv` / `rm` | 服务器上的文件（SFTP，以登录用户的身份） |
 | `files preview <目标> <文件>` | 只读预览文本内容，支持 UTF-8、带 BOM 的 UTF-16；大文件仅显示前 1 MiB |
+| `files size <目标> <路径>` | 按需查看文件或目录逻辑大小；目录递归包含目录项，内部符号链接不展开，硬链接按路径累计；最多统计 2 分钟，只提供 SFTP 的连接也可使用 |
 | `files save <目标> <文件>` | 保存完整文本（最大 1 MiB）；`FERRY_FILE_VALUE` 传入 JSON：`revision` 为预览返回的版本、`content` 为新内容；保留原编码、BOM、换行、权限和所有者，保存前检查远程文件是否变化 |
 | `files upload <目标> --dir <远程目录> [--overwrite] <本机文件…>` | 上传 |
 | `files download <目标> --to <本机目录> [--overwrite] <远程路径…>` | 下载 |
@@ -462,7 +463,7 @@ apps:
 
 | 命令 | 说明 |
 | --- | --- |
-| `settings [save]` | 查看设置（`--json`）；`save` 从 `FERRY_SETTINGS_VALUE` 读 JSON |
+| `settings [save [--with-secrets]]` | 查看设置（`--json`）；`save` 从 `FERRY_SETTINGS_VALUE` 读 JSON；加 `--with-secrets` 时同时从 `FERRY_SETTINGS_SECRETS` 读取凭据变更数组，失败时恢复本次已改的凭据 |
 | `notify [list] \| save <ID> [--sign] \| forget <ID> [--sign] \| test [<ID>]` | 部署通知：保存机器人地址或加签密钥（系统凭据库，值从 `FERRY_SECRET_VALUE` 读），发测试消息 |
 | `datadir [set <目录> \| reset] [--move]` | 查看 / 更改数据目录，`--move` 同时搬数据 |
 | `runtime list \| download --java N [--arch x64\|aarch64] \| import <压缩包> \| remove <ID>` | 本机的 JDK 库（下载源在设置里改）；`import --nginx <程序>` 导入 nginx |
@@ -524,7 +525,7 @@ apps:
 │   ├── lock  lock.who             部署 / 回滚 / 启停互斥；lock.who 是正在做的人和操作
 │   ├── backup/                    数据备份的设置、各项最近的结果
 │   ├── history.jsonl              部署历史
-│   ├── cache/lib/<sha256>.jar     增量上传的依赖缓存（60 天未用清理）
+│   ├── cache/<id>/lib/<sha256>.jar 本次增量上传的依赖（结束即删）
 │   ├── incoming/<id>/             每次部署的上传目录（结束即删，残留 12 小时后清理）
 │   └── apps/<应用>/                各应用里 Ferry 自己的文件（不放在应用目录里）
 │       ├── running                running/ 里是哪个版本

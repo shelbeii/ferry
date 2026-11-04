@@ -408,6 +408,20 @@ func (f *File) normalize() error {
 		if t == nil {
 			continue
 		}
+		for name := range t.AppRuntimes {
+			a := f.App(name)
+			if a == nil {
+				bad("targets.%s.appRuntimes：没有应用 %q", t.Name, name)
+				continue
+			}
+			if a.Name != name {
+				bad("targets.%s.appRuntimes.%s：请使用应用的原始名称 %s", t.Name, name, a.Name)
+				continue
+			}
+			if _, err := f.RuntimeApp(t, a); err != nil {
+				bad("targets.%s.appRuntimes.%s：%v", t.Name, name, err)
+			}
+		}
 		for _, n := range t.Apps {
 			if f.App(n) == nil {
 				bad("targets.%s.apps：没有应用 %q", t.Name, n)

@@ -33,6 +33,23 @@ func (c *Client) Home() (string, error) {
 	return s.Getwd()
 }
 
+// FileLocation 目录直接打开；文件（含符号链接）在它所在的目录中定位。
+func (c *Client) FileLocation(p string) (dir, focus string, err error) {
+	s, err := c.sftpClient()
+	if err != nil {
+		return "", "", err
+	}
+	p = path.Clean(p)
+	st, err := s.Stat(p)
+	if err != nil {
+		return "", "", fileErr("查看位置", p, err)
+	}
+	if st.IsDir() {
+		return p, "", nil
+	}
+	return path.Dir(p), path.Base(p), nil
+}
+
 // ListDir 列出远程目录：目录在前，各自按名称排序。返回规范化后的绝对路径。
 func (c *Client) ListDir(dir string) (string, []FileEntry, error) {
 	s, err := c.sftpClient()

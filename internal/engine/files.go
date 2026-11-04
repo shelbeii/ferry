@@ -18,6 +18,7 @@ type DirListing struct {
 	Path    string             `json:"path"`
 	Home    string             `json:"home"`
 	Entries []remote.FileEntry `json:"entries"`
+	Focus   string             `json:"focus,omitempty"`
 }
 
 // ExistsError 要传的文件在那边已经有了：界面问过用户后带 --overwrite 重试。
@@ -51,7 +52,7 @@ func (e *Engine) withClient(target string, fn func(c *remote.Client) error) erro
 	return err
 }
 
-// ListDir 列出目录；dir 为空时列登录用户的主目录。
+// ListDir 列出目录；空路径使用登录用户的主目录，文件路径打开所在目录并返回定位项。
 func (e *Engine) ListDir(target, dir string) (*DirListing, error) {
 	var out DirListing
 	err := e.withClient(target, func(c *remote.Client) error {
@@ -62,6 +63,10 @@ func (e *Engine) ListDir(target, dir string) (*DirListing, error) {
 		out.Home = home
 		if dir == "" {
 			dir = home
+		}
+		dir, out.Focus, err = c.FileLocation(dir)
+		if err != nil {
+			return err
 		}
 		out.Path, out.Entries, err = c.ListDir(dir)
 		return err
@@ -75,6 +80,17 @@ func (e *Engine) PreviewFile(target, p string) (*remote.FilePreview, error) {
 	err := e.withClient(target, func(c *remote.Client) error {
 		var err error
 		out, err = c.PreviewFile(e.ctx(), p)
+		return err
+	})
+	return out, err
+}
+
+// FileSize 按需统计文件或目录大小；连接管理与文件浏览相同，不安装 agent。
+func (e *Engine) FileSize(target, p string) (*remote.FileSize, error) {
+	var out *remote.FileSize
+	err := e.withClient(target, func(c *remote.Client) error {
+		var err error
+		out, err = c.FileSize(e.ctx(), p)
 		return err
 	})
 	return out, err

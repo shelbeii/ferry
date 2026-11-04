@@ -22,9 +22,9 @@ const when = (at?: number) => at ? new Date(at).toLocaleTimeString('zh-CN', { ho
   </section>
 </template>
 <style scoped>
-.resource-trend { padding: 18px 20px; border: 1px solid var(--ferry-stroke); border-radius: var(--ferry-radius); background: var(--ferry-surface); box-shadow: var(--ferry-shadow); min-width: 0; }
+.resource-trend { padding: 20px; border: 1px solid var(--ferry-stroke); border-radius: var(--ferry-card-radius); background: var(--ferry-surface); box-shadow: var(--ferry-shadow); min-width: 0; }
 .trend-title { display: flex; align-items: baseline; justify-content: space-between; font-size: 13px; }
-.trend-title strong { font-size: 25px; letter-spacing: -1px; color: var(--trend-accent); font-variant-numeric: tabular-nums; }
+.trend-title strong { font-size: 25px; font-weight: 600; letter-spacing: -1px; color: var(--trend-accent); font-variant-numeric: tabular-nums; }
 .chart { height: 82px; position: relative; margin-top: 12px; }
 svg { width: 100%; height: 100%; overflow: visible; }
 .grid-lines { stroke: var(--el-border-color-lighter); stroke-width: 1; fill: none; vector-effect: non-scaling-stroke; }

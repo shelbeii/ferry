@@ -23,10 +23,7 @@ import (
 	"github.com/captain/ferry/internal/zipx"
 )
 
-const (
-	staleIncoming = 12 * time.Hour
-	cacheMaxAge   = 60 * 24 * time.Hour
-)
+const staleIncoming = 12 * time.Hour
 
 // ---------------------------------------------------------------- prepare
 
@@ -42,6 +39,12 @@ func (a *Agent) prepare() int {
 	if err := os.Mkdir(stage, 0o700); err != nil {
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
+	ready := false
+	defer func() {
+		if !ready {
+			a.finishUpload(stage)
+		}
+	}()
 	// sudo 执行时把上传目录交给登录用户
 	if uid, err := strconv.Atoi(os.Getenv("SUDO_UID")); err == nil && uid != 0 {
 		gid, _ := strconv.Atoi(os.Getenv("SUDO_GID"))
@@ -51,11 +54,14 @@ func (a *Agent) prepare() int {
 	}
 	out := proto.Prepared{Stage: stage}
 	if a.req.Seed {
+		if err := a.ensureUploadCache(stage); err != nil {
+			return a.result(proto.CodeFailed, err.Error(), nil)
+		}
 		for _, s := range a.req.Apps {
 			if s.Type != proto.TypeJava {
 				continue
 			}
-			out.Seeded += a.seedFrom(s)
+			out.Seeded += a.seedFrom(s, a.uploadCacheDir(stage))
 		}
 		if out.Seeded > 0 {
 			a.info(proto.EvCache, "", "从服务器现有版本抽取了 %d 个依赖", out.Seeded)
@@ -74,66 +80,41 @@ func (a *Agent) prepare() int {
 			}
 		}
 	}
-	ents, _ := os.ReadDir(a.cacheDir())
+	ents, _ := os.ReadDir(a.uploadCacheDir(stage))
 	for _, e := range ents {
 		n := e.Name()
 		if strings.HasSuffix(n, ".jar") && zipx.IsSHA256(strings.TrimSuffix(n, ".jar")) {
 			out.Libs = append(out.Libs, strings.TrimSuffix(n, ".jar"))
 		}
 	}
+	ready = true
 	return a.result(proto.CodeOK, "", out)
 }
 
-// keepLibs 没部署成功（失败、跳过）的 Java 应用：把这次上传的 jar 里的依赖收进缓存。
-// 改好配置重新部署时，即使重新构建了，也只需要上传变了的部分，不用再传一遍整个 jar。
-func (a *Agent) keepLibs(s *proto.AppSpec, rel proto.ReleaseSpec, stage string) {
-	if s.Type != proto.TypeJava {
-		return
-	}
-	for _, p := range []string{filepath.Join(a.releaseDir(s.Name, rel.ID), s.FileName), filepath.Join(stage, rel.File)} {
-		if _, err := os.Stat(p); err != nil {
-			continue
-		}
-		n, err := zipx.ExtractLibs(p, a.cacheDir())
-		if n > 0 {
-			a.info(proto.EvCache, s.Name, "留下了这次上传的 %d 个依赖，下次部署不用再传", n)
-		}
-		if err == nil {
-			return
-		}
-	}
-}
-
-// seedFrom 从应用的版本抽取依赖（每个版本只抽一次）：当前版本，以及还没切换过去的最新版本
+// seedFrom 为本次上传抽取依赖：当前版本，以及还没切换过去的最新版本
 // （比如第一次部署失败留下的：改好配置再部署时只传变了的部分）。
-func (a *Agent) seedFrom(s proto.AppSpec) int {
+func (a *Agent) seedFrom(s proto.AppSpec, cache string) int {
 	n := 0
 	cur := a.current(s.Name)
 	if cur != "" {
-		n += a.seedRelease(s, cur)
+		n += a.seedRelease(s, cur, cache)
 	}
 	if ids := a.listReleases(s.Name); len(ids) > 0 && ids[0] != cur {
-		n += a.seedRelease(s, ids[0])
+		n += a.seedRelease(s, ids[0], cache)
 	}
 	return n
 }
 
-func (a *Agent) seedRelease(s proto.AppSpec, cur string) int {
+func (a *Agent) seedRelease(s proto.AppSpec, cur, cache string) int {
 	dir := a.releaseDir(s.Name, cur)
 	if _, err := os.Stat(filepath.Join(dir, s.FileName)); err != nil {
 		return 0
 	}
-	marker := a.verFile(s.Name, cur, "libs-seeded")
-	os.MkdirAll(filepath.Dir(marker), 0o750)
-	if _, err := os.Stat(marker); err == nil {
-		return 0
-	}
-	n, err := zipx.ExtractLibs(filepath.Join(dir, s.FileName), a.cacheDir())
+	n, err := zipx.ExtractLibs(filepath.Join(dir, s.FileName), cache)
 	if err != nil {
 		a.warn(proto.EvCache, s.Name, "抽取依赖失败（本次多传一些）：%v", err)
 		return n
 	}
-	os.WriteFile(marker, nil, 0o644)
 	return n
 }
 
@@ -141,9 +122,23 @@ func (a *Agent) cleanIncoming() {
 	ents, _ := os.ReadDir(a.incomingDir())
 	for _, e := range ents {
 		fi, err := e.Info()
-		if err == nil && a.Sys.Now().Sub(fi.ModTime()) > staleIncoming {
-			os.RemoveAll(filepath.Join(a.incomingDir(), e.Name()))
+		if err == nil && reID.MatchString(e.Name()) && a.Sys.Now().Sub(fi.ModTime()) > staleIncoming {
+			a.finishUpload(filepath.Join(a.incomingDir(), e.Name()))
 		}
+	}
+	// 进程退出在删除上传目录与删除缓存之间：下次 prepare 补清理孤立缓存。
+	caches, _ := os.ReadDir(a.cacheRootDir())
+	for _, e := range caches {
+		if !reID.MatchString(e.Name()) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(a.incomingDir(), e.Name())); os.IsNotExist(err) {
+			os.RemoveAll(filepath.Join(a.cacheRootDir(), e.Name()))
+		}
+	}
+	// 旧版本的全局依赖缓存已不再使用；有旧上传待处理时留到下一次再清理。
+	if active, err := os.ReadDir(a.incomingDir()); err == nil && len(active) == 0 {
+		os.RemoveAll(filepath.Join(a.cacheRootDir(), "lib"))
 	}
 }
 
@@ -161,6 +156,7 @@ func (a *Agent) deploy() int {
 	if filepath.Dir(stage) != a.incomingDir() {
 		return a.result(proto.CodeBadInput, "上传目录不在 "+a.incomingDir()+" 下："+req.Stage, nil)
 	}
+	defer a.finishUpload(stage) // 成功、失败、校验失败或拿不到锁，都清理本次上传及依赖。
 	if len(req.Releases) != len(req.Apps) {
 		return a.result(proto.CodeBadInput, "releases 与 apps 数量不一致", nil)
 	}
@@ -183,7 +179,6 @@ func (a *Agent) deploy() int {
 		return a.result(proto.CodeBadInput, "上传目录不存在："+stage, nil)
 	}
 
-	defer os.RemoveAll(stage) // 本次的上传目录：无论成败都删除（拿不到锁也删，下次重新上传）
 	unlock, err := a.lock(time.Duration(req.LockWaitSec) * time.Second)
 	if errors.Is(err, ErrLocked) {
 		return a.result(proto.CodeLocked, err.Error(), nil)
@@ -215,12 +210,6 @@ func (a *Agent) deploy() int {
 			failed = s.Name
 		}
 	}
-	for i, o := range out.Apps {
-		if o.Result != "OK" {
-			a.keepLibs(&req.Apps[i], rels[o.App], stage)
-		}
-	}
-	a.pruneCache()
 	if failed != "" {
 		if len(skipped) > 0 {
 			a.fail(proto.EvAbort, strings.Join(skipped, ","), "因 %s 失败未部署，保持原版本", failed)
@@ -232,6 +221,9 @@ func (a *Agent) deploy() int {
 
 // verifyStage 收下新依赖、拼装增量文件、核对全部文件的 sha256 与大小。任何一步失败都不动应用。
 func (a *Agent) verifyStage(stage string, apps []proto.AppSpec, rels map[string]proto.ReleaseSpec) error {
+	if err := a.ensureUploadCache(stage); err != nil {
+		return err
+	}
 	libs := filepath.Join(stage, "libs")
 	if ents, err := os.ReadDir(libs); err == nil {
 		for _, e := range ents {
@@ -244,7 +236,7 @@ func (a *Agent) verifyStage(stage string, apps []proto.AppSpec, rels map[string]
 			if err != nil || got != sha {
 				return fmt.Errorf("上传的依赖 %s 校验失败", sha[:12])
 			}
-			dst := filepath.Join(a.cacheDir(), e.Name())
+			dst := filepath.Join(a.uploadCacheDir(stage), e.Name())
 			if _, err := os.Stat(dst); err == nil {
 				os.Remove(src)
 				continue
@@ -267,7 +259,6 @@ func (a *Agent) verifyStage(stage string, apps []proto.AppSpec, rels map[string]
 			a.purgeBadLibs(plan)
 			return fmt.Errorf("%s 拼装失败：%v", s.Name, err)
 		}
-		a.touchLibs(plan)
 		if got, _, err := zipx.FileSHA256(filepath.Join(stage, r.File)); err == nil && got != r.SHA256 {
 			a.purgeBadLibs(plan)
 		}
@@ -323,7 +314,9 @@ func (a *Agent) verifyStage(stage string, apps []proto.AppSpec, rels map[string]
 	return nil
 }
 
-func (a *Agent) cachedLib(sha string) string { return filepath.Join(a.cacheDir(), sha+".jar") }
+func (a *Agent) cachedLib(sha string) string {
+	return filepath.Join(a.uploadCacheDir(a.req.Stage), sha+".jar")
+}
 
 // purgeBadLibs 拼装失败时逐个核对计划用到的缓存依赖，删掉内容与文件名（sha256）不符的，下次不再复用。
 func (a *Agent) purgeBadLibs(plan string) {
@@ -343,41 +336,6 @@ func (a *Agent) purgeBadLibs(plan string) {
 			os.Remove(p)
 			a.warn(proto.EvCache, "", "缓存依赖 %s 已损坏，已删除", s.SHA256[:12])
 		}
-	}
-}
-
-// touchLibs 更新用到的缓存依赖的修改时间（缓存按修改时间清理）。
-func (a *Agent) touchLibs(plan string) {
-	f, err := os.Open(plan)
-	if err != nil {
-		return
-	}
-	steps, _ := zipx.ParsePlan(f)
-	f.Close()
-	now := a.Sys.Now()
-	for _, s := range steps {
-		if !s.Raw {
-			os.Chtimes(a.cachedLib(s.SHA256), now, now)
-		}
-	}
-}
-
-func (a *Agent) pruneCache() {
-	ents, _ := os.ReadDir(a.cacheDir())
-	removed := 0
-	for _, e := range ents {
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), ".tmp") || a.Sys.Now().Sub(fi.ModTime()) > cacheMaxAge {
-			if os.Remove(filepath.Join(a.cacheDir(), e.Name())) == nil {
-				removed++
-			}
-		}
-	}
-	if removed > 0 {
-		a.info(proto.EvPrune, "", "清理了 %d 个 60 天未用的缓存依赖", removed)
 	}
 }
 
@@ -819,6 +777,9 @@ func (a *Agent) restoreService(s *proto.AppSpec, failed, prev string, wasActive 
 
 // switchStatic 切换 current、维护额外链接、reload、可选健康检查；失败切回。
 func (a *Agent) switchStatic(s *proto.AppSpec, id, prev string) (string, string) {
+	if binding := a.readSiteBinding(s.Name); s.NginxInstance != "" && prev != "" && binding.Instance != "" && binding.Instance != s.NginxInstance {
+		return a.switchNginxInstance(s, id, prev, binding)
+	}
 	apply := func(target string) error {
 		if target == "" {
 			if err := a.deactivate(s.Name); err != nil {

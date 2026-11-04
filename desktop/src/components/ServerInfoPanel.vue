@@ -12,7 +12,8 @@ const observations = reactive<Record<string, { at: number; cpu: number | null; m
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { Key, Refresh } from '@element-plus/icons-vue'
-import { ferry, FerryError, type Running } from '../ferry'
+import { FerryError } from '../ferry'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { appSettings, secretRequest, trustRequest, trustedTick } from '../state'
 import { capacity, percentText, serverInfoCards, uptimeText, usageClass, usagePercent, visibleMounts } from '../serverinfo'
 import LoadingBlock from './LoadingBlock.vue'
@@ -24,7 +25,8 @@ const key = computed(() => `${props.config}|${props.target}`)
 const report = computed(() => cache[key.value]?.report)
 const error = computed(() => errors[key.value])
 const cards = computed(() => serverInfoCards(report.value))
-const loading = ref(false)
+const reads = useReadRequests()
+const loading = computed(() => !!reads.loading.value[key.value])
 const shown = ref(true)
 const temporary = ref(false)
 const mounts = computed(() => visibleMounts(report.value?.mounts ?? [], temporary.value).sort((a, b) => (b.usage ?? -1) - (a.usage ?? -1)))
@@ -39,45 +41,34 @@ const readTime = computed(() => cache[key.value] ? new Date(cache[key.value].at)
 const autoTip = computed(() => interval.value < 0 ? '自动刷新已关闭' : !props.connected ? '连接已断开，自动刷新已暂停' : `每 ${interval.value} 分钟自动刷新`)
 const serverTime = computed(() => report.value?.now ? new Date(report.value.now * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC') : '—')
 
-let running: Running<ServerInfo> | undefined
-let serial = 0
 let timer: ReturnType<typeof setInterval> | undefined
-async function load(background = false) {
+async function load(background = false, signal?: AbortSignal) {
   if (background && loading.value) return
-  running?.kill()
-  const seq = ++serial
   const k = key.value
   const config = props.config
   const target = props.target
   attempts[k] = Date.now()
-  loading.value = true
-  const proc = ferry<ServerInfo>(['server-info', target, '-c', config, ...(background ? ['--background'] : [])])
-  running = proc
   try {
-    const result = await proc.done
-    if (seq !== serial) return
-    if (!result.ok || !result.data) throw new FerryError(result.error ?? '读取服务器信息失败', result.detail)
-    cache[k] = { report: result.data, at: Date.now() }
-    const r = result.data
-    observations[k] = [...(observations[k] ?? []), { at: Date.now(), cpu: r.cpu.usage, memory: usagePercent(r.memory.used, r.memory.total) ?? null }].slice(-40)
-    delete errors[k]
+    await reads.run(k, async (s) => {
+      const r = await readCall<ServerInfo>(['server-info', target, '-c', config, ...(background ? ['--background'] : [])], s)
+      if (!r) throw new Error('读取服务器信息失败')
+      cache[k] = { report: r, at: Date.now() }
+      observations[k] = [...(observations[k] ?? []), { at: Date.now(), cpu: r.cpu.usage, memory: usagePercent(r.memory.used, r.memory.total) ?? null }].slice(-40)
+      delete errors[k]
+    }, { signal })
   } catch (e) {
-    if (seq !== serial || background) return
+    if (e instanceof ReadCanceled || signal?.aborted || background) return
     const err = e as FerryError
     errors[k] = { msg: err.message, unknownHost: err instanceof FerryError && err.unknownHost }
     if (err instanceof FerryError && err.needSecret && err.detail) {
       secretRequest.value = { detail: err.detail, config, retry: () => { if (key.value === k) load() } }
     }
   } finally {
-    if (seq === serial) {
-      running = undefined
-      loading.value = false
-      emit('loaded')
-    }
+    if (key.value === k) emit('loaded')
   }
 }
 
-watch(key, () => { temporary.value = false; load() }, { immediate: true })
+watch(key, (_, previous) => { if (previous) reads.cancel(previous); temporary.value = false; load() }, { immediate: true })
 watch(trustedTick, () => errors[key.value] && props.active && load())
 onMounted(() => {
   timer = setInterval(() => {
@@ -89,8 +80,7 @@ onActivated(() => { shown.value = true })
 onDeactivated(() => { shown.value = false })
 onBeforeUnmount(() => {
   clearInterval(timer)
-  serial++
-  running?.kill()
+  reads.cancelAll()
 })
 defineExpose({ load, loading, error, report, cards, readTime, autoTip })
 </script>
@@ -203,8 +193,8 @@ defineExpose({ load, loading, error, report, cards, readTime, autoTip })
 </template>
 
 <style scoped>
-.server-info { container-type: inline-size; }
-.resource-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.server-info { container-type: inline-size; display: flex; flex-direction: column; gap: 16px; padding-bottom: 16px; }
+.resource-charts, .memory-grid, .overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .system-details summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
 .system-details summary::-webkit-details-marker { display: none; }
 .system-details summary > span:first-child { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
@@ -212,9 +202,8 @@ defineExpose({ load, loading, error, report, cards, readTime, autoTip })
 .disk-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .disk-tools .el-input { max-width: 300px; }
 @container (max-width: 680px) { .resource-charts, .memory-grid, .system-grid { grid-template-columns: minmax(0, 1fr) !important; } .section-head, .disk-tools, .system-details summary { flex-wrap: wrap; } }
-.server-info { display: flex; flex-direction: column; gap: 16px; padding-bottom: 16px; }
 .panel-bar, .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.section { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 12px; padding: 20px; min-width: 0; }
+.section, .overview-card { background: var(--ferry-surface); border: 1px solid var(--ferry-stroke); border-radius: var(--ferry-card-radius); box-shadow: var(--ferry-shadow); padding: 20px; min-width: 0; }
 .section-head { margin-bottom: 18px; }
 h3 { font-size: 15px; font-weight: 600; margin: 0; }
 h3 .small { margin-left: 8px; font-weight: 400; }
@@ -226,7 +215,6 @@ b { font-weight: 500; overflow-wrap: anywhere; }
 .load-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--el-border-color-lighter); }
 .load-chip { display: inline-flex; gap: 10px; align-items: center; padding: 6px 12px; border-radius: 6px; background: var(--el-fill-color-light); }
 .load-note { flex: 1; min-width: 220px; line-height: 1.7; }
-.memory-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .memory-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 20px; font-size: 13px; }
 .memory-values > div { display: flex; flex-direction: column; gap: 6px; }
 .memory-values b { font-size: 16px; font-variant-numeric: tabular-nums; }
@@ -239,8 +227,7 @@ p { line-height: 1.7; margin: 16px 0 0; }
 .warn { color: var(--el-color-warning); }
 .bad { color: var(--el-color-danger); }
 .off { color: var(--el-text-color-placeholder); }
-.overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.overview-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; border: 1px solid var(--el-border-color-lighter); border-radius: 10px; }
-.overview-card strong { font-size: 25px; font-weight: 500; }
-.overview-card > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overview-card { display: flex; flex-direction: column; gap: 10px; }
+.overview-card strong { font-size: 25px; font-weight: 600; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+.overview-card > span { font-size: 13px; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

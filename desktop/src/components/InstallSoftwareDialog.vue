@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, Search, Plus, Upload } from '@element-plus/icons-vue'
+import { ArrowLeft, FolderOpened, Search, Plus, Upload } from '@element-plus/icons-vue'
 import { stringify } from 'yaml'
 import { call, variantMisfit, type Software, type SoftwareReport, type SwPackage, type SwParam, type SwTemplate, type SwTemplates, type SwVariant } from '../ferry'
 import { startTask, type Task } from '../state'
 import { pickFile } from '../platform'
 import LoadingBlock from './LoadingBlock.vue'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+const RemoteDirectoryPicker = defineAsyncComponent(() => import('./RemoteDirectoryPicker.vue'))
 
 const props = defineProps<{ config: string; target: string; report?: SoftwareReport; done: (t: Task) => void }>()
 const emit = defineEmits<{ close: [] }>()
+const reads = useReadRequests()
+let latestSequence = 0
 
 // ---------------------------------------------------------------- 软件池
 
@@ -77,6 +81,12 @@ const vi = ref(0)
 const variant = computed(() => tpl.value?.variants[vi.value])
 const params = computed<SwParam[]>(() => tpl.value?.params ?? [])
 const form = ref({ name: '', in: '/opt/ferry-software', user: '', version: '', java: 0, pkg: '', javaDir: '', network: 'auto' as Network })
+const directoryPickerOpen = ref(false)
+watch(() => [props.config, props.target], () => { directoryPickerOpen.value = false })
+function selectDirectory(path: string) {
+  form.value.in = path
+  directoryPickerOpen.value = false
+}
 // 服务器要下载东西（从软件源装包、步骤里的下载）时走谁的网络
 type Network = 'auto' | 'local' | 'server'
 const downloads = computed(() => !!variant.value?.system || !!variant.value?.steps?.some((st) => st.run))
@@ -150,14 +160,18 @@ watch(vi, applyVariant)
 async function loadLatest() {
   const t = tpl.value
   if (!t) return
+  const sequence = ++latestSequence
+  const variantIndex = vi.value
+  reads.cancel('latest')
   latestLoading.value = true
+  latestError.value = ''
   try {
-    const r = await call<{ version: string }>(['software', 'latest', t.id, '--variant', String(vi.value + 1)])
-    if (tpl.value === t) latest.value = r.version
+    const r = await reads.run('latest', s => readCall<{ version: string }>(['software', 'latest', t.id, '--variant', String(variantIndex + 1)], s))
+    if (sequence === latestSequence && tpl.value === t && vi.value === variantIndex) latest.value = r.version
   } catch (e) {
-    latestError.value = (e as Error).message
+    if (sequence === latestSequence && tpl.value === t && vi.value === variantIndex && !(e instanceof ReadCanceled)) latestError.value = (e as Error).message
   } finally {
-    latestLoading.value = false
+    if (sequence === latestSequence) latestLoading.value = false
   }
 }
 
@@ -189,10 +203,12 @@ const installDir = computed(() => {
   const waiting = view.value !== 'custom' && !shownVersion.value && latestLoading.value
   return `${base}/${waiting ? `${installName.value}-（最新版本）` : folder(installName.value, shownVersion.value)}`
 })
-const inError = computed(() => {
-  const d = form.value.in.trim().replace(/\/+$/, '')
+function installLocationError(path: string): string {
+  const d = path.trim().replace(/\/+$/, '')
+  if (path.trim() === '/') return '请选择根目录下的文件夹，如 /opt/ferry-software'
   return /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(d) ? '' : '写绝对路径，只能用字母、数字、点、下划线、横线'
-})
+}
+const inError = computed(() => installLocationError(form.value.in))
 
 // 安装目录所在分区：最长的匹配前缀
 const disk = computed(() => {
@@ -605,7 +621,9 @@ async function installCustom() {
           <el-input v-model="form.name" class="mono short" />
         </el-form-item>
         <el-form-item label="安装位置" :error="inError">
-          <el-input v-model="form.in" class="mono" placeholder="/opt/ferry-software" />
+          <el-input v-model="form.in" class="mono" placeholder="/opt/ferry-software" aria-label="安装位置">
+            <template #append><el-button :icon="FolderOpened" @click="directoryPickerOpen = true">选择服务器目录</el-button></template>
+          </el-input>
           <div class="muted small">
             装到 <span class="mono">{{ installDir }}</span>（文件夹名是名称加版本），程序、配置、数据、日志都放在里面。
             <template v-if="disk">所在分区（{{ disk.path }}）剩余 {{ gb(disk.freeMB) }}。</template>
@@ -686,7 +704,9 @@ async function installCustom() {
           <el-input v-model="custom.name" class="mono short" />
         </el-form-item>
         <el-form-item label="安装位置" :error="shownErrors.in">
-          <el-input v-model="form.in" class="mono" placeholder="/opt/ferry-software" />
+          <el-input v-model="form.in" class="mono" placeholder="/opt/ferry-software" aria-label="安装位置">
+            <template #append><el-button :icon="FolderOpened" @click="directoryPickerOpen = true">选择服务器目录</el-button></template>
+          </el-input>
           <div class="muted small">
             装到 <span class="mono">{{ installDir }}</span><template v-if="shownVersion">（文件夹名是名称加版本）</template><template v-else>（安装包没有版本，文件夹名就是名称）</template>。
             <template v-if="disk">所在分区（{{ disk.path }}）剩余 {{ gb(disk.freeMB) }}</template>
@@ -728,6 +748,7 @@ async function installCustom() {
       <el-button v-if="view === 'custom'" type="primary" @click="installCustom">安装</el-button>
     </template>
   </el-dialog>
+  <RemoteDirectoryPicker v-if="directoryPickerOpen" :config="config" :target="target" :path="form.in" :validate="installLocationError" @select="selectDirectory" @close="directoryPickerOpen = false" />
 </template>
 
 <style scoped>

@@ -8,6 +8,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { highlightSelectionMatches, openSearchPanel, search, searchKeymap } from '@codemirror/search'
 import { bytes, ferry, FerryError, isSecretKind, type FilePreview, type Running } from '../ferry'
 import { secretRequest, trustRequest, trustedTick } from '../state'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 
 const props = defineProps<{ config: string; target: string; path: string; readArgs?: string[]; saveArgs?: string[]; downloadable?: boolean }>()
 const emit = defineEmits<{ close: []; download: []; saved: [] }>()
@@ -31,7 +32,7 @@ const dirty = computed(() => editing.value && draft.value !== normalize(data.val
 const wrapping = new Compartment()
 const editMode = new Compartment()
 let editor: EditorView | undefined
-let reading: Running<FilePreview> | undefined
+const reads = useReadRequests()
 let writing: Running<FilePreview> | undefined
 let seq = 0
 let disposed = false
@@ -40,10 +41,11 @@ let waitTrust = false
 function cancel() {
   seq++
   waitTrust = false
-  reading?.kill()
-  reading = undefined
+  reads.cancelAll()
   writing?.kill()
   writing = undefined
+  saving.value = false
+  comparing.value = false
   editor?.destroy()
   editor = undefined
   data.value = undefined
@@ -59,16 +61,14 @@ async function load() {
   const at = seq
   loading.value = true
   error.value = ''
-  const proc = ferry<FilePreview>([...(props.readArgs ?? ['files', 'preview', props.target, props.path]), '-c', props.config])
-  reading = proc
   try {
-    const result = await proc.done
+    const result = await reads.run('preview', (s) => readCall<FilePreview>([...(props.readArgs ?? ['files', 'preview', props.target, props.path]), '-c', props.config], s))
     if (at !== seq) return
-    if (!result.ok || !result.data) throw new FerryError(result.error || '文件读取失败', result.detail)
-    data.value = result.data
-    draft.value = normalize(result.data.content)
+    if (!result) throw new Error('文件读取失败')
+    data.value = result
+    draft.value = normalize(result.content)
   } catch (e) {
-    if (at !== seq) return
+    if (at !== seq || e instanceof ReadCanceled) return
     error.value = (e as Error).message
     const detail = e instanceof FerryError ? e.detail : undefined
     if (detail?.kind === 'unknown-host' || (e instanceof FerryError && e.unknownHost)) {
@@ -79,7 +79,6 @@ async function load() {
     }
   } finally {
     if (at === seq) {
-      reading = undefined
       loading.value = false
     }
   }

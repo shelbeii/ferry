@@ -52,11 +52,12 @@ type fakeSys struct {
 	acl        bool               // 支持 setfacl
 	listen     map[int][]string   // pid → 监听的地址
 	args       map[int][][]string // pid → 进程及子进程的命令行
-	nginx      string             // nginx -T 的输出；空 = 没有 nginx
-	users      map[string]bool    // useradd 创建的用户
-	hooks      []HookExec         // 执行过的部署钩子
-	hookFail   map[string]bool    // 这些钩子命令执行失败
-	shellOut   map[string]string  // 这些命令的输出
+	processes  map[int][]ProcessSnapshot
+	nginx      string            // nginx -T 的输出；空 = 没有 nginx
+	users      map[string]bool   // useradd 创建的用户
+	hooks      []HookExec        // 执行过的部署钩子
+	hookFail   map[string]bool   // 这些钩子命令执行失败
+	shellOut   map[string]string // 这些命令的输出
 	// Pipe：pipeOut 命令的输出、pipeFail 命令失败的错误；收到的标准输入记在 pipeIn，环境变量记在 pipeEnv
 	pipeOut, pipeFail, pipeIn map[string]string
 	pipeEnv                   map[string][]string
@@ -176,6 +177,8 @@ func (f *fakeSys) Ownership(p string) (Ownership, error) {
 func (f *fakeSys) Listening(pid int) []string { return f.listen[pid] }
 
 func (f *fakeSys) ProcArgs(pid int) [][]string { return f.args[pid] }
+
+func (f *fakeSys) Processes(pid int) []ProcessSnapshot { return f.processes[pid] }
 
 func (f *fakeSys) NginxDump() (string, error) {
 	if f.nginx == "" {
@@ -593,21 +596,16 @@ func TestDeltaAssemble(t *testing.T) {
 	if r.code != 0 || !r.has(proto.EvAssemble, "System.jar") {
 		t.Fatalf("\n%s", r.dump())
 	}
-	cached := filepath.Join(f.root, ".ferry", "cache", "lib", libSHA+".jar")
-	if _, err := os.Stat(cached); err != nil {
-		t.Fatal("新依赖应进入缓存")
-	}
-	// prepare 报告缓存
-	pr := exec1(t, f, "prepare", &proto.Request{Apps: []proto.AppSpec{sys}})
-	var p proto.Prepared
-	json.Unmarshal(pr.result.Data, &p)
-	if len(p.Libs) != 1 || p.Libs[0] != libSHA {
-		t.Fatalf("prepare 应列出缓存：%+v", p)
+	cacheRoot := filepath.Join(f.root, ".ferry", "cache")
+	if ents, err := os.ReadDir(cacheRoot); err != nil || len(ents) != 0 {
+		t.Fatalf("部署结束不应留下展开的依赖：%v, %v", ents, err)
 	}
 	// 缓存被篡改：校验失败，引擎随后全量重试
-	os.WriteFile(cached, []byte("LIB"), 0o644)
 	req = f.stage(t, []proto.AppSpec{sys}, id2, map[string][]byte{"System": []byte("HEADlibBODY")})
 	toDelta(req, false)
+	cached := filepath.Join(cacheRoot, filepath.Base(req.Stage), "lib", libSHA+".jar")
+	os.MkdirAll(filepath.Dir(cached), 0o700)
+	os.WriteFile(cached, []byte("LIB"), 0o644)
 	if r = exec1(t, f, "deploy", req); r.code != proto.CodeVerify {
 		t.Fatalf("缓存损坏应校验失败：\n%s", r.dump())
 	}
@@ -886,30 +884,29 @@ func storedJar(t *testing.T, libs map[string]string) []byte {
 	return b.Bytes()
 }
 
-// 部署失败：这次上传的依赖留在缓存里（失败的、因它没部署的应用都算），改好配置再部署时只传变了的部分。
-func TestFailedDeployKeepsLibs(t *testing.T) {
+// 部署失败也清空上传缓存；重试时从服务器留下的失败版本重新提取，而非长期保留依赖副本。
+func TestFailedDeployReseedsLibs(t *testing.T) {
 	f := newFake(t)
 	a, b := javaApp("Auth"), javaApp("Gateway")
 	f.unitBad[a.Unit] = true
 	ja := storedJar(t, map[string]string{"BOOT-INF/lib/common.jar": "common", "BOOT-INF/lib/auth-only.jar": "auth"})
 	jb := storedJar(t, map[string]string{"BOOT-INF/lib/common.jar": "common", "BOOT-INF/lib/gw-only.jar": "gw"})
 	r := exec1(t, f, "deploy", f.stage(t, []proto.AppSpec{a, b}, id1, map[string][]byte{"Auth": ja, "Gateway": jb}))
-	if r.code != proto.CodeFailed || !r.has(proto.EvCache, "下次部署不用再传") {
+	if r.code != proto.CodeFailed {
 		t.Fatalf("\n%s", r.dump())
 	}
-	libs := func(seed bool) []string {
-		pr := exec1(t, f, "prepare", &proto.Request{Apps: []proto.AppSpec{a, b}, Seed: seed})
+	if ents, err := os.ReadDir(filepath.Join(f.root, ".ferry", "cache")); err != nil || len(ents) != 0 {
+		t.Fatalf("失败也应清理缓存：%v, %v", ents, err)
+	}
+	for range 2 {
+		pr := exec1(t, f, "prepare", &proto.Request{Apps: []proto.AppSpec{a, b}, Seed: true})
 		var p proto.Prepared
 		json.Unmarshal(pr.result.Data, &p)
-		return p.Libs
-	}
-	if got := libs(false); len(got) != 3 {
-		t.Fatalf("应留下 3 个依赖：%v", got)
-	}
-
-	// 以前的版本失败时没留（缓存是空的）：从还没切换过去的最新版本里抽
-	os.RemoveAll(filepath.Join(f.root, ".ferry", "cache", "lib"))
-	if got := libs(true); len(got) != 2 {
-		t.Fatalf("应从失败的 Auth 版本抽出 2 个依赖：%v", got)
+		if pr.code != 0 || len(p.Libs) != 2 {
+			t.Fatalf("每次都能从失败的 Auth 版本抽取 2 个依赖：%s", pr.dump())
+		}
+		if r := exec1(t, f, "discard", &proto.Request{Stage: p.Stage}); r.code != 0 {
+			t.Fatal(r.dump())
+		}
 	}
 }

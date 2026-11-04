@@ -243,7 +243,12 @@ export interface DirListing {
   path: string
   home: string
   entries: FileEntry[]
+  /** 打开的是文件时，在所在目录中定位它。 */
+  focus?: string
 }
+
+/** 按需统计的逻辑大小，目录内部符号链接不展开。 */
+export interface RemoteFileSize { path: string; bytes: number; dir: boolean }
 
 /** 只读文本预览（ferry files preview）；content 最多读取服务器文件的前 limit 字节。 */
 export interface FilePreview {
@@ -445,6 +450,19 @@ export interface AppStatus {
   sites?: Site[]
   /** 静态站点没找到 nginx 站点时的原因 */
   serving?: string
+}
+
+export interface AppInfoField { label: string; value: string; path?: boolean }
+export interface AppRuntimeChoice { id: string; path: string; version?: string; source: string; unit?: string; state?: string; current?: boolean; disabled?: string }
+export interface AppRuntimeChoices { app: string; type: string; canSwitch: boolean; reason?: string; port?: string; current?: string; choices: AppRuntimeChoice[]; notes?: string[] }
+export interface AppInfoSection { id: string; title: string; fields: AppInfoField[] }
+export interface AppInfo {
+  name: string
+  type: string
+  collectedAt: string
+  status: AppStatus
+  sections: AppInfoSection[]
+  notes?: string[]
 }
 
 /** ferry software：服务器上已有的软件（只读查看） */
@@ -769,6 +787,8 @@ export interface Software {
   account?: string
   dir?: string
   hosting?: {binary: string; config: string; prefix: string; sites: string}
+  /** 容器在主机上的 Compose 目录、持久化挂载位置。 */
+  locations?: { label: string; path: string }[]
 }
 
 export interface SoftwareConfigFile { id: string; label: string; path: string; source?: string; format?: string; readOnly?: string; apply?: 'reload' | 'restart'; backup: boolean; inPlace?: boolean }
@@ -1052,6 +1072,8 @@ export interface DataDirInfo {
 }
 
 export interface SettingsResponse {
+  /** 后台支持设置与凭据批量提交的协议版本。 */
+  secretsTransaction?: number
   settings: AppSettings
   dataDir: DataDirInfo
   file: string

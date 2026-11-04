@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import LoadingBlock from './LoadingBlock.vue'
 import { computed, onMounted, ref } from 'vue'
-import { call, shortCommit, time, type HistoryEntry } from '../ferry'
+import { shortCommit, time, type HistoryEntry } from '../ferry'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 
 const props = defineProps<{ config: string; target: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -10,6 +11,7 @@ const visible = ref(true)
 const loading = ref(true)
 const error = ref('')
 const rows = ref<HistoryEntry[]>([])
+const reads = useReadRequests()
 // 部署记录在服务器上：团队里每个人的部署、回滚、启停都在这里，可以按人、应用、操作筛
 const who = ref('')
 const app = ref('')
@@ -20,15 +22,19 @@ const apps = computed(() => uniq((r) => r.app))
 const actions = computed(() => uniq((r) => r.action))
 const shown = computed(() => rows.value.filter((r) => (!who.value || r.actor === who.value) && (!app.value || r.app === app.value) && (!action.value || r.action === action.value)))
 
-onMounted(async () => {
+async function load() {
+  loading.value = true
+  error.value = ''
   try {
-    rows.value = (await call<HistoryEntry[] | null>(['history', props.target, '-c', props.config, '--limit', '200'])) ?? []
+    rows.value = (await reads.run('history', (s) => readCall<HistoryEntry[] | null>(['history', props.target, '-c', props.config, '--limit', '200'], s))) ?? []
   } catch (e) {
+    if (e instanceof ReadCanceled) return
     error.value = (e as Error).message
   } finally {
     loading.value = false
   }
-})
+}
+onMounted(load)
 
 const actionText: Record<string, string> = { deploy: '部署', rollback: '回滚', start: '启动', stop: '停止', restart: '重启' }
 
@@ -43,7 +49,7 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
 <template>
   <el-dialog v-model="visible" :title="`部署历史（${target}）`" width="1000px" append-to-body @closed="emit('close')">
     <div>
-      <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon />
+      <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon><el-button link type="primary" @click="load">重新读取</el-button></el-alert>
       <LoadingBlock v-if="loading" :text="`正在连接 ${target}，读取部署历史…`" :rows="10" min-height="60vh" />
       <div v-if="!loading && rows.length" class="filters">
         <el-select v-model="who" size="small" clearable placeholder="全部操作人" style="width: 220px">

@@ -2,7 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Close, Loading } from '@element-plus/icons-vue'
-import { bytes, call, ferry, ferryRaw, time, type LogRun, type LogSearch, type Running } from '../ferry'
+import { bytes, ferryRaw, time, type LogRun, type LogSearch, type Running } from '../ferry'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 
 // release：打开时选中这个版本（从「版本/回滚」点进来）；不传 = 当前运行
 const props = defineProps<{ config: string; target: string; app: string; release?: string }>()
@@ -36,15 +37,26 @@ const loading = ref(false)
 const streaming = ref(false) // 还在持续输出（没有内容时显示「还没有新的输出」）
 const waited = ref(0)
 let waitTimer: ReturnType<typeof setInterval> | undefined
+let initialTimer: ReturnType<typeof setTimeout> | undefined
+const reads = useReadRequests()
 const LOADED = '\u0000ferry:loaded' // 与 ferry 的 logsLoadedMark 一致
 
 function setLoading(on: boolean) {
   loading.value = on
   clearInterval(waitTimer)
   waitTimer = undefined
+  clearTimeout(initialTimer)
   if (on) {
     waited.value = 0
     waitTimer = setInterval(() => waited.value++, 1000)
+    const sequence = loadSeq
+    initialTimer = setTimeout(() => {
+      if (sequence !== loadSeq || !loading.value || disposed) return
+      stop()
+      setLoading(false)
+      streaming.value = false
+      error.value = '读取日志超时（60 秒），请检查连接后重试'
+    }, 60_000)
   }
 }
 
@@ -143,7 +155,7 @@ function fileLabel(f: LogRun['files'][number]): string {
 
 async function loadRuns() {
   try {
-    const data = await call<LogRun[]>(['logs', props.target, props.app, '-c', props.config, '--runs'])
+    const data = await reads.run('runs', s => readCall<LogRun[]>(['logs', props.target, props.app, '-c', props.config, '--runs'], s))
     if (disposed) return
     runs.value = data
     runsError.value = ''
@@ -156,7 +168,7 @@ async function loadRuns() {
       }
     }
   } catch (e) {
-    if (disposed) return
+    if (disposed || e instanceof ReadCanceled) return
     runsError.value = (e as Error).message
   }
 }
@@ -214,10 +226,10 @@ async function start() {
   if (!res.ok) error.value = res.error ?? ''
 }
 
-async function stop() {
+function stop() {
   const r = running
   running = undefined
-  await r?.kill()
+  void r?.kill().catch(() => undefined)
 }
 
 /** 换了运行、文件、方式：回到看末尾 */
@@ -245,13 +257,12 @@ const searchError = ref('')
 const searchedFor = ref('')
 const searchedCase = ref(false)
 let searchSeq = 0
-let searchProc: Running<LogSearch> | undefined
 
 async function search() {
   const kw = keyword.value.trim()
   if (!kw || noRuns.value) return
   const seq = ++searchSeq
-  searchProc?.kill()
+  reads.cancel('search')
   searching.value = true
   searchError.value = ''
   result.value = null
@@ -264,17 +275,14 @@ async function search() {
     else args.push(...(path.value ? ['--log', path.value] : ['--file']))
   }
   if (matchCase) args.push('--case')
-  const proc = ferry<LogSearch>(args)
-  searchProc = proc
   try {
-    const r = await proc.done
+    const r = await reads.run('search', s => readCall<LogSearch>(args, s))
     if (seq !== searchSeq) return
-    if (!r.ok) throw new Error(r.error ?? '搜索失败')
-    result.value = r.data ?? { matches: [], files: 0, truncated: false }
+    result.value = r ?? { matches: [], files: 0, truncated: false }
     searchedFor.value = kw
     searchedCase.value = matchCase
   } catch (e) {
-    if (seq !== searchSeq) return
+    if (seq !== searchSeq || e instanceof ReadCanceled) return
     searchError.value = (e as Error).message
     result.value = null
   } finally {
@@ -284,8 +292,7 @@ async function search() {
 
 function clearSearch() {
   searchSeq++
-  searchProc?.kill()
-  searchProc = undefined
+  reads.cancel('search')
   searching.value = false
   result.value = null
   searchError.value = ''
@@ -333,6 +340,7 @@ onBeforeUnmount(() => {
   clearSearch()
   clearInterval(rateTimer)
   clearInterval(waitTimer)
+  clearTimeout(initialTimer)
   clearTimeout(flushTimer)
   stop()
 })

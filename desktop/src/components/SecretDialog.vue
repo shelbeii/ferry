@@ -2,11 +2,13 @@
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { call, sessionEnv, type ErrorDetail } from '../ferry'
+import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{ detail: ErrorDetail; config: string }>()
 const emit = defineEmits<{ close: []; done: [] }>()
 
 const visible = ref(true)
+const captureContext = useInteractionScope(() => visible.value)
 const value = ref('')
 const remember = ref(false)
 const saving = ref(false)
@@ -17,7 +19,9 @@ const rejected = computed(() => props.detail.kind.endsWith('-rejected'))
 const title = computed(() => (isPassphrase.value ? '私钥密码' : '服务器登录密码'))
 
 async function submit() {
-  if (!value.value) return
+  if (!value.value || saving.value) return
+  const current = captureContext()
+  const detail = props.detail, secret = value.value
   saving.value = true
   error.value = ''
   try {
@@ -26,12 +30,13 @@ async function submit() {
       const args = isPassphrase.value
         ? ['secret', 'set', '--passphrase', props.detail.key ?? '', '-c', props.config]
         : ['secret', 'set', props.detail.target ?? '', '-c', props.config]
-      await call(args, { FERRY_SECRET_VALUE: value.value })
-      delete sessionEnv[props.detail.env ?? '']
+      await call(args, { FERRY_SECRET_VALUE: secret })
+      if (!current()) return
+      delete sessionEnv[detail.env ?? '']
       ElMessage.success('已保存到系统凭据库')
-    } else if (props.detail.env) {
+    } else if (detail.env) {
       // 只在本次运行期间记住
-      sessionEnv[props.detail.env] = value.value
+      sessionEnv[detail.env] = secret
     }
     visible.value = false
     emit('done')
@@ -44,7 +49,7 @@ async function submit() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="title" width="520px" append-to-body @closed="emit('close')">
+  <el-dialog v-model="visible" :title="title" width="520px" append-to-body :before-close="(done: () => void) => { if (!saving) done() }" @closed="emit('close')">
     <el-alert
       v-if="rejected"
       type="error"
@@ -61,7 +66,7 @@ async function submit() {
     </p>
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon />
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
+      <el-button :disabled="saving" @click="visible = false">取消</el-button>
       <el-button type="primary" :disabled="!value" :loading="saving" @click="submit">确定并重试</el-button>
     </template>
   </el-dialog>

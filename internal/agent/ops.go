@@ -59,6 +59,9 @@ func (a *Agent) rollback() int {
 		}
 	}
 	a.info(proto.EvRollback, s.Name, "%s → %s", orNone(cur), to)
+	if s.Type == proto.TypeStatic && to != LegacyID {
+		a.loadNginxRuntime(s, to)
+	}
 
 	var rerr error
 	switch {
@@ -377,48 +380,60 @@ func (a *Agent) status() int {
 		return ngText, ngErr
 	}
 	for i := range a.req.Apps {
-		s := &a.req.Apps[i]
-		st := proto.AppStatus{Name: s.Name, Type: s.Type, Unit: s.Unit, Releases: len(a.listReleases(s.Name))}
-		if cur := a.current(s.Name); cur != "" {
-			st.Current = a.readMeta(s.Name, cur)
-		} else {
-			st.Problem = "未部署"
-		}
-		if s.NginxInstance != "" && st.Current != nil {
-			a.nginxSiteStatus(s, &st)
-		} else if isService(s) {
-			p := a.Sys.UnitProps(s.Unit)
-			st.Active, st.Sub, st.PID, st.Since = p.Active, p.Sub, p.PID, p.Since
-			st.Port = healthPort(s.Health)
-			if p.PID > 0 {
-				st.Listen, st.Extra = a.classifyPorts(s, st.Port, a.Sys.Listening(p.PID), p.PID)
-			}
-			if p.Load == "not-found" {
-				st.Problem = "单元不存在"
-			}
-			if p.Active == "active" && (s.Health.TCP != "" || s.Health.HTTP != "") {
-				ok := a.Sys.Probe(s.Health) == nil
-				st.Healthy = &ok
-			}
-			if st.Current == nil {
-				for _, c := range s.Conflict {
-					if cp := a.Sys.UnitProps(c); isRunning(cp) {
-						st.Problem = "未接管，旧服务 " + c + " 在运行"
-					}
-				}
-			}
-		} else if st.Current != nil {
-			if s.Health.TCP != "" || s.Health.HTTP != "" {
-				ok := a.Sys.Probe(s.Health) == nil
-				st.Healthy = &ok
-			}
-			st.Sites, st.Listen, st.Serving = a.staticServing(s, nginx)
-			st.Port = healthPort(s.Health)
-		}
+		st := a.appStatus(&a.req.Apps[i], nginx)
 		st.Busy = busy
 		out = append(out, st)
 	}
 	return a.result(proto.CodeOK, "", out)
+}
+
+func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.AppStatus {
+	actual := a.deployedStaticSpec(*s)
+	s = &actual
+	st := proto.AppStatus{Name: s.Name, Type: s.Type, Unit: s.Unit, Releases: len(a.listReleases(s.Name))}
+	if cur := a.current(s.Name); cur != "" {
+		st.Current = a.readMeta(s.Name, cur)
+	} else {
+		st.Problem = "未部署"
+	}
+	if s.NginxInstance != "" && st.Current != nil {
+		a.nginxSiteStatus(s, &st)
+	} else if isService(s) {
+		p := a.Sys.UnitProps(s.Unit)
+		st.Active, st.Sub, st.PID, st.Since = p.Active, p.Sub, p.PID, p.Since
+		st.Port = healthPort(s.Health)
+		if st.Port == "" && servedStatic(s) {
+			_, port := splitSiteListen(s.SitePort)
+			if port > 0 {
+				st.Port = strconv.Itoa(port)
+			}
+		}
+		if p.PID > 0 {
+			st.Listen, st.Extra = a.classifyPorts(s, st.Port, a.Sys.Listening(p.PID), p.PID)
+		}
+		if p.Load == "not-found" {
+			st.Problem = "单元不存在"
+		}
+		if p.Active == "active" && (s.Health.TCP != "" || s.Health.HTTP != "") {
+			ok := a.Sys.Probe(s.Health) == nil
+			st.Healthy = &ok
+		}
+		if st.Current == nil {
+			for _, c := range s.Conflict {
+				if cp := a.Sys.UnitProps(c); isRunning(cp) {
+					st.Problem = "未接管，旧服务 " + c + " 在运行"
+				}
+			}
+		}
+	} else if st.Current != nil {
+		if s.Health.TCP != "" || s.Health.HTTP != "" {
+			ok := a.Sys.Probe(s.Health) == nil
+			st.Healthy = &ok
+		}
+		st.Sites, st.Listen, st.Serving = a.staticServing(s, nginx)
+		st.Port = healthPort(s.Health)
+	}
+	return st
 }
 
 // healthPort 健康检查里的端口（tcp 的 host:port，或 http 地址里的端口）。

@@ -87,7 +87,7 @@ func TestStaticSwitchToInstanceFailureRestoresUnit(t *testing.T) {
 	old := "demo-web.service"
 	os.WriteFile(filepath.Join(f.unitDir, old), []byte(ManagedMarker+"\n# project=demo app=web target=t1\n[Unit]\n"), 0o644)
 	f.unit(old).active = "active"
-	f.shellFail["runuser -u 'svc' -- "+nginxCheckCommand(in.Hosting)+" 2>&1"] = true
+	f.shellFail[nginxCheckCommand(in.Hosting)+" 2>&1"] = true
 	req := f.stage(t, []proto.AppSpec{s}, id1, map[string][]byte{"web": []byte("v1")})
 	req.FerryDir, req.Project = a.req.FerryDir, a.req.Project
 	execConfigured(t, a, "deploy", req)

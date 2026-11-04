@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import LoadingBlock from './LoadingBlock.vue'
 import { computed, onMounted, ref } from 'vue'
-import { bytes, call, shortCommit, time, type AppReleases, type ReleaseInfo } from '../ferry'
+import { bytes, shortCommit, time, type AppReleases, type ReleaseInfo } from '../ferry'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { startTask } from '../state'
 import { previousRelease } from '../deploymentReview'
 
@@ -12,14 +13,16 @@ const visible = ref(true)
 const loading = ref(true)
 const error = ref('')
 const data = ref<AppReleases>()
+const reads = useReadRequests()
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    const all = await call<AppReleases[]>(['releases', props.target, props.app, '-c', props.config])
+    const all = await reads.run('releases', (s) => readCall<AppReleases[]>(['releases', props.target, props.app, '-c', props.config], s))
     data.value = all[0]
   } catch (e) {
+    if (e instanceof ReadCanceled) return
     error.value = (e as Error).message
   } finally {
     loading.value = false

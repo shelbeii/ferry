@@ -4,6 +4,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { call, FerryError, type Software, type SoftwareConfigs, type SoftwareConfigFile, type FilePreview } from '../ferry'
 import { secretRequest, trustRequest } from '../state'
 import FilePreviewDialog from './FilePreviewDialog.vue'
+import { useInteractionScope } from '../interactionScope'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 const ConfigEditor = defineAsyncComponent(() => import('./ConfigEditor.vue'))
 const props = defineProps<{ config: string; target: string; software: Software }>()
 const emit = defineEmits<{close: []; changed: []}>()
@@ -18,6 +20,9 @@ const projectConfigUsed = ref(false)
 watch(projectConfig, (open) => { if (open) projectConfigUsed.value = true })
 const identity = computed(() => props.software.instance ? [props.software.instance] : props.software.container ? ['--container', props.software.container] : props.software.unit ? ['--unit', props.software.unit] : ['--pid', String(props.software.pid)])
 const args = (op: string, file?: SoftwareConfigFile) => ['software', 'config', op, props.target, ...identity.value, ...(file ? ['--id', file.id] : [])]
+const captureContext = useInteractionScope(() => [props.config, props.target, identity.value.join('|'), visible.value])
+const reads = useReadRequests()
+let loadSequence = 0
 function handle(e: unknown) {
   const err = e as FerryError
   if (err instanceof FerryError && err.needSecret && err.detail) secretRequest.value = { detail: err.detail, config: props.config, retry: load }
@@ -25,31 +30,45 @@ function handle(e: unknown) {
   return err.message
 }
 async function load() {
+  const sequence = ++loadSequence
+  const current = captureContext()
+  reads.cancelAll()
   loading.value = true; error.value = ''
-  try { report.value = await call<SoftwareConfigs>([...args('list'), '-c', props.config]) }
-  catch (e) { error.value = handle(e) }
-  finally { loading.value = false }
+  try { const r = await reads.run('list', s => readCall<SoftwareConfigs>([...args('list'), '-c', props.config], s)); if (current() && sequence === loadSequence) report.value = r }
+  catch (e) { if (current() && sequence === loadSequence && !(e instanceof ReadCanceled)) error.value = handle(e) }
+  finally { if (current() && sequence === loadSequence) loading.value = false }
 }
 async function associate() {
+  const current = captureContext()
+  const command = [...args('associate'), '-c', props.config]
   let path: string
   try { ({ value: path } = await ElMessageBox.prompt('配置文件应位于此软件安装目录、对应的 /etc 配置目录，或容器的持久化挂载内。', '关联配置文件', { inputPlaceholder: '服务器上的绝对路径', inputValidator: (value) => value.startsWith('/') || '请输入绝对路径' })) } catch { return }
-  try { report.value = await call<SoftwareConfigs>([...args('associate'), '-c', props.config], { FERRY_FILE_VALUE: JSON.stringify({ path: path.trim() }) }); ElMessage.success('配置文件已关联') } catch (e) { ElMessage.error(handle(e)) }
+  if (!current()) return
+  working.value = 'associate'
+  try { const r = await call<SoftwareConfigs>(command, { FERRY_FILE_VALUE: JSON.stringify({ path: path.trim() }) }); if (current()) { report.value = r; ElMessage.success('配置文件已关联') } } catch (e) { if (current()) ElMessage.error(handle(e)) }
+  finally { if (current()) working.value = '' }
 }
 async function apply(file: SoftwareConfigFile) {
+  const current = captureContext()
+  const command = [...args('apply', file), '-c', props.config]
   try { await ElMessageBox.confirm(file.apply === 'reload' ? '校验配置并重新加载此软件？' : `重启 ${props.software.name} 使配置生效？连接可能短暂中断。`, '配置生效', { confirmButtonText: file.apply === 'reload' ? '校验并重新加载' : '重启', type: 'warning' }) } catch { return }
+  if (!current()) return
   working.value = file.id
-  try { await call([...args('apply', file), '-c', props.config]); ElMessage.success('配置已生效'); emit('changed') }
-  catch (e) { ElMessage.error({ message: handle(e), duration: 8000 }) }
-  finally { working.value = '' }
+  try { await call(command); if (current()) { ElMessage.success('配置已生效'); emit('changed') } }
+  catch (e) { if (current()) ElMessage.error({ message: handle(e), duration: 8000 }) }
+  finally { if (current()) working.value = '' }
 }
 async function restore(file: SoftwareConfigFile) {
-  const doc = await call<FilePreview>([...args('read', file), '-c', props.config]).catch((e) => { ElMessage.error(handle(e)); return undefined })
-  if (!doc) return
+  const current = captureContext()
+  const command = [...args('restore', file), '-c', props.config]
+  const doc = await reads.run('backup-read', s => readCall<FilePreview>([...args('read', file), '-c', props.config], s)).catch((e) => { if (current() && !(e instanceof ReadCanceled)) ElMessage.error(handle(e)); return undefined })
+  if (!doc || !current()) return
   try { await ElMessageBox.confirm('恢复到上一次保存前的内容？当前内容会另存为备份，恢复后仍需执行生效操作。', '恢复配置备份', { confirmButtonText: '恢复', type: 'warning' }) } catch { return }
+  if (!current()) return
   working.value = file.id
-  try { await call([...args('restore', file), '-c', props.config], { FERRY_FILE_VALUE: JSON.stringify({ revision: doc.revision }) }); ElMessage.success('已恢复配置文件'); await load() }
-  catch (e) { ElMessage.error(handle(e)) }
-  finally { working.value = '' }
+  try { await call(command, { FERRY_FILE_VALUE: JSON.stringify({ revision: doc.revision }) }); if (current()) { ElMessage.success('已恢复配置文件'); await load() } }
+  catch (e) { if (current()) ElMessage.error(handle(e)) }
+  finally { if (current()) working.value = '' }
 }
 watch(() => [props.config, props.target, props.software], () => { selected.value = undefined; load() }, { immediate: true })
 </script>

@@ -20,6 +20,7 @@ import {
   setList,
   setMap,
   setScalar,
+  setValue,
   type Path,
 } from '../../editor/configDoc'
 import { isMap, isScalar, isSeq } from 'yaml'
@@ -141,6 +142,16 @@ function commit(k: string, c: SchemaNode, v: FieldValue) {
 
 function removeField(k: string) {
   ctx.edit((d) => remove(d, writePath(d, k), props.keep))
+}
+
+async function addMapItem(k:string) {
+  try {
+    const result=await ElMessageBox.prompt('填写应用名','添加运行环境',{inputValidator:(value)=>ctx.names.value.apps.includes(value.trim())||'请选择配置中已有的应用名'})
+    const key=result.value.trim()
+    if(keysAt(doc.value,fieldPath(k)).includes(key))return
+    ctx.edit((d)=>setValue(d,[...fieldPath(k),key],{}))
+    opened.add(k)
+  } catch { /* 取消 */ }
 }
 
 // ---------------------------------------------------------------- 展开的段落
@@ -270,6 +281,15 @@ const kindText: Record<string, string> = { list: '列表', map: '名字 → 值'
           <div class="doc muted">{{ c.doc }}</div>
           <div v-if="isOpen(k)" class="sect-body">
             <ConfigFields :path="fieldPath(k)" :node="c" :app-type="appType" :keep="keep" />
+          </div>
+        </div>
+
+        <div v-else-if="c.kind==='objMap' && c.map" class="sect" :class="{set:isSet(k)}" :data-path="fieldPath(k).join('.')">
+          <div class="sect-head" @click="toggle(k)"><el-icon class="arrow"><ArrowDown v-if="isOpen(k)" /><ArrowRight v-else /></el-icon><span class="label">{{ c.label }}</span><span class="key mono">{{ k }}</span></div>
+          <div class="doc muted">{{ c.doc }}</div>
+          <div v-if="isOpen(k)" class="sect-body">
+            <div v-for="name in keysAt(doc,fieldPath(k))" :key="name" class="card"><div class="card-head"><b>{{ name }}</b><span class="spacer" /><el-button v-if="!readonly" size="small" text :icon="Delete" @click="ctx.edit((d)=>remove(d,[...fieldPath(k),name],keep))">删除覆盖</el-button></div><ConfigFields :path="[...fieldPath(k),name]" :node="c.map" :keep="keep" /></div>
+            <el-button v-if="!readonly" size="small" :icon="Plus" @click="addMapItem(k)">添加应用运行环境</el-button>
           </div>
         </div>
 

@@ -277,7 +277,7 @@ func (a *Agent) swupgrade() int {
 		if filepath.Dir(stage) != a.incomingDir() {
 			return a.result(proto.CodeBadInput, "上传目录不在 "+a.incomingDir()+" 下", nil)
 		}
-		defer os.RemoveAll(stage)
+		defer a.finishUpload(stage)
 	}
 	unlock, err := a.Sys.Lock(a.swLock(), 10*time.Minute)
 	if err != nil {

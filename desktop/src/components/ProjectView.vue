@@ -4,8 +4,14 @@ import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount,
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { Refresh, Upload, VideoPlay, VideoPause, RefreshRight, Clock, EditPen, Key, Monitor, ChatDotRound, Grid, List, SwitchButton, Setting, ArrowDown, Tools, Bell, Box, Connection, User, DataLine } from '@element-plus/icons-vue'
 import { call, FerryError, latencyInfo, latencyTip, shortCommit, time, type AppStatus, type ConnStatus, type LockHolder, type ExtraPort, type Inspect, type InspectTarget } from '../ferry'
-import { addProject, addTerminal, aiAskRequest, startTask, trustRequest, trustedTick, secretRequest, localRequest, appSettings, tasks, projectSummary, type Project } from '../state'
+import { addProject, addTerminal, aiAskRequest, startTask, trustRequest, trustedTick, secretRequest, localRequest, appSettings, tasks, projectSummary, projectTraits, type Project } from '../state'
 import SoftwarePanel from './SoftwarePanel.vue'
+import RowActions from './RowActions.vue'
+import type { RowAction } from '../rowActions'
+import type { DeploymentRequest } from '../editor/appSetup'
+import { appLocation } from '../fileLocations'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useInteractionScope } from '../interactionScope'
 import PortPanel from './PortPanel.vue'
 import SshPanel from './SshPanel.vue'
 import ServerInfoPanel from './ServerInfoPanel.vue'
@@ -24,17 +30,24 @@ import { glass, setVar } from '../glass/runtime'
 const AiDrawer = defineAsyncComponent(() => import('./AiDrawer.vue'))
 const DeployDialog = defineAsyncComponent(() => import('./DeployDialog.vue'))
 const ReleasesDialog = defineAsyncComponent(() => import('./ReleasesDialog.vue'))
+const AppInfoDialog = defineAsyncComponent(() => import('./AppInfoDialog.vue'))
+const RuntimeSwitchDialog = defineAsyncComponent(() => import('./RuntimeSwitchDialog.vue'))
 const LogsDialog = defineAsyncComponent(() => import('./LogsDialog.vue'))
 const HistoryDialog = defineAsyncComponent(() => import('./HistoryDialog.vue'))
 const ConfigEditor = defineAsyncComponent(() => import('./ConfigEditor.vue'))
 const KeygenDialog = defineAsyncComponent(() => import('./KeygenDialog.vue'))
 const LocalDialog = defineAsyncComponent(() => import('./LocalDialog.vue'))
+const FilesDrawer = defineAsyncComponent(() => import('./FilesDrawer.vue'))
 
 const props = defineProps<{ project: Project }>()
 
 const info = ref<Inspect>()
+watch(info, (project) => {
+  if (project) projectTraits[props.project.path] = { types: project.apps.map((app) => app.type), servers: project.targets.length }
+})
 const loadError = ref('')
 const activeTarget = ref('')
+const captureContext = useInteractionScope(() => [props.project.path, activeTarget.value])
 const target = computed<InspectTarget | undefined>(() => info.value?.targets.find((t) => t.name === activeTarget.value))
 
 // 每个目标的状态单独缓存
@@ -93,7 +106,11 @@ function observeFloat() {
 }
 
 // 正在读取状态的服务器（各记各的：一台还在连接时切到另一台，不显示成另一台在连接）
-const loadingTargets = ref<Record<string, number>>({})
+const statusReads = useReadRequests()
+const refreshReads = useReadRequests()
+const inspectReads = useReadRequests()
+const connReads = useReadRequests()
+const loadingTargets = statusReads.loading
 const loadingStatus = computed(() => !!loadingTargets.value[activeTarget.value])
 // 勾选的应用（按名字记）：表格切到「软件」再切回来、刷新状态时会重建，这里记住、重建后再勾回去
 const selection = ref<string[]>([])
@@ -147,8 +164,54 @@ async function syncSelection() {
 }
 
 const deployOpen = ref(false)
+const editorDeployment = ref<DeploymentRequest>()
 const releasesApp = ref('')
+const appInfoRequest = ref<{ app: string; target: string }>()
+const runtimeSwitchRequest = ref<{ app: string; target: string }>()
 const logsApp = ref('')
+const filesOpen = ref(false)
+const filesPath = ref('')
+const filesTitle = ref('')
+
+function showAppLocation(row: AppStatus) {
+  const path = appLocation(target.value, row.name)
+  if (!path) return
+  filesPath.value = path
+  filesTitle.value = `${row.name} · ${activeTarget.value}`
+  filesOpen.value = true
+}
+async function showInfoLocation(path: string) {
+  const request = appInfoRequest.value
+  if (!request) return
+  activeTarget.value = request.target
+  await nextTick()
+  if (appInfoRequest.value !== request || activeTarget.value !== request.target) return
+  filesPath.value = path
+  filesTitle.value = `${request.app} · ${request.target}`
+  filesOpen.value = true
+}
+async function showAppReleases(request: { app: string; target: string } | undefined) {
+  if (!request) return
+  activeTarget.value = request.target
+  await nextTick()
+  if (activeTarget.value !== request.target) return
+  releasesApp.value = request.app
+  if (appInfoRequest.value === request) appInfoRequest.value = undefined
+  if (runtimeSwitchRequest.value === request) runtimeSwitchRequest.value = undefined
+}
+
+function appActions(row: AppStatus): RowAction[] {
+  const path = appLocation(target.value, row.name)
+  const actions: RowAction[] = [
+    { id: 'app-info', label: '查看运行情况', run: () => { appInfoRequest.value = { app: row.name, target: activeTarget.value } } },
+    { id: 'runtime', label: '切换运行环境', run: () => { runtimeSwitchRequest.value = { app: row.name, target: activeTarget.value } } },
+    { id: 'location', label: '查看位置', run: () => showAppLocation(row), disabled: !path, title: path || '未识别到应用的部署目录' },
+  ]
+  if (row.type !== 'static' || row.unit) actions.push({ id: 'logs', label: '日志', run: () => { logsRelease.value = ''; logsApp.value = row.name } })
+  actions.push({ id: 'releases', label: '版本 / 回滚', run: () => { releasesApp.value = row.name } })
+  if (isAbnormal(row)) actions.push({ id: 'ai', label: 'AI 排查', run: () => askAboutApp(row) })
+  return actions
+}
 const logsRelease = ref('') // 从「版本/回滚」打开某个版本的运行日志
 const historyOpen = ref(false)
 // AI 助手：每台服务器一个对话（切换服务器时各自保留）
@@ -347,31 +410,37 @@ function openEditor(field?: string) {
   editorOpen.value = true
 }
 
-async function loadInspect() {
-  loadError.value = ''
+async function loadInspect(signal?: AbortSignal) {
   try {
-    info.value = await call<Inspect>(['inspect', '-c', props.project.path])
-    if (info.value.project !== props.project.name) await addProject({ path: props.project.path, name: info.value.project })
-    if (!info.value.targets.some((t) => t.name === activeTarget.value)) activeTarget.value = info.value.targets[0]?.name ?? ''
-    loadSetFields()
+    return await inspectReads.run('inspect', async (s) => {
+      const inspected = await readCall<Inspect>(['inspect', '-c', props.project.path], s)
+      info.value = inspected
+      loadError.value = ''
+      if (!inspected.targets.some((t) => t.name === activeTarget.value)) activeTarget.value = inspected.targets[0]?.name ?? ''
+      if (inspected.project !== props.project.name) await addProject({ path: props.project.path, name: inspected.project })
+      loadSetFields()
+      return true
+    }, { signal })
   } catch (e) {
-    info.value = undefined
+    if (e instanceof ReadCanceled) return false
     loadError.value = (e as Error).message
+    return false
   }
 }
 
 // background：定时的自动刷新（间隔见设置 → 连接）。只用已有的连接、不推迟空闲断开；读不到（连接刚好断开）就算了，不显示错误
-async function loadStatus(background = false) {
-  const t = activeTarget.value
+async function loadStatus(background = false, t = activeTarget.value, signal?: AbortSignal) {
   if (!t) return
-  loadingTargets.value[t] = (loadingTargets.value[t] ?? 0) + 1
   try {
-    statuses.value[t] = await call<AppStatus[]>(['status', t, '-c', props.project.path, ...(background ? ['--background'] : [])])
-    statusAt.value[t] = Date.now()
-    now.value = Date.now()
-    delete statusError.value[t]
+    await statusReads.run(t, async (s) => {
+      const rows = await readCall<AppStatus[]>(['status', t, '-c', props.project.path, ...(background ? ['--background'] : [])], s)
+      statuses.value[t] = rows
+      statusAt.value[t] = Date.now()
+      now.value = Date.now()
+      delete statusError.value[t]
+    }, { signal, timeoutMessage: `读取 ${t} 的应用状态超时（60 秒），已保留上次读取的数据，请检查网络后重试` })
   } catch (e) {
-    if (background) return
+    if (background || e instanceof ReadCanceled || signal?.aborted) return
     const err = e as FerryError
     const keyMissing = err instanceof FerryError && err.keyMissing
     // 私钥不在：下面有按钮，不用列命令行的办法
@@ -379,33 +448,39 @@ async function loadStatus(background = false) {
       ? `${err.detail?.local ? '本机设置里' : 'ferry.yaml 里'}指定的私钥 ${err.detail?.key} 在这台电脑上没有，默认私钥、ssh-agent 也登录不了。私钥只在配置它的那台电脑上，不会跟着 ferry.yaml 走。`
       : err.message
     statusError.value[t] = { msg, unknownHost: err instanceof FerryError && err.unknownHost, keyMissing }
-    if (err instanceof FerryError && err.needSecret && err.detail) {
-      secretRequest.value = { detail: err.detail, config: props.project.path, retry: loadStatus }
+    if (active && activeTarget.value === t && err instanceof FerryError && err.needSecret && err.detail) {
+      secretRequest.value = { detail: err.detail, config: props.project.path, retry: () => loadStatus(false, t) }
     }
   } finally {
-    if (--loadingTargets.value[t] <= 0) delete loadingTargets.value[t]
-    loadConns()
+    if (active) loadConns()
   }
 }
 
 // 点「刷新」：重新读配置、应用状态和当前打开的面板。
 // 刷新时盖一层「正在刷新」，完了提示一下：数据没变时也看得出刷新过
-const refreshing = ref(false)
+const refreshing = computed(() => !!refreshReads.loading.value[activeTarget.value])
 async function refresh() {
   if (refreshing.value) return
-  refreshing.value = true
   const t = activeTarget.value
+  if (!t) return
   const panel = view.value === 'software' ? swPanel.value : view.value === 'ports' ? portPanel.value : view.value === 'ssh' ? sshPanel.value : view.value === 'server' ? serverPanel.value : undefined
   const started = Date.now()
+  statusReads.cancel(t)
   try {
-    await loadInspect()
-    await Promise.all([loadStatus(), panel?.load()])
-    // 复用连接时不到 0.1 秒就读完了：至少显示半秒，不然一闪而过看不出来
-    await new Promise((r) => setTimeout(r, Math.max(0, 500 - (Date.now() - started))))
-  } finally {
-    refreshing.value = false
+    const ok = await refreshReads.run(t, async (signal) => {
+      if (!await loadInspect(signal) || signal.aborted) return false
+      await Promise.all([loadStatus(false, t, signal), panel?.load(false, signal)])
+      // 复用连接时至少显示半秒，避免一闪而过。
+      await new Promise((r) => setTimeout(r, Math.max(0, 500 - (Date.now() - started))))
+      return !loadError.value && !(panel ? panel.error : statusError.value[t])
+    }, { timeoutMessage: `刷新 ${t} 超时（60 秒），已保留上次读取的数据，请检查网络后重试` })
+    if (ok && active && activeTarget.value === t) ElMessage.success({ message: '已刷新', duration: 1500 })
+  } catch (e) {
+    if (e instanceof ReadCanceled) return
+    const msg = (e as Error).message
+    if (!panel) statusError.value[t] = { msg, unknownHost: false }
+    if (active && activeTarget.value === t) ElMessage.error(msg)
   }
-  if (!loadError.value && !(panel ? panel.error : statusError.value[t])) ElMessage.success({ message: '已刷新', duration: 1500 })
 }
 
 // 到各目标的常驻连接（桌面版在操作之间复用连接，空闲后自动断开）
@@ -422,11 +497,14 @@ function targetState(name: string) {
 }
 
 async function loadConns() {
+  if (!active) return
   try {
-    const list = await call<ConnStatus[]>(['pool', '-c', props.project.path])
-    conns.value = Object.fromEntries(list.map((c) => [c.target, c]))
+    await connReads.run('pool', async (signal) => {
+      const list = await readCall<ConnStatus[]>(['pool', '-c', props.project.path], signal)
+      conns.value = Object.fromEntries(list.map((c) => [c.target, c]))
+    }, { timeout: 8000 })
   } catch {
-    conns.value = {}
+    // 连接探测超时不能据此认定全部连接都断了，保留上次结果。
   }
 }
 
@@ -490,8 +568,9 @@ const readTip = computed(() =>
 onMounted(async () => {
   startTimer()
   await loadInspect()
+  if (!active) { mounted = true; return }
   await loadConns() // 本机就能答复：先知道是不是已经连着，加载提示才说得准
-  await loadStatus()
+  if (active) await loadStatus()
   mounted = true
 })
 onActivated(async () => {
@@ -499,15 +578,23 @@ onActivated(async () => {
   if (!mounted) return // 第一次显示时 onMounted 已经在加载
   startTimer()
   await loadConns()
+  if (!active) return
   await loadInspect() // 配置可能在别处改过
-  await loadStatus()
+  if (active) await loadStatus()
 })
 onDeactivated(() => {
   targetDetails.value = false
   active = false
   clearInterval(connTimer)
+  cancelReads()
 })
-onBeforeUnmount(() => clearInterval(connTimer))
+function cancelReads() {
+  refreshReads.cancelAll()
+  statusReads.cancelAll()
+  inspectReads.cancelAll()
+  connReads.cancelAll()
+}
+onBeforeUnmount(() => { active = false; clearInterval(connTimer); cancelReads() })
 // 任务（部署、启停、日志等）结束后刷新连接状态
 watch(
   () => tasks.filter((t) => t.status === 'running').length,
@@ -523,10 +610,16 @@ const finishedHere = computed(() =>
 // 切到别的项目时结束的不用管：切回来时 onActivated 本来就会刷新
 watch(finishedHere, () => active && loadStatus())
 // 版本 / 历史 / 日志窗口打开后（连接已建立）、关闭后刷新
-watch([releasesApp, logsApp, historyOpen], () => setTimeout(loadConns, 1500))
+watch([releasesApp, logsApp, historyOpen, appInfoRequest, runtimeSwitchRequest], () => setTimeout(loadConns, 1500))
 watch(trustedTick, () => loadStatus())
-watch(activeTarget, (t) => {
+watch(activeTarget, (t, previous) => {
+  refreshReads.cancel(previous)
+  statusReads.cancel(previous)
+  releasesApp.value = logsApp.value = logsRelease.value = ''
+  historyOpen.value = monitorOpen.value = backupOpen.value = keygenOpen.value = false
   targetDetails.value = false
+  filesOpen.value = false
+  filesPath.value = ''
   selection.value = []
   filter.value = 'all'
   if (t && !statuses.value[t]) loadStatus()
@@ -779,6 +872,9 @@ function afterTask() {
 
 // 启动 / 重启 / 停止和部署一样只作用于勾选的应用：没勾选时按钮是灰的
 async function control(action: 'start' | 'stop' | 'restart') {
+  const current = captureContext()
+  const targetName = activeTarget.value
+  const config = props.project.path
   const names = selectedNames.value
   const label = { start: '启动', stop: '停止', restart: '重启' }[action]
   if (!names.length) {
@@ -787,16 +883,17 @@ async function control(action: 'start' | 'stop' | 'restart') {
   }
   const what = names.join('、')
   if (action !== 'start' && target.value?.production) {
-    if (!(await confirmProduction(`${label} ${what}`, activeTarget.value))) return
+    if (!(await confirmProduction(`${label} ${what}`, targetName))) return
   } else if (action !== 'start') {
     try {
-      await ElMessageBox.confirm(`${label} ${activeTarget.value} 上的 ${what}？`, label, { type: 'warning' })
+      await ElMessageBox.confirm(`${label} ${targetName} 上的 ${what}？`, label, { type: 'warning' })
     } catch {
       return
     }
   }
-  const args = [action, activeTarget.value, names.join(','), '-c', props.project.path, '--yes'] // 上面已经确认过
-  startTask(`${label} ${activeTarget.value}：${what}`, args, afterTask)
+  if (!current()) return
+  const args = [action, targetName, names.join(','), '-c', config, '--yes'] // 上面已经确认过
+  startTask(`${label} ${targetName}：${what}`, args, afterTask)
 }
 
 // 部署要先勾选应用：不勾选就部署全部太容易误操作（要全部部署就勾表头的全选）
@@ -805,16 +902,23 @@ function openDeploy() {
     ElMessage.warning('请先勾选要部署的应用（全部部署可以点「全选」或表头的勾选框）')
     return
   }
+  editorDeployment.value = { apps: [...selectedNames.value], targets: [activeTarget.value] }
   deployOpen.value = true
 }
 
 function openTrust() {
-  trustRequest.value = { target: activeTarget.value }
+  trustRequest.value = { target: activeTarget.value, config: props.project.path }
 }
 
-function onSaved() {
+async function onSaved(deployment?: DeploymentRequest) {
   ElMessage.success('配置已保存')
-  loadInspect()
+  await loadInspect()
+  if (deployment && info.value) {
+    editorDeployment.value = deployment
+    activeTarget.value = deployment.targets[0]
+    view.value = 'apps'
+    deployOpen.value = true
+  }
 }
 </script>
 
@@ -1217,9 +1321,7 @@ function onSaved() {
                 <span class="problem">{{ shownProblem(row) }}</span>
               </el-tooltip>
               <span class="spacer" />
-              <el-button v-if="isAbnormal(row)" link type="warning" size="small" @click.stop="askAboutApp(row)">让 AI 看看</el-button>
-              <el-button v-if="row.type !== 'static' || row.unit" link type="primary" size="small" @click.stop="logsApp = row.name">日志</el-button>
-              <el-button link type="primary" size="small" @click.stop="releasesApp = row.name">版本</el-button>
+              <RowActions :key="`${activeTarget}:${row.name}`" :actions="appActions(row)" :label="row.name" :inline-count="0" />
             </div>
           </article>
           <el-empty v-if="!visibleRows.length && !statusError[activeTarget]" :description="appQuery.trim() ? '没有匹配的应用，请调整搜索条件' : filter === 'all' ? '这台服务器上没有应用' : `没有${filterLabel[filter]}的应用`" :image-size="60" class="cards-empty" />
@@ -1298,11 +1400,9 @@ function onSaved() {
             <el-table-column v-if="visibleRows.some((r) => shownProblem(r))" label="问题" min-width="140">
               <template #default="{ row }"><span class="ev-warn">{{ shownProblem(row) }}</span></template>
             </el-table-column>
-            <el-table-column label="操作" width="210" fixed="right">
+            <el-table-column label="操作" width="100" fixed="right">
               <template #default="{ row }">
-                <el-button v-if="isAbnormal(row)" link type="warning" @click="askAboutApp(row)">AI 排查</el-button>
-              <el-button link type="primary" @click="releasesApp = row.name">版本/回滚</el-button>
-                <el-button v-if="row.type !== 'static' || row.unit" link type="primary" @click="logsApp = row.name">日志</el-button>
+                <RowActions :key="`${activeTarget}:${row.name}`" :actions="appActions(row)" :label="row.name" :inline-count="0" />
               </template>
             </el-table-column>
           </el-table>
@@ -1312,15 +1412,38 @@ function onSaved() {
       </div>
     </template>
 
+    <FilesDrawer v-if="filesPath" v-model="filesOpen" :config="project.path" :target="activeTarget" :title="filesTitle" :path="filesPath" />
     <DeployDialog
       v-if="deployOpen && info"
       :config="project.path"
       :info="info"
-      :target="activeTarget"
-      :apps="selectedNames"
-      @close="deployOpen = false"
-      @started="(t) => (deployOpen = false)"
+      :target="editorDeployment?.targets[0] ?? activeTarget"
+      :apps="editorDeployment?.apps ?? selectedNames"
+      :initial-targets="editorDeployment?.targets"
+      @close="deployOpen = false; editorDeployment = undefined"
+      @started="deployOpen = false; editorDeployment = undefined"
       @finished="afterTask"
+    />
+    <AppInfoDialog
+      v-if="appInfoRequest"
+      :key="`${appInfoRequest.target}:${appInfoRequest.app}`"
+      :config="project.path"
+      :target="appInfoRequest.target"
+      :app="appInfoRequest.app"
+      @close="appInfoRequest = undefined"
+      @saved="onSaved"
+      @versions="showAppReleases(appInfoRequest)"
+      @location="showInfoLocation"
+    />
+    <RuntimeSwitchDialog
+      v-if="runtimeSwitchRequest"
+      :key="`${runtimeSwitchRequest.target}:${runtimeSwitchRequest.app}`"
+      :config="project.path"
+      :target="runtimeSwitchRequest.target"
+      :app="runtimeSwitchRequest.app"
+      @close="runtimeSwitchRequest = undefined"
+      @saved="onSaved"
+      @versions="showAppReleases(runtimeSwitchRequest)"
     />
     <ReleasesDialog
       v-if="releasesApp"
@@ -1363,7 +1486,7 @@ function onSaved() {
       @saved="loadInspect().then(() => loadStatus())"
       @keygen="openKeygen"
     />
-    <ConfigEditor v-if="editorUsed" v-model="editorOpen" :path="project.path" :focus="editorFocus" @saved="onSaved" />
+    <ConfigEditor v-if="editorUsed" v-model="editorOpen" :path="project.path" :focus="editorFocus" :target="activeTarget" @saved="onSaved" />
     <KeygenDialog
       v-if="keygenOpen && keygenFor && info"
       :config="project.path"
@@ -2034,7 +2157,7 @@ button.stat:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 底部一栏始终贴着卡片底边：同一行的卡片高度一样，「日志 · 版本」就在一条线上 */
+/* 底部一栏始终贴着卡片底边：同一行卡片的操作在一条线上 */
 .card-foot {
   display: flex;
   align-items: center;

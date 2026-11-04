@@ -87,7 +87,7 @@ func TestHostedNginxValidationFailureKeepsSite(t *testing.T) {
 	before, _ := os.ReadFile(file)
 	os.MkdirAll(a.verMetaDir(s.Name, id2), 0o755)
 	os.WriteFile(a.verFile(s.Name, id2, "nginx.conf"), []byte(ManagedMarker+"\nbroken;"), 0o644)
-	f.shellFail["runuser -u 'svc' -- "+nginxCheckCommand(in.Hosting)+" 2>&1"] = true
+	f.shellFail[nginxCheckCommand(in.Hosting)+" 2>&1"] = true
 	if err := a.publishNginxSite(&s, id2); err == nil {
 		t.Fatal("校验失败不能发布")
 	}

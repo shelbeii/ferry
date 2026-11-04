@@ -8,14 +8,18 @@ import { isMap, isScalar, isSeq, type Document } from 'yaml'
 import { schema, type SchemaNode } from '../../editor/schema'
 import { addEntry, append, keysAt, move, nodeAt, parse, remove, renameKey, scalarAt, serialize, type Path } from '../../editor/configDoc'
 import ConfigFields from './ConfigFields.vue'
+import AddAppDialog from './AddAppDialog.vue'
+import { applyAppSetup, type AppSetup, type DeploymentRequest } from '../../editor/appSetup'
 import { formCtx } from './ctx'
 
 const props = defineProps<{
   text: string
+  config: string
+  target?: string
   /** ferry 校验的错误（没有问题时为空） */
   errors: string
 }>()
-const emit = defineEmits<{ 'update:text': [text: string] }>()
+const emit = defineEmits<{ 'update:text': [text: string]; deploy: [request: DeploymentRequest] }>()
 
 const doc = computed(() => markRaw(parse(props.text)))
 const syntaxError = computed(() => {
@@ -173,11 +177,7 @@ const newFields: Record<Exclude<Section, 'project'>, NewField[]> = {
     { key: 'name', label: '名字', placeholder: '如 prod、test-1', check: nameOk(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, '名字', () => names.value.targets) },
     { key: 'host', label: '服务器地址', placeholder: 'IP 或域名' },
   ],
-  apps: [
-    { key: 'name', label: '应用名', placeholder: '如 api、web', check: nameOk(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, '应用名', () => names.value.apps) },
-    { key: 'type', label: '类型', values: ['java', 'binary', 'static', 'python', 'node', 'dotnet'] },
-    { key: 'path', label: '产物路径', placeholder: 'jar、程序文件或目录，相对配置文件所在目录' },
-  ],
+  apps: [], // 应用使用 AddAppDialog，一次补齐运行设置。
   backups: [
     {
       key: 'name',
@@ -199,6 +199,7 @@ function startAdd(s: Exclude<Section, 'project'>) {
 }
 
 function confirmAdd() {
+  if (adding.s === 'apps') return
   const f = adding.form
   for (const nf of adding.fields) {
     const v = (f[nf.key] ?? '').trim()
@@ -211,7 +212,6 @@ function confirmAdd() {
   edit((d) => {
     if (s === 'builds') addEntry(d, ['builds'], f.name.trim(), { command: f.command.trim() })
     else if (s === 'targets') addEntry(d, ['targets'], f.name.trim(), { host: f.host.trim() })
-    else if (s === 'apps') next.key = append(d, ['apps'], { name: f.name.trim(), type: f.type, artifact: { path: f.path.trim() } })
     else {
       const v = f.value.trim()
       const what = f.kind === 'mysql' || f.kind === 'postgres' ? { database: v } : f.kind === 'paths' ? [v] : v
@@ -221,6 +221,18 @@ function confirmAdd() {
   if (s === 'builds' || s === 'targets') next = { s, key: f.name.trim() }
   adding.open = false
   nextTick(() => (sel.value = next))
+}
+
+function addApp(form: AppSetup, deploy: boolean) {
+  let index = -1
+  edit((d) => { index = applyAppSetup(d, form) })
+  if (index < 0) return
+  adding.open = false
+  folded.delete('apps')
+  nextTick(() => {
+    sel.value = { s: 'apps', key: index }
+    if (deploy) emit('deploy', { apps: [form.name.trim()], targets: [...form.targets] })
+  })
 }
 
 async function removeSel() {
@@ -415,7 +427,8 @@ function isSel(s: Section, key?: string | number) {
       </section>
     </template>
 
-    <el-dialog v-model="adding.open" :title="sections.find((x) => x.s === adding.s)?.add" width="480px" append-to-body>
+    <AddAppDialog v-if="adding.open && adding.s === 'apps'" :text="text" :config="config" :target="target" @close="adding.open = false" @add="addApp" />
+    <el-dialog v-else v-model="adding.open" :title="sections.find((x) => x.s === adding.s)?.add" width="480px" append-to-body>
       <el-form label-width="120px" @submit.prevent="confirmAdd">
         <el-form-item v-for="f in adding.fields" :key="f.key" :label="f.label">
           <el-select v-if="f.values" v-model="adding.form[f.key]">

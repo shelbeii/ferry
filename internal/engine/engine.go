@@ -448,6 +448,7 @@ func (e *Engine) switchTarget(p *targetPlan, u uploaded, id string, git gitinfo.
 		req.NoRollback = o.NoRollback
 		if attempt == 0 {
 			if err := e.backupBefore(s); err != nil {
+				s.discardStage(req.Stage)
 				return nil, err
 			}
 		}
@@ -733,6 +734,7 @@ func (e *Engine) installNginx(p *targetPlan) error {
 		}
 		item := remote.UploadItem{Local: filepath.Join(dir, m.File), Remote: remote.Join(prep.Stage, m.File), Mode: 0o640, Size: m.Size}
 		if err := e.uploadItems(s, []remote.UploadItem{item}, m.Size, m.Size); err != nil {
+			s.discardStage(prep.Stage)
 			return fmt.Errorf("上传 nginx 失败：%w", err)
 		}
 		var r proto.Runtime
@@ -795,6 +797,7 @@ func (e *Engine) installJDK(s *session, n int, dir string) (proto.Runtime, error
 	}
 	item := remote.UploadItem{Local: filepath.Join(lib, m.File), Remote: remote.Join(prep.Stage, m.File), Mode: 0o640, Size: m.Size}
 	if err := e.uploadItems(s, []remote.UploadItem{item}, m.Size, m.Size); err != nil {
+		s.discardStage(prep.Stage)
 		return proto.Runtime{}, fmt.Errorf("上传 JDK 失败：%w", err)
 	}
 	var r proto.Runtime
@@ -838,6 +841,7 @@ func (e *Engine) installPin(s *session, pn pinNeed) error {
 	}
 	item := remote.UploadItem{Local: filepath.Join(lib, m.File), Remote: remote.Join(prep.Stage, m.File), Mode: 0o640, Size: m.Size}
 	if err := e.uploadItems(s, []remote.UploadItem{item}, m.Size, m.Size); err != nil {
+		s.discardStage(prep.Stage)
 		return fmt.Errorf("上传 JDK 失败：%w", err)
 	}
 	spec := &proto.RuntimeSpec{ID: m.ID, Java: pn.java, Version: m.Version, Pin: link, File: m.File, SHA256: m.SHA256, Size: m.Size}
@@ -909,6 +913,12 @@ func (e *Engine) upload(s *session, items []*item, id string, git gitinfo.Info, 
 	if err := s.callData("prepare", &proto.Request{Apps: specs, Seed: delta && hasJava, Sites: delta && hasStatic}, &prep); err != nil {
 		return nil, 0, 0, err
 	}
+	uploaded := false
+	defer func() {
+		if !uploaded {
+			s.discardStage(prep.Stage)
+		}
+	}()
 	have := map[string]bool{}
 	for _, l := range prep.Libs {
 		have[l] = true
@@ -1017,6 +1027,7 @@ func (e *Engine) upload(s *session, items []*item, id string, git gitinfo.Info, 
 		}
 		return nil, 0, 0, err
 	}
+	uploaded = true
 	return req, upBytes, total, nil
 }
 

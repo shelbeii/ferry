@@ -1,13 +1,14 @@
 <script setup lang="ts">
 // 设置 → 通知：部署、回滚结束后发到企业微信、钉钉、飞书的群机器人，或自己的接口。
-// 机器人地址（含令牌）和加签密钥存在系统凭据库，按 ID 区分；改动在设置「保存」时才写入（applySecrets）。
-import { computed, onMounted, reactive, ref } from 'vue'
+// 机器人地址和加签密钥与设置一起提交，成功后才清理草稿。
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { call, NOTIFY_KINDS, type AppSettings, type NotifyChannel } from '../ferry'
 import { projects } from '../state'
 import GlassSwitch from './glass/GlassSwitch.vue'
 import GlassToggle from './glass/GlassToggle.vue'
+import { notifySecretChanges } from '../settingsSecrets'
 
 const props = defineProps<{ notify: AppSettings['notify'] }>()
 
@@ -146,6 +147,7 @@ function deleteDraftSign() {
 
 // 用编辑框里（还没保存）的值测试
 async function test() {
+  const sequence = ++testSequence
   testing.value = true
   testResult.value = undefined
   const env: Record<string, string> = { FERRY_NOTIFY_TEST_KIND: draft.kind }
@@ -157,29 +159,27 @@ async function test() {
   const saved = draft.id && stored.value[draft.id]?.url && !pendingDeletes.has(`url:${draft.id}`)
   try {
     await call(['notify', 'test', ...(saved ? [draft.id] : [])], env)
+    if (sequence !== testSequence) return
     testResult.value = { ok: true, msg: '已发送，去群里看看收到没有' }
   } catch (e) {
-    testResult.value = { ok: false, msg: (e as Error).message }
+    if (sequence === testSequence) testResult.value = { ok: false, msg: (e as Error).message }
   } finally {
-    testing.value = false
+    if (sequence === testSequence) testing.value = false
   }
 }
+let testSequence = 0
+watch(() => [editing.value, JSON.stringify(draft), draftURL.value, draftSign.value], () => { testSequence++; testing.value = false; testResult.value = undefined }, { flush: 'sync' })
 
-/** 设置保存时调用：写入新填的地址、加签密钥，删除删掉的 */
-async function applySecrets() {
-  for (const key of pendingDeletes) {
-    if (pending[key]) continue
-    const [what, id] = key.split(':')
-    await call(['notify', 'forget', id, ...(what === 'sign' ? ['--sign'] : [])])
-  }
-  for (const [key, v] of Object.entries(pending)) {
-    const [what, id] = key.split(':')
-    await call(['notify', 'save', id, ...(what === 'sign' ? ['--sign'] : [])], { FERRY_SECRET_VALUE: v })
+function getSecretChanges() { return notifySecretChanges(pending, pendingDeletes) }
+function acceptSecretChanges() {
+  for (const change of getSecretChanges()) {
+    const row = stored.value[change.id] ??= { url: false, sign: false }
+    row[change.kind === 'notify-url' ? 'url' : 'sign'] = !change.remove
   }
   pendingDeletes.clear()
   for (const k of Object.keys(pending)) delete pending[k]
 }
-defineExpose({ applySecrets })
+defineExpose({ getSecretChanges, acceptSecretChanges })
 </script>
 
 <template>

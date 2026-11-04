@@ -6,10 +6,14 @@ import { call, NOTIFY_KINDS } from '../ferry'
 import { appSettings, settingsRequest } from '../state'
 import LoadingBlock from './LoadingBlock.vue'
 import GlassToggle from './glass/GlassToggle.vue'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{ config: string; target: string }>()
 const emit = defineEmits<{ close: [] }>()
 const visible = ref(true)
+const captureContext = useInteractionScope(() => [props.config, props.target, visible.value])
+const reads = useReadRequests()
 
 interface Problem {
   key: string
@@ -40,12 +44,16 @@ function setChannel(id: string, enabled: boolean) {
 }
 
 async function run<T>(action: string, extra: string[] = []): Promise<T | undefined> {
+  if (busy.value) return
+  const current = captureContext()
   busy.value = action
   error.value = ''
   try {
-    return await call<T>(['monitor', props.target, action, ...extra, '-c', props.config])
+    const args = ['monitor', props.target, action, ...extra, '-c', props.config]
+    const result = action === 'status' ? await reads.run('status', s => readCall<T>(args, s)) : await call<T>(args)
+    return current() ? result : undefined
   } catch (e) {
-    error.value = (e as Error).message
+    if (current() && !(e instanceof ReadCanceled)) error.value = (e as Error).message
   } finally {
     busy.value = ''
   }

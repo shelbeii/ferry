@@ -101,6 +101,11 @@ func LocalFiles(f *config.File, t *config.Target, a *config.App) ([]artifact.Ext
 
 // Spec 把配置渲染成发给 agent 的 AppSpec（单元文件在这里生成）。
 func Spec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, error) {
+	var overrideErr error
+	a, overrideErr = f.RuntimeApp(t, a)
+	if overrideErr != nil {
+		return proto.AppSpec{}, overrideErr
+	}
 	s, err := baseSpec(f, t, a)
 	if err != nil || !a.Hooks.Any() {
 		return s, err
@@ -191,6 +196,7 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 		sc.Builtins["artifact"] = sc.Builtins["running"]
 		if !a.Deps.Off && (a.Type == proto.TypePython || a.Type == proto.TypeNode) {
 			d := proto.Deps{Kind: a.Type}
+			d.Node = t.AppRuntimes[a.Name].Node
 			var err error
 			if d.Registry, err = sc.Expand(a.Deps.Registry); err != nil {
 				return s, wrap("deps.registry", err)
@@ -198,7 +204,7 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 			if d.Python, err = sc.Expand(a.Deps.Python); err != nil {
 				return s, wrap("deps.python", err)
 			}
-			if strings.ContainsAny(d.Registry+d.Python, " '\"\n") {
+			if strings.ContainsAny(d.Registry, " '\"\n") || strings.ContainsAny(d.Python, "\r\n\x00") {
 				return s, fmt.Errorf("%s：deps 里不能有空格、引号", a.Name)
 			}
 			s.Deps = &d

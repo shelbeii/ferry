@@ -31,6 +31,7 @@ async function pickKey() {
 }
 
 async function save(connect: boolean) {
+  if (saving.value) return
   error.value = ''
   if (!form.host.trim()) {
     error.value = '请填写主机'
@@ -45,6 +46,7 @@ async function save(connect: boolean) {
     return
   }
   saving.value = true
+  const login = { auth: form.auth, password: form.password, remember: form.remember }
   try {
     const value = {
       name: props.conn?.name ?? '',
@@ -56,13 +58,13 @@ async function save(connect: boolean) {
       identityFile: form.auth === 'key' ? form.identityFile.trim() : '',
     }
     const r = await call<{ name: string; path: string }>(['connection', 'save'], { FERRY_CONNECTION_VALUE: JSON.stringify(value) })
-    if (form.auth === 'password' && form.password) {
-      if (form.remember) {
+    if (login.auth === 'password' && login.password) {
+      if (login.remember) {
         // 值只经环境变量传给 ferry，不出现在命令行参数里
-        await call(['secret', 'set', r.name, '-c', r.path], { FERRY_SECRET_VALUE: form.password })
+        await call(['secret', 'set', r.name, '-c', r.path], { FERRY_SECRET_VALUE: login.password })
         delete sessionEnv[passwordEnv(r.name)]
       } else {
-        sessionEnv[passwordEnv(r.name)] = form.password
+        sessionEnv[passwordEnv(r.name)] = login.password
       }
     }
     await loadConnections()
@@ -79,7 +81,7 @@ async function save(connect: boolean) {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="editing ? '修改连接' : '新建连接'" width="520px" append-to-body @closed="emit('close')">
+  <el-dialog v-model="visible" :title="editing ? '修改连接' : '新建连接'" width="520px" append-to-body :before-close="(done: () => void) => { if (!saving) done() }" @closed="emit('close')">
     <el-form label-width="84px" @submit.prevent>
       <el-form-item label="主机" required>
         <div class="row">
@@ -119,7 +121,7 @@ async function save(connect: boolean) {
     <div class="muted small">第一次连接时会请你核对服务器的主机公钥。</div>
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="mt" />
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
+      <el-button :disabled="saving" @click="visible = false">取消</el-button>
       <el-button :loading="saving" @click="save(false)">只保存</el-button>
       <el-button type="primary" :loading="saving" @click="save(true)">保存并连接</el-button>
     </template>

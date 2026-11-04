@@ -1,15 +1,21 @@
 <script setup lang="ts">
 // 新建项目向导：选项目目录 → 识别应用（可修改、可手动添加）→ 填服务器（可从已有连接填入、测试连接）→ 预览生成的 ferry.yaml → 创建（可以接着预检）。
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Delete, FolderOpened, MagicStick, ChatDotRound, CircleCheckFilled, WarningFilled, CircleCloseFilled, Connection as ConnIcon } from '@element-plus/icons-vue'
 import { call, ferry, FerryError, type AiDetected, type Detected, type FerryLine, type Inspect } from '../ferry'
 import { pickDir, pickFile, pickMany } from '../platform'
 import { addProject, appSettings, connections, connectionsPath, loadConnections, localRequest, settingsRequest, trustRequest, secretRequest, trustedTick } from '../state'
 import { findModelByName, usageText } from '../ai'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useInteractionScope } from '../interactionScope'
 
 const emit = defineEmits<{ close: []; created: [path: string] }>()
 const visible = ref(true)
+const captureContext = useInteractionScope(() => visible.value)
+const reads = useReadRequests()
+let detectSequence = 0
+let configSequence = 0
 const step = ref(0)
 
 // ---------------------------------------------------------------- 第 1 步：目录
@@ -203,16 +209,23 @@ function appForm(s: Detected['apps'][number]): AppForm {
 
 async function detect() {
   if (!dir.value.trim()) return
+  const current = captureContext()
+  const sequence = ++detectSequence
+  const directory = dir.value.trim()
+  reads.cancel('detect')
   detecting.value = true
   detectError.value = ''
   aiSummary.value = ''
   try {
-    await applyDetected(await call<Detected>(['detect', dir.value.trim()]))
+    const detected = await reads.run('detect', s => readCall<Detected>(['detect', directory], s))
+    if (!current() || sequence !== detectSequence || directory !== dir.value.trim()) return
+    await applyDetected(detected)
   } catch (e) {
+    if (!current() || sequence !== detectSequence || directory !== dir.value.trim() || e instanceof ReadCanceled) return
     detectError.value = (e as Error).message
     detected.value = undefined
   } finally {
-    detecting.value = false
+    if (sequence === detectSequence) detecting.value = false
   }
 }
 
@@ -243,6 +256,7 @@ const aiSummary = ref('')
 const aiUsage = ref('')
 let aiKill: (() => Promise<void>) | undefined
 let aiStopped = false
+onBeforeUnmount(() => { aiStopped = true; void aiKill?.().catch(() => undefined) })
 const aiModels = computed(() => appSettings.value?.ai?.models ?? [])
 const aiModel = computed(
   () => aiModels.value.find((m) => m.id === aiModelId.value) ?? aiModels.value.find((m) => m.id === appSettings.value?.ai?.default) ?? aiModels.value[0],
@@ -266,6 +280,8 @@ function onAiLine(l: FerryLine) {
 async function aiDetect() {
   const m = aiModel.value
   if (!dir.value.trim() || !m || aiRunning.value) return
+  const current = captureContext()
+  const directory = dir.value.trim()
   aiRunning.value = true
   aiStopped = false
   aiLog.value = []
@@ -278,6 +294,7 @@ async function aiDetect() {
   const r = await run.done
   aiKill = undefined
   aiRunning.value = false
+  if (!current() || directory !== dir.value.trim()) return
   if (r.data?.usage && r.data.usage.input + r.data.usage.output > 0) {
     aiUsage.value = usageText(r.data.usage, findModelByName(aiModels.value, r.data.model ?? '') ?? m)
   }
@@ -305,11 +322,13 @@ function openAiSettings() {
 
 /** 配置文件的位置是不是已经有文件了（有就不能创建，可以直接添加它） */
 async function checkConfig() {
+  const sequence = ++configSequence
+  const path = configPath.value
   configExists.value = false
   if (!/\.ya?ml$/i.test(configPath.value)) return
   try {
-    const r = await call<{ exists: boolean }>(['create', '-c', configPath.value, '--check'])
-    configExists.value = r.exists
+    const r = await call<{ exists: boolean }>(['create', '-c', path, '--check'])
+    if (sequence === configSequence && path === configPath.value) configExists.value = r.exists
   } catch {
     // 检查不了时到最后一步再说
   }
@@ -507,9 +526,12 @@ function handleConnError(e: unknown, config: string, target: string, retry: () =
 }
 
 async function probe(t: TargetForm) {
+  if (t.probing) return
+  const current = captureContext()
   t.probing = true
   t.probeError = ''
   const key = targetKey(t)
+  let operationPath = probePath.value
   try {
     const prep = await call<{ path: string }>(['probe', 'prepare'], {
       FERRY_PROBE_VALUE: JSON.stringify({
@@ -520,16 +542,20 @@ async function probe(t: TargetForm) {
       }),
     })
     probePath.value = prep.path
-    const r = await call<ProbeResult>(['probe', t.name, '-c', prep.path], {
+    operationPath = prep.path
+    if (!current() || key !== targetKey(t) || !targets.value.includes(t)) return
+    const r = await reads.run(`probe:${t.name}`, s => readCall<ProbeResult>(['probe', t.name, '-c', prep.path], s, {
       FERRY_PROBE_VALUE: JSON.stringify({ root: t.root, runAs: needsRunAs.value ? t.runAs : '', ferryDir: t.ferryDir, ports: portList() }),
-    })
+    }))
+    if (!current() || key !== targetKey(t) || !targets.value.includes(t)) return
     t.probe = r
     if (r.nginxInstances?.length === 1 && !t.nginxInstance) t.nginxInstance = r.nginxInstances[0].name
     t.probedKey = key
     if (r.priv === 'sudo' && t.user !== 'root') t.sudo = true
   } catch (e) {
+    if (!current() || key !== targetKey(t) || e instanceof ReadCanceled) return
     t.probe = undefined
-    t.probeError = handleConnError(e, probePath.value, t.name, () => probe(t))
+    t.probeError = handleConnError(e, operationPath, t.name, () => { if (current() && key === targetKey(t)) probe(t) })
   } finally {
     t.probing = false
   }
@@ -783,10 +809,12 @@ async function next() {
 }
 
 async function create() {
+  if (creating.value) return
   creating.value = true
+  const name = project.value
   try {
     const r = await call<CreateResult>(['create', '-c', configPath.value], { FERRY_CREATE_VALUE: JSON.stringify(spec()) })
-    await addProject({ path: r.path, name: project.value })
+    await addProject({ path: r.path, name })
     createdPath.value = r.path
     emit('created', r.path)
   } catch (e) {

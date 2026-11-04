@@ -8,11 +8,13 @@ import { readConfig, writeConfig } from '../platform'
 import { ferry } from '../ferry'
 import { createEditor, locate, reveal, type FerryEditor } from '../editor/yamlEditor'
 import { diffHunks } from '../editor/configDoc'
+import { saveDraft } from '../editor/saveDraft'
+import type { DeploymentRequest } from '../editor/appSetup'
 import ConfigForm from './config/ConfigForm.vue'
 
 // focus：打开后定位到的字段路径，如 ['targets', 'prod-b', 'root']
-const props = defineProps<{ path: string; focus?: string[] }>()
-const emit = defineEmits<{ saved: [] }>()
+const props = defineProps<{ path: string; focus?: string[]; target?: string }>()
+const emit = defineEmits<{ saved: [deployment?: DeploymentRequest] }>()
 
 const visible = defineModel<boolean>({ required: true })
 const host = ref<HTMLElement>()
@@ -85,10 +87,10 @@ const formErrors = ref('')
 let formTimer: ReturnType<typeof setTimeout> | undefined
 let formSeq = 0
 function checkForm() {
+  const seq = ++formSeq
   clearTimeout(formTimer)
   if (!active || !opened || !loaded.value) return
   formTimer = setTimeout(async () => {
-    const seq = ++formSeq
     const err = await validate(text.value)
     if (seq === formSeq && active && !disposed) formErrors.value = err ?? ''
   }, 500)
@@ -238,6 +240,7 @@ function onClosed() {
     destroyEditor()
   }
   reviewing.value = false
+  deployment.value = undefined
   visible.value = false
 }
 
@@ -257,6 +260,11 @@ onBeforeUnmount(() => {
 // ---------------------------------------------------------------- 保存：先看改了什么
 
 const reviewing = ref(false)
+const deployment = ref<DeploymentRequest>()
+function saveAndDeploy(request: DeploymentRequest) {
+  deployment.value = request
+  void save()
+}
 const hunks = computed(() => (reviewing.value ? diffHunks(original.value, text.value) : []))
 const changeCount = computed(() => hunks.value.reduce((n, h) => n + h.lines.filter((l) => l.t !== ' ').length, 0))
 
@@ -276,18 +284,26 @@ async function doSave() {
   if (!active || refreshing.value || loadError.value || saving.value) return
   saving.value = true
   saveMsg.value = null
+  const content = text.value
+  const request = deployment.value
   try {
-    await writeConfig(props.path, crlf ? text.value.replace(/\n/g, '\r\n') : text.value)
-    original.value = text.value
+    original.value = await saveDraft(original.value, crlf ? content.replace(/\n/g, '\r\n') : content, {
+      read: () => readConfig(props.path), write: (value) => writeConfig(props.path, value),
+    })
     reviewing.value = false
-    const err = await validate(text.value)
+    const checked = content.length > 30000 ? await ferry(['validate', '-c', props.path]).done : undefined
+    const err = checked ? checked.ok ? null : checked.error ?? '配置校验失败' : await validate(content)
     formErrors.value = err ?? ''
     if (err) {
+      deployment.value = undefined
       saveMsg.value = { ok: false, text: tab.value === 'form' ? '已保存，但配置有错误：见表单里的红字' : '已保存，但配置有错误：见编辑器中的红色标记' }
       if (editor.value) forceLinting(editor.value.view)
     } else {
       saveMsg.value = { ok: true, text: '已保存，校验通过' }
-      emit('saved')
+      deployment.value = undefined
+      const deploy = text.value === content ? request : undefined
+      emit('saved', deploy)
+      if (deploy) visible.value = false
     }
   } catch (e) {
     saveMsg.value = { ok: false, text: String(e) }
@@ -311,6 +327,7 @@ async function restore() {
     return
   }
   text.value = original.value
+  deployment.value = undefined
   editor.value?.setDoc(original.value)
   saveMsg.value = null
 }
@@ -369,7 +386,7 @@ async function beforeClose(done: () => void) {
       <el-alert v-if="loadError" type="error" :title="loadError" :closable="false" show-icon />
       <el-alert v-if="focusHint && tab === 'yaml'" type="info" :title="focusHint" show-icon class="hint" @close="focusHint = ''" />
       <div v-loading="loading" class="body">
-        <ConfigForm v-if="loaded" v-show="tab === 'form'" ref="form" :text="text" :errors="formErrors" @update:text="onFormText" />
+        <ConfigForm v-if="loaded" v-show="tab === 'form'" ref="form" :text="text" :config="path" :target="target" :errors="formErrors" @update:text="onFormText" @deploy="saveAndDeploy" />
         <div v-show="tab === 'yaml'" class="editor-wrap">
           <div ref="host" class="editor-host" />
         </div>
@@ -393,7 +410,7 @@ async function beforeClose(done: () => void) {
       </div>
     </div>
     <template #footer>
-      <template v-if="reviewing"><span class="muted foot-tip">审阅 {{ changeCount }} 行修改</span><el-button @click="reviewing = false">返回修改</el-button><el-button type="primary" :loading="saving" @click="doSave">确认保存</el-button></template>
+      <template v-if="reviewing"><span class="muted foot-tip">审阅 {{ changeCount }} 行修改<span v-if="deployment">，保存后部署 {{ deployment.apps.join('、') }} 到 {{ deployment.targets.join('、') }}</span></span><el-button @click="reviewing = false; deployment = undefined">返回修改</el-button><el-button type="primary" :loading="saving" @click="doSave">{{ deployment ? '确认保存并部署' : '确认保存' }}</el-button></template>
       <template v-else>
       <span v-if="saveMsg" :class="saveMsg.ok ? 'ev-ok' : 'ev-error'" class="foot-msg">{{ saveMsg.text }}</span>
       <span v-else class="muted foot-tip">密码等敏感信息不要写进配置</span>

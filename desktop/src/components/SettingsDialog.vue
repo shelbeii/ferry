@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import LoadingBlock from './LoadingBlock.vue'
-import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, FolderOpened, Link, Plus, View } from '@element-plus/icons-vue'
 import { bytes, call, pkgOrigin, time, type AppSettings, type DataDirInfo, type JdkList, type SecretEntry, type SwPackage, type SwTemplates } from '../ferry'
@@ -42,6 +42,8 @@ const credentialQuery = ref('')
 const runtimeView = ref('jdk')
 const matchingSecrets = computed(() => secrets.value.filter((s) => `${s.label} ${secretKind(s.kind)}`.toLowerCase().includes(credentialQuery.value.trim().toLowerCase())))
 const saving = ref(false)
+const saveError = ref('')
+const saveErrorNotice = ref<HTMLElement>()
 const initializationError = ref('')
 const form = ref<AppSettings>()
 const envRows = ref<{ key: string; value: string }[]>([])
@@ -501,24 +503,33 @@ function restoreTheme() {
 }
 
 async function save() {
-  if (!form.value) return
+  if (!form.value || saving.value) return
   saving.value = true
+  saveError.value = ''
   try {
     const env: Record<string, string> = {}
     for (const r of envRows.value) if (r.key.trim()) env[r.key.trim()] = r.value
-    const s: AppSettings = {
+    const s: AppSettings = JSON.parse(JSON.stringify({
       ...form.value,
       build: { ...form.value.build, env, path: pathRows.value.map((p) => p.trim()).filter(Boolean) },
       desktop: appSettings.value!.desktop, // 项目列表以当前为准
-    }
-    await aiModels.value?.applyKeys()
-    await notifyChannels.value?.applySecrets()
-    await dnsKeys.value?.applyKeys()
-    await saveSettings(s)
+    }))
+    const changes = [
+      ...(aiModels.value?.getSecretChanges() ?? []),
+      ...(notifyChannels.value?.getSecretChanges() ?? []),
+      ...(dnsKeys.value?.getSecretChanges() ?? []),
+    ]
+    await saveSettings(s, changes)
+    aiModels.value?.acceptSecretChanges()
+    notifyChannels.value?.acceptSecretChanges()
+    dnsKeys.value?.acceptSecretChanges()
     ElMessage.success('设置已保存')
     visible.value = false
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    saveError.value = (e as Error).message
+    ElMessage.error(saveError.value)
+    await nextTick()
+    saveErrorNotice.value?.scrollIntoView({ block: 'nearest' })
   } finally {
     saving.value = false
   }
@@ -590,8 +601,8 @@ async function pickKeyDir() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="设置" width="min(1120px, 94vw)" top="4vh" class="settings-dialog" append-to-body @close="restoreTheme" @closed="emit('close')">
-    <div v-if="form && info" class="settings-workspace">
+  <el-dialog v-model="visible" title="设置" width="min(1120px, 94vw)" top="4vh" class="settings-dialog" append-to-body :before-close="(done: () => void) => { if (!saving) done() }" @close="restoreTheme" @closed="emit('close')">
+    <div v-if="form && info" class="settings-workspace" :inert="saving">
       <aside class="settings-navigation" aria-label="设置分类">
         <el-input v-model="settingsQuery" placeholder="搜索设置" clearable size="small" aria-label="搜索设置分类" />
         <div v-for="group in navigationGroups" :key="group.label" class="settings-group"><span>{{ group.label }}</span><button v-for="item in group.items" :key="item.name" :class="{ active: tab === item.name }" :aria-current="tab === item.name ? 'page' : undefined" @click="tab = item.name">{{ item.label }}</button></div>
@@ -599,6 +610,7 @@ async function pickKeyDir() {
       </aside>
       <section class="settings-content">
         <header class="settings-heading"><h2>{{ currentSection.label }}</h2><p>{{ currentSection.description }}</p></header>
+        <div v-if="saveError" ref="saveErrorNotice" class="note"><el-alert type="error" title="保存未完成，输入已保留，可修改后再次保存" :closable="false" show-icon><p>{{ saveError }}</p></el-alert></div>
     <!-- 各页用 lazy：第一次切到才渲染，打开设置时不用一下子把二十几页全建出来（会卡一下） -->
     <el-tabs v-model="tab" class="tabs">
       <!-- 存储 -->
@@ -1095,10 +1107,10 @@ async function pickKeyDir() {
     <LoadingBlock v-else text="正在读取设置…" :rows="9" min-height="320px" />
     <template #footer>
       <!-- 「关于」页没有可保存的内容 -->
-      <el-button v-if="tab === 'about'" @click="visible = false">关闭</el-button>
+      <el-button v-if="tab === 'about'" :disabled="saving" @click="visible = false">关闭</el-button>
       <template v-else>
-        <span class="muted small foot" :title="info?.file">配置选项点「保存」生效；测试、查看和清理操作即时执行。</span>
-        <el-button @click="visible = false">取消</el-button>
+        <span class="muted small foot" :title="info?.file">设置与模型、通知、DNS 凭据一起保存；测试、查看和清理即时执行。</span>
+        <el-button :disabled="saving" @click="visible = false">取消</el-button>
         <el-button type="primary" :disabled="!form" :loading="saving" @click="save">保存</el-button>
       </template>
     </template>

@@ -136,6 +136,13 @@ kind
 project
 targets
 targets.*.aiChanges
+targets.*.appRuntimes
+targets.*.appRuntimes.*.dotnet
+targets.*.appRuntimes.*.java
+targets.*.appRuntimes.*.nginxInstance
+targets.*.appRuntimes.*.node
+targets.*.appRuntimes.*.port
+targets.*.appRuntimes.*.python
 targets.*.apps
 targets.*.arch
 targets.*.auth

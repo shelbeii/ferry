@@ -53,6 +53,8 @@ type System interface {
 	Listening(pid int) []string
 	// ProcArgs 进程 pid 及其子进程的命令行参数（识别附加端口的用途）
 	ProcArgs(pid int) [][]string
+	// Processes 按主进程、子进程顺序读取运行详情，不读取进程的环境变量值。
+	Processes(pid int) []ProcessSnapshot
 	// NginxDump nginx -T 的输出（完整配置）；没有 nginx 时返回 ErrNoNginx
 	NginxDump() (string, error)
 	// JavaVersion 运行 <java> -version 的输出

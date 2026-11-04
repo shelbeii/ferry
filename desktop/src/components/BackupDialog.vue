@@ -8,10 +8,14 @@ import { pickDir } from '../platform'
 import { confirmProduction } from '../ui'
 import LoadingBlock from './LoadingBlock.vue'
 import GlassSwitch from './glass/GlassSwitch.vue'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{ config: string; target: string; production?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const visible = ref(true)
+const captureContext = useInteractionScope(() => [props.config, props.target, visible.value])
+const reads = useReadRequests()
 
 interface Run {
   time: string
@@ -64,11 +68,18 @@ const filter = ref('')
 const shown = computed(() => files.value.filter((f) => !filter.value || f.item === filter.value))
 
 async function load() {
+  const current = captureContext()
   error.value = ''
   try {
-    status.value = await call<Status>(['backup', props.target, 'status', '-c', props.config])
-    files.value = (await call<Status>(['backup', props.target, 'list', '-c', props.config])).files ?? []
+    const [s, list] = await reads.run('backups', signal => Promise.all([
+      readCall<Status>(['backup', props.target, 'status', '-c', props.config], signal),
+      readCall<Status>(['backup', props.target, 'list', '-c', props.config], signal),
+    ]))
+    if (!current()) return
+    status.value = s
+    files.value = list.files ?? []
   } catch (e) {
+    if (!current() || e instanceof ReadCanceled) return
     error.value = (e as Error).message
   }
 }
@@ -76,6 +87,8 @@ onMounted(load)
 
 /** 要等一会儿的操作：服务器上的进展显示在下面。 */
 async function long<T>(key: string, args: string[]): Promise<T | undefined> {
+  if (busy.value) return
+  const current = captureContext()
   busy.value = key
   error.value = ''
   log.value = []
@@ -86,6 +99,7 @@ async function long<T>(key: string, args: string[]): Promise<T | undefined> {
   }
   try {
     const r = await ferry<T>([...args, '-c', props.config], onLine).done
+    if (!current()) return
     if (!r.ok) {
       error.value = r.error ?? '失败了'
       return
@@ -98,6 +112,7 @@ async function long<T>(key: string, args: string[]): Promise<T | undefined> {
 }
 
 async function toggle(on: boolean) {
+  const current = captureContext()
   if (!on) {
     try {
       await ElMessageBox.confirm('关掉后服务器上不再定时备份，部署前也不备份。已有的备份文件留着，随时可以再打开。', '关闭数据备份', { type: 'warning', confirmButtonText: '关闭' })
@@ -105,6 +120,7 @@ async function toggle(on: boolean) {
       return
     }
   }
+  if (!current()) return
   if (await long(on ? 'on' : 'off', ['backup', props.target, on ? 'on' : 'off'])) {
     ElMessage.success(on ? '数据备份已打开' : '数据备份已关闭')
     await load()
@@ -119,6 +135,7 @@ async function runNow(name = '') {
 }
 
 async function restore(f: BFile) {
+  const current = captureContext()
   const what = `用 ${f.name} 恢复 ${f.item}`
   try {
     await ElMessageBox.confirm(
@@ -129,7 +146,9 @@ async function restore(f: BFile) {
   } catch {
     return
   }
+  if (!current()) return
   if (props.production && !(await confirmProduction(what, props.target))) return
+  if (!current()) return
   if (await long('restore:' + f.name, ['backup', props.target, 'restore', f.item, f.name, '--yes'])) {
     ElMessage.success('已恢复')
     await load()
@@ -137,11 +156,13 @@ async function restore(f: BFile) {
 }
 
 async function forceRestore(f: BFile) {
+  const current = captureContext()
   try {
     await ElMessageBox.confirm('恢复前备份现在的数据失败了。照样恢复的话，现在的数据就找不回来了。', '照样恢复？', { type: 'error', confirmButtonText: '照样恢复' })
   } catch {
     return
   }
+  if (!current()) return
   if (await long('restore:' + f.name, ['backup', props.target, 'restore', f.item, f.name, '--yes', '--force'])) {
     ElMessage.success('已恢复')
     await load()
@@ -149,19 +170,21 @@ async function forceRestore(f: BFile) {
 }
 
 async function download(f: BFile) {
+  const current = captureContext()
   const dir = await pickDir('下载到哪个文件夹')
-  if (!dir) return
+  if (!dir || !current()) return
   const r = await long<{ file: string }>('download:' + f.name, ['backup', props.target, 'download', f.item, f.name, dir])
   if (r) ElMessage.success(`已下载到 ${r.file}`)
 }
 
 async function remove(f: BFile) {
+  const current = captureContext()
   try {
     await ElMessageBox.confirm(`删掉服务器上的 ${f.name}？删了就找不回来了。`, '删除备份', { type: 'warning', confirmButtonText: '删除' })
   } catch {
     return
   }
-  if (await long('delete:' + f.name, ['backup', props.target, 'delete', f.item, f.name, '--yes'])) await load()
+  if (current() && await long('delete:' + f.name, ['backup', props.target, 'delete', f.item, f.name, '--yes'])) await load()
 }
 
 const kindText = (it: Item) =>

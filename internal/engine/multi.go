@@ -55,7 +55,7 @@ func (e *Engine) uploadAll(plans []*targetPlan, id string, git gitinfo.Info, tmp
 func (e *Engine) dropStages(plans []*targetPlan, ups []uploaded) {
 	for i, u := range ups {
 		if u.req != nil && u.req.Stage != "" {
-			plans[i].s.c.RemoveAll(u.req.Stage)
+			plans[i].s.discardStage(u.req.Stage)
 		}
 	}
 }

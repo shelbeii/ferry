@@ -3,15 +3,18 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { ArrowRight, Back, Delete, Document, Download, EditPen, Folder, FolderAdd, HomeFilled, Link, Refresh, Upload, View } from '@element-plus/icons-vue'
-import { bytes, call, ferry, FerryError, isSecretKind, type DirListing, type ErrorDetail, type FileEntry, type Running } from '../ferry'
+import { bytes, call, ferry, FerryError, isSecretKind, type DirListing, type ErrorDetail, type FileEntry } from '../ferry'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { validRemoteName } from '../fileNames'
 import FilePermissions from './FilePermissions.vue'
 import FilePreviewDialog from './FilePreviewDialog.vue'
+import FileSizeCell from './FileSizeCell.vue'
 import { onFileDrop, pickDir, pickMany, reveal } from '../platform'
 import { secretRequest, trustRequest, trustedTick } from '../state'
 import { glass, setVar } from '../glass/runtime'
 
-const props = defineProps<{ config: string; target: string }>()
+const props = defineProps<{ config: string; target: string; initialPath?: string; initialFocus?: string; directoryOnly?: boolean }>()
+const emit = defineEmits<{ directoryChange: [path: string] }>()
 
 const path = ref('')
 const home = ref('')
@@ -19,6 +22,7 @@ const pathInput = ref('')
 const editingPath = ref(false)
 const breadcrumbs = computed(() => path.value.split('/').filter(Boolean).map((label, i, all) => ({ label, path: '/' + all.slice(0, i + 1).join('/') })))
 const entries = ref<FileEntry[]>([])
+const sizeVersion = ref(0)
 const loading = ref(false)
 const error = ref('')
 const selected = ref<FileEntry[]>([])
@@ -26,7 +30,8 @@ const table = ref<{ clearSelection: () => void }>()
 const focusedName = ref<string>()
 const preview = ref<{ entry: FileEntry; dir: string }>()
 const query = ref('')
-const shownEntries = computed(() => entries.value.filter((e) => e.name.toLowerCase().includes(query.value.trim().toLowerCase())).slice().sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true })))
+const directoryEntries = computed(() => entries.value.filter((e) => !props.directoryOnly || e.dir))
+const shownEntries = computed(() => directoryEntries.value.filter((e) => e.name.toLowerCase().includes(query.value.trim().toLowerCase())).slice().sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true })))
 const selectedNames = computed(() => new Set(selected.value.map((row) => row.name)))
 const working = ref('')
 /** 正在删除的（完整路径）：删除在后台进行，别的文件夹照常能进、能操作 */
@@ -37,18 +42,25 @@ const xfer = ref<{ kind: 'upload' | 'download'; what: string; file: string; done
 const dropOver = ref(false)
 const root = ref<HTMLDivElement>()
 let waitTrust = false
-let listing: Running<DirListing> | undefined
+const listingReads = useReadRequests()
 let loadSeq = 0
 let transferSeq = 0
 let context = 0
 let requestedPath = ''
+let requestedFocus: string | undefined
 let disposed = false
 
 const join = (dir: string, name: string) => (dir.endsWith('/') ? dir + name : dir + '/' + name)
 const parent = computed(() => (path.value === '/' ? '' : path.value.replace(/\/[^/]+\/?$/, '') || '/'))
 const percent = computed(() => (xfer.value && xfer.value.total > 0 ? Math.min(100, Math.round((xfer.value.done / xfer.value.total) * 100)) : 0))
+const chosenDirectory = computed(() => {
+  if (!props.directoryOnly || busy.value || error.value || !path.value) return ''
+  const folder = shownEntries.value.find((entry) => entry.name === focusedName.value && entry.dir)
+  return folder ? join(path.value, folder.name) : path.value
+})
+watch(chosenDirectory, (dir) => emit('directoryChange', dir), { immediate: true })
 
-watch(() => `${props.config}|${props.target}`, () => {
+watch(() => [props.config, props.target, props.initialPath, props.initialFocus, props.directoryOnly], () => {
   context++
   transferSeq++
   xfer.value?.kill()
@@ -57,10 +69,10 @@ watch(() => `${props.config}|${props.target}`, () => {
   deleting.value = new Set()
   preview.value = undefined
   path.value = ''; home.value = ''; entries.value = []; clearSelection(); query.value = ''; editingPath.value = false
-  load('')
+  load(props.initialPath ?? '', props.initialFocus)
 }, { immediate: true })
 watch(trustedTick, () => {
-  if (waitTrust) load(requestedPath)
+  if (waitTrust) load(requestedPath, requestedFocus)
 })
 
 let unlisten: (() => void) | undefined
@@ -81,6 +93,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => headResize?.disconnect())
 onMounted(async () => {
+  if (props.directoryOnly) return
   unlisten = await onFileDrop(
     (x, y) => {
       const r = root.value?.getBoundingClientRect()
@@ -94,7 +107,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disposed = true
   context++; loadSeq++; transferSeq++
-  listing?.kill()
+  listingReads.cancelAll()
   unlisten?.()
   xfer.value?.kill()
 })
@@ -112,30 +125,40 @@ function handle(e: unknown, retry: () => void): string {
   return msg
 }
 
-async function load(dir: string) {
+async function load(dir: string, initialFocus?: string) {
   const seq = ++loadSeq
-  listing?.kill()
+  sizeVersion.value++
+  listingReads.cancelAll()
   requestedPath = dir
+  requestedFocus = initialFocus
   loading.value = true
   waitTrust = false
-  const proc = ferry<DirListing>(['files', 'ls', props.target, ...(dir ? [dir] : []), '-c', props.config])
-  listing = proc
   try {
-    const result = await proc.done
+    const r = await listingReads.run('listing', (s) => readCall<DirListing>(['files', 'ls', props.target, ...(dir ? [dir] : []), '-c', props.config], s))
     if (seq !== loadSeq) return
-    if (!result.ok || !result.data) throw new FerryError(result.error ?? '目录读取失败', result.detail)
-    const r = result.data
+    if (!r) throw new Error('目录读取失败')
     if (path.value !== r.path) query.value = ''
     path.value = r.path
     pathInput.value = r.path
     home.value = r.home
     entries.value = r.entries
     clearSelection()
+    const focus = r.focus || initialFocus
+    if (focus && shownEntries.value.some((entry) => entry.name === focus)) {
+      focusedName.value = focus
+      nextTick(() => {
+        if (seq !== loadSeq) return
+        focusList()
+        const position = shownEntries.value.findIndex((entry) => entry.name === focus)
+        root.value?.querySelectorAll<HTMLElement>('.el-table__body-wrapper tr.el-table__row')[position]?.scrollIntoView({ block: 'nearest' })
+      })
+    }
     error.value = ''
   } catch (e) {
-    if (seq !== loadSeq) return
-    error.value = handle(e, () => { if (seq === loadSeq) load(dir) })
-    pathInput.value = path.value
+    if (seq !== loadSeq || e instanceof ReadCanceled) return
+    error.value = handle(e, () => { if (seq === loadSeq) load(dir, initialFocus) })
+    pathInput.value = dir
+    if (!path.value) editingPath.value = true
   } finally {
     if (seq === loadSeq) loading.value = false
   }
@@ -175,7 +198,7 @@ function clearFocusOnBackground(event: MouseEvent) {
 }
 
 function viewFile(row: FileEntry) {
-  if (!busy.value && !row.dir && !isDeleting(row)) preview.value = { entry: row, dir: path.value }
+  if (!props.directoryOnly && !busy.value && !row.dir && !isDeleting(row)) preview.value = { entry: row, dir: path.value }
 }
 
 function openEntry(row: FileEntry) {
@@ -200,9 +223,9 @@ function listKeydown(event: KeyboardEvent) {
   const focusedRow = shownEntries.value.find((row) => row.name === focusedName.value)
   if (event.key === 'Enter' && focusedRow) {
     event.preventDefault(); openEntry(focusedRow)
-  } else if (event.key === 'F2' && selected.value.length === 1) {
+  } else if (!props.directoryOnly && event.key === 'F2' && selected.value.length === 1) {
     event.preventDefault(); rename()
-  } else if (event.key === 'Delete' && selected.value.length) {
+  } else if (!props.directoryOnly && event.key === 'Delete' && selected.value.length) {
     event.preventDefault(); remove()
   } else if (event.key === 'Escape') {
     event.preventDefault(); clearSelection()
@@ -252,19 +275,21 @@ async function run(args: string[], ok: string) {
 async function mkdir() {
   if (busy.value) return
   const at = context
+  const dir = path.value
   let name: string
   try {
     ;({ value: name } = await ElMessageBox.prompt('文件夹名', '新建文件夹', { inputValidator: (v) => validRemoteName(v) || '请输入有效的文件夹名，不能用 .、.. 或 /' }))
   } catch {
     return
   }
-  if (at !== context) return
-  run(['files', 'mkdir', props.target, join(path.value, name.trim())], '文件夹已创建')
+  if (at !== context || dir !== path.value) return
+  run(['files', 'mkdir', props.target, join(dir, name.trim())], '文件夹已创建')
 }
 
 async function rename() {
   if (busy.value) return
   const at = context
+  const dir = path.value
   const row = selected.value[0]
   if (!row) return
   let name: string
@@ -273,13 +298,14 @@ async function rename() {
   } catch {
     return
   }
-  if (at !== context || name.trim() === row.name) return
-  run(['files', 'mv', props.target, join(path.value, row.name), join(path.value, name.trim())], '已改名')
+  if (at !== context || dir !== path.value || name.trim() === row.name) return
+  run(['files', 'mv', props.target, join(dir, row.name), join(dir, name.trim())], '已改名')
 }
 
 async function remove() {
   if (busy.value) return
   const at = context
+  const dir = path.value
   const rows = selected.value
   if (!rows.length) return
   const names = rows.map((r) => r.name + (r.dir ? '/' : ''))
@@ -292,8 +318,7 @@ async function remove() {
   } catch {
     return
   }
-  if (at !== context) return
-  const dir = path.value
+  if (at !== context || dir !== path.value) return
   const paths = rows.map((r) => join(dir, r.name))
   const what = names.length === 1 ? names[0] : `${names.length} 项`
   deleting.value = new Set([...deleting.value, ...paths])
@@ -408,7 +433,7 @@ function time(t: string): string {
 </script>
 
 <template>
-  <div ref="root" class="files" :class="{ over: dropOver, 'glass-head': glass.enabled }">
+  <div ref="root" class="files" :class="{ over: dropOver, 'glass-head': glass.enabled, 'directory-picker': directoryOnly }">
     <div class="bar">
       <el-tooltip :show-after="HOVER_DELAY" content="上一级" placement="bottom">
         <el-button size="small" :icon="Back" aria-label="上一级目录" :disabled="!parent" @click="load(parent)" />
@@ -430,7 +455,7 @@ function time(t: string): string {
       </el-tooltip>
     </div>
     <div class="bar">
-      <el-dropdown trigger="click" @command="(c: string) => pickUpload(c === 'dir')">
+      <el-dropdown v-if="!directoryOnly" trigger="click" @command="(c: string) => pickUpload(c === 'dir')">
         <el-button size="small" type="primary" :icon="Upload" :disabled="busy || !path">上传</el-button>
         <template #dropdown>
           <el-dropdown-menu>
@@ -439,15 +464,15 @@ function time(t: string): string {
           </el-dropdown-menu>
         </template>
       </el-dropdown>
-      <el-button size="small" :icon="View" :disabled="busy || selected.length !== 1 || selected[0]?.dir || (selected[0] && isDeleting(selected[0]))" @click="viewFile(selected[0])">查看内容</el-button>
-      <el-button size="small" :icon="Download" :disabled="busy || !selected.length" @click="download(selected)">下载</el-button>
+      <el-button v-if="!directoryOnly" size="small" :icon="View" :disabled="busy || selected.length !== 1 || selected[0]?.dir || (selected[0] && isDeleting(selected[0]))" @click="viewFile(selected[0])">查看内容</el-button>
+      <el-button v-if="!directoryOnly" size="small" :icon="Download" :disabled="busy || !selected.length" @click="download(selected)">下载</el-button>
       <el-button size="small" :icon="FolderAdd" :disabled="busy || !path" @click="mkdir">新建文件夹</el-button>
-      <el-button size="small" :icon="EditPen" :disabled="busy || selected.length !== 1" @click="rename">改名</el-button>
-      <el-button size="small" :icon="Delete" :disabled="busy || !selected.length" type="danger" plain @click="remove">删除</el-button>
+      <el-button v-if="!directoryOnly" size="small" :icon="EditPen" :disabled="busy || selected.length !== 1" @click="rename">改名</el-button>
+      <el-button v-if="!directoryOnly" size="small" :icon="Delete" :disabled="busy || !selected.length" type="danger" plain @click="remove">删除</el-button>
     </div>
 
-    <div class="file-filter"><el-input v-model="query" size="small" placeholder="搜索当前文件夹" clearable aria-label="搜索当前文件夹" /><span class="muted small">{{ shownEntries.length }} / {{ entries.length }} 项<span v-if="selected.length"> · 已勾选 {{ selected.length }} 项</span></span><el-button v-if="selected.length" size="small" text @click="clearSelection">取消勾选</el-button></div>
-    <el-alert v-if="error" type="error" :closable="false" show-icon class="err" :title="error"><el-button link type="primary" @click="load(requestedPath)">重试</el-button></el-alert>
+    <div class="file-filter"><el-input v-model="query" size="small" :placeholder="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" clearable :aria-label="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" /><span class="muted small">{{ shownEntries.length }} / {{ directoryEntries.length }} 项<span v-if="selected.length"> · 已勾选 {{ selected.length }} 项</span></span><el-button v-if="selected.length" size="small" text @click="clearSelection">取消勾选</el-button></div>
+    <el-alert v-if="error" type="error" :closable="false" show-icon class="err" :title="error"><el-button link type="primary" @click="load(requestedPath, requestedFocus)">重试</el-button></el-alert>
     <el-table
       ref="table"
       v-loading="loading"
@@ -456,9 +481,9 @@ function time(t: string): string {
       height="100%"
       class="list"
       tabindex="0"
-      aria-label="服务器文件列表"
+      :aria-label="directoryOnly ? '服务器目录列表' : '服务器文件列表'"
       row-key="name"
-      :empty-text="error ? '目录读取失败，请重试' : query.trim() ? '没有匹配的文件' : '空文件夹'"
+      :empty-text="error ? '目录读取失败，请重试' : query.trim() ? (directoryOnly ? '没有匹配的子目录' : '没有匹配的文件') : directoryOnly ? '没有子目录，可以选择当前目录' : '空文件夹'"
       @selection-change="(v: FileEntry[]) => (selected = v)"
       @select="checkboxSelect"
       @select-all="selectAll"
@@ -468,7 +493,7 @@ function time(t: string): string {
       @keydown="listKeydown"
       :row-class-name="({ row }: { row: FileEntry }) => [isDeleting(row) ? 'is-deleting' : '', selectedNames.has(row.name) ? 'file-selected' : '', focusedName === row.name ? 'file-focused' : ''].join(' ')"
     >
-      <el-table-column type="selection" width="34" :selectable="(row: FileEntry) => !busy && !isDeleting(row)" />
+      <el-table-column v-if="!directoryOnly" type="selection" width="34" :selectable="(row: FileEntry) => !busy && !isDeleting(row)" />
       <el-table-column label="名称" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="name" :class="{ dir: row.dir }">
@@ -479,8 +504,8 @@ function time(t: string): string {
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="大小" width="88" align="right">
-        <template #default="{ row }">{{ row.dir ? '' : bytes(row.size) }}</template>
+      <el-table-column v-if="!directoryOnly" label="大小" width="124" align="right">
+        <template #default="{ row }"><FileSizeCell :key="`${sizeVersion}:${row.name}`" :config="config" :target="target" :path="join(path, row.name)" :entry="row" :disabled="busy || isDeleting(row)" /></template>
       </el-table-column>
       <el-table-column label="修改时间" width="156">
         <template #default="{ row }">{{ time(row.mtime) }}</template>
@@ -498,7 +523,7 @@ function time(t: string): string {
       <el-progress :percentage="percent" :stroke-width="6" />
       <div class="muted small mono">{{ xfer.file }} {{ xfer.total ? `${bytes(xfer.done)} / ${bytes(xfer.total)}` : '' }}</div>
     </div>
-    <div v-else class="muted small tip" role="status">{{ working || (deleting.size ? `正在删除 ${deleting.size} 项，可以继续浏览别的文件夹` : '双击打开文件或文件夹；勾选复选框后可下载、改名或删除；可拖入文件上传') }}</div>
+    <div v-else class="muted small tip" role="status">{{ working || (directoryOnly ? '单击选中目录，双击进入；未选中子目录时使用当前目录' : deleting.size ? `正在删除 ${deleting.size} 项，可以继续浏览别的文件夹` : '双击打开文件或文件夹；勾选复选框后可下载、改名或删除；可拖入文件上传') }}</div>
     <div v-if="dropOver" class="drop">松开就上传到 {{ path }}</div>
     <FilePreviewDialog v-if="preview" :config="config" :target="target" :path="join(preview.dir, preview.entry.name)" @close="preview = undefined" @download="download([preview!.entry], preview!.dir)" @saved="load(path)" />
   </div>
@@ -576,6 +601,7 @@ function time(t: string): string {
 .list :deep(.permission-summary) { font-size: 15px; }
 .list :deep(.el-table__body) { user-select: none; -webkit-user-select: none; }
 .list :deep(.file-selected > td.el-table__cell) { background: var(--el-color-primary-light-9); }
+.directory-picker .list :deep(.file-focused > td.el-table__cell) { background: var(--el-color-primary-light-9); }
 .list:focus { outline: none; }
 .list:focus :deep(.file-focused) { outline: 1px solid var(--el-color-primary-light-5); outline-offset: -1px; }
 .name {

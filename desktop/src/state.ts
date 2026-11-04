@@ -5,6 +5,9 @@ import { call, ferry, isSecretKind, type AppSettings, type BusyItem, type Connec
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { isTauri, storeGet } from './platform'
 import { glass, GLASS_TRANSPARENCY_DEFAULT } from './glass/runtime'
+import { commandTarget } from './commandContext'
+import { mergeRetries, queuedRequest } from './requestQueue'
+import type { SettingsSecretChange } from './settingsSecrets'
 
 // ---------------------------------------------------------------- 设置
 
@@ -13,19 +16,42 @@ export const settingsInfo = ref<SettingsResponse | null>(null)
 
 export async function loadSettings(): Promise<AppSettings> {
   const r = await call<SettingsResponse>(['settings'])
+  acceptSettings(r)
+  return r.settings
+}
+
+function acceptSettings(r: SettingsResponse) {
   r.settings.ui.glassTransparency ??= GLASS_TRANSPARENCY_DEFAULT // 旧版 ferry 没有这一项
   settingsInfo.value = r
   appSettings.value = r.settings
   applyTheme(r.settings.ui.theme)
   glass.enabled = r.settings.ui.glass !== false
   glass.transparency = r.settings.ui.glassTransparency
-  return r.settings
 }
 
-/** 保存设置（整份替换；值经环境变量传给 ferry）。 */
-export async function saveSettings(s: AppSettings): Promise<void> {
-  await call(['settings', 'save'], { FERRY_SETTINGS_VALUE: JSON.stringify(s) })
-  await loadSettings()
+let settingsWrites: Promise<void> = Promise.resolve()
+function queueSettingsWrite(write: () => Promise<void>): Promise<void> {
+  const next = settingsWrites.then(write)
+  settingsWrites = next.catch(() => undefined)
+  return next
+}
+
+async function commitSettings(s: AppSettings, changes: SettingsSecretChange[] = []): Promise<void> {
+  const batch = changes.length > 0
+  if (batch && settingsInfo.value?.secretsTransaction !== 1) throw new Error('当前 Ferry 后台不支持设置与凭据一起保存，请重启更新后的桌面版再试；本次未保存')
+  const r = await call<SettingsResponse>(['settings', 'save', ...(batch ? ['--with-secrets'] : [])], {
+    FERRY_SETTINGS_VALUE: JSON.stringify(s),
+    ...(batch ? { FERRY_SETTINGS_SECRETS: JSON.stringify(changes) } : {}),
+  })
+  // 保存结果包含规范化的完整设置，避免提交成功后又因额外读取失败而误报保存失败。
+  acceptSettings(r)
+}
+
+/** 一次提交设置与凭据草稿；失败时不改变本机缓存，由调用方保留草稿。 */
+export function saveSettings(s: AppSettings, changes: SettingsSecretChange[] = []): Promise<void> {
+  const draft: AppSettings = JSON.parse(JSON.stringify(s))
+  const secrets: SettingsSecretChange[] = JSON.parse(JSON.stringify(changes))
+  return queueSettingsWrite(() => commitSettings({ ...draft, desktop: appSettings.value?.desktop ?? draft.desktop }, secrets))
 }
 
 // ---------------------------------------------------------------- 主题
@@ -76,8 +102,10 @@ export async function loadProjects() {
 }
 
 async function saveProjects() {
-  const s = appSettings.value ?? (await loadSettings())
-  await saveSettings({ ...s, desktop: { projects: projects.value, current: currentPath.value } })
+  await queueSettingsWrite(async () => {
+    const s = appSettings.value ?? (await loadSettings())
+    await commitSettings({ ...s, desktop: { projects: projects.value, current: currentPath.value } })
+  })
 }
 
 export async function addProject(p: Project) {
@@ -90,6 +118,7 @@ export async function addProject(p: Project) {
 
 export async function removeProject(path: string) {
   projects.value = projects.value.filter((p) => p.path !== path)
+  delete projectTraits[path]
   if (currentPath.value === path) currentPath.value = projects.value[0]?.path ?? ''
   await saveProjects()
 }
@@ -103,6 +132,10 @@ export async function relocateProject(from: string, to: string) {
     projectSummary[to] = projectSummary[from]
     delete projectSummary[from]
   }
+  if (projectTraits[from]) {
+    projectTraits[to] = projectTraits[from]
+    delete projectTraits[from]
+  }
   await saveProjects()
 }
 
@@ -113,6 +146,9 @@ export async function selectProject(path: string) {
 
 /** 左边项目列表里显示的「运行中 / 全部」：项目页读到状态后填（只算已经打开过、读过状态的服务器） */
 export const projectSummary = reactive<Record<string, { up: number; total: number }>>({})
+
+/** 侧栏图案使用已读取的项目特征，不额外请求服务器，也不保存到配置。 */
+export const projectTraits = reactive<Record<string, { types: string[]; servers: number }>>({})
 
 /** 本机界面偏好（项目列表收起、各项目用卡片还是列表）：只是方便，读写失败就用默认 */
 export function uiPref(key: string): string | null {
@@ -474,11 +510,7 @@ export async function removeTasks(list: Task[]) {
 }
 
 function guessTarget(args: string[]): string {
-  // 命令后的第一个位置参数是目标（多目标时取第一个）
-  const pos = args.filter((a, i) => !a.startsWith('-') && !(i > 0 && ['-c', '--to', '-n', '--limit', '--expect', '--key'].includes(args[i - 1])))
-  // ferry software <子命令> <目标> …
-  if (pos[0] === 'software' && ['install', 'start', 'stop', 'restart', 'remove', 'logs', 'password'].includes(pos[1] ?? '')) return pos[2] ?? ''
-  return (pos[1] ?? '').split(',')[0]
+  return commandTarget(args) ?? ''
 }
 
 function configOf(args: string[]): string {
@@ -489,7 +521,7 @@ function configOf(args: string[]): string {
 // ---------------------------------------------------------------- 主机公钥核对
 
 /** config 为空时用当前项目的配置文件（连接页没有当前项目，一定要带上）；retry：记录以后接着执行刚才的操作 */
-export const trustRequest = ref<{ target: string; config?: string; retry?: () => void } | null>(null)
+export const trustRequest = queuedRequest<{ target: string; config?: string; retry?: () => void }>({ key: r => JSON.stringify([r.config, r.target]), merge: mergeRetries })
 
 /**
  * 每个连接删了几次（按名字）：连接页按它区分，删除后再建同名的连接是新的页面；
@@ -530,11 +562,8 @@ export async function hangupConnection(name: string, title = name) {
 export const aiAskRequest = ref<{ config: string; target: string; text: string } | null>(null)
 
 // 命令的第二项是服务器的（deploy prod-a,prod-b → prod-a）
-const targetCommands = new Set(['deploy', 'start', 'stop', 'restart', 'rollback', 'status', 'preflight', 'software', 'port', 'who', 'logs'])
 function targetOf(args: string[]): string | undefined {
-  if (!targetCommands.has(args[0]) || !args[1] || args[1].startsWith('-')) return undefined
-  const t = ['software', 'port', 'who'].includes(args[0]) && args[2] && !args[2].startsWith('-') && ['install', 'start', 'stop', 'restart', 'remove', 'open', 'close', 'enable', 'disable', 'kick'].includes(args[1]) ? args[2] : args[1]
-  return t.split(',')[0]
+  return commandTarget(args)
 }
 /** 每记录一次主机公钥加一：页面据此重新读取状态 */
 export const trustedTick = ref(0)
@@ -625,7 +654,7 @@ export async function loadConnections() {
 // ---------------------------------------------------------------- 密码
 
 /** 部署时本机有程序占着要构建的 jar；retry 重新部署 */
-export const busyRequest = ref<{ config: string; target: string; items: BusyItem[]; retry: () => void } | null>(null)
+export const busyRequest = queuedRequest<{ config: string; target: string; items: BusyItem[]; retry: () => void }>()
 
 /** 打开设置并切到某一页（如 AI 助手里点「模型设置」） */
 export const settingsRequest = ref('')
@@ -634,4 +663,4 @@ export const settingsRequest = ref('')
 /** 导入的配置在这台电脑上缺东西（别的电脑上的私钥、源码目录）：进入项目后打开「本机设置」 */
 export const localRequest = ref<string | null>(null)
 
-export const secretRequest = ref<{ detail: ErrorDetail; config: string; retry: () => void } | null>(null)
+export const secretRequest = queuedRequest<{ detail: ErrorDetail; config: string; retry: () => void }>({ key: r => JSON.stringify([r.config, r.detail.kind, r.detail.env, r.detail.target, r.detail.key, r.detail.account]), merge: mergeRetries })

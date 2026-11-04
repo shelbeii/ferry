@@ -383,12 +383,18 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	}
 
 	stage := ""
+	stageHandedOff := false
 	if pkg != nil && !cached {
 		var prep proto.Prepared
 		if err := s.callData("prepare", &proto.Request{}, &prep); err != nil {
 			return nil, err
 		}
 		stage = prep.Stage
+		defer func() {
+			if !stageHandedOff {
+				s.discardStage(stage)
+			}
+		}()
 	}
 	vars["package"] = ""
 	if pkg != nil {
@@ -446,6 +452,7 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			secret.Delete(pwKey)
 		}
 	}
+	stageHandedOff = true // 交给 agent 后，断线也由它做完和清理，不能提前删除正在使用的上传。
 	r, err := s.call("swinstall", &proto.Request{Stage: stage, Install: plan})
 	if err != nil {
 		if saved {

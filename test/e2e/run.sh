@@ -183,12 +183,12 @@ t "日志目录归运行用户" ok "demo" -- dx a 'stat -c %U /opt/e2e/apps/api/
 step "增量上传"
 (cd "$ROOT" && go run ./test/e2e/mkjar "$OUT/sys.jar" v2)
 t "sys v2 只传变化的字节" ok "复用缓存" -- F deploy e2e-a sys --skip-build
-dx a 'f=$(ls /opt/e2e/.ferry/cache/lib/*.jar | head -1); echo x >> "$f"'
+t "部署后没有上传目录和依赖缓存残留" ok "" -- dx a 'test -z "$(find /opt/e2e/.ferry/cache /opt/e2e/.ferry/incoming -mindepth 1 -print -quit)"'
 (cd "$ROOT" && go run ./test/e2e/mkjar "$OUT/sys.jar" v3)
-t "缓存损坏：自动改全量重试并成功" ok "改为全量上传重试" -- F deploy e2e-a sys --skip-build
+t "清空临时缓存后仍从现有 JAR 增量上传" ok "复用缓存" -- F deploy e2e-a sys --skip-build
 (cd "$ROOT" && go run ./test/e2e/mkjar "$OUT/sys.jar" v4)
 out=$(F deploy e2e-a sys --skip-build 2>&1)
-has "损坏的缓存已删除，下次又是增量" "复用缓存" "$out"
+has "再次部署仍能重建临时依赖并增量上传" "复用缓存" "$out"
 
 step "静态站点只传变化的文件"
 echo '<h1>v2</h1>' > "$OUT/web/index.html"

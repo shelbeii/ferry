@@ -68,3 +68,17 @@ func TestExecCommand(t *testing.T) {
 		t.Fatal(c)
 	}
 }
+
+func TestSelectedPythonCreatesVenvWithoutRequirements(t *testing.T) {
+	canSymlink(t)
+	f := newFake(t)
+	a := &Agent{Sys: f, req: &proto.Request{Root: f.root}}
+	s := proto.AppSpec{Name: "py", Type: proto.TypePython, Deps: &proto.Deps{Kind: proto.TypePython, Python: "/opt/python312/bin/python3"}}
+	release := t.TempDir()
+	if err := a.installDeps(&s, release, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.hooks) != 1 || !strings.Contains(f.hooks[0].Cmd, "/opt/python312/bin/python3") || strings.Contains(f.hooks[0].Cmd, "requirements.txt") || !exists(filepath.Join(release, ".venv")) {
+		t.Fatalf("应使用所选 Python 创建空 venv：%+v", f.hooks)
+	}
+}

@@ -67,7 +67,7 @@ func (a *Agent) publishNginxSite(s *proto.AppSpec, id string) error {
 	if err != nil {
 		return err
 	}
-	unlock, err := a.Sys.Lock(filepath.Join(a.swDir(), "nginx-"+in.Name+".lock"), 30*time.Second)
+	unlock, err := a.lockNginxInstances(in.Name)
 	if err != nil {
 		return err
 	}
@@ -113,15 +113,7 @@ func (a *Agent) publishNginxSite(s *proto.AppSpec, id string) error {
 		if !strings.HasPrefix(string(conf), ManagedMarker) {
 			return errors.New("站点版本的 nginx 配置没有管理标记")
 		}
-		logs := filepath.Join(a.sharedDir(s.Name), "logs")
-		if err := os.MkdirAll(logs, 0o755); err != nil {
-			return err
-		}
-		uid, gid, err := a.Sys.LookupUser(in.User)
-		if err != nil {
-			return err
-		}
-		if err := a.Sys.Lchown(logs, uid, gid); err != nil {
+		if err := a.prepareNginxSiteLogs(s, in.User); err != nil {
 			return err
 		}
 		if s.TLS != nil {
@@ -143,13 +135,9 @@ func (a *Agent) publishNginxSite(s *proto.AppSpec, id string) error {
 			os.Remove(file)
 		}
 	}
-	check := nginxCheckCommand(in.Hosting)
-	if !in.Hosting.System {
-		check = "runuser -u " + shellQuote(in.User) + " -- " + check
-	}
-	if out, err := a.Sys.Shell(check+" 2>&1", 15*time.Second); err != nil || strings.Contains(out, "conflicting server name") {
+	if err := a.checkHostingNginx(in); err != nil {
 		revert()
-		return fmt.Errorf("nginx 配置校验失败，原站点配置已保留：%v %s", err, strings.TrimSpace(out))
+		return fmt.Errorf("nginx 配置校验失败，原站点配置已保留：%w", err)
 	}
 	if err := a.Sys.Systemctl("reload", in.Unit); err != nil {
 		revert()
@@ -159,6 +147,9 @@ func (a *Agent) publishNginxSite(s *proto.AppSpec, id string) error {
 		return fmt.Errorf("重新加载 nginx 失败，已重新加载原配置：%v", err)
 	}
 	if id != "" {
+		if err := a.saveNginxRuntime(s, id); err != nil {
+			return err
+		}
 		b, _ := json.Marshal(nginxSiteBinding{Instance: in.Name, File: file})
 		if err := writeFileAtomic(a.siteBindingFile(s.Name), b, 0o644); err != nil {
 			return err
@@ -173,6 +164,61 @@ func (a *Agent) publishNginxSite(s *proto.AppSpec, id string) error {
 	}
 	a.info(proto.EvReload, s.Name, "已更新 nginx 实例 %s 的站点配置", in.Name)
 	return nil
+}
+
+// nginx -t 会打开日志并测试监听端口。普通 runuser 不继承 systemd 给实例的
+// CAP_NET_BIND_SERVICE，因而会把正常监听 80/443（或 81）的实例误判为配置错误。
+// 和软件配置编辑中的检查一致，由 root agent 校验所选实例，实际重载仍由原服务执行。
+func (a *Agent) checkHostingNginx(in *proto.SoftwareInstance) error {
+	out, err := a.Sys.Shell(nginxCheckCommand(in.Hosting)+" 2>&1", 15*time.Second)
+	if err != nil {
+		return fmt.Errorf("%w %s", err, strings.TrimSpace(out))
+	}
+	if strings.Contains(out, "conflicting server name") {
+		return errors.New(strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// root 校验之前准备本站点的日志，避免 nginx -t 创建 root 属主的文件后，
+// 非 root master 重载时打不开。只处理生成的两个日志，不截断现有内容。
+func (a *Agent) prepareNginxSiteLogs(s *proto.AppSpec, user string) error {
+	uid, gid, err := a.Sys.LookupUser(user)
+	if err != nil {
+		return err
+	}
+	logs := filepath.Join(a.sharedDir(s.Name), "logs")
+	if err := os.MkdirAll(logs, 0o755); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(logs)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("站点日志目录不是普通目录：%s", logs)
+	}
+	for _, name := range []string{"access.log", "error.log"} {
+		file := filepath.Join(logs, name)
+		f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+		if err == nil {
+			err = f.Close()
+		}
+		if err != nil && !os.IsExist(err) {
+			return err
+		}
+		fi, err := os.Lstat(file)
+		if err != nil {
+			return err
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("站点日志不是普通文件：%s", file)
+		}
+		if err := a.Sys.Lchown(file, uid, gid); err != nil {
+			return err
+		}
+	}
+	return a.Sys.Lchown(logs, uid, gid)
 }
 
 // standaloneUnits 这个应用以前自带 nginx 时的单元（Ferry 生成的，同一项目、同一应用）：改用 nginx 实例后不再需要。

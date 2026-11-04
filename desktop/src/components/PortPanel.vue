@@ -9,7 +9,7 @@ const probes = reactive<Record<string, Record<number, PortProbe | 'running'>>>({
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Key, Refresh } from '@element-plus/icons-vue'
 import { call, FerryError, type PortInfo } from '../ferry'
@@ -17,6 +17,8 @@ import { secretRequest, startTask, trustRequest, trustedTick } from '../state'
 import LoadingBlock from './LoadingBlock.vue'
 import GlassPane from './glass/GlassPane.vue'
 import { glass } from '../glass/runtime'
+import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{
   config: string
@@ -32,32 +34,41 @@ const props = defineProps<{
 const emit = defineEmits<{ loaded: [] }>()
 
 const key = computed(() => `${props.config}|${props.target}`)
+const captureContext = useInteractionScope(() => key.value)
 const report = computed(() => cache[key.value])
 const error = computed(() => errors[key.value])
 const probe = computed(() => probes[key.value] ?? {})
-const loading = ref(false)
+const reads = useReadRequests()
+const probeReads = useReadRequests()
+const loading = computed(() => !!reads.loading.value[key.value])
+onBeforeUnmount(reads.cancelAll)
 
-async function load() {
+async function load(_background = false, signal?: AbortSignal) {
   const k = key.value
-  loading.value = true
+  const config = props.config
+  const target = props.target
   try {
-    cache[k] = await call<PortReport>(['port', props.target, '-c', props.config])
-    delete errors[k]
+    await reads.run(k, async (s) => {
+      cache[k] = await readCall<PortReport>(['port', target, '-c', config], s)
+      delete errors[k]
+    }, { signal })
   } catch (e) {
+    if (e instanceof ReadCanceled || signal?.aborted) return
     const err = e as FerryError
     errors[k] = { msg: err.message, unknownHost: err instanceof FerryError && err.unknownHost }
     if (err instanceof FerryError && err.needSecret && err.detail) {
-      secretRequest.value = { detail: err.detail, config: props.config, retry: load }
+      secretRequest.value = { detail: err.detail, config, retry: () => { if (key.value === k) load() } }
     }
   } finally {
-    loading.value = false
-    emit('loaded')
+    if (key.value === k) emit('loaded')
   }
 }
 
 watch(
   key,
-  () => {
+  (_, previous) => {
+    if (previous) reads.cancel(previous)
+    if (previous) probeReads.cancel(previous)
     if (!cache[key.value]) load()
   },
   { immediate: true },
@@ -180,6 +191,8 @@ function closeWhy(p: PortInfo): string {
 }
 
 async function setPort(p: PortInfo, action: 'open' | 'close') {
+  const current = captureContext()
+  const target = props.target, config = props.config, k = key.value
   const what = pkey(p)
   const label = action === 'open' ? '放行' : '关闭'
   const lines: string[] = []
@@ -208,7 +221,7 @@ async function setPort(p: PortInfo, action: 'open' | 'close') {
   } else if (fw.value?.kind === 'firewalld') lines.push(`改 firewalld 区域 ${fw.value.zone} 的运行时和永久配置，马上生效，重启后也保持。`)
   else if (fw.value?.kind === 'ufw') lines.push('改 ufw 的规则，马上生效，重启后也保持。')
   try {
-    await ElMessageBox.confirm(lines.join('\n'), `${label} ${props.target} 的端口 ${what}`, {
+    await ElMessageBox.confirm(lines.join('\n'), `${label} ${target} 的端口 ${what}`, {
       type: action === 'close' ? 'warning' : 'info',
       confirmButtonText: label,
       customStyle: { whiteSpace: 'pre-line' },
@@ -216,10 +229,10 @@ async function setPort(p: PortInfo, action: 'open' | 'close') {
   } catch {
     return
   }
-  const k = key.value
-  startTask(`${label} ${props.target} 的端口 ${what}`, ['port', action, props.target, what, '-y', '-c', props.config], (t) => {
+  if (!current()) return
+  startTask(`${label} ${target} 的端口 ${what}`, ['port', action, target, what, '-y', '-c', config], (t) => {
     if (t.status === 'ok' && t.data) cache[k] = t.data as PortReport
-    else load()
+    else if (current()) load()
     delete probes[k]?.[p.port]
   })
 }
@@ -267,6 +280,7 @@ function doEnable() {
 
 const disableOpen = ref(false)
 const disableDocker = ref(true)
+watch(key, () => { enableOpen.value = disableOpen.value = false })
 /** 现在防火墙拦着、关掉后外部能连上的端口 */
 const unblocked = computed(() => ports.value.filter((p) => reach(p) === 'blocked' || reach(p) === 'partial'))
 /** Ferry 在 DOCKER-USER 里拦着的：关防火墙不影响 */
@@ -320,20 +334,22 @@ const testable = (p: PortInfo) => p.proto === 'tcp' && !p.internal && (p.firewal
 const testing = computed(() => Object.values(probe.value).some((v) => v === 'running'))
 
 async function test(list: PortInfo[]) {
-  if (!probes[key.value]) probes[key.value] = {}
-  const pr = probes[key.value] // 经 reactive 取出来的才会更新界面（??= 返回的是原对象）
+  const k = key.value, target = props.target, config = props.config
+  const current = captureContext()
   const ports = list.filter(testable).map((p) => p.port)
   if (!ports.length) {
     ElMessage.info('没有要测试的端口（只监听本机的不用测）')
     return
   }
+  probes[k] = { ...probes[k] }
+  const pr = probes[k]
   for (const n of ports) pr[n] = 'running'
   try {
-    const res = await call<PortProbe[]>(['port', 'check', props.target, ports.join(','), '-c', props.config])
+    const res = await probeReads.run(k, s => readCall<PortProbe[]>(['port', 'check', target, ports.join(','), '-c', config], s))
     for (const r of res) pr[r.port] = r
   } catch (e) {
     for (const n of ports) delete pr[n]
-    ElMessage.error((e as Error).message)
+    if (current() && !(e instanceof ReadCanceled)) ElMessage.error((e as Error).message)
   }
 }
 
@@ -413,7 +429,7 @@ const fwName = computed(() => {
         <el-button v-if="fw.enable && !fw.active" type="primary" plain @click="openEnable">打开防火墙</el-button>
         <el-button v-if="fw.disable && fw.active" plain @click="openDisable">关闭防火墙</el-button>
       </template>
-      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load" />
+      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load()" />
       <span class="spacer" />
       <template v-if="report && fw">
         <span class="fw-state" :class="fw.active ? 'on' : 'off'"><span class="dot" />{{ fw.active ? '防火墙在运行' : '防火墙没开' }}</span>
