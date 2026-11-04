@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, useId } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from '../platform'
 import { browserOpen } from '../state'
+import { dbOpen } from '../db'
 
 const props = defineProps<{
   identity: string
@@ -45,7 +46,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('blur', onBlur)
   unlistenFocus?.()
 })
-const paused = computed(() => hidden.value || !focused.value || browserOpen.value)
+const paused = computed(() => hidden.value || !focused.value || browserOpen.value || dbOpen.value)
 
 // 同一项目始终使用相同的配色与布局；切换时由各自的配置与已读取状态驱动。
 const seed = computed(() => {

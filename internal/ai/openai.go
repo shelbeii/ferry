@@ -247,17 +247,28 @@ func (p *openaiProvider) post(ctx context.Context, body []byte) (*http.Response,
 	}
 }
 
-// thinkingParams 按服务商的方式传思考设置。effort 为空时什么都不传（用模型的默认）。
+// thinkingParams 按服务商的方式传思考档位。effort 为空时什么都不传（用模型的默认）；off = 关闭思考。
 func (p *openaiProvider) thinkingParams(req map[string]any) {
 	e := p.effort
 	if e == "" {
 		return
 	}
 	switch p.thinking {
-	case "deepseek": // DeepSeek：只有开、关
-		req["thinking"] = map[string]any{"type": map[bool]string{true: "disabled", false: "enabled"}[e == "off"]}
-	case "qwen": // 通义千问：开关，低、中时限制思考的长度
+	case "deepseek": // DeepSeek：thinking.type 开关，开的时候 reasoning_effort 选强度（low / high / max）
+		if e == "off" {
+			req["thinking"] = map[string]any{"type": "disabled"}
+			return
+		}
+		req["thinking"] = map[string]any{"type": "enabled"}
+		if e != "on" {
+			req["reasoning_effort"] = e
+		}
+	case "qwen": // 通义千问：enable_thinking 开关，thinking_budget 限制思考的长度（档位的值是数字时按它，低、中按 2048、8192）
 		req["enable_thinking"] = e != "off"
+		if n, err := strconv.Atoi(e); err == nil && n > 0 {
+			req["thinking_budget"] = n
+			return
+		}
 		switch e {
 		case "low":
 			req["thinking_budget"] = 2048
@@ -265,11 +276,11 @@ func (p *openaiProvider) thinkingParams(req map[string]any) {
 			req["thinking_budget"] = 8192
 		}
 	case "none":
-	default: // reasoning_effort：low / medium / high
+	default: // reasoning_effort：档位的值原样传（off = none，关闭思考）
 		switch e {
-		case "off", "on":
-		case "xhigh", "max":
-			req["reasoning_effort"] = "high"
+		case "on":
+		case "off":
+			req["reasoning_effort"] = "none"
 		default:
 			req["reasoning_effort"] = e
 		}

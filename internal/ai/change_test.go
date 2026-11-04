@@ -212,7 +212,7 @@ func newServer(t *testing.T, fm *fakeModel) string {
 	return srv.URL
 }
 
-// 思考强度：Anthropic 放在 output_config.effort，OpenAI 兼容接口用 reasoning_effort（最高 high）；不设置时不传
+// 思考档位：Anthropic 放在 output_config.effort（off 关闭思考），OpenAI 兼容接口的值原样放在 reasoning_effort；不设置时不传
 func TestEffort(t *testing.T) {
 	ant := `{"id":"m","type":"message","role":"assistant","model":"x","stop_reason":"end_turn","content":[{"type":"text","text":"好"}],"usage":{"input_tokens":1,"output_tokens":1}}`
 	oa := `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"好"}}]}`
@@ -222,7 +222,11 @@ func TestEffort(t *testing.T) {
 	}{
 		{Anthropic, "xhigh", ant, func(m map[string]any) bool { return m["output_config"].(map[string]any)["effort"] == "xhigh" }},
 		{Anthropic, "", ant, func(m map[string]any) bool { return m["output_config"] == nil }},
-		{OpenAI, "max", oa, func(m map[string]any) bool { return m["reasoning_effort"] == "high" }},
+		{Anthropic, "off", ant, func(m map[string]any) bool {
+			return m["output_config"] == nil && m["thinking"].(map[string]any)["type"] == "disabled"
+		}},
+		{OpenAI, "max", oa, func(m map[string]any) bool { return m["reasoning_effort"] == "max" }},
+		{OpenAI, "off", oa, func(m map[string]any) bool { return m["reasoning_effort"] == "none" }},
 		{OpenAI, "low", oa, func(m map[string]any) bool { return m["reasoning_effort"] == "low" }},
 		{OpenAI, "", oa, func(m map[string]any) bool { _, ok := m["reasoning_effort"]; return !ok }},
 	}
@@ -328,7 +332,17 @@ func TestThinkingStyles(t *testing.T) {
 		check         func(map[string]any) bool
 	}{
 		{"deepseek", "off", func(m map[string]any) bool { return m["thinking"].(map[string]any)["type"] == "disabled" }},
-		{"deepseek", "high", func(m map[string]any) bool { return m["thinking"].(map[string]any)["type"] == "enabled" }},
+		{"deepseek", "high", func(m map[string]any) bool {
+			return m["thinking"].(map[string]any)["type"] == "enabled" && m["reasoning_effort"] == "high"
+		}},
+		{"deepseek", "max", func(m map[string]any) bool { return m["reasoning_effort"] == "max" }},
+		{"deepseek", "on", func(m map[string]any) bool {
+			_, a := m["reasoning_effort"]
+			return m["thinking"].(map[string]any)["type"] == "enabled" && !a
+		}},
+		{"qwen", "4096", func(m map[string]any) bool {
+			return m["enable_thinking"] == true && m["thinking_budget"] == float64(4096)
+		}},
 		{"qwen", "off", func(m map[string]any) bool { return m["enable_thinking"] == false }},
 		{"qwen", "low", func(m map[string]any) bool {
 			return m["enable_thinking"] == true && m["thinking_budget"] == float64(2048)

@@ -22,10 +22,12 @@ import (
 	"github.com/captain/ferry/internal/ui"
 )
 
-// aiConfig 用哪个模型：modelID 为空时用默认模型；effort 为空时用模型设置的思考强度（none = 不设置）。
+// aiConfig 用哪个模型：modelID 为空时用默认模型；effort 为空时用模型设置的思考档位（none = 不设置），其他的要是模型设置里有的档位。
 // API Key 从凭据库取（环境变量 FERRY_AI_KEY 优先）。设置里「测试」用 FERRY_AI_PROVIDER 等环境变量传表单里还没保存的值。
 func aiConfig(st settings.Settings, cio *cliIO, modelID, effort string) (ai.Config, error) {
 	var c ai.Config
+	var model settings.AIModel
+	useModel := false
 	keyID := modelID
 	if v := cio.getenv("FERRY_AI_PROVIDER"); v != "" {
 		c = ai.Config{Provider: v, BaseURL: strings.TrimSpace(cio.getenv("FERRY_AI_BASE_URL")),
@@ -43,17 +45,20 @@ func aiConfig(st settings.Settings, cio *cliIO, modelID, effort string) (ai.Conf
 			return c, fmt.Errorf("没有这个模型：%s（在「设置 → AI」里看看）", modelID)
 		}
 		c = ai.Config{Provider: m.Provider, BaseURL: m.BaseURL, Model: m.Model, Effort: m.Effort, Thinking: m.Thinking}
+		model, useModel = m, true
 		c.Images = ai.SupportsImages(m.Images, m.Provider, m.Model)
 		keyID = m.ID
 	}
-	switch effort {
-	case "":
-	case "none":
+	switch {
+	case effort == "":
+	case effort == "none":
 		c.Effort = ""
-	case "off", "on", "low", "medium", "high", "xhigh", "max":
-		c.Effort = effort
+	case useModel && !model.ValidEffort(effort):
+		return c, fmt.Errorf("模型「%s」没有这个思考档位：%s（在「设置 → AI」里编辑模型看看）", model.Name, effort)
+	case !settings.ReEffortValue.MatchString(effort):
+		return c, fmt.Errorf("思考档位不对：%s", effort)
 	default:
-		return c, fmt.Errorf("思考强度只能是 none、off、on、low、medium、high、xhigh、max：%s", effort)
+		c.Effort = effort
 	}
 	c.APIKey = cio.getenv("FERRY_AI_KEY")
 	if c.APIKey == "" && keyID != "" {

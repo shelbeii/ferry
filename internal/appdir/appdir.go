@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // 数据目录的来源。
@@ -228,6 +229,28 @@ func SubDir(elem ...string) string {
 
 // TempDir ferry 自己的临时文件（部署时打包、上传 agent 等），也放在数据目录里。
 func TempDir() string { return SubDir("tmp") }
+
+// CleanTemp 删掉临时目录里超过 maxAge 没动过的文件、目录，返回删了几个。
+// 用完都会删；剩下的是进程中途被关掉（结束任务、关机）留下的。
+// 别的 ferry 进程（编程软件的 ferry mcp、终端里的命令）可能正在用新的，所以只删放了很久的。
+func CleanTemp(maxAge time.Duration) int {
+	dir := filepath.Join(Dir(), "tmp")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < maxAge {
+			continue
+		}
+		if os.RemoveAll(filepath.Join(dir, e.Name())) == nil {
+			n++
+		}
+	}
+	return n
+}
 
 // KeysDir 默认的密钥目录。
 func KeysDir() string { return SubDir("keys") }

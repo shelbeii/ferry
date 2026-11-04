@@ -159,6 +159,49 @@ html.dark .el-radio-button { --el-radio-button-checked-text-color: #10182b; }
 .el-table td.el-table__cell { padding: 11px 0; }
 .el-table--border .el-table__cell { border-right-color: transparent; }
 .el-table .cell { line-height: 1.6; }
+/* 设置中的列表与详情沿用弹窗底色，表头只加一层浅色区分。 */
+.settings-dialog {
+  --ferry-settings-fill: color-mix(in srgb, var(--el-text-color-secondary) 6%, transparent);
+}
+.settings-dialog .el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-expanded-cell-bg-color: transparent;
+  --el-table-header-bg-color: var(--ferry-settings-fill);
+  --el-table-row-hover-bg-color: color-mix(in srgb, var(--el-color-primary) 7%, transparent);
+  --el-table-current-row-bg-color: color-mix(in srgb, var(--el-color-primary) 10%, transparent);
+  --el-table-border-color: var(--ferry-stroke);
+  border-radius: 8px;
+}
+.settings-dialog .el-descriptions {
+  --el-descriptions-item-bordered-label-background: var(--ferry-settings-fill);
+  --el-descriptions-table-border: 1px solid var(--ferry-stroke);
+}
+.settings-dialog .el-descriptions__body {
+  background: transparent;
+  border-radius: 8px;
+  overflow: hidden;
+}
+/* 横向滚动时，固定列仍要遮住从下方经过的文字。 */
+.settings-dialog .el-table:is(.is-scrolling-left, .is-scrolling-middle) .el-table__body-wrapper .el-table-fixed-column--right,
+.settings-dialog .el-table:is(.is-scrolling-right, .is-scrolling-middle) .el-table__body-wrapper .el-table-fixed-column--left {
+  background: var(--el-bg-color-overlay);
+}
+html.cg-on .settings-dialog .el-table:is(.is-scrolling-left, .is-scrolling-middle) .el-table__body-wrapper .el-table-fixed-column--right,
+html.cg-on .settings-dialog .el-table:is(.is-scrolling-right, .is-scrolling-middle) .el-table__body-wrapper .el-table-fixed-column--left {
+  background: var(--ferry-overlay-glass);
+  backdrop-filter: blur(12px);
+}
+/* 行号、折叠标记和代码共用底色，当前行的高亮贯穿两边。 */
+.cfg-dialog .cm-editor { background-color: transparent; color: var(--el-text-color-regular); }
+.cfg-dialog .cm-editor .cm-gutters {
+  background-color: transparent;
+  color: var(--el-text-color-secondary);
+  border-right-color: var(--ferry-stroke);
+}
+.cfg-dialog .cm-editor :is(.cm-activeLine, .cm-activeLineGutter) {
+  background-color: color-mix(in srgb, var(--el-color-primary) 8%, transparent);
+}
 /* 所有弹层共用材质和排版；包括挂在 body 上、由 ElMessageBox 创建的确认框和输入框。 */
 :root {
   --ferry-overlay-radius: 22px;
@@ -529,6 +572,10 @@ html.cg-on .el-radio-group:has(> .el-radio-button) {
 html.dark.cg-on .el-radio-group:has(> .el-radio-button) {
   background: rgb(0 0 0 / clamp(.16, calc(.26 * var(--cg-k, 1)), .3));
   box-shadow: inset 0 0 0 .5px rgb(255 255 255 / .08), inset 0 1px 2px rgb(0 0 0 / .25);
+}
+html.cg-on .settings-dialog .runtime-navigation:has(> .el-radio-button) {
+  background: var(--ferry-settings-fill);
+  box-shadow: inset 0 0 0 1px var(--ferry-stroke);
 }
 html.cg-on .el-radio-group:has(> .el-radio-button--small) { border-radius: 9px; }
 html.cg-on .el-radio-group > .el-radio-button .el-radio-button__inner,

@@ -62,7 +62,7 @@ var actionNames = map[string]string{"deploy": "部署", "start": "启动", "stop
 	"sw-start": "启动软件", "sw-stop": "停止软件", "sw-restart": "重启软件", "port-open": "放行端口", "port-close": "关闭端口",
 	"fw-enable": "打开防火墙", "ssh-kick": "断开 SSH 连接", "backup-run": "现在备份", "create": "新建项目",
 	"exec": "执行命令", "write-file": "写文件", "install": "安装软件", "tpl-save": "保存软件模板", "secret": "填写密码",
-	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份"}
+	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份", "db-exec": "改数据库"}
 
 // reSoftware Ferry 装的软件的名称（安装时的 --name）。
 var reSoftware = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -164,6 +164,9 @@ func PrepareRequest(r *approve.Request) error {
 	}
 	if r.ClientConfirmed && (r.Action == "create" || r.Action == "secret") {
 		return errors.New("新建项目、填写密码只能在 Ferry 里确认")
+	}
+	if r.Action == "db-exec" {
+		return prepareDB(r)
 	}
 	if r.Action == "create" {
 		content, err := generateProject(r.Spec, r.Config)
@@ -278,6 +281,11 @@ func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in target
 	if err != nil {
 		return nil, err
 	}
+	return s.ask(ctx, req, r, inClient)
+}
+
+// ask 交给用户确认：设置里选了在编程软件里确认、编程软件也支持时先在编程软件里问，否则交给桌面版；最多等 waitCap。
+func (s *server) ask(ctx context.Context, req *mcp.CallToolRequest, r approve.Request, inClient bool) (any, error) {
 	// 设置里选了在编程软件里确认、编程软件也支持时，先让编程软件问用户（用户在编程软件的界面里回答，不经过模型），
 	// 回答后编程软件带着回答再调一次（见上面）；密码始终在 Ferry 里填
 	if inClient && r.Action != "secret" && canElicit(req) {
@@ -380,7 +388,10 @@ func canElicit(req *mcp.CallToolRequest) bool {
 // confirmForm 在编程软件里给用户看的确认表单：要做什么、在哪台服务器、详情、理由，一个「同意执行」。
 func confirmForm(r approve.Request) *mcp.ElicitParams {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Ferry：%s 请求%s\n服务器：%s（%s）\n", orDash(r.Client), opTitle(r), r.Target, r.Host)
+	fmt.Fprintf(&b, "Ferry：%s 请求%s\n", orDash(r.Client), opTitle(r))
+	if r.Target != "" {
+		fmt.Fprintf(&b, "服务器：%s（%s）\n", r.Target, r.Host)
+	}
 	if r.Danger != "" {
 		fmt.Fprintf(&b, "危险：%s\n", r.Danger)
 	}
@@ -724,6 +735,8 @@ func opTitle(r approve.Request) string {
 		var in struct{ Path string }
 		json.Unmarshal(r.Input, &in)
 		return actionNames[r.Action] + " " + in.Path + "（" + r.Target + "）"
+	case r.Action == "db-exec":
+		return fmt.Sprintf("%s %s（%d 条语句）", actionNames[r.Action], r.DBName, len(r.Stmts))
 	case r.Action == "secret":
 		labels := make([]string, len(r.Fields))
 		for i, f := range r.Fields {

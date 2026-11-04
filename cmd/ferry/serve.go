@@ -12,7 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/captain/ferry/internal/appdir"
+	"github.com/captain/ferry/internal/dbx"
 	"github.com/captain/ferry/internal/engine"
+	"github.com/captain/ferry/internal/safe"
 	"github.com/captain/ferry/internal/settings"
 )
 
@@ -36,8 +39,12 @@ func serve(in io.Reader, out io.Writer) int {
 	os.Stdout = os.Stderr
 
 	st, _ := settings.Load()
+	// 以前中途被关掉留下的临时文件（上传到一半的 agent、部署时的打包目录）
+	safe.Go("清理临时文件", func() { appdir.CleanTemp(24 * time.Hour) })
 	pool := engine.NewPool(st.IdleTimeout())
 	defer pool.Close()
+	dbx.Default.Keep() // 「数据库」的连接在请求之间留着，空闲 10 分钟后关
+	defer dbx.Default.Close("")
 
 	var mu sync.Mutex
 	enc := json.NewEncoder(out)

@@ -1,6 +1,6 @@
 [package]
 name = "ferry-desktop"
-version = "0.13.54"
+version = "0.13.61"
 description = "Ferry 部署工具桌面版"
 edition = "2021"
 
@@ -23,10 +23,11 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# 内置浏览器：取网页的调试编号、拦下网页里的 F12（版本和 Tauri 用的一致）
+# 内置浏览器：取网页的调试编号、图标，拦下网页里的 F12（版本和 Tauri 用的一致）
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.62", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com"] }
+base64 = "0.22"
 
 [profile.release]
 codegen-units = 1

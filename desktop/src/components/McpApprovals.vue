@@ -21,7 +21,7 @@ interface McpRequest {
   client?: string
   action:
     | 'deploy' | 'start' | 'stop' | 'restart' | 'rollback' | 'sw-start' | 'sw-stop' | 'sw-restart' | 'port-open' | 'port-close' | 'fw-enable' | 'ssh-kick' | 'backup-run' | 'create'
-    | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret' | 'sw-upgrade' | 'sw-restore' | 'sw-backup'
+    | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret' | 'sw-upgrade' | 'sw-restore' | 'sw-backup' | 'db-exec'
   project: string
   config: string
   target: string
@@ -52,6 +52,11 @@ interface McpRequest {
   clientConfirmed?: boolean
   detail?: string[]
   reason?: string
+  /** db-exec：在数据库连接 db（dbName 是名称）的库 database 里执行 stmts；经服务器连时 target 是那台服务器 */
+  db?: string
+  dbName?: string
+  database?: string
+  stmts?: string[]
 }
 
 const TIMEOUT_MS = 5 * 60 * 1000
@@ -80,10 +85,14 @@ const VERBS: Record<string, string> = {
   'sw-upgrade': '升级软件',
   'sw-restore': '恢复软件',
   'sw-backup': '设置数据备份',
+  'db-exec': '改数据库',
 }
 // 用服务器助手的工具执行的操作：确认内容按命令、差异整块显示，每次都要确认
 const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save', 'sw-upgrade', 'sw-restore', 'sw-backup']
 const isAI = (r: McpRequest) => AI_ACTIONS.includes(r.action)
+const isDB = (r: McpRequest) => r.action === 'db-exec'
+// 确认内容整块显示（命令、差异、SQL）
+const isBlock = (r: McpRequest) => isAI(r) || isDB(r)
 
 const queue = ref<McpRequest[]>([])
 const current = computed(() => queue.value[0])
@@ -116,8 +125,9 @@ const grantKey = (r: McpRequest) => [r.session, r.config, r.target, r.action].jo
 const clientOf = (r: McpRequest) => r.client || '编程软件'
 // 改防火墙、断开别人的连接、新建项目每次都问：不给「不再询问」
 const canGrant = (r: McpRequest) =>
-  r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick' && r.action !== 'secret' && !isAI(r)
+  r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick' && r.action !== 'secret' && !isBlock(r)
 const titleOf = (r: McpRequest) => {
+  if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条语句）`
   if (r.action === 'create') return `新建项目 ${r.project}`
   if (r.action.startsWith('sw-')) return `${VERBS[r.action]} ${r.software ?? String(r.input?.name ?? '')}`
   if (r.action.startsWith('port-')) return `${VERBS[r.action]} ${r.port ?? ''}`
@@ -164,7 +174,7 @@ async function arrive(r: McpRequest) {
     // 用户已经在编程软件里确认过（Ferry 检查过设置里允许这样）：直接执行，告诉用户一声
     if (await reply(r, true, `用户已在 ${clientOf(r)} 里确认`)) {
       execute(r)
-      ElNotification({ type: 'info', title: `${clientOf(r)} 请求的操作开始执行`, message: `${titleOf(r)}（${r.target}）：你在 ${clientOf(r)} 里同意了`, duration: 6000 })
+      ElNotification({ type: 'info', title: `${clientOf(r)} 请求的操作开始执行`, message: `${titleOf(r)}${r.target ? '（' + r.target + '）' : ''}：你在 ${clientOf(r)} 里同意了`, duration: 6000 })
     }
     return
   }
@@ -172,13 +182,13 @@ async function arrive(r: McpRequest) {
   if (until && until > Date.now()) {
     if (await reply(r, true, '按用户的授权自动同意（30 分钟内同类不再询问）')) {
       execute(r)
-      ElNotification({ type: 'info', title: `${clientOf(r)} 请求的操作已自动执行`, message: `${titleOf(r)}（${r.target}）：按你 30 分钟内不再询问的授权`, duration: 6000 })
+      ElNotification({ type: 'info', title: `${clientOf(r)} 请求的操作已自动执行`, message: `${titleOf(r)}${r.target ? '（' + r.target + '）' : ''}：按你 30 分钟内不再询问的授权`, duration: 6000 })
     }
     return
   }
   queue.value.push(r)
   attention()
-  notifyUser(`${clientOf(r)} 请求改动服务器`, `${titleOf(r)}（${r.target}）：到 Ferry 里同意或拒绝，5 分钟内有效`, true)
+  notifyUser(`${clientOf(r)} 请求改动服务器`, `${titleOf(r)}${r.target ? '（' + r.target + '）' : ''}：到 Ferry 里同意或拒绝，5 分钟内有效`, true)
 }
 
 async function attention() {
@@ -256,6 +266,13 @@ async function fill(values: SecretValue[]) {
 function execute(r: McpRequest) {
   if (r.action === 'create') {
     createProject(r)
+    return
+  }
+  if (isDB(r)) {
+    const title = `${titleOf(r)}（${clientOf(r)} 请求）`
+    const args = ['db', 'ai-exec', r.db ?? '', r.database ?? '']
+    const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: `${clientOf(r)} · MCP`, FERRY_DB_REQ: JSON.stringify({ stmts: r.stmts ?? [] }) })
+    watchProgress(r, task)
     return
   }
   if (isAI(r)) {
@@ -387,7 +404,7 @@ const actionType = (a: string) =>
 <template>
   <el-dialog
     :model-value="!!current"
-    :title="shown?.action === 'create' ? '编程软件请求新建项目' : shown?.action === 'secret' ? '编程软件请你填写' : '编程软件请求改动服务器'"
+    :title="shown?.action === 'create' ? '编程软件请求新建项目' : shown?.action === 'secret' ? '编程软件请你填写' : shown && isDB(shown) ? '编程软件请求改数据库' : '编程软件请求改动服务器'"
     width="560px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
@@ -402,14 +419,18 @@ const actionType = (a: string) =>
         <span class="muted small">来自 {{ clientOf(shown) }}</span>
       </div>
       <el-descriptions :column="1" border size="small" label-width="80px">
-        <el-descriptions-item label="项目">{{ shown.project }}</el-descriptions-item>
-        <el-descriptions-item v-if="shown.action === 'create'" label="配置文件">
+        <el-descriptions-item v-if="isDB(shown)" label="数据库">
+          {{ shown.dbName }}<span class="muted mono ml">库 {{ shown.database || '（默认）' }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item v-if="!isDB(shown) || shown.project" label="项目">{{ shown.project }}</el-descriptions-item>
+        <el-descriptions-item v-if="isDB(shown) && !shown.target" label="服务器"><span class="muted">这台电脑直接连</span></el-descriptions-item>
+        <el-descriptions-item v-else-if="shown.action === 'create'" label="配置文件">
           <span class="mono">{{ shown.config }}</span>
         </el-descriptions-item>
         <el-descriptions-item v-else label="服务器">
           {{ shown.target }}<span class="muted mono ml">{{ shown.host }}</span>
         </el-descriptions-item>
-        <el-descriptions-item v-for="(d, i) in isAI(shown) || shown.action === 'secret' ? [] : (shown.detail ?? [])" :key="i" :label="i === 0 ? '详情' : ''">
+        <el-descriptions-item v-for="(d, i) in isBlock(shown) || shown.action === 'secret' ? [] : (shown.detail ?? [])" :key="i" :label="i === 0 ? '详情' : ''">
           <span class="detail">{{ d }}</span>
         </el-descriptions-item>
         <el-descriptions-item label="理由">
@@ -417,7 +438,7 @@ const actionType = (a: string) =>
           <span v-else class="muted">（没有说明）</span>
         </el-descriptions-item>
       </el-descriptions>
-      <div v-if="isAI(shown) && shown.detail?.length" class="yaml">
+      <div v-if="isBlock(shown) && shown.detail?.length" class="yaml">
         <div class="muted small">{{ shown.detail[0] }}</div>
         <pre class="mono"><span v-for="(ln, k) in detailLines(shown.detail)" :key="k" :class="{ add: ln.startsWith('+ '), del: ln.startsWith('- ') }">{{ ln }}
 </span></pre>
@@ -433,6 +454,7 @@ const actionType = (a: string) =>
       <p class="muted small note">
         <template v-if="shown.action === 'create'">同意后生成这个文件，并加进 Ferry 的项目列表；不连服务器、不部署。</template>
         <template v-else-if="shown.action === 'secret'">填的内容只记在这次打开的 Ferry 里，执行时才用上；{{ clientOf(shown) }} 只拿到代号，看不到内容。Ferry 退出或这次连接断开后要重新填。</template>
+        <template v-else-if="isDB(shown)">同意后由 Ferry 执行，任务面板里能看到过程；结果交回编程软件。</template>
         <template v-else>同意后由 Ferry 执行，任务面板里能看到过程、可以停止；结果交回编程软件，部署记录里会标明经它请求。</template>
         看不明白要做什么时请拒绝。
         <template v-if="queue.length > 1">后面还有 {{ queue.length - 1 }} 个请求。</template>

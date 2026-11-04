@@ -1,11 +1,11 @@
 <script setup lang="ts">
-// 设置 → AI 的模型列表：可以配置多个模型（各自的服务商、地址、模型名、API Key、默认思考强度），选一个作为默认。
+// 设置 → AI 的模型列表：可以配置多个模型（各自的服务商、地址、模型名、API Key、思考档位），选一个作为默认。
 // API Key 存在系统凭据库，按模型 ID 区分；与设置一起提交，成功后才清理草稿。
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
-import { call, type AiModel, type AppSettings } from '../ferry'
-import { EFFORT_LABELS, THINKING_STYLES, effortOptions, plainHttpOutside, supportsImages, thinkingStyle } from '../ai'
+import { Close, Plus } from '@element-plus/icons-vue'
+import { call, type AiEffort, type AiModel, type AppSettings } from '../ferry'
+import { MAX_LEVELS, THINKING_STYLES, defaultEffort, defaultLevels, effortLabel, modelEffort, plainHttpOutside, supportsImages, thinkingStyle, validEffortValue } from '../ai'
 import { aiSecretChanges } from '../settingsSecrets'
 
 const props = defineProps<{ ai: AppSettings['ai'] }>()
@@ -38,6 +38,7 @@ const blank = (): AiModel => ({
   baseUrl: '',
   model: '',
   effort: '',
+  levels: undefined,
   thinking: '',
   images: '',
   priceIn: 0,
@@ -50,7 +51,39 @@ const draftKey = ref('')
 const testing = ref(false)
 const testResult = ref<{ ok: boolean; msg: string }>()
 
-const draftEfforts = computed(() => effortOptions(draft))
+// 思考档位：没自己改过时跟着服务商、思考参数用默认档位（保存成空，以后默认档位更新了也跟着变）；改过就存自己的
+const levelRows = ref<AiEffort[]>([])
+const levelsCustom = ref(false)
+const draftStyle = computed(() => thinkingStyle(draft))
+watch(draftStyle, () => {
+  if (!levelsCustom.value) levelRows.value = defaultLevels(draft)
+})
+function customize() {
+  levelsCustom.value = true
+}
+function addLevel() {
+  levelRows.value.push({ label: '', value: '' })
+  customize()
+}
+function removeLevel(i: number) {
+  levelRows.value.splice(i, 1)
+  customize()
+}
+function resetLevels() {
+  levelsCustom.value = false
+  levelRows.value = defaultLevels(draft)
+}
+const levelError = (l: AiEffort) => !!l.value.trim() && !validEffortValue(l.value.trim())
+const draftEfforts = computed(() =>
+  levelRows.value.filter((l) => validEffortValue(l.value.trim())).map((l) => ({ value: l.value.trim(), label: l.label.trim() || l.value.trim() })),
+)
+const LEVEL_HINTS: Record<string, string> = {
+  anthropic: '值放在 effort 参数里：low、medium、high、xhigh、max；off = 关闭思考',
+  effort: '值原样放在 reasoning_effort 里（常见 low、medium、high，有的模型还有 minimal、xhigh）；off = 传 none 关闭思考',
+  deepseek: '值放在 reasoning_effort 里（DeepSeek 支持 low、high、max）；off = 关闭思考',
+  qwen: 'off = 关闭思考；填数字 = 思考长度上限（thinking_budget），low、medium 分别是 2048、8192，其他的不限长度',
+  none: '「思考参数」选了不传，这里的档位不会传给接口',
+}
 const autoStyle = computed(() => thinkingStyle({ ...draft, thinking: '' }))
 const autoImages = computed(() => supportsImages({ ...draft, images: '' }))
 // 下拉框里「自动识别」是 'auto'，存的是空字符串
@@ -58,10 +91,15 @@ const draftImages = computed({
   get: () => draft.images || 'auto',
   set: (v: string) => (draft.images = v === 'auto' ? '' : v),
 })
-// 下拉框里「不设置」是 'none'，存的是空字符串
+// 下拉框里「自动识别」是 'auto'，存的是空字符串（空值会被当成没选，显示成「请选择」）
+const draftThinking = computed({
+  get: () => draft.thinking || 'auto',
+  set: (v: string) => (draft.thinking = v === 'auto' ? '' : v),
+})
+// 默认档位总是一个具体的档位：选的那一档没有了（或还没选过）时显示 defaultEffort 挑的，保存时存下来
 const draftEffort = computed({
-  get: () => draft.effort || 'none',
-  set: (v: string) => (draft.effort = v === 'none' ? '' : v),
+  get: () => (draftEfforts.value.some((o) => o.value === draft.effort) ? draft.effort : defaultEffort(draftEfforts.value)),
+  set: (v: string) => (draft.effort = v),
 })
 
 function newID(base: string): string {
@@ -80,6 +118,9 @@ function newID(base: string): string {
 function openEdit(i: number) {
   editIndex.value = i
   Object.assign(draft, blank(), i >= 0 ? props.ai.models[i] : {})
+  const own = i >= 0 ? props.ai.models[i].levels : undefined
+  levelsCustom.value = !!own?.length
+  levelRows.value = own?.length ? own.map((l) => ({ ...l })) : defaultLevels(draft)
   draftKey.value = ''
   testResult.value = undefined
   editing.value = true
@@ -93,7 +134,18 @@ function saveEdit() {
     ElMessage.warning('OpenAI 兼容接口要填接口地址和模型')
     return
   }
-  if (!draftEfforts.value.some((o) => o.value === (draft.effort || 'none'))) draft.effort = '' // 换了服务商或思考参数，没有这一档
+  const rows = levelRows.value.map((l) => ({ label: l.label.trim(), value: l.value.trim() })).filter((l) => l.value || l.label)
+  if (rows.some((l) => !validEffortValue(l.value))) {
+    ElMessage.warning('思考档位的值只能是字母、数字和 . _ -，不能是 none')
+    return
+  }
+  const values = rows.map((l) => l.value)
+  if (new Set(values).size !== values.length) {
+    ElMessage.warning('思考档位的值重复了')
+    return
+  }
+  draft.levels = levelsCustom.value ? rows.map((l) => ({ label: l.label || l.value, value: l.value })) : undefined
+  draft.effort = draftEffort.value // 没选过或选的那一档删了：存挑出来的那一档
   if (draft.provider !== 'openai') draft.thinking = ''
   if (editIndex.value < 0) {
     draft.id = newID(draft.model || draft.name || 'model')
@@ -137,7 +189,7 @@ async function test() {
     FERRY_AI_PROVIDER: draft.provider,
     FERRY_AI_BASE_URL: draft.baseUrl.trim(),
     FERRY_AI_MODEL: draft.model.trim(),
-    FERRY_AI_EFFORT: draft.effort,
+    FERRY_AI_EFFORT: draftEffort.value,
     FERRY_AI_THINKING: draft.thinking,
   }
   const key = draftKey.value.trim() || (draft.id ? pendingKeys[draft.id] : '')
@@ -176,7 +228,7 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
         <span class="name">{{ m.name }}</span>
       </el-radio>
       <span class="muted small meta">{{ providerLabel(m.provider) }} · <span class="mono">{{ m.model || 'claude-opus-5-5' }}</span></span>
-      <el-tag v-if="m.effort" size="small" effect="plain" disable-transitions>思考：{{ EFFORT_LABELS[m.effort] }}</el-tag>
+      <el-tag v-if="modelEffort(m)" size="small" effect="plain" disable-transitions>思考：{{ effortLabel(m, modelEffort(m)) }}</el-tag>
       <el-tag v-if="supportsImages(m)" size="small" effect="plain" disable-transitions>能看图片</el-tag>
       <el-tag v-if="m.priceIn || m.priceOut" size="small" effect="plain" type="info" disable-transitions>
         {{ m.currency }}{{ m.priceIn }} / {{ m.currency }}{{ m.priceOut }}
@@ -225,16 +277,32 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
           </div>
         </el-form-item>
         <el-form-item v-if="draft.provider === 'openai'" label="思考参数">
-          <el-select v-model="draft.thinking" style="width: 260px">
-            <el-option v-for="o in THINKING_STYLES" :key="o.value" :value="o.value" :label="o.value ? o.label : `${o.label}（${THINKING_STYLES.find((x) => x.value === autoStyle)?.label}）`" />
+          <el-select v-model="draftThinking" style="width: 300px">
+            <el-option v-for="o in THINKING_STYLES" :key="o.value" :value="o.value || 'auto'" :label="o.value ? o.label : `${o.label}（${THINKING_STYLES.find((x) => x.value === autoStyle)?.label}）`" />
           </el-select>
           <div class="muted small">各家开关思考的参数不一样；不确定就用「自动识别」，报错时改成「不传思考参数」</div>
         </el-form-item>
-        <el-form-item label="思考强度">
+        <el-form-item label="思考档位">
+          <div class="levels">
+            <div v-for="(l, i) in levelRows" :key="i" class="level">
+              <el-input v-model="l.label" size="small" placeholder="显示名，如 高" maxlength="12" style="width: 120px" @input="customize" />
+              <span class="muted">→</span>
+              <el-input v-model="l.value" size="small" class="mono" placeholder="传给接口的值，如 high" :class="{ 'is-bad': levelError(l) }" style="width: 180px" @input="customize" />
+              <el-button text size="small" :icon="Close" title="删除这一档" @click="removeLevel(i)" />
+            </div>
+            <div class="level-ops">
+              <el-button size="small" :icon="Plus" :disabled="levelRows.length >= MAX_LEVELS" @click="addLevel">添加档位</el-button>
+              <el-button v-if="levelsCustom" text size="small" type="primary" @click="resetLevels">恢复默认档位</el-button>
+              <span v-else class="muted small">现在是默认档位，可以直接改</span>
+            </div>
+            <div class="muted small">{{ LEVEL_HINTS[draftStyle] }}</div>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="draftEfforts.length" label="默认档位">
           <el-select v-model="draftEffort" style="width: 160px">
             <el-option v-for="o in draftEfforts" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
-          <span class="muted small ml">对话时的默认值，可以另选</span>
+          <span class="muted small ml">对话时默认用这一档，可以另选</span>
         </el-form-item>
         <el-form-item label="图片">
           <el-select v-model="draftImages" style="width: 200px">
@@ -334,6 +402,28 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
 }
 .prices .el-input-number {
   width: 76px;
+}
+.levels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.level {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.level-ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.levels .muted.small {
+  line-height: 1.6;
+}
+.is-bad :deep(.el-input__wrapper) {
+  box-shadow: 0 0 0 1px var(--el-color-danger) inset;
 }
 .ok {
   color: var(--el-color-success);

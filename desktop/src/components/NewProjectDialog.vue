@@ -1014,19 +1014,21 @@ const levelIcon = { ok: CircleCheckFilled, warn: WarningFilled, error: CircleClo
           </el-dropdown>
         </div>
         <el-empty v-if="!apps.length" description="还没有应用：点右上角「添加应用」" :image-size="60" />
-        <el-collapse v-model="openApps">
-          <el-collapse-item v-for="(a, i) in apps" :key="i" :name="i">
+        <el-collapse v-model="openApps" class="app-list">
+          <el-collapse-item v-for="(a, i) in apps" :key="i" :name="i" class="app-panel">
             <template #title>
               <div class="app-title" @click.stop>
                 <el-checkbox v-model="a.include" />
               </div>
-              <span class="app-name mono" :class="{ off: !a.include }">{{ a.name }}</span>
-              <el-tag size="small" type="info" class="ml">{{ typeLabel[a.type] }}</el-tag>
-              <el-tag v-if="a.include && visibleNotes(a).length" size="small" type="warning" class="ml">{{ visibleNotes(a).length }} 条提醒</el-tag>
-              <span class="muted small ml">{{ a.kind }}</span>
-              <span v-if="a.port && usesPort(a)" class="muted small ml">端口 {{ a.port }}</span>
-              <span v-else-if="a.include && a.type !== 'static'" class="warn-text small ml">没填端口</span>
-              <span class="muted small ml mono ellipsis">{{ a.artifact }}</span>
+              <div class="app-heading">
+                <span class="app-name mono" :class="{ off: !a.include }">{{ a.name }}</span>
+                <el-tag size="small" type="info">{{ typeLabel[a.type] }}</el-tag>
+                <el-tag v-if="a.include && visibleNotes(a).length" size="small" type="warning">{{ visibleNotes(a).length }} 条提醒</el-tag>
+                <span class="muted small">{{ a.kind }}</span>
+                <span v-if="a.port && usesPort(a)" class="muted small">端口 {{ a.port }}</span>
+                <span v-else-if="a.include && a.type !== 'static'" class="warn-text small">没填端口</span>
+                <span class="muted small mono ellipsis">{{ a.artifact }}</span>
+              </div>
             </template>
             <el-form :label-width="form.labelWidth" size="small" :disabled="!a.include">
               <div class="grid">
@@ -1480,8 +1482,39 @@ const levelIcon = { ok: CircleCheckFilled, warn: WarningFilled, error: CircleClo
   display: inline-flex;
   margin-right: 8px;
 }
+.app-list {
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+  border: 0;
+}
+.app-list :deep(.el-collapse-item__header) {
+  min-height: 40px;
+  padding: 0 0 8px;
+  border-bottom: 0;
+  line-height: 1.6;
+}
+.app-list :deep(.el-collapse-item__title) {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.app-list :deep(.el-collapse-item__wrap) {
+  border-bottom: 0;
+}
+.app-list :deep(.el-collapse-item__content) {
+  padding: 12px 0 0;
+  color: var(--el-text-color-regular);
+}
+.app-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
 .app-name {
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 .app-name.off {
   color: var(--el-text-color-placeholder);
@@ -1495,7 +1528,7 @@ const levelIcon = { ok: CircleCheckFilled, warn: WarningFilled, error: CircleClo
 }
 .grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: 12px;
 }
 .grid3 {
@@ -1512,6 +1545,7 @@ const levelIcon = { ok: CircleCheckFilled, warn: WarningFilled, error: CircleClo
   margin: -6px 0 12px 108px;
   width: auto;
 }
+.app-panel,
 .target {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;

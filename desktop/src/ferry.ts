@@ -1011,6 +1011,12 @@ export function latencyTip(level?: 'good' | 'fair' | 'poor'): string {
 
 // ---------------------------------------------------------------- 设置
 
+/** 一个思考档位：label 显示名，value 传给接口的值 */
+export interface AiEffort {
+  label: string
+  value: string
+}
+
 /** 设置 → AI 里的一个模型（API Key 在系统凭据库，按 id 区分） */
 export interface AiModel {
   id: string
@@ -1018,8 +1024,10 @@ export interface AiModel {
   provider: 'anthropic' | 'openai'
   baseUrl: string
   model: string
-  /** 默认思考强度：'' = 不设置 | off | on | low | medium | high | xhigh | max */
+  /** 默认思考档位（levels 里的 value）：'' = 不设置 */
   effort: string
+  /** 对话时能选的思考档位（显示名 → 传给接口的值，off = 关闭思考）；没有 = 按服务商和思考参数的默认档位 */
+  levels?: AiEffort[]
   /** OpenAI 兼容接口怎么传思考设置：'' = 自动识别 | effort | deepseek | qwen | none */
   thinking: string
   /** 能不能看图片：'' = 自动识别 | on | off */

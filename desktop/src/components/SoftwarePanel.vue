@@ -21,6 +21,7 @@ import SoftwareLogsDialog from './SoftwareLogsDialog.vue'
 import SoftwareConfigDialog from './SoftwareConfigDialog.vue'
 import RowActions from './RowActions.vue'
 import type { RowAction } from '../rowActions'
+import { connFromSoftware, dbRequest, isDbSoftware } from '../db'
 import { softwareLocations, type FileLocation } from '../fileLocations'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { useInteractionScope } from '../interactionScope'
@@ -100,6 +101,11 @@ function rowActions(row: Software): RowAction[] {
       title: locations.length ? locations[0].path : row.via === 'docker' ? '未识别到可浏览的主机目录：容器需提供 Compose 目录或持久化挂载' : '未识别到此软件的程序或安装位置' },
     { id: 'config', label: '配置', run: () => { configOf.value = row } },
   ]
+  if (isDbSoftware(row)) {
+    // 打开左下角的「数据库」，经这台服务器连它
+    actions.unshift({ id: 'db', label: '管理数据', disabled: row.state !== 'running', title: row.state !== 'running' ? '没在运行' : '在「数据库」里打开（经这台服务器连，不用开放端口）',
+      run: () => { dbRequest.value = connFromSoftware(row, { config: props.config, target: props.target, title: props.target }, props.target) } })
+  }
   if (row.instance || controllable(row)) {
     actions.push({ id: 'logs', label: '日志', run: () => {
       if (row.instance) logsName.value = row.instance

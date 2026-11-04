@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 用临时目录模拟用户目录与配置目录。
@@ -262,5 +263,32 @@ func TestMoveProject(t *testing.T) {
 	// 原来没有数据
 	if to, err := MoveProject("demo", a, b); err != nil || to != "" {
 		t.Fatalf("%q %v", to, err)
+	}
+}
+
+// 临时目录里只删放了很久的（中途被关掉留下的），新的可能别的 ferry 进程正在用
+func TestCleanTemp(t *testing.T) {
+	t.Setenv("FERRY_HOME", t.TempDir())
+	Reset()
+	t.Cleanup(Reset)
+	tmp := TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	os.WriteFile(filepath.Join(tmp, "agent-1"), []byte("x"), 0o600)
+	os.Chtimes(filepath.Join(tmp, "agent-1"), old, old)
+	os.MkdirAll(filepath.Join(tmp, "deploy-1", "web"), 0o700)
+	os.WriteFile(filepath.Join(tmp, "deploy-1", "web", "a.tar.gz"), []byte("x"), 0o600)
+	os.Chtimes(filepath.Join(tmp, "deploy-1"), old, old)
+	os.WriteFile(filepath.Join(tmp, "agent-2"), []byte("x"), 0o600)
+
+	if n := CleanTemp(24 * time.Hour); n != 2 {
+		t.Fatalf("删了 %d 个", n)
+	}
+	for _, name := range []string{"agent-1", "deploy-1"} {
+		if _, err := os.Stat(filepath.Join(tmp, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s 还在", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "agent-2")); err != nil {
+		t.Fatal("新的不该删")
 	}
 }

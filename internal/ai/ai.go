@@ -27,7 +27,7 @@ type Config struct {
 	BaseURL  string // 空 = 服务商默认地址
 	Model    string
 	APIKey   string
-	// Effort 思考强度：空 = 不设置 | off | on | low | medium | high | xhigh | max
+	// Effort 思考档位（设置里档位的值）：空 = 不设置，off = 关闭思考，其他的按服务商的方式传过去
 	Effort string
 	// Thinking OpenAI 兼容接口怎么传思考设置（见 ThinkingStyle）
 	Thinking string

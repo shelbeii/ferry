@@ -18,6 +18,8 @@ interface Tab {
   title: string
   loading: boolean
   devtools: boolean
+  /** 网页图标（data: 地址），网页没有图标时为空 */
+  icon: string
 }
 interface Snapshot {
   tabs: Tab[]
@@ -303,6 +305,11 @@ onBeforeUnmount(() => {
           @mousedown.middle.prevent="closeTab(t.id)"
         >
           <span v-if="t.loading" class="spin" aria-label="正在加载" />
+          <img v-else-if="t.icon" class="fav" :src="t.icon" alt="" draggable="false" />
+          <svg v-else-if="t.url" class="fav globe" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="8" cy="8" r="6.25" />
+            <path d="M1.75 8h12.5M8 1.75c-1.8 1.7-2.6 3.8-2.6 6.25S6.2 12.55 8 14.25M8 1.75c1.8 1.7 2.6 3.8 2.6 6.25S9.8 12.55 8 14.25" />
+          </svg>
           <span class="tab-text">{{ label(t) }}</span>
           <button class="tab-close" aria-label="关闭标签" title="关闭标签（Ctrl+W）" @mousedown.stop @click.stop="closeTab(t.id)">
             <el-icon><Close /></el-icon>
@@ -446,6 +453,17 @@ onBeforeUnmount(() => {
 .tab-close:hover {
   background: var(--el-fill-color-dark);
   color: var(--el-text-color-primary);
+}
+.fav {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+.globe {
+  fill: none;
+  stroke: var(--el-text-color-secondary);
+  stroke-width: 1.2;
 }
 .spin {
   width: 10px;

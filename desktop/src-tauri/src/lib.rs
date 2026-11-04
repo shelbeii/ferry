@@ -2,6 +2,7 @@
 //! Rust 这边只负责窗口、插件，读写 ferry.yaml 的两个受限命令，以及内置浏览器（browser.rs）。
 
 mod browser;
+mod uicache;
 
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
@@ -117,7 +118,9 @@ pub fn run() {
             browser::browser_release,
             browser::browser_sync,
             browser::browser_data_usage,
-            browser::browser_clear_data
+            browser::browser_clear_data,
+            uicache::ui_cache_usage,
+            uicache::ui_cache_clear
         ])
         .setup(|app| {
             // 主窗口在这里创建：WebView2 的缓存放在 Ferry 的数据目录里（默认安装目录下），不放到系统盘的用户目录
@@ -145,6 +148,11 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 let dir = None;
                 app.manage(browser::BrowserDir(dir));
+                #[cfg(not(target_os = "macos"))]
+                let ui = redirected.as_ref().map(|d| d.join("webview"));
+                #[cfg(target_os = "macos")]
+                let ui = None;
+                app.manage(uicache::UiDir(ui));
             }
             // 页面出错没能显示窗口时：3 秒后照样显示
             std::thread::spawn(move || {

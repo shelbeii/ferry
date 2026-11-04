@@ -127,6 +127,20 @@ func TestAIModelsMigrate(t *testing.T) {
 	if s.AI.Models[1].Provider != "anthropic" || s.AI.Models[1].Effort != "" || s.AI.Models[0].Effort != "high" {
 		t.Fatalf("%+v", s.AI.Models)
 	}
+	// 自己设置的思考档位：去掉不合规、重复、none；默认档位要是设置里有的
+	s = Settings{AI: AI{Models: []AIModel{{ID: "a", Provider: "openai", Model: "deepseek-flash", Effort: "max", Levels: []AIEffort{
+		{Label: " 关闭 ", Value: "off"}, {Label: "高", Value: "high"}, {Label: "", Value: "max"}, {Label: "x", Value: "high"},
+		{Label: "不设置", Value: "none"}, {Label: "坏", Value: "a b"}, {Label: "空", Value: ""},
+	}}, {ID: "b", Effort: "low", Levels: []AIEffort{{Label: "高", Value: "high"}}}}}}
+	s.normalize()
+	if got := s.AI.Models[0].Levels; len(got) != 3 || got[0] != (AIEffort{"关闭", "off"}) || got[2] != (AIEffort{"max", "max"}) || s.AI.Models[0].Effort != "max" {
+		t.Fatalf("档位：%+v", s.AI.Models[0])
+	}
+	if s.AI.Models[1].Effort != "" || !s.AI.Models[1].ValidEffort("high") || s.AI.Models[1].ValidEffort("low") {
+		t.Fatalf("档位外的默认值：%+v", s.AI.Models[1])
+	}
+	s = Settings{AI: AI{Default: "ds", Models: []AIModel{{ID: "ds", Provider: "openai", Model: "deepseek-chat", Effort: "high"}}}}
+	s.normalize()
 	if m, ok := s.AI.FindModel(""); !ok || m.ID != "ds" {
 		t.Fatalf("默认模型：%+v", m)
 	}

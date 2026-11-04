@@ -45,7 +45,12 @@ func (p *anthropicProvider) Step(ctx context.Context, system string, msgs []Mess
 		System:    []anthropic.BetaTextBlockParam{{Text: system, CacheControl: anthropic.NewBetaCacheControlEphemeralParam()}},
 		Messages:  anthropicMessages(msgs, p.model, p.images),
 	}
-	if p.effort != "" {
+	switch p.effort {
+	case "", "on":
+	case "off": // 关闭思考
+		d := anthropic.NewBetaThinkingConfigDisabledParam()
+		params.Thinking = anthropic.BetaThinkingConfigParamUnion{OfDisabled: &d}
+	default:
 		params.OutputConfig.Effort = anthropic.BetaOutputConfigEffort(p.effort)
 	}
 	for _, t := range tools {

@@ -216,6 +216,16 @@ export async function clearBrowserData(): Promise<void> {
   if (isTauri) await invoke('browser_clear_data')
 }
 
+/** Ferry 界面自己的缓存（网页缓存、脚本编译缓存、显卡缓存）占用多少字节；null = 不能单独统计、清理（macOS、浏览器调试时） */
+export async function uiCacheUsage(): Promise<number | null> {
+  return isTauri ? invoke<number | null>('ui_cache_usage') : null
+}
+
+/** 清除界面缓存，返回清完后还占用多少字节 */
+export async function clearUiCache(): Promise<number> {
+  return isTauri ? invoke<number>('ui_cache_clear') : 0
+}
+
 /** 选择 ferry.yaml（浏览器调试时手工输入路径）。 */
 export async function pickConfig(): Promise<string | null> {
   if (!isTauri) return promptPath('ferry.yaml 的绝对路径')

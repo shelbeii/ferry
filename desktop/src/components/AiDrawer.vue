@@ -10,7 +10,7 @@ import MarkdownIt from 'markdown-it'
 import { call, ferry, isSecretKind, type FerryLine } from '../ferry'
 import { onFileDrop, openUrl, pickSaveFile } from '../platform'
 import { appSettings, secretRequest, trustRequest, settingsRequest } from '../state'
-import { EFFORT_LABELS, effortOptions, addUsage, zeroUsage, usageText, findModelByName, cost, money, tokens, type Usage } from '../ai'
+import { defaultEffort, effortLabel, effortOptions, modelEffort, addUsage, zeroUsage, usageText, findModelByName, cost, money, tokens, type Usage } from '../ai'
 import { supportsImages, prepareImage, base64Blob, imageUrl, MAX_IMAGES, type AiImage } from '../ai'
 import GlassPane from './glass/GlassPane.vue'
 import { glass, setVar } from '../glass/runtime'
@@ -112,17 +112,18 @@ const modelId = ref(loadModelPref())
 const curModel = computed(
   () => models.value.find((m) => m.id === modelId.value) ?? models.value.find((m) => m.id === appSettings.value?.ai?.default) ?? models.value[0],
 )
-const effort = ref(curModel.value?.effort || 'none')
-const efforts = computed(() => effortOptions(curModel.value ?? { provider: 'anthropic', thinking: '', baseUrl: '', model: '' }))
+// 思考档位总是一个具体的档位（或关闭）；模型没有档位（思考参数选了不传）时为空，不显示选择
+const effort = ref(curModel.value ? modelEffort(curModel.value) : '')
+const efforts = computed(() => (curModel.value ? effortOptions(curModel.value) : []))
 watch(
   () => curModel.value?.id,
   () => {
-    effort.value = curModel.value?.effort || 'none'
+    effort.value = curModel.value ? modelEffort(curModel.value) : ''
   },
 )
-// 设置里改了思考参数，原来选的这一档没有了
+// 设置里改了思考档位，原来选的这一档没有了
 watch(efforts, (opts) => {
-  if (!opts.some((o) => o.value === effort.value)) effort.value = 'none'
+  if (!opts.some((o) => o.value === effort.value)) effort.value = curModel.value ? modelEffort(curModel.value) : defaultEffort(opts)
 })
 
 // ---------------------------------------------------------------- 图片
@@ -770,6 +771,14 @@ function callTitle(c: Call): string {
       return `请你填写：${((c.input.fields as SecretField[] | undefined) ?? []).map((f) => f.label).join('、')}`
     case 'save_software_template':
       return '保存软件模板'
+    case 'db_connections':
+      return '查看数据库连接'
+    case 'db_schema':
+      return i.table ? `看表结构 ${i.table}` : i.database ? `看库 ${i.database} 里的表` : '看有哪些库'
+    case 'db_query':
+      return `查询数据库${i.database ? ' ' + i.database : ''}`
+    case 'db_execute':
+      return `改数据库${i.connection ? ' ' + i.connection : ''}${i.database ? ' · ' + i.database : ''}`
   }
   return c.name
 }
@@ -1042,10 +1051,10 @@ function copy(text: string) {
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <el-dropdown trigger="click" :disabled="running" placement="top-start" @command="(v: string) => (effort = v)">
+            <el-dropdown v-if="efforts.length" trigger="click" :disabled="running" placement="top-start" @command="(v: string) => (effort = v)">
               <span class="chip" :class="{ off: running }">
                 <el-icon><Opportunity /></el-icon>
-                <span class="chip-text">思考：{{ EFFORT_LABELS[effort] ?? effort }}</span>
+                <span class="chip-text">思考：{{ effortLabel(curModel, effort) }}</span>
                 <el-icon class="chip-arrow"><ArrowDown /></el-icon>
               </span>
               <template #dropdown>

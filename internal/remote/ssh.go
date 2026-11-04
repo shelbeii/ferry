@@ -144,6 +144,12 @@ func (c *Client) ListenRemote(addr string) (net.Listener, error) {
 	return c.ssh.Listen("tcp", addr)
 }
 
+// DialTCP 经这条 SSH 连接从服务器那边连 addr（本地端口转发，数据库客户端用）。
+// 服务器的 sshd 不允许端口转发（AllowTcpForwarding no）时报错。
+func (c *Client) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
+	return c.ssh.DialContext(ctx, "tcp", addr)
+}
+
 // ResetSFTP 丢掉缓存的 SFTP 会话（它断了而 SSH 连接还在时），下次用时重新打开。
 func (c *Client) ResetSFTP() {
 	c.sftpMu.Lock()

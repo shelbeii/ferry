@@ -78,6 +78,8 @@ pub struct Tab {
     loading: bool,
     /// 开发者工具开着
     devtools: bool,
+    /// 网页图标（data:image/png;base64,…），没有时为空
+    icon: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -343,6 +345,7 @@ fn create_view(app: &AppHandle, id: u32, url: Url) -> Result<(), String> {
         .map_err(|e| format!("打开网页失败：{e}"))?;
     let _ = v.hide();
     hook_keys(app, &v);
+    hook_favicon(app, &v);
     Ok(())
 }
 
@@ -369,6 +372,7 @@ fn new_tab(app: &AppHandle, url: Option<Url>) -> Result<(), String> {
             title: String::new(),
             loading: url.is_some(),
             devtools: false,
+            icon: String::new(),
         });
         t.active = id;
         id
@@ -589,9 +593,94 @@ fn hook_keys(app: &AppHandle, v: &Webview) {
 #[cfg(not(windows))]
 fn hook_keys(_: &AppHandle, _: &Webview) {}
 
+/// 图标太大就不要了（每次标签变化都会把图标发给界面）
+const MAX_ICON: usize = 48 * 1024;
+
+/// 网页图标：WebView2 的 FaviconChanged 通知时取 PNG，转成 data: 地址放到标签上
+/// （界面的内容安全策略只允许 data: 图片，不能直接用网页里的图标地址）
+#[cfg(windows)]
+fn hook_favicon(app: &AppHandle, v: &Webview) {
+    use base64::Engine;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_15, COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG,
+    };
+    use webview2_com::{FaviconChangedEventHandler, GetFaviconCompletedHandler};
+    use windows::core::{Interface, PWSTR};
+
+    let app = app.clone();
+    let label = v.label().to_string();
+    let _ = v.with_webview(move |pw| unsafe {
+        let Ok(core) = pw.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(core) = core.cast::<ICoreWebView2_15>() else {
+            return; // WebView2 太旧，没有图标接口
+        };
+        let handler = FaviconChangedEventHandler::create(Box::new(move |sender, _| {
+            let Some(core) = sender.and_then(|s| s.cast::<ICoreWebView2_15>().ok()) else {
+                return Ok(());
+            };
+            let mut uri = PWSTR::null();
+            let has = core.FaviconUri(&mut uri).is_ok() && !uri.is_null() && {
+                let s = uri.to_string().unwrap_or_default();
+                windows::Win32::System::Com::CoTaskMemFree(Some(uri.0 as _));
+                !s.is_empty()
+            };
+            if !has {
+                update(&app, &label, |t| t.icon.clear());
+                return Ok(());
+            }
+            let (app, label) = (app.clone(), label.clone());
+            let done = GetFaviconCompletedHandler::create(Box::new(move |hr, stream| {
+                let png = hr
+                    .ok()
+                    .and(stream)
+                    .and_then(|s| read_stream(&s))
+                    .filter(|b| !b.is_empty() && b.len() <= MAX_ICON);
+                let icon = png
+                    .map(|b| {
+                        "data:image/png;base64,".to_string()
+                            + &base64::engine::general_purpose::STANDARD.encode(b)
+                    })
+                    .unwrap_or_default();
+                update(&app, &label, |t| t.icon = icon);
+                Ok(())
+            }));
+            let _ = core.GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, &done);
+            Ok(())
+        }));
+        let mut token = Default::default();
+        let _ = core.add_FaviconChanged(&handler, &mut token);
+    });
+}
+
+/// 把 COM 流读完（最多读 MAX_ICON 多一点，超过的不要）
+#[cfg(windows)]
+unsafe fn read_stream(s: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let mut n = 0u32;
+        let hr = s.Read(buf.as_mut_ptr() as _, buf.len() as u32, Some(&mut n));
+        if hr.is_err() {
+            return None;
+        }
+        if n == 0 {
+            return Some(out);
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+        if out.len() > MAX_ICON {
+            return None;
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hook_favicon(_: &AppHandle, _: &Webview) {}
+
 // ---------- 数据 ----------
 
-fn dir_size(p: &Path) -> u64 {
+pub(crate) fn dir_size(p: &Path) -> u64 {
     let Ok(rd) = std::fs::read_dir(p) else {
         return 0;
     };

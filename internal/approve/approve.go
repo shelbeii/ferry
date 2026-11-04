@@ -67,6 +67,11 @@ type Request struct {
 	Input  json.RawMessage  `json:"input,omitempty"`
 	Fields []ai.SecretField `json:"fields,omitempty"`
 	Danger string           `json:"danger,omitempty"` // 危险的原因（桌面版算的）
+	// db-exec：在数据库连接 DB（ID；DBName 是它的名称）的库 Database 里执行 Stmts（经服务器连时 Config、Target 是那台服务器）
+	DB       string   `json:"db,omitempty"`
+	DBName   string   `json:"dbName,omitempty"`
+	Database string   `json:"database,omitempty"`
+	Stmts    []string `json:"stmts,omitempty"`
 	// ClientConfirmed 用户已经在编程软件里确认了（设置里选了在编程软件里确认时）：桌面版不再弹窗，直接执行
 	ClientConfirmed bool     `json:"clientConfirmed,omitempty"`
 	Detail          []string `json:"detail,omitempty"` // 补充说明（代码提交、构建命令、线上版本……）

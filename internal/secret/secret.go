@@ -34,6 +34,7 @@ const (
 	KindNotify     = "notify"     // 部署通知的机器人地址、加签密钥
 	KindDNS        = "dns"        // HTTPS 证书 DNS 验证用的 DNS 服务商密钥
 	KindAIInput    = "ai-input"   // 用户在 AI 助手的输入框里填、并选了记住的密码、账号
+	KindDB         = "db"         // 「数据库」里保存的数据库密码
 )
 
 func service() string {

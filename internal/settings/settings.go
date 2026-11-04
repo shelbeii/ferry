@@ -97,8 +97,10 @@ type AIModel struct {
 	Provider string `json:"provider"` // anthropic | openai（OpenAI 兼容接口）
 	BaseURL  string `json:"baseUrl"`  // 空 = 服务商默认地址（OpenAI 兼容接口必填）
 	Model    string `json:"model"`    // 模型名；Anthropic 空 = claude-opus-5-5
-	// Effort 默认的思考强度：空 = 不设置（用模型自己的默认）| off | on | low | medium | high | xhigh | max。对话时可以另选
+	// Effort 默认的思考档位（Levels 里的 Value）：空 = 不设置（用模型自己的默认）。对话时可以另选
 	Effort string `json:"effort"`
+	// Levels 对话时能选的思考档位：显示名 → 传给接口的值（off = 关闭思考）。空 = 按服务商和思考参数的默认档位
+	Levels []AIEffort `json:"levels,omitempty"`
 	// Thinking OpenAI 兼容接口怎么传思考设置：空 = 按接口地址自动识别 | effort（reasoning_effort）| deepseek（thinking）
 	// | qwen（enable_thinking）| none（不传）
 	Thinking string `json:"thinking"`
@@ -111,13 +113,37 @@ type AIModel struct {
 	Currency   string  `json:"currency"`
 }
 
+// AIEffort 一个思考档位：Label 显示名（如「高」），Value 传给接口的值（如 high；off = 关闭思考）。
+type AIEffort struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
+// MaxEffortLevels 一个模型最多设置多少个思考档位
+const MaxEffortLevels = 12
+
+// ValidEffort 模型能不能用这个思考档位：设置了档位时只能用设置的，没设置时用旧版本的固定档位。
+func (m AIModel) ValidEffort(v string) bool {
+	if len(m.Levels) == 0 {
+		return efforts[v]
+	}
+	for _, l := range m.Levels {
+		if l.Value == v {
+			return true
+		}
+	}
+	return v == ""
+}
+
 // LegacyModelID 从旧版本单个模型配置转过来的模型 ID（它的 API Key 在旧的凭据账户里）。
 const LegacyModelID = "default"
 
 var (
 	reModelID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-	efforts   = map[string]bool{"": true, "off": true, "on": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true}
-	thinkings = map[string]bool{"": true, "effort": true, "deepseek": true, "qwen": true, "none": true}
+	// 思考档位的值：字母、数字、. _ -（none 留给「不设置」）
+	ReEffortValue = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
+	efforts       = map[string]bool{"": true, "off": true, "on": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true}
+	thinkings     = map[string]bool{"": true, "effort": true, "deepseek": true, "qwen": true, "none": true}
 )
 
 // FindModel 按 ID 找模型；id 为空时用默认模型（没有默认时用第一个）。
@@ -317,7 +343,8 @@ func (s *Settings) normalize() {
 		if m.Name == "" {
 			m.Name = m.ID
 		}
-		if !efforts[m.Effort] {
+		m.Levels = normalizeLevels(m.Levels)
+		if !m.ValidEffort(m.Effort) {
 			m.Effort = ""
 		}
 		if !thinkings[m.Thinking] || m.Provider != "openai" {
@@ -491,4 +518,28 @@ func (s Settings) CleanBuildLogs(dir string) {
 			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
+}
+
+// normalizeLevels 去掉值不合规、重复的档位，显示名为空时用值，最多 MaxEffortLevels 个。
+func normalizeLevels(in []AIEffort) []AIEffort {
+	var out []AIEffort
+	seen := map[string]bool{}
+	for _, l := range in {
+		l.Value, l.Label = strings.TrimSpace(l.Value), strings.TrimSpace(l.Label)
+		if !ReEffortValue.MatchString(l.Value) || strings.EqualFold(l.Value, "none") || seen[l.Value] {
+			continue
+		}
+		seen[l.Value] = true
+		if l.Label == "" {
+			l.Label = l.Value
+		}
+		if r := []rune(l.Label); len(r) > 12 {
+			l.Label = string(r[:12])
+		}
+		out = append(out, l)
+		if len(out) == MaxEffortLevels {
+			break
+		}
+	}
+	return out
 }

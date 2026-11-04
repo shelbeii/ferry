@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..')
 const PORT = 1421
-const ORIGIN = 'http://localhost:1420'
+const ORIGIN = process.env.FERRY_BRIDGE_ORIGIN || 'http://localhost:1420' // 另开一个 vite 端口调试时用环境变量改
 const token = randomBytes(24).toString('hex')
 writeFileSync(join(root, '.bridge-token'), token)
 

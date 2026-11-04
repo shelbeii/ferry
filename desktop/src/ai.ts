@@ -1,28 +1,19 @@
-// AI 助手：思考强度的选项、token 用量与费用估算（设置里的模型列表、对话时共用）。
-// 设置里「不设置」存成空字符串；下拉框里用 'none'（空值会被当成没选，显示成「请选择」）。
-import type { AiModel } from './ferry'
-
-export const EFFORT_LABELS: Record<string, string> = {
-  none: '不设置',
-  off: '关闭',
-  on: '开启',
-  low: '低',
-  medium: '中',
-  high: '高',
-  xhigh: '很高',
-  max: '最高',
-}
+// AI 助手：思考档位的选项、token 用量与费用估算（设置里的模型列表、对话时共用）。
+// 思考档位总是选一个具体的档位（或关闭）；模型没有设置默认档位时用 defaultEffort 挑一个。
+import type { AiEffort, AiModel } from './ferry'
 
 export const THINKING_STYLES: { value: string; label: string }[] = [
   { value: '', label: '自动识别' },
   { value: 'effort', label: 'reasoning_effort（OpenAI 等）' },
-  { value: 'deepseek', label: 'DeepSeek（开 / 关）' },
+  { value: 'deepseek', label: 'DeepSeek（thinking + reasoning_effort）' },
   { value: 'qwen', label: '通义千问（enable_thinking）' },
   { value: 'none', label: '不传思考参数' },
 ]
 
+type StyleOf = Pick<AiModel, 'provider' | 'thinking' | 'baseUrl' | 'model'>
+
 /** OpenAI 兼容接口传思考设置的方式（和 ferry 里的识别规则一致） */
-export function thinkingStyle(m: Pick<AiModel, 'provider' | 'thinking' | 'baseUrl' | 'model'>): string {
+export function thinkingStyle(m: StyleOf): string {
   if (m.provider !== 'openai') return 'anthropic'
   if (m.thinking) return m.thinking
   const b = (m.baseUrl || '').toLowerCase()
@@ -32,18 +23,54 @@ export function thinkingStyle(m: Pick<AiModel, 'provider' | 'thinking' | 'baseUr
   return 'effort'
 }
 
-/** 这个模型能选的思考强度 */
-export function effortOptions(m: Pick<AiModel, 'provider' | 'thinking' | 'baseUrl' | 'model'>): { value: string; label: string }[] {
-  const keys =
-    {
-      anthropic: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      effort: ['none', 'low', 'medium', 'high'],
-      deepseek: ['none', 'off', 'on'],
-      qwen: ['none', 'off', 'low', 'medium', 'high'],
-      none: ['none'],
-    }[thinkingStyle(m)] ?? ['none']
-  return keys.map((value) => ({ value, label: EFFORT_LABELS[value] }))
+const L = (label: string, value: string): AiEffort => ({ label, value })
+
+/** 各家接口默认的思考档位（值按各家文档）；off = 关闭思考 */
+const DEFAULT_LEVELS: Record<string, AiEffort[]> = {
+  anthropic: [L('低', 'low'), L('中', 'medium'), L('高', 'high'), L('很高', 'xhigh'), L('最高', 'max')],
+  effort: [L('低', 'low'), L('中', 'medium'), L('高', 'high')],
+  deepseek: [L('关闭', 'off'), L('低', 'low'), L('高', 'high'), L('最高', 'max')],
+  qwen: [L('关闭', 'off'), L('低', 'low'), L('中', 'medium'), L('高', 'high')],
+  none: [],
 }
+
+/** 没有自己设置档位时用的默认档位 */
+export function defaultLevels(m: StyleOf): AiEffort[] {
+  return (DEFAULT_LEVELS[thinkingStyle(m)] ?? []).map((l) => ({ ...l }))
+}
+
+/** 这个模型的思考档位：自己设置了用设置的，没有用默认的 */
+export function levelsOf(m: StyleOf & Pick<AiModel, 'levels'>): AiEffort[] {
+  return m.levels?.length ? m.levels : defaultLevels(m)
+}
+
+/** 这个模型能选的思考档位 */
+export function effortOptions(m: StyleOf & Pick<AiModel, 'levels'>): { value: string; label: string }[] {
+  return levelsOf(m).map((l) => ({ value: l.value, label: l.label || l.value }))
+}
+
+/** 没选过档位时用哪一档：有 high 用 high（各家模型自己的默认大多是它），没有就用第一个不是关闭的 */
+export function defaultEffort(opts: { value: string }[]): string {
+  return (opts.find((o) => o.value === 'high') ?? opts.find((o) => o.value !== 'off') ?? opts[0])?.value ?? ''
+}
+
+/** 模型实际用的默认档位：设置里选的那一档还在就用它，否则按 defaultEffort 挑 */
+export function modelEffort(m: StyleOf & Pick<AiModel, 'levels' | 'effort'>): string {
+  const opts = effortOptions(m)
+  return opts.some((o) => o.value === m.effort) ? m.effort : defaultEffort(opts)
+}
+
+/** 档位的显示名；找不到时显示值本身 */
+export function effortLabel(m: (StyleOf & Pick<AiModel, 'levels'>) | undefined, value: string): string {
+  return (m && levelsOf(m).find((l) => l.value === value)?.label) || value
+}
+
+/** 档位的值：字母、数字、. _ -，none 留给「不设置」（和 ferry 里 settings 的规则一致） */
+export function validEffortValue(v: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(v) && v.toLowerCase() !== 'none'
+}
+
+export const MAX_LEVELS = 12
 
 // ---------------------------------------------------------------- 用量与费用
 

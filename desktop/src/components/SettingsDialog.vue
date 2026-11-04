@@ -9,7 +9,7 @@ import NotifyChannels from './NotifyChannels.vue'
 import DnsKeys from './DnsKeys.vue'
 import CliMcp from './CliMcp.vue'
 import { appSettings, applyTheme, dropTasks, loadSettings, saveSettings, settingsInfo, settingsRequest, startTask, tasks } from '../state'
-import { appInfo, browserDataUsage, clearBrowserData, isTauri, openUrl, pickDir, pickFile, reveal } from '../platform'
+import { appInfo, browserDataUsage, clearBrowserData, clearUiCache, isTauri, uiCacheUsage, openUrl, pickDir, pickFile, reveal } from '../platform'
 import { clearHistory } from '../browser/address'
 import { glass, GLASS_TRANSPARENCY_DEFAULT } from '../glass/runtime'
 import GlassToggle from './glass/GlassToggle.vue'
@@ -25,7 +25,7 @@ const tab = ref(settingsRequest.value || 'storage')
 settingsRequest.value = ''
 const settingsQuery = ref('')
 const sections = [
-  { name: 'storage', label: '存储', group: '常规', description: '管理数据位置、磁盘占用和记录保留策略。', keywords: '目录 日志 清理 任务 浏览器 缓存 Cookie' },
+  { name: 'storage', label: '存储', group: '常规', description: '管理数据位置、磁盘占用和记录保留策略。', keywords: '目录 日志 清理 任务 浏览器 缓存 Cookie 界面缓存 临时文件' },
   { name: 'connect', label: '连接', group: '常规', description: '设置连接、上传和自动刷新行为。', keywords: 'SSH 超时 密钥 端口' },
   { name: 'secrets', label: '凭据', group: '常规', description: '查看和管理保存在本机系统凭据库中的密码与密钥。', keywords: '密码 key token' },
   { name: 'ui', label: '界面', group: '常规', description: '调整主题、任务展示与通知体验。', keywords: '主题 深色 通知 液态玻璃 玻璃 动画' },
@@ -82,6 +82,7 @@ async function initialize() {
   loadTemplates()
   loadAiUsage()
   loadBrowserUsage()
+  loadUiCache()
   loadTaskUsage()
   loadMcpUsage()
 }
@@ -153,6 +154,29 @@ async function cleanBrowser() {
   } finally {
     browserCleaning.value = false
     loadBrowserUsage()
+  }
+}
+
+// ---------------------------------------------------------------- 界面缓存
+
+const uiCache = ref<number | null>(null)
+const uiCacheCleaning = ref(false)
+
+async function loadUiCache() {
+  uiCache.value = await uiCacheUsage().catch(() => null)
+}
+
+async function cleanUiCache() {
+  uiCacheCleaning.value = true
+  try {
+    const before = uiCache.value ?? 0
+    const left = await clearUiCache()
+    uiCache.value = left
+    ElMessage.success(`界面缓存已清除，腾出 ${bytes(Math.max(before - left, 0))}`)
+  } catch (e) {
+    ElMessage.error(String((e as Error)?.message ?? e))
+  } finally {
+    uiCacheCleaning.value = false
   }
 }
 
@@ -240,7 +264,7 @@ const jdkJava = ref(17)
 const jdkArch = ref<'x64' | 'aarch64'>('x64')
 const jdkBusy = ref(false)
 
-const secretKind = (k: string) => ({ password: '登录密码', passphrase: '私钥密码', software: '软件密码', ai: 'AI 模型', notify: '部署通知', dns: 'DNS 密钥', 'ai-input': 'AI 助手填写' })[k] ?? k
+const secretKind = (k: string) => ({ password: '登录密码', passphrase: '私钥密码', software: '软件密码', ai: 'AI 模型', notify: '部署通知', dns: 'DNS 密钥', 'ai-input': 'AI 助手填写', db: '数据库密码' })[k] ?? k
 
 async function loadJdks() {
   try {
@@ -754,6 +778,22 @@ async function pickKeyDir() {
           </el-form-item>
         </el-form>
         <p v-else class="muted small">这个系统上浏览器的数据和 Ferry 界面放在一起，不能单独清理。</p>
+
+        <template v-if="uiCache !== null">
+          <h4 class="sub">界面缓存</h4>
+          <p class="muted small">
+            Ferry 界面自己的网页缓存、脚本编译缓存和显卡缓存，在数据目录的 webview 里，升级多了会越攒越多。不会自动清理；
+            清除后不影响设置和数据，只是之后第一次打开各个页面会慢一点，用过一遍就又攒回来。
+          </p>
+          <el-form label-width="110px">
+            <el-form-item>
+              <div class="usage">
+                <span class="muted small">占用 {{ bytes(uiCache) }}</span>
+                <el-button size="small" :loading="uiCacheCleaning" @click="cleanUiCache">清除界面缓存</el-button>
+              </div>
+            </el-form-item>
+          </el-form>
+        </template>
       </el-tab-pane>
 
       <!-- 连接 -->

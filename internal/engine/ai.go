@@ -325,6 +325,10 @@ func (e *Engine) aiSystemPrompt(s *session, t *config.Target, mode string) strin
 		}
 		b.WriteString("查看应用优先用 app_status、app_logs，比自己拼命令可靠。\n")
 	}
+	if e.hasAIDB(t) {
+		b.WriteString("\n用户允许你查这台服务器上的数据库：用 db_connections 看有哪些连接，db_schema 看库、表和表结构，db_query 执行只读查询（不要用 run_command 跑 mysql、psql）。" +
+			"db_connections 里 write 为 true 的连接，允许改动时可以用 db_execute 改数据、建表改表（用户看过 SQL 同意才执行）；其他的不能改：需要改时把 SQL 写出来，请用户在 Ferry 的「数据库」里执行。\n")
+	}
 	return b.String()
 }
 
@@ -348,6 +352,7 @@ func toJSON(v any) string {
 // 生产服务器：每个改动都要确认，不能「同类不再询问」。
 func (e *Engine) aiTools(s *session, t *config.Target, mode, conv string) []ai.Tool {
 	tools := e.aiToolList(s, t, mode, conv)
+	tools = append(tools, e.aiDBTools(t, mode == AIConfirm)...)
 	if t.Production {
 		for i := range tools {
 			if approve := tools[i].Approve; approve != nil {

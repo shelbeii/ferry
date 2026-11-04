@@ -84,7 +84,7 @@ func indexRemove(account string) {
 }
 
 func describe(account string) (kind, label string) {
-	for _, k := range []string{KindPassword, KindPassphrase, KindSoftware, KindAI, KindNotify, KindDNS, KindAIInput} {
+	for _, k := range []string{KindPassword, KindPassphrase, KindSoftware, KindAI, KindNotify, KindDNS, KindAIInput, KindDB} {
 		if len(account) > len(k)+1 && account[:len(k)+1] == k+":" {
 			label = account[len(k)+1:]
 			if k == KindAI && strings.HasPrefix(label, "api-key:") {

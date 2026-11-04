@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { pickConfig, pickSaveFile } from './platform'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete, List, Setting, Monitor, Fold, Expand, FolderOpened, MoreFilled, EditPen, SwitchButton, Search, Compass } from '@element-plus/icons-vue'
+import { Plus, Delete, List, Setting, Monitor, Fold, Expand, FolderOpened, MoreFilled, EditPen, SwitchButton, Search, Compass, Coin } from '@element-plus/icons-vue'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from './platform'
@@ -18,6 +18,7 @@ import TerminalHost from './components/TerminalHost.vue'
 import ConnectionView from './components/ConnectionView.vue'
 import McpApprovals from './components/McpApprovals.vue'
 import { completeRequest, requestKey } from './requestQueue'
+import { dbOpen, dbRequest } from './db'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const SettingsDialog = defineAsyncComponent(() => import('./components/SettingsDialog.vue'))
@@ -28,6 +29,16 @@ const BrowserDrawer = defineAsyncComponent(() => import('./components/BrowserDra
 // 浏览器第一次打开后一直留着（关上抽屉网页还在，再打开接着用）
 const browserUsed = ref(false)
 watch(browserOpen, (v) => v && (browserUsed.value = true))
+// 「数据库」：同样第一次打开后留着（标签页、查询内容还在）；和浏览器同一个位置，打开一个就收起另一个
+const DbDrawer = defineAsyncComponent(() => import('./components/db/DbDrawer.vue'))
+const dbUsed = ref(false)
+watch(dbOpen, (v) => {
+  if (!v) return
+  dbUsed.value = true
+  browserOpen.value = false
+})
+watch(browserOpen, (v) => v && (dbOpen.value = false))
+watch(dbRequest, (v) => v && (dbOpen.value = true))
 
 const settingsOpen = ref(false)
 watch(settingsRequest, (t) => {
@@ -95,7 +106,7 @@ const running = computed(() => tasks.filter((t) => t.status === 'running').lengt
 
 // 项目列表可以收起，只留最左边的图标栏（记在本机）
 const RAIL = 56
-const LIST = 208
+const LIST = 230
 const listOpen = ref(uiPref('listOpen') !== '0')
 watch(listOpen, (v) => setUiPref('listOpen', v ? '1' : '0'))
 // 终端面板等按左边栏的宽度定位
@@ -247,7 +258,7 @@ async function moveConfig(path: string) {
 
 <template>
   <el-container class="shell" :style="{ '--ferry-side': sideWidth + 'px' }">
-    <!-- 最左边的图标栏：收起 / 展开项目列表、添加、浏览器、任务、设置 -->
+    <!-- 最左边的图标栏：收起 / 展开项目列表、添加、数据库、浏览器、任务、设置 -->
     <nav class="rail" aria-label="主导航">
       <img src="/logo.png" alt="Ferry" class="logo" />
       <el-tooltip :show-after="HOVER_DELAY" :content="listOpen ? '收起项目列表' : '展开项目列表'" placement="right">
@@ -268,6 +279,11 @@ async function moveConfig(path: string) {
         </template>
       </el-dropdown>
       <span class="rail-gap" />
+      <el-tooltip :show-after="HOVER_DELAY" content="数据库" placement="right">
+        <button class="rail-btn" :class="{ on: dbOpen }" aria-label="数据库" @click="dbOpen = !dbOpen">
+          <el-icon :size="18"><Coin /></el-icon>
+        </button>
+      </el-tooltip>
       <el-tooltip :show-after="HOVER_DELAY" content="浏览器" placement="right">
         <button class="rail-btn" :class="{ on: browserOpen }" aria-label="浏览器" @click="browserOpen = !browserOpen">
           <el-icon :size="18"><Compass /></el-icon>
@@ -401,6 +417,7 @@ async function moveConfig(path: string) {
     </el-main>
     <TaskDrawer />
     <BrowserDrawer v-if="browserUsed" :side="sideWidth" />
+    <DbDrawer v-if="dbUsed" :side="sideWidth" />
     <TerminalHost />
     <McpApprovals />
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
@@ -496,7 +513,7 @@ async function moveConfig(path: string) {
   transform: translate(60%, -40%) scale(0.85);
 }
 .aside {
-  width: 208px;
+  width: 230px;
   flex-shrink: 0;
   box-sizing: border-box;
   background: var(--el-fill-color-extra-light);

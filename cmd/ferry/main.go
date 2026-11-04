@@ -49,7 +49,7 @@ const usage = `ferry —— 后端 / 前端部署工具
   trust    <目标> [--expect <指纹>]  核对并记录服务器主机公钥（首次连接前执行）
   hostkey  <目标>               只取服务器主机公钥指纹与记录状态
   inspect                       输出规范化后的配置（配合 --json）
-  ai       <目标> <要问的话> [--conv <对话>] [--mode confirm] [--model <模型 ID>] [--effort low|medium|high|xhigh|max|none]
+  ai       <目标> <要问的话> [--conv <对话>] [--mode confirm] [--model <模型 ID>] [--effort <思考档位>|none]
            [--image <图片>[;<图片>…]]
                                 服务器助手：大模型查看服务器、回答问题（模型在设置 → AI 里配置）；--image 附上截图等图片；
                                 --mode confirm 允许改动服务器，每个改动停下来等确认：
@@ -360,6 +360,8 @@ func run(argv []string, cio *cliIO) int {
 		return probePrepareCmd(cio, js, fail)
 	case cmd == "connection":
 		return connectionCmd(c, cio, js, con, fail)
+	case cmd == "db":
+		return dbCmd(c, cio, js, con, st, fail)
 	case cmd == "ai-key":
 		return aiKeyCmd(c, cio, js, con, st, fail)
 	case cmd == "notify":
