@@ -2,13 +2,13 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { pickConfig, pickSaveFile } from './platform'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete, List, Setting, Monitor, Fold, Expand, FolderOpened, MoreFilled, EditPen, SwitchButton, Search } from '@element-plus/icons-vue'
+import { Plus, Delete, List, Setting, Monitor, Fold, Expand, FolderOpened, MoreFilled, EditPen, SwitchButton, Search, Compass } from '@element-plus/icons-vue'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from './platform'
 import { call, FerryError, type Connection, type Inspect } from './ferry'
 import { connectionsPath as connPath, CONN_PREFIX, pageTerminals, loadTaskHistory } from './state'
-import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, projectTraits, uiPref, setUiPref } from './state'
+import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, browserOpen, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, projectTraits, uiPref, setUiPref } from './state'
 import ProjectScene from './components/ProjectScene.vue'
 import ProjectView from './components/ProjectView.vue'
 import TaskDrawer from './components/TaskDrawer.vue'
@@ -24,6 +24,10 @@ const SettingsDialog = defineAsyncComponent(() => import('./components/SettingsD
 const NewProjectDialog = defineAsyncComponent(() => import('./components/NewProjectDialog.vue'))
 const ConnectionDialog = defineAsyncComponent(() => import('./components/ConnectionDialog.vue'))
 const BusyDialog = defineAsyncComponent(() => import('./components/BusyDialog.vue'))
+const BrowserDrawer = defineAsyncComponent(() => import('./components/BrowserDrawer.vue'))
+// 浏览器第一次打开后一直留着（关上抽屉网页还在，再打开接着用）
+const browserUsed = ref(false)
+watch(browserOpen, (v) => v && (browserUsed.value = true))
 
 const settingsOpen = ref(false)
 watch(settingsRequest, (t) => {
@@ -243,7 +247,7 @@ async function moveConfig(path: string) {
 
 <template>
   <el-container class="shell" :style="{ '--ferry-side': sideWidth + 'px' }">
-    <!-- 最左边的图标栏：收起 / 展开项目列表、添加、任务、设置 -->
+    <!-- 最左边的图标栏：收起 / 展开项目列表、添加、浏览器、任务、设置 -->
     <nav class="rail" aria-label="主导航">
       <img src="/logo.png" alt="Ferry" class="logo" />
       <el-tooltip :show-after="HOVER_DELAY" :content="listOpen ? '收起项目列表' : '展开项目列表'" placement="right">
@@ -264,6 +268,11 @@ async function moveConfig(path: string) {
         </template>
       </el-dropdown>
       <span class="rail-gap" />
+      <el-tooltip :show-after="HOVER_DELAY" content="浏览器" placement="right">
+        <button class="rail-btn" :class="{ on: browserOpen }" aria-label="浏览器" @click="browserOpen = !browserOpen">
+          <el-icon :size="18"><Compass /></el-icon>
+        </button>
+      </el-tooltip>
       <el-tooltip :show-after="HOVER_DELAY" :content="running ? `任务：${running} 个进行中` : '任务'" placement="right">
         <button class="rail-btn" aria-label="任务" @click="drawerOpen = true">
           <el-badge :value="running" :hidden="running === 0" type="primary" class="rail-badge">
@@ -391,6 +400,7 @@ async function moveConfig(path: string) {
       </div>
     </el-main>
     <TaskDrawer />
+    <BrowserDrawer v-if="browserUsed" :side="sideWidth" />
     <TerminalHost />
     <McpApprovals />
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />

@@ -9,7 +9,8 @@ import NotifyChannels from './NotifyChannels.vue'
 import DnsKeys from './DnsKeys.vue'
 import CliMcp from './CliMcp.vue'
 import { appSettings, applyTheme, dropTasks, loadSettings, saveSettings, settingsInfo, settingsRequest, startTask, tasks } from '../state'
-import { appInfo, isTauri, openUrl, pickDir, pickFile, reveal } from '../platform'
+import { appInfo, browserDataUsage, clearBrowserData, isTauri, openUrl, pickDir, pickFile, reveal } from '../platform'
+import { clearHistory } from '../browser/address'
 import { glass, GLASS_TRANSPARENCY_DEFAULT } from '../glass/runtime'
 import GlassToggle from './glass/GlassToggle.vue'
 
@@ -24,7 +25,7 @@ const tab = ref(settingsRequest.value || 'storage')
 settingsRequest.value = ''
 const settingsQuery = ref('')
 const sections = [
-  { name: 'storage', label: '存储', group: '常规', description: '管理数据位置、磁盘占用和记录保留策略。', keywords: '目录 日志 清理 任务' },
+  { name: 'storage', label: '存储', group: '常规', description: '管理数据位置、磁盘占用和记录保留策略。', keywords: '目录 日志 清理 任务 浏览器 缓存 Cookie' },
   { name: 'connect', label: '连接', group: '常规', description: '设置连接、上传和自动刷新行为。', keywords: 'SSH 超时 密钥 端口' },
   { name: 'secrets', label: '凭据', group: '常规', description: '查看和管理保存在本机系统凭据库中的密码与密钥。', keywords: '密码 key token' },
   { name: 'ui', label: '界面', group: '常规', description: '调整主题、任务展示与通知体验。', keywords: '主题 深色 通知 液态玻璃 玻璃 动画' },
@@ -80,6 +81,7 @@ async function initialize() {
   loadSwLib()
   loadTemplates()
   loadAiUsage()
+  loadBrowserUsage()
   loadTaskUsage()
   loadMcpUsage()
 }
@@ -123,6 +125,34 @@ async function cleanAi(all: boolean) {
     ElMessage.error((e as Error).message)
   } finally {
     aiCleaning.value = false
+  }
+}
+
+// ---------------------------------------------------------------- 内置浏览器的数据
+
+const browserUsage = ref<number | null>(null)
+const browserCleaning = ref(false)
+
+async function loadBrowserUsage() {
+  browserUsage.value = await browserDataUsage().catch(() => null)
+}
+
+async function cleanBrowser() {
+  try {
+    await ElMessageBox.confirm('清除内置浏览器的缓存、Cookie、登录状态、网站保存的数据和最近打开的网页？清除后网站要重新登录。', '清除浏览器数据', { type: 'warning', confirmButtonText: '清除' })
+  } catch {
+    return
+  }
+  browserCleaning.value = true
+  try {
+    await clearBrowserData()
+    clearHistory()
+    ElMessage.success('浏览器数据已清除')
+  } catch (e) {
+    ElMessage.error(String((e as Error)?.message ?? e))
+  } finally {
+    browserCleaning.value = false
+    loadBrowserUsage()
   }
 }
 
@@ -712,6 +742,18 @@ async function pickKeyDir() {
             </div>
           </el-form-item>
         </el-form>
+
+        <h4 class="sub">内置浏览器</h4>
+        <p class="muted small">左边「浏览器」打开过的网页留下的缓存、Cookie、登录状态和网站保存的数据，在数据目录的 browser 里。不会自动清理，清除后网站要重新登录。</p>
+        <el-form v-if="browserUsage !== null" label-width="110px">
+          <el-form-item>
+            <div class="usage">
+              <span class="muted small">占用 {{ bytes(browserUsage) }}</span>
+              <el-button size="small" type="danger" plain :loading="browserCleaning" @click="cleanBrowser">清除浏览器数据</el-button>
+            </div>
+          </el-form-item>
+        </el-form>
+        <p v-else class="muted small">这个系统上浏览器的数据和 Ferry 界面放在一起，不能单独清理。</p>
       </el-tab-pane>
 
       <!-- 连接 -->

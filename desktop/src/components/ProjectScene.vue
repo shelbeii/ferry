@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, useId } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { isTauri } from '../platform'
+import { browserOpen } from '../state'
 
 const props = defineProps<{
   identity: string
@@ -11,10 +14,38 @@ const props = defineProps<{
 }>()
 
 const id = useId()
+// 动画一直重画很费 CPU（约半个核）：窗口最小化、不在前台、被浏览器抽屉挡住时停下
 const hidden = ref(document.hidden)
+const focused = ref(document.hasFocus())
 const visibility = () => { hidden.value = document.hidden }
-onMounted(() => document.addEventListener('visibilitychange', visibility))
-onBeforeUnmount(() => document.removeEventListener('visibilitychange', visibility))
+const onFocus = () => { focused.value = true }
+const onBlur = () => { focused.value = false }
+let unlistenFocus: (() => void) | undefined
+let disposed = false
+onMounted(() => {
+  document.addEventListener('visibilitychange', visibility)
+  if (isTauri) {
+    // 用窗口的焦点：点进浏览器里的网页时焦点还在 Ferry 窗口里，页面却会收到 blur；
+    // 页面的 document.hasFocus() 也不准（窗口不在前台时可能还是 true），开始时问窗口
+    const w = getCurrentWindow()
+    w.isFocused().then((f) => { focused.value = f }).catch(() => {})
+    w.onFocusChanged((e) => { focused.value = e.payload }).then((u) => {
+      if (disposed) u()
+      else unlistenFocus = u
+    }).catch(() => {})
+  } else {
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('blur', onBlur)
+  }
+})
+onBeforeUnmount(() => {
+  disposed = true
+  document.removeEventListener('visibilitychange', visibility)
+  window.removeEventListener('focus', onFocus)
+  window.removeEventListener('blur', onBlur)
+  unlistenFocus?.()
+})
+const paused = computed(() => hidden.value || !focused.value || browserOpen.value)
 
 // 同一项目始终使用相同的配色与布局；切换时由各自的配置与已读取状态驱动。
 const seed = computed(() => {
@@ -61,7 +92,7 @@ const description = computed(() => {
 </script>
 
 <template>
-  <figure class="project-scene" :class="{ flowing, paused: hidden }" :style="{ '--scene-hue': hue }" :title="description">
+  <figure class="project-scene" :class="{ flowing, paused }" :style="{ '--scene-hue': hue }" :title="description">
     <svg class="scene" viewBox="0 0 188 84" role="img" :aria-label="description">
       <defs>
         <linearGradient :id="`${id}-wash`" x1="0" y1="0" x2="1" y2="1"><stop stop-color="currentColor" stop-opacity=".12" /><stop offset="1" stop-color="currentColor" stop-opacity="0" /></linearGradient>

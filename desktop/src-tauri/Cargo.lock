@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-desktop"
-version = "0.13.50"
+version = "0.13.54"
 dependencies = [
  "serde",
  "serde_json",
@@ -990,6 +990,8 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-store",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]

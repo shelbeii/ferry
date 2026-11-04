@@ -230,6 +230,8 @@ export interface Task {
 
 export const tasks = reactive<Task[]>([])
 export const drawerOpen = ref(false)
+/** 内置浏览器的抽屉（BrowserDrawer.vue） */
+export const browserOpen = ref(false)
 export const selectedTaskId = ref<number | null>(null)
 let nextId = 1
 

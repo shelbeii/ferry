@@ -1,5 +1,7 @@
 //! Ferry 桌面版：界面在 WebView 里，所有部署操作交给 sidecar（ferry 命令行，--json 输出）。
-//! Rust 这边只负责窗口、插件，以及读写 ferry.yaml 的两个受限命令。
+//! Rust 这边只负责窗口、插件，读写 ferry.yaml 的两个受限命令，以及内置浏览器（browser.rs）。
+
+mod browser;
 
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
@@ -55,14 +57,25 @@ fn check_config_path(path: &str) -> Result<&Path, String> {
     }
 }
 
+/// 读写配置只给 Ferry 的界面用（内置浏览器里的网页不行）
+fn main_only(webview: &tauri::Webview) -> Result<(), String> {
+    if webview.label() == "main" {
+        Ok(())
+    } else {
+        Err("不允许从这里调用".into())
+    }
+}
+
 #[tauri::command]
-fn read_config(path: String) -> Result<String, String> {
+fn read_config(webview: tauri::Webview, path: String) -> Result<String, String> {
+    main_only(&webview)?;
     let p = check_config_path(&path)?;
     std::fs::read_to_string(p).map_err(|e| format!("读取 {path} 失败：{e}"))
 }
 
 #[tauri::command]
-fn write_config(path: String, content: String) -> Result<(), String> {
+fn write_config(webview: tauri::Webview, path: String, content: String) -> Result<(), String> {
+    main_only(&webview)?;
     let p = check_config_path(&path)?;
     // 先写临时文件再改名，避免写到一半损坏配置
     let tmp = p.with_extension("yaml.tmp");
@@ -90,7 +103,22 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![read_config, write_config])
+        .manage(browser::Browser::default())
+        .invoke_handler(tauri::generate_handler![
+            read_config,
+            write_config,
+            browser::browser_tabs,
+            browser::browser_new_tab,
+            browser::browser_select_tab,
+            browser::browser_close_tab,
+            browser::browser_navigate,
+            browser::browser_action,
+            browser::browser_layout,
+            browser::browser_release,
+            browser::browser_sync,
+            browser::browser_data_usage,
+            browser::browser_clear_data
+        ])
         .setup(|app| {
             // 主窗口在这里创建：WebView2 的缓存放在 Ferry 的数据目录里（默认安装目录下），不放到系统盘的用户目录
             #[cfg_attr(target_os = "macos", allow(unused_mut))] // macOS 上不改 WebView 数据目录
@@ -98,6 +126,8 @@ pub fn run() {
                 .title("Ferry")
                 .inner_size(1320.0, 840.0)
                 .min_inner_size(1000.0, 620.0)
+                // 开着 devtools 功能是给内置浏览器用的（macOS）；Ferry 自己的界面照旧只在开发版里能打开
+                .devtools(cfg!(debug_assertions))
                 // 先不显示：界面画好、主题切好后由页面显示（main.ts），免得先闪白底或浅色
                 .visible(false);
             #[cfg(not(target_os = "macos"))]
@@ -107,6 +137,15 @@ pub fn run() {
                 w = w.data_directory(d.join("webview"));
             }
             let win = w.build()?;
+            {
+                use tauri::Manager;
+                // 内置浏览器的网页用单独的目录，能单独清理
+                #[cfg(not(target_os = "macos"))]
+                let dir = redirected.as_ref().map(|d| d.join("browser"));
+                #[cfg(target_os = "macos")]
+                let dir = None;
+                app.manage(browser::BrowserDir(dir));
+            }
             // 页面出错没能显示窗口时：3 秒后照样显示
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(3));

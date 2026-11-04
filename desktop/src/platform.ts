@@ -205,6 +205,17 @@ export async function writeConfig(path: string, content: string): Promise<void> 
   await bridge('/write_config', { path, content })
 }
 
+// ---------------------------------------------------------------- 内置浏览器
+
+/** 内置浏览器的数据（缓存、Cookie、登录状态等）占用多少字节；null = 不能单独统计、清理（macOS、浏览器调试时） */
+export async function browserDataUsage(): Promise<number | null> {
+  return isTauri ? invoke<number | null>('browser_data_usage') : null
+}
+
+export async function clearBrowserData(): Promise<void> {
+  if (isTauri) await invoke('browser_clear_data')
+}
+
 /** 选择 ferry.yaml（浏览器调试时手工输入路径）。 */
 export async function pickConfig(): Promise<string | null> {
   if (!isTauri) return promptPath('ferry.yaml 的绝对路径')
