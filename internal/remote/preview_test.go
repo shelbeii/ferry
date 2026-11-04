@@ -121,7 +121,8 @@ func TestPreviewFileSFTP(t *testing.T) {
 		t.Fatalf("已取消的请求不应读取文件：%v", err)
 	}
 	// Windows 未开启开发人员模式时不能建链接，其他情况下验证链接照常只读。
-	if os.Symlink(filepath.Join(dir, ".ferry-runtime.json"), filepath.Join(dir, "config-link")) == nil {
+	// 相对目标也适用于 Windows 上的测试 SFTP 服务，避免把盘符当成远程相对路径拼接。
+	if os.Symlink(".ferry-runtime.json", filepath.Join(dir, "config-link")) == nil {
 		if linked, err := c.PreviewFile(context.Background(), "config-link"); err != nil || linked.Content != content {
 			t.Fatalf("应能读取指向文本文件的链接：%v", err)
 		}
