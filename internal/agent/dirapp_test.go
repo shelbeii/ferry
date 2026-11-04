@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,7 +73,8 @@ func TestExecCommand(t *testing.T) {
 func TestSelectedPythonCreatesVenvWithoutRequirements(t *testing.T) {
 	canSymlink(t)
 	f := newFake(t)
-	a := &Agent{Sys: f, req: &proto.Request{Root: f.root}}
+	var out bytes.Buffer
+	a := &Agent{Sys: f, Out: &out, req: &proto.Request{Root: f.root}}
 	s := proto.AppSpec{Name: "py", Type: proto.TypePython, Deps: &proto.Deps{Kind: proto.TypePython, Python: "/opt/python312/bin/python3"}}
 	release := t.TempDir()
 	if err := a.installDeps(&s, release, 1000); err != nil {
@@ -80,5 +82,8 @@ func TestSelectedPythonCreatesVenvWithoutRequirements(t *testing.T) {
 	}
 	if len(f.hooks) != 1 || !strings.Contains(f.hooks[0].Cmd, "/opt/python312/bin/python3") || strings.Contains(f.hooks[0].Cmd, "requirements.txt") || !exists(filepath.Join(release, ".venv")) {
 		t.Fatalf("应使用所选 Python 创建空 venv：%+v", f.hooks)
+	}
+	if !strings.Contains(out.String(), "已装好Python 依赖") {
+		t.Fatalf("应输出依赖安装完成的日志：%s", out.String())
 	}
 }
