@@ -4,12 +4,14 @@
 #   powershell -File scripts\release.ps1            # 和双击一样，发布前会问一次
 #   powershell -File scripts\release.ps1 -DryRun    # 只检查、列出要发布的内容，不打标签
 #   powershell -File scripts\release.ps1 -Yes       # 不问，直接发布
+#   powershell -File scripts\release.ps1 -Yes -NoOpen  # 自动发布，不打开浏览器
 #
 # 版本号取自 desktop/package.json；要发新版本先升版本号（scripts\package.ps1 -Bump）并提交、推送。
 # 发布前要求：在 main 分支、没有没提交的修改、本地和 GitHub 上的 main 一致（本地多出的提交会问要不要先推送）、这个版本还没发布过。
 param(
     [switch]$DryRun,
-    [switch]$Yes
+    [switch]$Yes,
+    [switch]$NoOpen
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -18,17 +20,28 @@ Set-Location $root
 function Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host "`n✗ $text" -ForegroundColor Red; exit 1 }
 
-# git 的输出原样显示；失败时返回 $false
-function Git-Ok {
-    & git @args
-    return $LASTEXITCODE -eq 0
+# 每个 git 查询都检查退出码，避免把网络失败误认为标签不存在。
+# Windows PowerShell 5.1 会把原生命令的 stderr 当作错误记录，先收集再按退出码判断。
+function Invoke-Git([string[]]$GitArgs) {
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = @(& git @GitArgs 2>&1)
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
+    if ($code -ne 0) { throw "git $($GitArgs -join ' ') 失败（退出码 $code）：`n$($output -join "`n")" }
+    $output | ForEach-Object { $_.ToString() }
 }
 
 # 连 GitHub 偶尔失败（网络）：最多试 3 次
 function Git-Retry([string]$what) {
     for ($i = 1; $i -le 3; $i++) {
-        & git @args
-        if ($LASTEXITCODE -eq 0) { return }
+        try {
+            Invoke-Git -GitArgs $args | ForEach-Object { Write-Host $_ }
+            return
+        } catch {
+            Write-Host $_.Exception.Message -ForegroundColor Yellow
+        }
         if ($i -lt 3) {
             Write-Host "  $what 失败，5 秒后重试（第 $($i + 1) 次）" -ForegroundColor Yellow
             Start-Sleep -Seconds 5
@@ -49,47 +62,69 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail '找不到 git�
 $pkg = Join-Path $root 'desktop\package.json'
 $version = ([regex]'"version":\s*"([^"]+)"').Match([IO.File]::ReadAllText($pkg)).Groups[1].Value
 if (-not $version) { Fail "读不到 $pkg 里的版本号" }
+if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { Fail "正式版版本号应为 x.y.z：$version" }
+# 安装包名称取自 Tauri，Rust 和 npm 也各有版本记录，发布前必须全部一致。
+$lockText = [IO.File]::ReadAllText((Join-Path $root 'desktop\package-lock.json'))
+# Windows PowerShell 5.1 的 ConvertFrom-Json 不支持 packages[""]，只在内存里临时改名。
+$lockText = ([regex]'"packages"\s*:\s*\{\s*""\s*:').Replace($lockText, '"packages":{"__ferry_root__":', 1)
+$lock = $lockText | ConvertFrom-Json
+$conf = [IO.File]::ReadAllText((Join-Path $root 'desktop\src-tauri\tauri.conf.json')) | ConvertFrom-Json
+$cargo = [IO.File]::ReadAllText((Join-Path $root 'desktop\src-tauri\Cargo.toml'))
+$cargoLock = [IO.File]::ReadAllText((Join-Path $root 'desktop\src-tauri\Cargo.lock'))
+$versions = [ordered]@{
+    'package-lock.json' = $lock.version
+    'package-lock.json packages[""]' = $lock.packages.__ferry_root__.version
+    'tauri.conf.json' = $conf.version
+    'Cargo.toml' = ([regex]'(?ms)^\[package\]\s*.*?^version\s*=\s*"([^"]+)"').Match($cargo).Groups[1].Value
+    'Cargo.lock' = ([regex]'(?m)^name = "ferry-desktop"\r?\nversion = "([^"]+)"').Match($cargoLock).Groups[1].Value
+}
+foreach ($name in $versions.Keys) {
+    if ($versions[$name] -ne $version) { Fail "$name 的版本号（$($versions[$name])）与 package.json（$version）不一致：请先用 package.ps1 同步版本号并提交" }
+}
 $tag = "v$version"
-$remote = (& git remote get-url origin).Trim()
+$remote = (Invoke-Git -GitArgs @('remote', 'get-url', 'origin')).Trim()
 $repo = ([regex]'github\.com[:/](.+?)(\.git)?$').Match($remote).Groups[1].Value
 if (-not $repo) { Fail "origin 不是 GitHub 仓库：$remote" }
 Step "要发布 Ferry $version（标签 $tag，仓库 $repo）"
 
 # ---- 分支、本地修改
-$branch = (& git rev-parse --abbrev-ref HEAD).Trim()
+$branch = (Invoke-Git -GitArgs @('rev-parse', '--abbrev-ref', 'HEAD')).Trim()
 if ($branch -ne 'main') { Fail "现在在 $branch 分支：请切到 main 再发布" }
-$dirty = & git status --porcelain --untracked-files=no
+$dirty = @(Invoke-Git -GitArgs @('status', '--porcelain', '--untracked-files=no'))
 if ($dirty) { Fail "有还没提交的修改，先提交（发布的是已提交的代码）：`n$($dirty -join "`n")" }
+$untracked = @(Invoke-Git -GitArgs @('ls-files', '--others', '--exclude-standard') | Where-Object { $_ -notlike '.claude/*' })
+if ($untracked) { Fail "有尚未加入提交的文件：`n$($untracked -join "`n")`n请提交需要发布的文件，或将本地文件加入忽略规则" }
 
 # ---- 和 GitHub 上的比较
 Step '读取 GitHub 上的分支和标签'
 Git-Retry '读取 GitHub' fetch origin main --tags --quiet
-$counts = (& git rev-list --left-right --count 'origin/main...HEAD').Trim() -split '\s+'
+$counts = (Invoke-Git -GitArgs @('rev-list', '--left-right', '--count', 'origin/main...HEAD')).Trim() -split '\s+'
 $behind, $ahead = [int]$counts[0], [int]$counts[1]
 if ($behind -gt 0) { Fail "GitHub 上的 main 有 $behind 个本地没有的提交：先 git pull 合并，再发布" }
 
-$remoteTag = & git ls-remote --tags origin "refs/tags/$tag"
+$remoteTag = Invoke-Git -GitArgs @('ls-remote', '--tags', 'origin', "refs/tags/$tag")
 if ($remoteTag) {
-    Write-Host "`n$tag 已经发布过了（GitHub 上已有这个标签）。要发新版本：先升版本号（scripts\package.ps1 -Bump），提交、推送后再运行。" -ForegroundColor Yellow
+    Write-Host "`nGitHub 上已有标签 $tag，不再重复推送。请到 Actions 查看构建结果；构建失败时重新运行该工作流。" -ForegroundColor Yellow
+    Write-Host "构建页面：https://github.com/$repo/actions/workflows/release.yml"
     Write-Host "Release 页面：https://github.com/$repo/releases/tag/$tag"
     exit 0
 }
-$localTag = & git tag --list $tag
+$localTag = Invoke-Git -GitArgs @('tag', '--list', $tag)
 if ($localTag) {
-    $tagCommit = (& git rev-list -n 1 $tag).Trim()
-    $head = (& git rev-parse HEAD).Trim()
+    $tagCommit = (Invoke-Git -GitArgs @('rev-list', '-n', '1', $tag)).Trim()
+    $head = (Invoke-Git -GitArgs @('rev-parse', 'HEAD')).Trim()
     if ($tagCommit -ne $head) { Fail "本地已有标签 $tag，但不在当前提交上：确认后用 git tag -d $tag 删掉再运行" }
 }
 
 # ---- 要发布的内容
 # 没有更早的标签时 git describe 会报错：PowerShell 5.1 里重定向错误输出也会中止脚本，这里先放宽
 $ErrorActionPreference = 'Continue'
-$prev = (& git describe --tags --abbrev=0 --match 'v*' HEAD 2>$null)
+$prev = (& git describe --tags --abbrev=0 --match 'v*' --exclude=$tag HEAD 2>$null)
 $ErrorActionPreference = 'Stop'
-$log = if ($prev) { & git log --oneline "$prev..HEAD" } else { & git log --oneline -20 }
+$log = if ($prev) { @(Invoke-Git -GitArgs @('log', '--oneline', "$prev..HEAD")) } else { @(Invoke-Git -GitArgs @('log', '--oneline', '-20')) }
 if ($prev -and -not $log) { Fail "当前提交就是上次发布的 $prev：没有新的提交，不用再发布" }
 Write-Host ''
-Write-Host ("提交：{0}" -f (& git log -1 --format='%h %s'))
+Write-Host ("提交：{0}" -f (Invoke-Git -GitArgs @('log', '-1', '--format=%h %s')))
 if ($prev) { Write-Host "上次发布：$prev，之后有 $(@($log).Count) 个提交：" } else { Write-Host '最近的提交：' }
 $log | Select-Object -First 30 | ForEach-Object { Write-Host "  $_" }
 if (@($log).Count -gt 30) { Write-Host "  ……" }
@@ -111,13 +146,13 @@ if ($ahead -gt 0) {
 }
 if (-not $localTag) {
     Step "打标签 $tag"
-    if (-not (Git-Ok tag -a $tag -m "Ferry $version")) { Fail '打标签失败' }
+    Invoke-Git -GitArgs @('tag', '-a', $tag, '-m', "Ferry $version")
 }
 Step "推送标签 $tag"
 Git-Retry '推送标签' push --quiet origin $tag
 
 $actions = "https://github.com/$repo/actions/workflows/release.yml"
-Write-Host "`n已推送 $tag。GitHub 正在构建、发布（20～30 分钟，macOS 最慢）。" -ForegroundColor Green
+Write-Host "`n已推送 $tag。GitHub 将构建各平台安装包，全部成功后建立 Release。" -ForegroundColor Green
 Write-Host "进度：$actions"
 Write-Host "做完后在：https://github.com/$repo/releases/tag/$tag"
-Start-Process $actions
+if (-not $NoOpen) { Start-Process $actions }

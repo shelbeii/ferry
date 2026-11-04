@@ -604,7 +604,7 @@ npm run tauri dev             # 开发
 npm run tauri build           # Windows 安装包：src-tauri/target/release/bundle/nsis/
 ```
 
-发布：推送 `v` 开头、和版本号一致的标签（如 `git tag v0.13.20 && git push origin v0.13.20`），GitHub Actions（`.github/workflows/release.yml`）会构建 Linux 版 ferry、Windows 安装包、macOS 安装包，建一个 Release 并附上它们和 `SHA256SUMS.txt`。只要 macOS 安装包时：Actions →「macOS 安装包」→ Run workflow。在普通浏览器里调试界面等更多说明见 [desktop/README.md](desktop/README.md)。
+发布：先提交需要发布的代码，在 Windows 上运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1 -DryRun` 预检，再双击 `scripts/release.cmd`，输入 `y` 发布。脚本核对各文件的版本号、分支、未提交及未跟踪文件（本机 `.claude/` 除外）和远程标签，给当前提交打 `v<版本号>` 标签并推送；仅打好本地标签而未推送成功时可以直接重试。GitHub Actions（`.github/workflows/release.yml`）会测试、构建 Linux 版 ferry、Windows 安装包、macOS 安装包，全部通过后建一个 Release 并附上它们和 `SHA256SUMS.txt`。已有远程标签时，到 Actions 重新运行失败的工作流。脚本集成检查可运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release.ps1`，所有 Git 操作都在临时本地仓库里完成。只要 macOS 安装包时：Actions →「macOS 安装包」→ Run workflow。在普通浏览器里调试界面等更多说明见 [desktop/README.md](desktop/README.md)。
 
 版本号写在 `desktop/package.json`、`desktop/src-tauri/tauri.conf.json`、`desktop/src-tauri/Cargo.toml`（以及 `desktop/package-lock.json`）里，四处要一起改。用打包脚本可以一步完成改版本号和打包：
 

@@ -13,6 +13,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   check:
     name: 核对版本号
@@ -23,13 +27,26 @@ jobs:
       - uses: actions/checkout@v7
       - id: v
         run: |
-          tag=${GITHUB_REF_NAME#v}
-          pkg=$(node -p "require('./desktop/package.json').version")
-          if [[ $tag != "$pkg" ]]; then
-            echo "::error::标签 ${GITHUB_REF_NAME} 和 desktop/package.json 的版本号 ${pkg} 不一致"
-            exit 1
-          fi
-          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const read = p => fs.readFileSync(p, 'utf8');
+          const version = JSON.parse(read('desktop/package.json')).version;
+          const lock = JSON.parse(read('desktop/package-lock.json'));
+          const versions = {
+            'package-lock.json': lock.version,
+            'package-lock.json packages[""]': lock.packages['']?.version,
+            'tauri.conf.json': JSON.parse(read('desktop/src-tauri/tauri.conf.json')).version,
+            'Cargo.toml': read('desktop/src-tauri/Cargo.toml').match(/^version\s*=\s*"([^"]+)"/m)?.[1],
+            'Cargo.lock': read('desktop/src-tauri/Cargo.lock').match(/^name = "ferry-desktop"\r?\nversion = "([^"]+)"/m)?.[1],
+          };
+          if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version) || process.env.GITHUB_REF_NAME !== 'v' + version) {
+            throw new Error('标签和 package.json 正式版版本号不一致');
+          }
+          for (const [name, value] of Object.entries(versions)) {
+            if (value !== version) throw new Error(name + ' 的版本号与 package.json 不一致');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + version + '\n');
+          NODE
 
   linux:
     name: Linux 版 ferry
@@ -79,9 +96,12 @@ jobs:
       - name: 安装前端依赖
         working-directory: desktop
         run: npm ci
+      - name: 前端测试
+        working-directory: desktop
+        run: npm test
       - name: 构建安装包
         working-directory: desktop
-        run: npx tauri build --bundles nsis
+        run: npx tauri build --bundles nsis --ci
       - uses: actions/upload-artifact@v7
         with:
           name: ferry-windows
