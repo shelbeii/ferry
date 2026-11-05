@@ -491,6 +491,8 @@ td.editing {
   position: relative;
   padding: 0;
   overflow: visible;
+  /* 选中描边和输入框边框不要叠在一起 */
+  outline: none;
 }
 .cell-input {
   position: absolute;
@@ -498,12 +500,12 @@ td.editing {
   width: 100%;
   height: 100%;
   box-sizing: border-box;
-  border: 2px solid var(--el-color-primary);
+  border: 1px solid var(--el-color-primary);
   outline: none;
   resize: none;
   font: inherit;
-  line-height: 23px;
-  padding: 0 6px;
+  line-height: 25px;
+  padding: 0 7px;
   margin: 0;
   background: var(--el-bg-color);
   color: var(--el-text-color-primary);

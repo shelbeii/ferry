@@ -93,6 +93,9 @@ const usage = `ferry —— 后端 / 前端部署工具
   app-runtimes <目标> <应用>     列出服务器上可切换的运行环境
   releases <目标> [应用…]        列出各版本
   changes  <目标> [应用…]        这次部署会带上线的改动：线上运行的版本、本地的提交、中间新增的提交（不改动服务器）
+  keep     scan <目标> <应用> [--dir <目录>] [--keep-files <JSON>]   部署时保留的（artifact.keep）在服务器上的情况；
+                                --dir 列出运行中的版本里这个目录下的（"." = 最上层），--keep-files 用这份代替配置里的
+  keep     set <应用> <JSON>    把要保留的写回 ferry.yaml（如 [{"path":"config.js"},{"path":"uploads","shared":true}]，[] = 去掉）
   monitor  <目标> [status | on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14] | off | check | test]
                                 服务器监控：服务器上每隔几分钟检查应用停了 / 反复重启、磁盘快满、证书快到期、防火墙被关、
                                 新出现对外开放的端口，出现、恢复时各发一次通知（发到设置 → 通知里的地方）
@@ -151,6 +154,7 @@ const usage = `ferry —— 后端 / 前端部署工具
       --full            deploy：全量上传（不用增量）
       --no-rollback     deploy：失败时保留失败版本（排查用）
       --keep-perms      deploy：不自动修正权限（默认会把运行用户访问不了的目录、不安全的部署目录改好）
+      --keep-files <JSON>  deploy：这次保留服务器上的（{"应用":[{"path":"config.js"},{"path":"uploads","shared":true}]}），代替配置里的 artifact.keep
       --accept-new-host-key  首次连接时自动记录主机公钥（等同 ssh 的 accept-new）
       --units           plan：输出完整的 systemd 单元文件
 `
@@ -163,7 +167,7 @@ type cli struct {
 var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": true, "limit": true, "offset": true, "tool": true, "client": true, "result": true, "since": true, "until": true, "q": true, "n": true, "expect": true, "key": true, "passphrase": true, "account": true,
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
 	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true,
-	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true}
+	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "keep-files": true}
 var boolFlags = map[string]bool{
 	"with-secrets": true,
 	"y":            true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
@@ -655,7 +659,13 @@ func run(argv []string, cio *cliIO) int {
 		if err != nil {
 			return fail(err)
 		}
-		reports, err := e.Deploy(strings.Split(t, ","), apps, engine.DeployOptions{SkipBuild: c.has("skip-build"), Full: c.has("full"), NoRollback: c.has("no-rollback"), KeepPerms: c.has("keep-perms")})
+		o := engine.DeployOptions{SkipBuild: c.has("skip-build"), Full: c.has("full"), NoRollback: c.has("no-rollback"), KeepPerms: c.has("keep-perms")}
+		if v := c.flags["keep-files"]; v != "" {
+			if err := json.Unmarshal([]byte(v), &o.Keep); err != nil {
+				return fail(fmt.Errorf("--keep-files 不是有效的 JSON：%v", err))
+			}
+		}
+		reports, err := e.Deploy(strings.Split(t, ","), apps, o)
 		if js != nil {
 			if err != nil {
 				js.Result(false, reports, err)
@@ -835,6 +845,9 @@ func run(argv []string, cio *cliIO) int {
 
 	case "backup":
 		return backupCmd(c, e, js, con, fail)
+
+	case "keep":
+		return keepCmd(c, e, js, con, fail)
 
 	case "changes":
 		t, apps, err := targetArgs()
@@ -1548,6 +1561,9 @@ func inspect(f *config.File) map[string]any {
 		m := map[string]any{"name": a.Name, "type": a.Type, "order": a.Order, "artifact": a.Artifact.Path}
 		if len(a.Artifact.Files) > 0 {
 			m["files"] = a.Artifact.Files
+		}
+		if len(a.Artifact.Keep) > 0 {
+			m["keep"] = a.Artifact.Keep
 		}
 		if b := f.ResolveBuild(a); b != nil {
 			m["build"] = b.Name

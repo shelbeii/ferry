@@ -120,3 +120,62 @@ func TestDBExecute(t *testing.T) {
 		t.Fatal("一条里塞两条语句应该拒绝")
 	}
 }
+
+func TestRedisExecute(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FERRY_HOME", home)
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+	file := filepath.Join(t.TempDir(), "approver.json")
+	oldFile := approverFile
+	approverFile = func() string { return file }
+	t.Cleanup(func() { approverFile = oldFile })
+	conns := `{"connections":[
+ {"id":"cache","name":"缓存","kind":"redis","host":"127.0.0.1","port":6379,"database":"2","ai":true,"aiWrite":true},
+ {"id":"sql","name":"本机库","kind":"mysql","host":"127.0.0.1","port":3306,"user":"root","ai":true,"aiWrite":true}
+]}`
+	os.MkdirAll(filepath.Join(home, "db"), 0o700)
+	if err := os.WriteFile(filepath.Join(home, "db", "connections.json"), []byte(conns), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := settings.Defaults()
+	st.MCP.AllowChanges = true
+	settings.Save(st)
+	cs := connect(t, t.TempDir())
+	expectErr := func(tool string, args map[string]any, want string) {
+		t.Helper()
+		if text, isErr := callText(t, cs, tool, args); !isErr || !strings.Contains(text, want) {
+			t.Fatalf("%s 应该报「%s」：%v %s", tool, want, isErr, text)
+		}
+	}
+	// 不用连 Redis 就能拒绝的
+	expectErr("redis_query", map[string]any{"connection": "缓存", "command": "KEYS *"}, "SCAN")
+	expectErr("redis_query", map[string]any{"connection": "缓存", "command": "CONFIG GET requirepass"}, "不能用 CONFIG")
+	expectErr("redis_query", map[string]any{"connection": "本机库", "command": "GET a"}, "不是 Redis")
+	expectErr("db_query", map[string]any{"connection": "缓存", "sql": "SELECT 1"}, "redis_query")
+	expectErr("db_execute", map[string]any{"connection": "缓存", "sql": "SET a 1", "reason": "x"}, "redis_execute")
+	expectErr("redis_execute", map[string]any{"connection": "缓存", "commands": "FLUSHDB", "reason": "x"}, "FLUSHDB")
+
+	// 桌面版收到的请求：命令一行一条，标出删除
+	hub := approve.NewHub(file)
+	hub.Prepare = PrepareRequest
+	reqs := make(chan approve.Request, 2)
+	unsub, err := hub.Subscribe(func(kind string, v any) {
+		if kind == "request" {
+			reqs <- v.(approve.Request)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsub()
+	go func() {
+		r := <-reqs
+		if r.DBKind != "redis" || r.Database != "2" || len(r.Stmts) != 2 || r.Detail[1] != "SET a 1\nDEL b" || !strings.Contains(r.Detail[0], "Redis") ||
+			!strings.Contains(r.Detail[0], "db2") || !strings.Contains(r.Danger, "DEL") {
+			t.Errorf("请求：%+v", r)
+		}
+		hub.Decide(r.ID, approve.Decision{Note: "你在 Ferry 里拒绝了"})
+	}()
+	expectErr("redis_execute", map[string]any{"connection": "缓存", "commands": "SET a 1\nDEL b", "reason": "清理"}, "没有执行改数据库 缓存")
+}

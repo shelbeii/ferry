@@ -722,6 +722,39 @@ t "停止后访问不到" fail "" -- dx a 'curl -sf 127.0.0.1:18090/'
 t "再启动" ok "" -- F start e2e-a site
 t "启动后可以访问" ok "site v1" -- dx a 'curl -s 127.0.0.1:18090/'
 
+step "部署时保留服务器上的（artifact.keep）：配置文件用服务器上的，上传目录共用"
+mkdir -p "$OUT/kp/uploads" "$OUT/kp/assets"
+head -c 200000 /dev/urandom > "$OUT/kp/assets/vendor.js"   # 不变的大文件：第二次部署走增量
+echo '<h1>kp v1</h1>' > "$OUT/kp/index.html"
+echo 'window.API="pkg1"' > "$OUT/kp/config.js"
+: > "$OUT/kp/uploads/.keep"
+t "第一次部署：服务器上还没有，用包里的" ok "部署完成" -- F deploy e2e-a kp --skip-build
+t "配置是包里的" ok "pkg1" -- dx a 'curl -s 127.0.0.1:18099/config.js'
+t "上传目录是指向 data 的链接" ok "/opt/e2e/apps/kp/data/uploads" -- dx a 'readlink /opt/e2e/apps/kp/running/www/uploads'
+t "共用目录归运行用户（程序能写）" ok "demo:demo" -- dx a 'stat -c %U:%G /opt/e2e/apps/kp/data/uploads'
+dx a 'echo "window.API=\"server\"" > /opt/e2e/apps/kp/running/www/config.js; echo U1 > /opt/e2e/apps/kp/data/uploads/u1.txt'
+t "nginx 经链接读到共用目录里的文件" ok "U1" -- dx a 'curl -s 127.0.0.1:18099/uploads/u1.txt'
+echo '<h1>kp v2</h1>' > "$OUT/kp/index.html"
+echo 'window.API="pkg2"' > "$OUT/kp/config.js"
+t "部署前的改动里提醒：服务器上的和包里的不同" ok "用服务器上的（和包里的不同" -- F changes e2e-a kp
+t "keep scan：服务器上的情况和最上层的文件" ok '"name":"config.js"' -- F keep scan e2e-a kp --dir . --json
+out=$(F deploy e2e-a kp --skip-build 2>&1)
+printf '\n### 第二次部署 kp（保留）\n%s\n' "$out" >> "$LOG"
+has "第二次部署：增量上传" "增量：上传" "$out"
+has "部署输出说明用了服务器上的配置" "config.js：用服务器上的（和包里的不同）" "$out"
+has "部署输出说明用共用目录" "uploads：用共用目录 data/uploads" "$out"
+t "新首页生效" ok "kp v2" -- dx a 'curl -s 127.0.0.1:18099/'
+t "配置还是服务器上改过的" ok "server" -- dx a 'curl -s 127.0.0.1:18099/config.js'
+t "共用目录里的文件还在" ok "U1" -- dx a 'curl -s 127.0.0.1:18099/uploads/u1.txt'
+t "版本记下保留了什么" ok '"kept":["config.js","uploads（共用）"]' -- F releases e2e-a kp --json
+t "这次不保留配置（--keep-files 代替配置里的）" ok "部署完成" -- F deploy e2e-a kp --skip-build --keep-files '{"kp":[{"path":"uploads","shared":true}]}'
+t "配置换成包里的" ok "pkg2" -- dx a 'curl -s 127.0.0.1:18099/config.js'
+t "共用目录照旧" ok "U1" -- dx a 'curl -s 127.0.0.1:18099/uploads/u1.txt'
+t "回滚" ok "" -- F rollback e2e-a kp
+t "回滚后配置回到那个版本的（服务器上改过的）" ok "server" -- dx a 'curl -s 127.0.0.1:18099/config.js'
+t "回滚不动共用目录" ok "U1" -- dx a 'curl -s 127.0.0.1:18099/uploads/u1.txt'
+t "保留的路径不对时部署前就停下" fail "不能保留" -- F deploy e2e-a kp --skip-build --keep-files '{"kp":[{"path":".ferry"}]}'
+
 step "不停机发布（zeroDowntime）：新版本在另一个端口启动、就绪后再停旧的"
 docker cp "$E2E/zd_traffic.sh" ferry-e2e-a:/tmp/zt.sh >/dev/null
 zdget() { dx a 'curl -s --max-time 3 http://127.0.0.1:18101/health'; }

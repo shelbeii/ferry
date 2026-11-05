@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/captain/ferry/internal/safe"
 )
@@ -52,6 +53,12 @@ type Client struct {
 	lastUsed time.Time
 	closed   bool
 	Version  string
+
+	// Redis：各个库的连接池、命令行窗口的连接、命令是否只读（COMMAND INFO 查过的）
+	rdbs         map[int]*redis.Client
+	rsess        map[string]*rsession
+	rcmdRO       map[string]bool
+	redisCluster bool
 }
 
 type session struct {
@@ -92,6 +99,12 @@ func (m *Manager) reap() {
 				if time.Since(s.lastUsed) > IdleClose {
 					s.conn.Close()
 					delete(c.sessions, sid)
+				}
+			}
+			for sid, s := range c.rsess {
+				if time.Since(s.lastUsed) > IdleClose {
+					s.close()
+					delete(c.rsess, sid)
 				}
 			}
 			c.mu.Unlock()
@@ -152,9 +165,14 @@ func (m *Manager) Open(ctx context.Context, c *Conn, password string, open OpenT
 		}
 	}
 	// 先连一次：密码不对、连不上时现在就报错
-	db, err := cl.DB(ctx, "")
-	if err == nil {
-		err = pingVersion(ctx, cl, db)
+	var err error
+	if c.Kind == Redis {
+		err = cl.redisPing(ctx)
+	} else {
+		var db *sql.DB
+		if db, err = cl.DB(ctx, ""); err == nil {
+			err = pingVersion(ctx, cl, db)
+		}
 	}
 	if err != nil {
 		cl.close()
@@ -235,6 +253,10 @@ func (m *Manager) CloseSession(id, sid string) {
 		s.conn.Close()
 		delete(cl.sessions, sid)
 	}
+	if s := cl.rsess[sid]; s != nil {
+		s.close()
+		delete(cl.rsess, sid)
+	}
 }
 
 func (cl *Client) close() {
@@ -249,6 +271,12 @@ func (cl *Client) close() {
 	}
 	for _, db := range cl.dbs {
 		db.Close()
+	}
+	for _, s := range cl.rsess {
+		s.close()
+	}
+	for _, r := range cl.rdbs {
+		r.Close()
 	}
 	if cl.tn != nil {
 		cl.tn.Close()
@@ -275,6 +303,9 @@ func (cl *Client) DB(ctx context.Context, name string) (*sql.DB, error) {
 	}
 	if db := cl.dbs[name]; db != nil {
 		return db, nil
+	}
+	if cl.Conn.Kind == Redis {
+		return nil, errors.New("Redis 不能执行 SQL")
 	}
 	var db *sql.DB
 	switch cl.Conn.Kind {
@@ -391,6 +422,9 @@ func (cl *Client) explain(err error) error {
 	if err == nil {
 		return nil
 	}
+	if s := err.Error(); strings.Contains(s, "without any password configured") || strings.Contains(s, "no password is set") {
+		return errors.New("这个 Redis 没有设密码：在连接里把密码清空（修改连接，清掉记住的密码）")
+	}
 	if authFailed(err) {
 		return &NeedPasswordError{ID: cl.Conn.ID, Name: cl.Conn.Name, Env: PasswordEnv(cl.Conn.ID), Rejected: true, Msg: err.Error()}
 	}
@@ -416,6 +450,12 @@ func authFailed(err error) bool {
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) {
 		return pe.Code == "28P01" || pe.Code == "28000"
+	}
+	var re redis.Error
+	if errors.As(err, &re) {
+		s := re.Error()
+		return strings.HasPrefix(s, "NOAUTH") || strings.HasPrefix(s, "WRONGPASS") || strings.HasPrefix(s, "ERR invalid password") ||
+			strings.HasPrefix(s, "ERR invalid username-password")
 	}
 	return false
 }

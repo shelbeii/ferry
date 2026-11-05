@@ -495,6 +495,7 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 	}
 	src := filepath.Join(stage, rel.File)
 	var fileSums map[string]string
+	var kept []string
 	switch s.Type {
 	case proto.TypeStatic:
 		site := tmp // 站点文件直接放在版本目录里；Ferry 的 nginx 的放在 www/（日志 logs/ 与它并列）
@@ -511,8 +512,13 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 		} else if err := extractTarGz(src, site); err != nil {
 			return fmt.Errorf("解压失败：%v", err)
 		}
-		if rel.Site != "" { // 文件清单随版本保存：下次部署据此只传变化的文件
-			if b, err := os.ReadFile(filepath.Join(stage, rel.Site)); err == nil {
+		var err error
+		if kept, err = a.keepFiles(s, site); err != nil {
+			return err
+		}
+		if rel.Site != "" { // 文件清单随版本保存：下次部署据此只传变化的文件（保留的不记：用的是服务器上的）
+			if files, err := readSiteManifest(filepath.Join(stage, rel.Site)); err == nil {
+				b, _ := json.Marshal(dropKept(files, s.Keep))
 				os.WriteFile(filepath.Join(meta, siteManifest), b, 0o644)
 			}
 		}
@@ -527,6 +533,10 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 		}
 	case proto.TypePython, proto.TypeNode, proto.TypeDotnet:
 		if err := a.placeDirApp(s, src, tmp, gid); err != nil {
+			return err
+		}
+		var err error
+		if kept, err = a.keepFiles(s, tmp); err != nil {
 			return err
 		}
 		if err := os.WriteFile(filepath.Join(meta, "unit.service"), []byte(s.UnitText), 0o644); err != nil {
@@ -554,6 +564,10 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 			}
 			fileSums = sums
 		}
+		var err error
+		if kept, err = a.keepFiles(s, tmp); err != nil {
+			return err
+		}
 		if err := os.WriteFile(filepath.Join(meta, "unit.service"), []byte(s.UnitText), 0o644); err != nil {
 			return err
 		}
@@ -561,6 +575,7 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 	m := rel.Meta
 	m.ID, m.App, m.SHA256, m.Size = rel.ID, s.Name, rel.SHA256, rel.Size
 	m.FileSums = fileSums
+	m.Kept = kept
 	m.DeployedAt = a.Sys.Now()
 	if m.DeployedBy == "" {
 		m.DeployedBy = a.req.Actor

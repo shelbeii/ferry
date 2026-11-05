@@ -1,6 +1,6 @@
 package mcpserver
 
-// 数据库：看保存的数据库连接、库表结构，执行只读查询（engine/dbai.go）。
+// 数据库：看保存的数据库连接、库表结构，执行只读查询（engine/dbai.go）；Redis 用 redis_query、redis_execute。
 // 只能用用户在 Ferry「数据库」里勾选了「允许 AI 查询」的连接。
 
 import (
@@ -35,6 +35,19 @@ type dbQueryIn struct {
 	Limit      int    `json:"limit,omitempty" jsonschema:"最多返回多少行，默认 100，最多 500"`
 }
 
+type redisQueryIn struct {
+	Connection string `json:"connection" jsonschema:"Redis 连接（db_connections 里 kind 为 redis 的 id 或 name）"`
+	Database   string `json:"database,omitempty" jsonschema:"库的编号（0、1……）；不填 = 连接的默认库"`
+	Command    string `json:"command" jsonschema:"一条只读的 Redis 命令，如 HGETALL user:1、SCAN 0 MATCH order:* COUNT 200"`
+}
+
+type redisExecIn struct {
+	Connection string `json:"connection" jsonschema:"Redis 连接（db_connections 里 write 为 true 的 id 或 name）"`
+	Database   string `json:"database,omitempty" jsonschema:"库的编号（0、1……）；不填 = 连接的默认库"`
+	Commands   string `json:"commands" jsonschema:"要执行的 Redis 命令，一行一条（最多 100 条）"`
+	Reason     string `json:"reason" jsonschema:"为什么这样改（显示在 Ferry 的确认框里）"`
+}
+
 type dbExecIn struct {
 	Connection string `json:"connection" jsonschema:"数据库连接（db_connections 里 write 为 true 的 id 或 name）"`
 	Database   string `json:"database,omitempty" jsonschema:"在哪个库里执行；不填 = 连接的默认库"`
@@ -51,8 +64,8 @@ func (s *server) dbEngine(ctx context.Context) *engine.Engine {
 func (s *server) addDBTools(m *mcp.Server) {
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(true)}
 	addTool(s, m, &mcp.Tool{Name: "db_connections", Title: "数据库连接",
-		Description: "Ferry「数据库」里保存的、用户允许 AI 查询的数据库连接（MySQL、MariaDB、PostgreSQL）：名称、种类、经哪个项目的哪台服务器连（SSH 转发）、地址、用户、默认库。" +
-			"db_schema、db_query 的 connection 参数从这里取。没列出来的连接要用户在 Ferry 里勾选「允许 AI 查询」。",
+		Description: "Ferry「数据库」里保存的、用户允许 AI 查询的数据库连接（MySQL、MariaDB、PostgreSQL、Redis）：名称、种类、经哪个项目的哪台服务器连（SSH 转发）、地址、用户、默认库。" +
+			"db_schema、db_query（Redis 用 redis_query）的 connection 参数从这里取。没列出来的连接要用户在 Ferry 里勾选「允许 AI 查询」。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		logged(s, "db_connections", func(ctx context.Context, in dbConnsIn) (any, error) {
 			list, hidden, err := engine.AIDBConns()
@@ -84,7 +97,8 @@ func (s *server) addDBTools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "db_schema", Title: "数据库结构",
 		Description: "看数据库的结构：不给 database 时列出全部库（system 是系统库）；给了 database 时列出表和视图（行数估计、大小、注释）；" +
-			"给了 table 时是这张表的列（类型、能否为空、默认值、注释）、索引、外键、主键和建表语句。写 SQL、实体类前先用它看结构。",
+			"给了 table 时是这张表的列（类型、能否为空、默认值、注释）、索引、外键、主键和建表语句。写 SQL、实体类前先用它看结构。" +
+			"Redis：不给 database 时列出有键的库；给了 database（编号）时列出键和类型（最多 200 个），table 当键的模式（如 user:*）。",
 		Annotations: readOnly},
 		logged(s, "db_schema", func(ctx context.Context, in dbSchemaIn) (any, error) {
 			cn, err := engine.AIDBFind(in.Connection)
@@ -107,6 +121,15 @@ func (s *server) addDBTools(m *mcp.Server) {
 			}
 			return s.dbEngine(ctx).AIDBQuery(ctx, cn, in.Database, in.SQL, in.Limit)
 		}))
+
+	addTool(s, m, &mcp.Tool{Name: "redis_query", Title: "Redis 查询", Description: engine.AIRedisQueryDesc, Annotations: readOnly},
+		logged(s, "redis_query", func(ctx context.Context, in redisQueryIn) (any, error) {
+			cn, err := engine.AIDBFind(in.Connection)
+			if err != nil {
+				return nil, err
+			}
+			return s.dbEngine(ctx).AIRedisQuery(ctx, cn, in.Database, in.Command)
+		}))
 }
 
 // addDBChangeTools 改数据库：交给 Ferry 桌面版确认后执行（和部署、启停一样）。
@@ -122,28 +145,46 @@ func (s *server) addDBChangeTools(m *mcp.Server) {
 			if req != nil && req.Params != nil && req.Params.RequestState != "" {
 				return s.confirmed(ctx, req)
 			}
-			cn, err := engine.AIDBFind(in.Connection)
-			if err != nil {
-				return nil, err
-			}
-			st, _ := settings.Load()
-			f, t, err := DBChangeAllowed(st, cn)
-			if err != nil {
-				return nil, err
-			}
-			db := strings.TrimSpace(in.Database)
-			if db == "" {
-				db = cn.Database
-			}
-			stmts, err := dbx.CheckAIWrite(cn.Kind, db, in.SQL)
-			if err != nil {
-				return nil, err
-			}
-			r := approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "db-exec",
-				Database: db, Stmts: stmts, Reason: strings.TrimSpace(in.Reason)}
-			fillDB(&r, cn, f, t)
-			return s.ask(ctx, req, r, st.MCP.ConfirmIn == "client")
+			return s.dbChange(ctx, req, in.Connection, in.Database, in.SQL, in.Reason, false)
 		}))
+
+	addTool(s, m, &mcp.Tool{Name: "redis_execute", Title: "改 Redis",
+		Description: engine.AIRedisExecDesc + "要用户在 Ferry 设置里允许编程软件请求改动；经生产服务器连的不行。最多等 40 秒：没结束返回 id，再用 task_status 查。",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
+		loggedReq(s, "redis_execute", func(ctx context.Context, req *mcp.CallToolRequest, in redisExecIn) (any, error) {
+			if req != nil && req.Params != nil && req.Params.RequestState != "" {
+				return s.confirmed(ctx, req)
+			}
+			return s.dbChange(ctx, req, in.Connection, in.Database, in.Commands, in.Reason, true)
+		}))
+}
+
+// dbChange db_execute、redis_execute：检查后交给用户确认。
+func (s *server) dbChange(ctx context.Context, req *mcp.CallToolRequest, conn, database, src, reason string, redis bool) (any, error) {
+	cn, err := engine.AIDBFind(conn)
+	if err != nil {
+		return nil, err
+	}
+	if err := engine.AIDBKindFits(cn, redis); err != nil {
+		return nil, err
+	}
+	st, _ := settings.Load()
+	f, t, err := DBChangeAllowed(st, cn)
+	if err != nil {
+		return nil, err
+	}
+	db := strings.TrimSpace(database)
+	if db == "" {
+		db = cn.Database
+	}
+	stmts, err := dbx.CheckAIWrite(cn.Kind, db, src)
+	if err != nil {
+		return nil, err
+	}
+	r := approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "db-exec",
+		Database: db, Stmts: stmts, Reason: strings.TrimSpace(reason)}
+	fillDB(&r, cn, f, t)
+	return s.ask(ctx, req, r, st.MCP.ConfirmIn == "client")
 }
 
 // DBChangeAllowed 这个数据库连接能不能经 MCP 改：设置里允许编程软件请求改动，连接允许 AI 修改、不是只读；
@@ -174,7 +215,7 @@ func DBChangeAllowed(st settings.Settings, cn *dbx.Conn) (*config.File, *config.
 
 // fillDB 补上给人看的：连接、服务器、要执行的 SQL、危险的地方。
 func fillDB(r *approve.Request, cn *dbx.Conn, f *config.File, t *config.Target) {
-	r.DB, r.DBName = cn.ID, cn.Name
+	r.DB, r.DBName, r.DBKind = cn.ID, cn.Name, cn.Kind
 	r.Project, r.Config, r.Target, r.Host = "", "", "", ""
 	where := "这台电脑直接连 " + cn.Addr()
 	if f != nil && t != nil {
@@ -188,16 +229,33 @@ func fillDB(r *approve.Request, cn *dbx.Conn, f *config.File, t *config.Target) 
 	if db == "" {
 		db = "（默认）"
 	}
+	if cn.Kind == dbx.Redis {
+		db = "db" + strings.TrimPrefix(strings.ToLower(orZero(r.Database)), "db")
+	}
 	head := fmt.Sprintf("数据库 %s（%s，%s），库 %s。%s", cn.Name, kindName(cn.Kind), where, db, strings.Join(dbx.AIWriteNotes(cn.Kind, r.Stmts), "；"))
-	r.Detail = []string{head, strings.Join(r.Stmts, ";\n\n") + ";"}
+	body := strings.Join(r.Stmts, ";\n\n") + ";"
+	if cn.Kind == dbx.Redis {
+		body = strings.Join(r.Stmts, "\n")
+	}
+	r.Detail = []string{head, body}
 	r.Danger = dbx.AIWriteDanger(cn.Kind, r.Stmts)
 }
 
 func kindName(k string) string {
-	if k == dbx.Postgres {
+	switch k {
+	case dbx.Postgres:
 		return "PostgreSQL"
+	case dbx.Redis:
+		return "Redis"
 	}
 	return "MySQL / MariaDB"
+}
+
+func orZero(s string) string {
+	if s == "" {
+		return "0"
+	}
+	return s
 }
 
 // prepareDB 桌面版收到改数据库的请求、给用户看之前再查一遍，确认框里的内容按连接重新生成。

@@ -1,5 +1,5 @@
 // Package dbx 数据库客户端（桌面版左下角的「数据库」）：保存的数据库连接，直接连或经一台服务器的 SSH 转发连；
-// 浏览库、表，查询，改数据，建表改表，导出。支持 MySQL / MariaDB 和 PostgreSQL。
+// 浏览库、表，查询，改数据，建表改表，导出。支持 MySQL / MariaDB、PostgreSQL 和 Redis（键的浏览、改值、命令行，见 redis.go）。
 package dbx
 
 import (
@@ -22,18 +22,20 @@ import (
 const (
 	MySQL    = "mysql" // MySQL、MariaDB
 	Postgres = "postgres"
+	Redis    = "redis"
 )
 
 // Conn 一个保存的数据库连接。
 type Conn struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	Kind string `json:"kind"` // mysql | postgres
+	Kind string `json:"kind"` // mysql | postgres | redis
 	// Host、Port 数据库的地址；经服务器连时是从服务器上看的地址（通常 127.0.0.1）
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	// User Redis 是 ACL 的用户名（一般不填）
 	User     string `json:"user"`
-	Database string `json:"database,omitempty"` // 默认库；PostgreSQL 没填时连 postgres
+	Database string `json:"database,omitempty"` // 默认库；PostgreSQL 没填时连 postgres；Redis 是库的编号（没填是 0）
 	// Via 经这台服务器连（SSH 端口转发）；为空时这台电脑直接连
 	Via *Via `json:"via,omitempty"`
 	// Container 数据库在这个 Docker 容器里、端口没映射到服务器上：连接时查容器的 IP 再连（Host 不用）
@@ -77,9 +79,9 @@ func (c *Conn) Check() error {
 	c.Host = strings.TrimSpace(c.Host)
 	c.User = strings.TrimSpace(c.User)
 	switch c.Kind {
-	case MySQL, Postgres:
+	case MySQL, Postgres, Redis:
 	default:
-		return fmt.Errorf("不支持的数据库种类 %q（支持 mysql、postgres）", c.Kind)
+		return fmt.Errorf("不支持的数据库种类 %q（支持 mysql、postgres、redis）", c.Kind)
 	}
 	if c.Name == "" {
 		return errors.New("请填连接名")
@@ -87,8 +89,14 @@ func (c *Conn) Check() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return errors.New("端口应在 1–65535 之间")
 	}
-	if c.User == "" {
+	if c.User == "" && c.Kind != Redis {
 		return errors.New("请填用户名")
+	}
+	if c.Kind == Redis {
+		c.Database = strings.TrimSpace(c.Database)
+		if _, err := ParseRedisDB(c.Database); err != nil {
+			return err
+		}
 	}
 	if c.Container == "" && c.Host == "" {
 		return errors.New("请填地址")

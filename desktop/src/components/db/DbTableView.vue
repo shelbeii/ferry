@@ -242,7 +242,7 @@ defineExpose({ hasChanges: () => changeCount.value > 0, reload: () => { info.val
         <el-radio-button value="ddl" @click="openStructure('ddl')">{{ view ? '视图定义' : '建表语句' }}</el-radio-button>
       </el-radio-group>
       <template v-if="tab === 'data'">
-        <DbFilterBar v-model:panel="panel" :columns="(info?.columns ?? []).map((c) => c.name)" :filters="filters" :sorts="sorts" :where="where" @apply="applyFilter">
+        <DbFilterBar v-model:panel="panel" :columns="info?.columns ?? []" :filters="filters" :sorts="sorts" :where="where" @apply="applyFilter">
           <el-button size="small" :icon="Refresh" :loading="loading" @click="reload">刷新</el-button>
         </DbFilterBar>
       </template>

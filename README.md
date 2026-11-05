@@ -41,6 +41,7 @@ ferry rollback prod api           # 回到上一个可用版本
 | 服务器软件 | 查看服务器上已有的 MySQL、Redis、Nacos 等（包括 Docker、1Panel 装的），按模板安装软件；编辑配置、备份恢复、重新加载或重启生效 |
 | 端口与防火墙 | 看每个端口谁在用、外部能不能连；用 firewalld / ufw 放行或关闭端口，从本机测试实际能不能连上 |
 | 终端与文件 | 桌面版里直接打开服务器终端、浏览和上传下载文件 |
+| 数据库 | 桌面版里的轻量数据库客户端：MySQL / MariaDB、PostgreSQL 看表、改数据、查询、建表改表、导出；Redis 按分组浏览键（SCAN，不卡 Redis），看和改字符串、哈希、列表、集合、有序集合、流，有命令行。经服务器的 SSH 转发连，不用开放数据库端口 |
 | AI 助手 | 用大模型查看、排查服务器；允许改动时每一步都先给你确认 |
 | 部署通知 | 部署、回滚结束后把结果发到企业微信、钉钉、飞书群，或自己的接口 |
 | 服务器告警 | 服务器上定时检查应用、磁盘、证书、防火墙、端口、备份，有问题发到群里，恢复时再发一次；可以随时打开、关闭 |
@@ -179,6 +180,13 @@ apps:
 
 - **原子切换**：运行中的版本在 `running/`，其他版本在 `versions/<版本>/`，切换只是改名。保留最近 N 个版本（`keepReleases`，当前版本和上一个可用版本始终保留）。
 - **附带文件**：程序要读的配置文件、证书、启动脚本（`artifact.files`）和程序放在同一个目录，每次部署一起上传，回滚时一起回滚；可以按服务器用不同的文件。新建项目时可以直接添加，识别项目时会列出看着像配置的文件。
+- **保留服务器上的文件**：服务器上改过的配置文件、上传目录这类不想被包里的替换的（`artifact.keep`），部署时从运行中的版本带进新版本；服务器上还没有时用包里的。写 `shared: true` 的放在应用的 `data/` 下只有一份，每个版本链接过去，回滚时不动（上传目录等）；不写的跟着版本走，回滚时回到那个版本的样子。部署窗口里可以这次不保留某一项、从服务器上的文件里勾选要保留的，选「记到 ferry.yaml」以后都这样；服务器上的和包里的不同时会提醒（包里改的这次不会上线）。
+
+  ```yaml
+  artifact:
+    path: dist
+    keep: [config.js, "conf/*.json", {path: uploads, shared: true}]
+  ```
 - **不停机发布**（`service.zeroDowntime`）：两个端口轮流用，新版本在空着的端口启动、就绪后再停旧的，失败时旧版本一直没停过；直接对外的应用由 Ferry 的 nginx 在前面转发。经注册中心（Nacos）互相调用的服务、网关都适用。
 - **部署时执行的命令**（`hooks`）：切换前（如数据库迁移，失败就不切换）、就绪后（如预热、刷新缓存，失败就回滚）在服务器上执行自己的命令，以运行用户的身份，和服务拿到一样的环境变量。
 - **部署前后对比**：确认前列出每个应用线上运行的版本、这次要上线的提交（`ferry changes <目标>` 也能单独看）；线上有本地没有的提交（别的分支、别人刚部署了更新的）时提醒，部署会把它们去掉。部署后说新版本从启动到就绪用了多久，比上次慢很多时提醒。
@@ -268,6 +276,7 @@ apps:
   - `preflight`：部署前检查服务器环境（只检查不改）；`software_logs`：服务器上软件（MySQL、Redis……）的日志。
   - `db_connections`、`db_schema`、`db_query`：「数据库」里保存的连接、库表结构、只读查询。只能用你在连接上勾选了「允许 AI 查询」的（默认不勾），密码要记住在凭据库里（或是 Ferry 装的软件）。查询一次一条，只读事务里执行，最多 15 秒、500 行；`SELECT … INTO`、加锁、`SLEEP`、读写服务器文件、结束别人连接的函数、账号密码表都拒绝。Ferry 的 AI 助手里也有这三个，只对着当前服务器上的连接。
   - `db_execute`：改数据、建表改表。只能用你在连接上另外勾选了「允许 AI 修改」的（只读的连接不能勾），和部署一样要打开「允许编程软件请求改动」，经生产服务器连的不行。每次都在 Ferry 里弹出完整的 SQL 和危险提示（没写 WHERE 的 UPDATE / DELETE、删表、删列），不给「不再询问」；同意后在一个事务里执行，有一条失败就全部撤回（MySQL 的建表改表撤不回，确认框里会说明），等锁最多 10 秒。不能建库删库、动账号权限（GRANT、CREATE USER）、SET、CALL、LOAD DATA、COPY、能执行系统命令的函数。Ferry 的 AI 助手在允许改动的模式下也有，每次在对话里确认。
+  - `redis_query`、`redis_execute`：Redis 连接（同样要勾选「允许 AI 查询」「允许 AI 修改」）。`db_schema` 列出有键的库和键；`redis_query` 执行一条只读的命令（按 Redis 自己的只读标记判断，最多 15 秒，回复像 redis-cli 那样排好）；`redis_execute` 一次最多 100 条改动的命令，确认后用 MULTI/EXEC 一起执行（Redis 没有回滚，确认框里会说明）。`KEYS`、`CONFIG`、`ACL`、`CLIENT`、清库、切库、脚本、会一直等的命令都不给用。
   - `run_command`：执行只读命令（磁盘、内存、端口、配置文件、`systemctl status` 等），和 AI 助手只读模式同一套规则，改东西的命令、访问外网的都拒绝；「新建连接」的服务器也能用。
   - `build_log`：本机构建的完整输出（构建失败时看编译错误）。
   - `detect_project`：识别目录里的应用（新建项目前用）。
@@ -539,7 +548,7 @@ apps:
 └── apps/<应用>/
     ├── running/                   运行中的版本，也是服务的工作目录：程序、附带文件（artifact.files，静态站点在 www/）和它运行时写的日志 logs/
     ├── versions/<id>/             其他版本：程序、附带文件和它上一次运行时的日志 logs/（切换时就是 running/ 改名放回来）
-    ├── data/                      不随版本变化的目录（sharedDirs），归运行用户；配置里用到时才有
+    ├── data/                      不随版本变化的目录（sharedDirs、artifact.keep 里共用的），归运行用户；配置里用到时才有
     └── deps/<种类>-<哈希>/         python 的 venv、node 的 node_modules（版本目录里的 .venv、node_modules 链接到这里）
 <root>/backups/<名字>/             数据备份的文件（只有 root 能读）
 <应用的 root>/apps/<应用>/          应用单独设置了 root 时在这里（Ferry 的文件仍在目标 root 的 .ferry/apps/<应用>）
@@ -622,6 +631,7 @@ powershell -File scripts\package.ps1 -Bump          # 先检查（go vet、gofmt
 | --- | --- |
 | [docs/config.md](docs/config.md) | `ferry.yaml` 全部字段：变量、构建、目标、应用、服务、静态站点、登录凭据、运行环境、日志 |
 | [docs/ci.md](docs/ci.md) | 在 GitLab CI、GitHub Actions、Jenkins 里部署 |
+| [docs/releases/README.md](docs/releases/README.md) | GitHub Release 的更新说明：自动汇总提交、编写版本说明、本地预览 |
 | [docs/design.md](docs/design.md) | 架构、常驻连接与协议、一次部署的细节、就绪判断、安全设计、测试 |
 | [desktop/README.md](desktop/README.md) | 桌面版的功能、权限、开发与调试 |
 | [examples/shop](examples/shop/) | 多服务项目的配置示例与迁移步骤 |

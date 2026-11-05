@@ -56,6 +56,12 @@ var aiWriteBanned = []struct {
 
 // CheckAIWrite 检查 AI 要执行的改动，返回拆好的语句。dbName 是在哪个库里执行。
 func CheckAIWrite(kind, dbName, src string) ([]string, error) {
+	if kind == Redis {
+		if _, err := ParseRedisDB(dbName); err != nil {
+			return nil, err
+		}
+		return CheckAIRedisWrite(src)
+	}
 	if len(src) > aiMaxSQL {
 		return nil, fmt.Errorf("SQL 太长（%d KB）：一次最多 %d KB，分几次执行", len(src)>>10, aiMaxSQL>>10)
 	}
@@ -74,6 +80,12 @@ func CheckAIWrite(kind, dbName, src string) ([]string, error) {
 
 // CheckAIWriteStmts 逐条检查已经拆好的语句（桌面版确认前再查一遍用）。
 func CheckAIWriteStmts(kind, dbName string, stmts []string) error {
+	if kind == Redis {
+		if _, err := ParseRedisDB(dbName); err != nil {
+			return err
+		}
+		return CheckAIRedisWriteLines(stmts)
+	}
 	if len(stmts) == 0 || len(stmts) > AIMaxStmts {
 		return fmt.Errorf("语句的条数不对：%d", len(stmts))
 	}
@@ -157,6 +169,9 @@ func stmtFlat(kind, s string) string {
 
 // AIWriteDanger 这些语句危险在哪（给确认框标红）；空 = 没发现特别危险的。
 func AIWriteDanger(kind string, stmts []string) string {
+	if kind == Redis {
+		return AIRedisDanger(stmts)
+	}
 	var out []string
 	seen := map[string]bool{}
 	add := func(s string) {
@@ -187,6 +202,9 @@ func AIWriteDanger(kind string, stmts []string) string {
 
 // AIWriteNotes 执行前要让用户知道的（写进确认框）。
 func AIWriteNotes(kind string, stmts []string) []string {
+	if kind == Redis {
+		return AIRedisNotes()
+	}
 	if kind != MySQL {
 		return []string{"全部语句在一个事务里执行：有一条失败就全部撤回（建表改表也能撤回）"}
 	}
@@ -207,6 +225,9 @@ type AIStmtResult struct {
 	More     bool     `json:"more,omitempty"`
 	Error    string   `json:"error,omitempty"`
 	Ms       int64    `json:"ms"`
+	// Redis 命令的回复（SQL 是那条命令）；给 AI 的是 redis-cli 那样的文字
+	Reply     *RedisReply `json:"-"`
+	ReplyText string      `json:"reply,omitempty"`
 }
 
 // AIExecResult 一次改动的结果。
@@ -224,6 +245,9 @@ var ErrAIWriteNotAllowed = errors.New("这个数据库连接没有允许 AI 修�
 
 // AIExec 执行用户同意了的改动：在一个事务里逐条执行，有一条失败就撤回。
 func (cl *Client) AIExec(ctx context.Context, dbName string, stmts []string) (*AIExecResult, error) {
+	if cl.Conn.Kind == Redis {
+		return cl.AIRedisExec(ctx, dbName, stmts)
+	}
 	kind := cl.Conn.Kind
 	switch {
 	case cl.Conn.ReadOnly:

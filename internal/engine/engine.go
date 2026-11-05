@@ -96,6 +96,8 @@ type DeployOptions struct {
 	NoRollback bool
 	// KeepPerms 不自动修正权限（默认会把运行用户访问不了的目录 / 文件、不安全的部署目录改好）
 	KeepPerms bool
+	// Keep 这次部署保留服务器上的（应用名 → 列表，代替 ferry.yaml 里的 artifact.keep；没有的应用按配置）
+	Keep map[string][]*config.KeepItem
 }
 
 // DeployReport 部署结果。
@@ -182,6 +184,11 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 			spec, err := Spec(f, t, a)
 			if err != nil {
 				return nil, err
+			}
+			if keep, ok := o.Keep[a.Name]; ok {
+				if spec.Keep, err = KeepSpec(a, spec.FileName, keep); err != nil {
+					return nil, fmt.Errorf("%s 这次保留的：%w", a.Name, err)
+				}
 			}
 			if spec.TLS != nil && spec.TLS.DNS != "" {
 				// DNS 验证的密钥：服务器上存一份，每天续期时用
@@ -1057,6 +1064,13 @@ func (e *Engine) siteDelta(it *item, rel *proto.ReleaseSpec, remote []proto.Site
 		total += f.Size
 	}
 	changed, bytes := artifact.SiteChanges(it.site, remote)
+	// 保留的总是带上包里的（服务器上没有时用它）：服务器上的可能被改过，不能当作「没变」从当前版本复制
+	for _, f := range it.site {
+		if proto.KeepMatch(it.spec.Keep, f.Path) && !changed[f.Path] {
+			changed[f.Path] = true
+			bytes += f.Size
+		}
+	}
 	if bytes > total*8/10 { // 几乎都变了：直接全量，省得服务器拼装
 		return manifest, nil, nil
 	}

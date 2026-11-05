@@ -27,6 +27,8 @@ type AppChange struct {
 	FilesAdded   []string `json:"filesAdded,omitempty"`
 	FilesChanged []string `json:"filesChanged,omitempty"`
 	FilesRemoved []string `json:"filesRemoved,omitempty"`
+	// Keep 部署时保留的（artifact.keep）在服务器上的情况和这次会怎么做
+	Keep []KeepItemReport `json:"keep,omitempty"`
 }
 
 // localApp 一个应用这次要部署的：生成的单元文件、附带文件的 sha256。
@@ -247,6 +249,17 @@ func (e *Engine) ReportChanges(target string, cs []AppChange) {
 		if len(fs) > 0 {
 			e.Rep.Info("%s 的附带文件：%s", c.App, strings.Join(fs, "；"))
 		}
+		for _, k := range c.Keep {
+			name := k.Path
+			if k.Shared {
+				name += "（共用）"
+			}
+			if k.Differs {
+				e.Rep.Warn("%s 保留 %s：%s", c.App, name, k.Note)
+			} else {
+				e.Rep.Info("%s 保留 %s：%s", c.App, name, k.Note)
+			}
+		}
 	}
 }
 
@@ -272,8 +285,24 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 		return nil, err
 	}
 	var rels []proto.AppReleases
+	var keeps []proto.KeepScan
 	err = e.withSession(target, names, func(s *session, specs []proto.AppSpec) error {
-		return s.callData("releases", &proto.Request{Apps: specs, Detail: true}, &rels)
+		if err := s.callData("releases", &proto.Request{Apps: specs, Detail: true}, &rels); err != nil {
+			return err
+		}
+		var withKeep []proto.AppSpec
+		for _, sp := range specs {
+			if len(sp.Keep) > 0 {
+				withKeep = append(withKeep, sp)
+			}
+		}
+		if len(withKeep) > 0 {
+			// 读不到（服务器上的 agent 太旧等）不影响看改动
+			if err := s.callData("keepscan", &proto.Request{Apps: withKeep}, &keeps); err != nil {
+				keeps = nil
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -282,5 +311,18 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 	if dir == "" {
 		dir = e.File.Dir
 	}
-	return changesFrom(dir, git, rels, localApps(e.File, t, apps)), nil
+	cs := changesFrom(dir, git, rels, localApps(e.File, t, apps))
+	for i := range cs {
+		for _, ks := range keeps {
+			if ks.App != cs[i].App {
+				continue
+			}
+			for _, a := range apps {
+				if a.Name == ks.App {
+					cs[i].Keep = keepReports(e.File, t, a, ks)
+				}
+			}
+		}
+	}
+	return cs, nil
 }

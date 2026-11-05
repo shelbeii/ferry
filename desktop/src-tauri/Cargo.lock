@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-desktop"
-version = "0.13.61"
+version = "0.13.65"
 dependencies = [
  "base64 0.22.1",
  "serde",

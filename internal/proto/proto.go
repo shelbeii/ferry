@@ -106,6 +106,8 @@ type Request struct {
 	LockWaitSec int `json:"lockWaitSec,omitempty"`
 	// Detail releases：同时返回运行中的版本的单元文件（部署前比较）
 	Detail bool `json:"detail,omitempty"`
+	// KeepDir keepscan：列出运行中的版本里这个目录下的（相对站点目录 / 版本目录，"." = 最上层；空 = 不列）
+	KeepDir string `json:"keepDir,omitempty"`
 	// Monitor monitor：服务器监控的设置
 	Monitor *MonitorSpec `json:"monitor,omitempty"`
 	// 数据备份：backup 命令
@@ -176,6 +178,9 @@ type AppSpec struct {
 	SitePort      string   `json:"sitePort,omitempty"` // static.port：部署前检查端口有没有被别人占着
 
 	KeepReleases int `json:"keepReleases"`
+
+	// Keep 部署时保留服务器上的文件、目录（不用包里的），见 KeepItem
+	Keep []KeepItem `json:"keep,omitempty"`
 
 	// Hooks 部署时在服务器上执行的命令（手动回滚时不执行）
 	Hooks *Hooks `json:"hooks,omitempty"`
@@ -418,6 +423,8 @@ type ReleaseMeta struct {
 	Files []string `json:"files,omitempty"`
 	// FileSums 附带文件里每个文件的 sha256（相对版本目录的路径 → sha256）：下次部署时比较哪些文件改了
 	FileSums map[string]string `json:"fileSums,omitempty"`
+	// Kept 部署时保留了服务器上的（用的不是包里的）：路径，共用的后面带「（共用）」
+	Kept []string `json:"kept,omitempty"`
 }
 
 // reservedFileNames 版本目录里归 Ferry 用的名字（运行日志、站点文件、以前放在版本目录里的 Ferry 文件）：附带文件不能用。
@@ -491,6 +498,7 @@ const (
 	EvFirewall = "FIREWALL"
 	EvHook     = "HOOK"
 	EvCert     = "CERT"
+	EvKeep     = "KEEP"
 )
 
 // Result agent 的最后一行输出。
@@ -1131,6 +1139,7 @@ var evLabels = map[string]string{
 	EvFirewall: "防火墙",
 	EvHook:     "部署命令",
 	EvCert:     "证书",
+	EvKeep:     "保留",
 }
 
 // EvLabel 事件代码的中文名称；不认识的代码原样返回。

@@ -208,6 +208,14 @@ const app: SchemaNode = obj('应用', '一个可部署的应用', {
         exec: bool('可执行', '脚本要勾上'),
       }, { type: '字符串或对象', short: 'from' }),
     },
+    keep: {
+      ...list('保留服务器上的', '部署时不用包里的、用服务器上运行中的版本里的：配置文件等。服务器上还没有时用包里的。部署窗口里也能勾选'),
+      kind: 'objList',
+      item: obj('保留', '相对版本目录（静态站点是站点目录）的路径，或 {path, shared}', {
+        path: str('路径', '文件或目录，如 config.js、conf/*.json（不共用的可以用 * ?）', { required: true }),
+        shared: bool('共用', '放在应用的 data/ 下，每个版本链接过去（上传目录等）：只有一份，回滚时不动'),
+      }, { type: '字符串或对象', short: 'path' }),
+    },
   }, { required: true }),
   deps: obj('装依赖', '部署时在服务器上装依赖（requirements.txt / package.json），依赖文件没变就用上次装好的', {
     registry: str('镜像源', 'pip 的 index-url（如 https://mirrors.aliyun.com/pypi/simple）/ npm 的 registry（如 https://registry.npmmirror.com）'),

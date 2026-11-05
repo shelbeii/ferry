@@ -779,6 +779,10 @@ function callTitle(c: Call): string {
       return `查询数据库${i.database ? ' ' + i.database : ''}`
     case 'db_execute':
       return `改数据库${i.connection ? ' ' + i.connection : ''}${i.database ? ' · ' + i.database : ''}`
+    case 'redis_query':
+      return `Redis：${String(i.command ?? '').slice(0, 60)}`
+    case 'redis_execute':
+      return `改 Redis${i.connection ? ' ' + i.connection : ''}（${String(i.commands ?? '').split('\n').filter((l) => l.trim()).length} 条命令）`
   }
   return c.name
 }

@@ -5,6 +5,9 @@ apps.[].artifact.files
 apps.[].artifact.files.[].exec
 apps.[].artifact.files.[].from
 apps.[].artifact.files.[].to
+apps.[].artifact.keep
+apps.[].artifact.keep.[].path
+apps.[].artifact.keep.[].shared
 apps.[].artifact.path
 apps.[].artifact.verify
 apps.[].artifact.verify.minSize

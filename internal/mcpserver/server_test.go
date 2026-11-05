@@ -101,14 +101,14 @@ func TestMCP(t *testing.T) {
 	var names []string
 	changes := map[string]bool{"deploy": true, "app_control": true, "rollback": true, "software_control": true, "port_control": true, "create_project": true, "ssh_disconnect": true, "firewall_enable": true, "backup_run": true,
 		"run_change_command": true, "write_file": true, "software_install": true, "save_software_template": true, "ask_secret": true,
-		"software_upgrade": true, "software_restore": true, "software_backup": true, "db_execute": true}
+		"software_upgrade": true, "software_restore": true, "software_backup": true, "db_execute": true, "redis_execute": true}
 	for _, tl := range tools.Tools {
 		names = append(names, tl.Name)
 		if tl.Annotations == nil || tl.Annotations.ReadOnlyHint == changes[tl.Name] {
 			t.Errorf("%s 的只读标记不对", tl.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "app_control,app_logs,app_releases,app_status,ask_secret,backup_run,backup_status,build_log,create_project,db_connections,db_execute,db_query,db_schema,deploy,deploy_changes,deploy_history,detect_project,firewall_enable,list_projects,monitor_status,port_check,port_control,preflight,rollback,run_change_command,run_command,save_software_template,server_check,server_ports,server_software,software_backup,software_control,software_install,software_logs,software_restore,software_templates,software_upgrade,ssh_disconnect,ssh_sessions,task_status,template_guide,write_file" {
+	if got := strings.Join(names, ","); got != "app_control,app_logs,app_releases,app_status,ask_secret,backup_run,backup_status,build_log,create_project,db_connections,db_execute,db_query,db_schema,deploy,deploy_changes,deploy_history,detect_project,firewall_enable,list_projects,monitor_status,port_check,port_control,preflight,redis_execute,redis_query,rollback,run_change_command,run_command,save_software_template,server_check,server_ports,server_software,software_backup,software_control,software_install,software_logs,software_restore,software_templates,software_upgrade,ssh_disconnect,ssh_sessions,task_status,template_guide,write_file" {
 		t.Fatalf("工具：%s", got)
 	}
 

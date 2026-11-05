@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { type AppChange, type Inspect } from '../ferry'
+import { ElMessage } from 'element-plus'
+import { call, type AppChange, type Inspect, type KeepItem, type KeepItemReport, type KeepReport } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { appSettings, startTask } from '../state'
 import { deploymentTargets } from '../deploymentReview'
+import KeepPicker from './KeepPicker.vue'
 
 const props = defineProps<{ config: string; info: Inspect; target: string; apps: string[]; initialTargets?: string[] }>()
 const emit = defineEmits<{ close: []; started: [id: number]; finished: [] }>()
@@ -76,13 +78,90 @@ const changeGroups = computed(() => {
 const short = (h?: string) => (h ? h.slice(0, 8) : '-')
 const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
 
-function start() {
+// 部署时保留服务器上的（artifact.keep）：配置里的默认勾上，可以这次不保留、从服务器上加
+type KeepRow = KeepItem & { on: boolean; added?: boolean }
+const appInfo = (name: string) => props.info.apps.find((a) => a.name === name)
+const keepRows = ref<Record<string, KeepRow[]>>(Object.fromEntries(props.info.apps.map((a) => [a.name, (a.keep ?? []).map((k) => ({ path: k.path, shared: !!k.shared, on: true }))])))
+const keepApps = computed(() => appList.value.filter((a) => keepRows.value[a]?.length))
+const otherApps = computed(() => appList.value.filter((a) => !keepRows.value[a]?.length))
+const addApp = ref('')
+watch(otherApps, (list) => { if (!list.includes(addApp.value)) addApp.value = list[0] ?? '' }, { immediate: true })
+const chosen = (app: string): KeepItem[] => (keepRows.value[app] ?? []).filter((r) => r.on).map((r) => (r.shared ? { path: r.path, shared: true } : { path: r.path }))
+// 和 ferry.yaml 里的不一样（这次要用 --keep-files 告诉部署）
+function keepEdited(app: string) {
+  const yaml = appInfo(app)?.keep ?? []
+  const now = chosen(app)
+  return now.length !== yaml.length || now.some((k, i) => k.path !== yaml[i].path || !!k.shared !== !!yaml[i].shared)
+}
+const editedApps = computed(() => appList.value.filter(keepEdited))
+const saveKeep = ref(false)
+const hasGlob = (p: string) => /[*?[]/.test(p)
+
+// 各项在比较的那台服务器上的情况（勾选、加、改「共用」后重新看）
+const keepReports = ref<Record<string, KeepItemReport[]>>({})
+const keepErrors = ref<Record<string, string>>({})
+const keepReads = useReadRequests()
+let keepSeq = 0
+async function loadKeep() {
+  const seq = ++keepSeq
+  keepReads.cancelAll()
+  keepErrors.value = {}
+  const target = reviewTarget.value
+  if (!target) return
+  await Promise.all(keepApps.value.map(async (app) => {
+    const items = (keepRows.value[app] ?? []).map((r) => (r.shared ? { path: r.path, shared: true } : { path: r.path }))
+    try {
+      const r = await keepReads.run(app, (s) => readCall<KeepReport>(['keep', 'scan', target, app, '--keep-files', JSON.stringify(items), '-c', props.config], s))
+      if (seq === keepSeq) keepReports.value[app] = r.items ?? []
+    } catch (e) {
+      if (seq !== keepSeq || e instanceof ReadCanceled) return
+      keepErrors.value[app] = (e as Error).message
+    }
+  }))
+}
+const keepKey = computed(() => reviewTarget.value + '|' + JSON.stringify(keepApps.value.map((a) => [a, keepRows.value[a].map((r) => [r.path, r.shared])])))
+watch(keepKey, loadKeep, { immediate: true })
+const reportFor = (app: string, r: KeepRow) => keepReports.value[app]?.find((x) => x.path === r.path && !!x.shared === !!r.shared)
+
+const picker = ref<{ app: string; type: string; program?: string }>()
+function openPicker(app: string) {
+  const a = appInfo(app)
+  if (!a || !reviewTarget.value) return
+  const program = a.type === 'java' || a.type === 'binary' ? a.artifact.split(/[\\/]/).pop() : undefined
+  picker.value = { app, type: a.type, program }
+}
+function onPick(app: string, items: KeepItem[]) {
+  const rows = (keepRows.value[app] ??= [])
+  for (const it of items) {
+    const old = rows.find((r) => r.path === it.path)
+    if (old) old.on = true
+    else rows.push({ path: it.path, shared: !!it.shared, on: true, added: true })
+  }
+}
+function removeRow(app: string, r: KeepRow) {
+  keepRows.value[app] = keepRows.value[app].filter((x) => x !== r)
+}
+
+async function start() {
   if (!canStart.value) return
   starting.value = true
   const args = ['deploy', targets.value.join(','), ...(props.apps.length ? [props.apps.join(',')] : []), '-c', props.config, '--yes']
   if (skipBuild.value) args.push('--skip-build')
   if (full.value) args.push('--full')
   if (noRollback.value) args.push('--no-rollback')
+  const edited = editedApps.value
+  if (edited.length) {
+    args.push('--keep-files', JSON.stringify(Object.fromEntries(edited.map((a) => [a, chosen(a)]))))
+    if (saveKeep.value) {
+      try {
+        for (const a of edited) await call(['keep', 'set', a, JSON.stringify(chosen(a)), '-c', props.config])
+      } catch (e) {
+        ElMessage.error(`写进 ferry.yaml 失败：${(e as Error).message}`)
+        starting.value = false
+        return
+      }
+    }
+  }
   const task = startTask(`部署 ${targets.value.join('、')}：${appList.value.join('、')}`, args, () => emit('finished'))
   emit('started', task.id)
   visible.value = false
@@ -148,6 +227,34 @@ function start() {
           </template>
         </div>
       </el-form-item>
+      <el-form-item label="保留">
+        <div class="keep">
+          <div class="muted small">勾选的用服务器上的，不会被包里的替换（服务器上还没有时用包里的）<template v-if="targets.length > 1">；下面是 {{ reviewTarget }} 上的情况</template></div>
+          <div v-for="a in keepApps" :key="a" class="keep-app">
+            <div class="keep-head">
+              <b>{{ a }}</b>
+              <el-button link type="primary" size="small" :disabled="!reviewTarget" @click="openPicker(a)">从服务器选…</el-button>
+              <span v-if="keepErrors[a]" class="muted small">读不到服务器上的情况：{{ keepErrors[a] }}</span>
+            </div>
+            <div v-for="r in keepRows[a]" :key="r.path" class="keep-row">
+              <el-checkbox v-model="r.on"><span class="mono">{{ r.path }}</span></el-checkbox>
+              <el-tooltip :show-after="500" content="共用：放在应用的 data/ 下只有一份，每个版本链接过去，回滚时不动（上传目录等）。不勾：从运行中的版本复制过去，回滚时跟着版本走" placement="top">
+                <el-checkbox v-model="r.shared" size="small" :disabled="!r.on || hasGlob(r.path)">共用</el-checkbox>
+              </el-tooltip>
+              <span v-if="!r.on" class="muted small">这次用包里的</span>
+              <span v-else-if="reportFor(a, r)" class="small" :class="reportFor(a, r)?.differs ? 'warn' : 'muted'">{{ reportFor(a, r)?.note }}</span>
+              <span v-else-if="keepReads.loading.value[a]" class="muted small">正在看服务器上的…</span>
+              <el-button v-if="r.added" link size="small" @click="removeRow(a, r)">去掉</el-button>
+            </div>
+          </div>
+          <div v-if="otherApps.length" class="keep-add">
+            <span class="muted small">{{ keepApps.length ? '其他应用' : '没有要保留的：服务器上的文件都换成包里的' }}</span>
+            <el-select v-if="otherApps.length > 1" v-model="addApp" size="small" class="keep-app-select" aria-label="选应用"><el-option v-for="a in otherApps" :key="a" :label="a" :value="a" /></el-select>
+            <el-button link type="primary" size="small" :disabled="!reviewTarget || !addApp" @click="openPicker(addApp)">从服务器选要保留的{{ otherApps.length === 1 ? `（${addApp}）` : '' }}…</el-button>
+          </div>
+          <el-checkbox v-if="editedApps.length" v-model="saveKeep" size="small">记到 ferry.yaml（以后部署都这样；不勾只这一次）</el-checkbox>
+        </div>
+      </el-form-item>
       <el-form-item label="构建">
         <div>
           <el-checkbox v-model="skipBuild">跳过构建，直接使用现有产物</el-checkbox>
@@ -172,6 +279,17 @@ function start() {
       <el-button :type="prodTargets.length ? 'danger' : 'primary'" :disabled="!canStart" :loading="starting" @click="start">部署到 {{ targets.length }} 台服务器</el-button>
     </template>
   </el-dialog>
+  <KeepPicker
+    v-if="picker"
+    :config="config"
+    :target="reviewTarget"
+    :app="picker.app"
+    :type="picker.type"
+    :program="picker.program"
+    :selected="(keepRows[picker.app] ?? []).map((r) => r.path)"
+    @pick="(items) => onPick(picker!.app, items)"
+    @close="picker = undefined"
+  />
 </template>
 
 <style scoped>
@@ -240,5 +358,42 @@ function start() {
 }
 .prod-tag {
   margin-left: 6px;
+}
+.keep {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.keep-app + .keep-app,
+.keep-add {
+  margin-top: 4px;
+}
+.keep-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.keep-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  padding-left: 12px;
+  line-height: 1.6;
+}
+.keep-row :deep(.el-checkbox) {
+  margin-right: 0;
+  height: 24px;
+}
+.keep-add {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.keep-app-select {
+  width: 140px;
 }
 </style>

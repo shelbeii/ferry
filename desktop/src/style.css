@@ -148,6 +148,8 @@ body { -webkit-font-smoothing: antialiased; }
 button, input, textarea { font: inherit; }
 button { transition: background var(--ferry-ease), border-color var(--ferry-ease), box-shadow var(--ferry-ease); }
 :focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }
+/* 下拉框由外层圆角容器显示焦点，内部输入框不再叠加矩形描边。 */
+.el-select__input:focus-visible { outline: none; }
 .el-button { font-weight: 500; }
 .el-button--primary:not(.is-link, .is-text, .is-plain) { box-shadow: 0 3px 8px #4f46e522; }
 html.dark .el-button--primary:not(.is-link, .is-text, .is-plain) { --el-button-text-color: #10182b; --el-button-hover-text-color: #10182b; }

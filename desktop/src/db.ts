@@ -3,7 +3,7 @@ import { reactive, ref, watch, type Ref } from 'vue'
 import { call, ferry, FerryError, isSecretKind, sessionEnv, type ErrorDetail, type Software } from './ferry'
 import { secretRequest, trustRequest } from './state'
 
-export type DbKind = 'mysql' | 'postgres'
+export type DbKind = 'mysql' | 'postgres' | 'redis'
 
 export interface DbVia {
   config: string
@@ -32,7 +32,7 @@ export interface DbConn {
   created?: string
 }
 
-export interface DbDatabase { name: string; system?: boolean }
+export interface DbDatabase { name: string; system?: boolean; /** Redis：键的个数 */ keys?: number }
 export interface DbTable { schema?: string; name: string; type: 'table' | 'view'; rows?: number; size?: number; comment?: string; engine?: string }
 export interface DbColumnInfo {
   name: string
@@ -167,11 +167,126 @@ export interface DbReq {
   preview?: boolean
   max?: number
   stop?: boolean
+  // Redis
+  scan?: { pattern?: string; type?: string; cursor?: string; count?: number }
+  get?: { key: RStr; offset?: number; limit?: number; cursor?: string; match?: string; desc?: boolean }
+  edit?: RedisEdit
+  line?: string
+  confirm?: boolean
 }
 
-export const kindLabel: Record<DbKind, string> = { mysql: 'MySQL / MariaDB', postgres: 'PostgreSQL' }
-export const defaultPort: Record<DbKind, number> = { mysql: 3306, postgres: 5432 }
-export const defaultUser: Record<DbKind, string> = { mysql: 'root', postgres: 'postgres' }
+// ---------------------------------------------------------------- Redis（dbx/redis.go）
+
+/** 界面传给 ferry 的键、字段、成员：文字，二进制时带 base64 */
+export interface RStr { t: string; b64?: string }
+/** 显示用的值：二进制时 t 是转义过的（bin 为 true）；size 不为 0 时被截断了，原来有 size 字节 */
+export interface RedisVal { t: string; b64?: string; bin?: boolean; size?: number }
+export interface RedisKey { name: string; b64?: string; type: string }
+export interface RedisKeys { keys: RedisKey[]; cursor: string; scanned: number; total: number; ms: number }
+/** 值里的一项：列表 i、v；哈希 f、v；集合 f；有序集合 f、s（分数）；流 f（ID）、p（字段、值交替） */
+export interface RedisItem { i?: number; f?: RedisVal; v?: RedisVal; s?: string; p?: RedisVal[] }
+export interface RedisValue {
+  key: RedisKey
+  exists: boolean
+  type: string
+  /** 毫秒；-1 永不过期 */
+  ttl: number
+  size: number
+  memory?: number
+  encoding?: string
+  value?: RedisVal
+  items?: RedisItem[]
+  offset?: number
+  cursor?: string
+  more?: boolean
+  ms: number
+}
+export interface RedisEdit {
+  op: string
+  key?: RStr
+  keys?: RStr[]
+  type?: string
+  field?: RStr
+  orig?: RStr
+  value?: string
+  index?: number
+  score?: string
+  pairs?: string[]
+  head?: boolean
+  ttl?: number
+  newKey?: RStr
+}
+export interface RedisReply { t: 'str' | 'int' | 'nil' | 'err' | 'arr'; v?: string; bin?: boolean; items?: RedisReply[]; more?: number; cut?: boolean }
+export interface RedisCmdResult { reply?: RedisReply; db: number; ms: number; confirm?: string }
+
+export const redisTypes: Record<string, string> = { string: '字符串', hash: '哈希', list: '列表', set: '集合', zset: '有序集合', stream: '流' }
+
+/** 键、字段、成员转成传给 ferry 的样子（二进制的带 base64） */
+export function rstr(v: { name?: string; t?: string; b64?: string }): RStr {
+  const t = v.name ?? v.t ?? ''
+  return v.b64 ? { t, b64: v.b64 } : { t }
+}
+
+/** 能在界面上改（不是二进制、没被截断） */
+export function editable(v?: RedisVal): boolean {
+  return !!v && !v.bin && !v.size
+}
+
+/** 剩下的过期时间说成人话 */
+export function ttlText(ms: number): string {
+  if (ms === -1) return '永不过期'
+  if (ms < 0) return '已过期'
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s} 秒后过期`
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const parts: string[] = []
+  if (d) parts.push(`${d} 天`)
+  if (h) parts.push(`${h} 小时`)
+  if (m && !d) parts.push(`${m} 分`)
+  return `${parts.join(' ')}后过期`
+}
+
+/** 像 redis-cli 那样把回复排成几行 */
+export function formatReply(r: RedisReply, indent = ''): string[] {
+  switch (r.t) {
+    case 'nil':
+      return ['(nil)']
+    case 'int':
+      return [`(integer) ${r.v}`]
+    case 'err':
+      return [`(error) ${r.v}`]
+    case 'str': {
+      const v = r.v ?? ''
+      const cut = r.cut ? ' …（太长，只显示了前面一部分）' : ''
+      // 多行的文字（INFO、CLIENT LIST……）原样显示；其余像 redis-cli 一样加引号
+      if (!r.bin && v.includes('\n')) return (v.replace(/\r\n/g, '\n').replace(/\n$/, '') + cut).split('\n')
+      // 状态回复（OK、PONG……）redis-cli 不加引号；go-redis 分不出状态和字符串，按常见的几个认
+      if (!r.bin && (v === 'OK' || v === 'PONG' || v === 'QUEUED')) return [v]
+      const q = r.bin ? v : v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\t/g, '\\t').replace(/\r/g, '\\r')
+      return [`"${q}"${cut}`]
+    }
+    case 'arr': {
+      const items = r.items ?? []
+      if (!items.length && !r.more) return ['(empty array)']
+      const out: string[] = []
+      const w = String(items.length).length
+      items.forEach((it, i) => {
+        const head = `${String(i + 1).padStart(w)}) `
+        const pad = ' '.repeat(head.length)
+        formatReply(it, indent + pad).forEach((l, j) => out.push(j === 0 ? head + l : pad + l))
+      })
+      if (r.more) out.push(`…（还有 ${r.more} 项没显示）`)
+      return out
+    }
+  }
+  return []
+}
+
+export const kindLabel: Record<DbKind, string> = { mysql: 'MySQL / MariaDB', postgres: 'PostgreSQL', redis: 'Redis' }
+export const defaultPort: Record<DbKind, number> = { mysql: 3306, postgres: 5432, redis: 6379 }
+export const defaultUser: Record<DbKind, string> = { mysql: 'root', postgres: 'postgres', redis: '' }
 
 /** 与 dbx.PasswordEnv 一致 */
 export function passwordEnv(id: string): string {
@@ -299,7 +414,7 @@ export function closeDbSession(id: string, session: string) {
 
 /** 软件页的一项 → 新连接的默认值（经这台服务器连）。 */
 export function connFromSoftware(sw: Software, via: DbVia, server: string): Partial<DbConn> | null {
-  const kind: DbKind | null = sw.kind === 'mysql' || sw.kind === 'mariadb' ? 'mysql' : sw.kind === 'postgresql' ? 'postgres' : null
+  const kind: DbKind | null = sw.kind === 'mysql' || sw.kind === 'mariadb' ? 'mysql' : sw.kind === 'postgresql' ? 'postgres' : sw.kind === 'redis' ? 'redis' : null
   if (!kind) return null
   const c: Partial<DbConn> = { kind, via, user: defaultUser[kind], name: `${sw.name} · ${server}`, savePassword: true }
   const l = sw.listen?.[0]
@@ -319,13 +434,13 @@ export function connFromSoftware(sw: Software, via: DbVia, server: string): Part
   }
   if (sw.instance) {
     c.software = sw.instance
-    if (sw.account) c.user = sw.account
+    if (sw.account && kind !== 'redis') c.user = sw.account
   }
   return c
 }
 
 export function isDbSoftware(sw: Software): boolean {
-  return sw.kind === 'mysql' || sw.kind === 'mariadb' || sw.kind === 'postgresql'
+  return sw.kind === 'mysql' || sw.kind === 'mariadb' || sw.kind === 'postgresql' || sw.kind === 'redis'
 }
 
 /** 单元格的文字（显示、复制用） */

@@ -736,7 +736,11 @@ func opTitle(r approve.Request) string {
 		json.Unmarshal(r.Input, &in)
 		return actionNames[r.Action] + " " + in.Path + "（" + r.Target + "）"
 	case r.Action == "db-exec":
-		return fmt.Sprintf("%s %s（%d 条语句）", actionNames[r.Action], r.DBName, len(r.Stmts))
+		unit := "语句"
+		if r.DBKind == "redis" {
+			unit = "命令"
+		}
+		return fmt.Sprintf("%s %s（%d 条%s）", actionNames[r.Action], r.DBName, len(r.Stmts), unit)
 	case r.Action == "secret":
 		labels := make([]string, len(r.Fields))
 		for i, f := range r.Fields {

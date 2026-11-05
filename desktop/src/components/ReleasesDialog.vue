@@ -55,6 +55,7 @@ function rollback() {
 const hasCommit = computed(() => (data.value?.releases ?? []).some((r) => r.commit))
 const hasBranch = computed(() => (data.value?.releases ?? []).some((r) => r.branch))
 const hasFiles = computed(() => (data.value?.releases ?? []).some((r) => r.files?.length))
+const hasKept = computed(() => (data.value?.releases ?? []).some((r) => r.kept?.length))
 
 function rowClass({ row }: { row: ReleaseInfo }) {
   return row.current ? 'current-row' : ''
@@ -105,6 +106,9 @@ function rowClass({ row }: { row: ReleaseInfo }) {
           </el-table-column>
           <el-table-column v-if="hasFiles" label="附带文件" min-width="140" :show-overflow-tooltip="{ showAfter: HOVER_DELAY }">
             <template #default="{ row }"><span class="mono">{{ row.files?.join('、') || '-' }}</span></template>
+          </el-table-column>
+          <el-table-column v-if="hasKept" label="保留服务器上的" min-width="140" :show-overflow-tooltip="{ showAfter: HOVER_DELAY }">
+            <template #default="{ row }"><span class="mono">{{ row.kept?.join('、') || '-' }}</span></template>
           </el-table-column>
           <el-table-column label="运行日志" width="110">
             <template #default="{ row }">

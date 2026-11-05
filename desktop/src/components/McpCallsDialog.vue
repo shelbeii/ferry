@@ -50,6 +50,8 @@ const TOOL_NAMES: Record<string, string> = {
   db_schema: '数据库结构',
   db_query: '数据库查询',
   db_execute: '请求改数据库',
+  redis_query: 'Redis 查询',
+  redis_execute: '请求改 Redis',
   deploy: '请求部署',
   app_control: '请求启停',
   rollback: '请求回滚',

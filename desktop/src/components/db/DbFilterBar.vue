@@ -3,10 +3,10 @@
 // 也可以切到「直接写条件」自己写 WHERE。
 import { computed, ref, watch } from 'vue'
 import { Plus, Delete, Top, Bottom, Check, Close, Filter, Sort, EditPen } from '@element-plus/icons-vue'
-import { filterOps, type DbFilter, type DbSort } from '../../db'
+import { filterOps, type DbColumnInfo, type DbFilter, type DbSort } from '../../db'
 
 const props = defineProps<{
-  columns: string[]
+  columns: DbColumnInfo[]
   filters: DbFilter[]
   sorts: DbSort[]
   where: string
@@ -39,11 +39,11 @@ watch(() => props.panel, (p) => {
 
 const opOf = (v: string) => filterOps.find((o) => o.value === v)
 function addFilter() {
-  fs.value.push({ col: props.columns[0] ?? '', op: '=', value: '', off: false, or: false })
+  fs.value.push({ col: props.columns[0]?.name ?? '', op: '=', value: '', off: false, or: false })
 }
 function addSort() {
   const used = new Set(ss.value.map((s) => s.col))
-  ss.value.push({ col: props.columns.find((c) => !used.has(c)) ?? props.columns[0] ?? '', desc: false })
+  ss.value.push({ col: props.columns.find((c) => !used.has(c.name))?.name ?? props.columns[0]?.name ?? '', desc: false })
 }
 function moveSort(i: number, d: number) {
   const j = i + d
@@ -72,6 +72,23 @@ function toggle(p: 'filter' | 'sort') {
   emit('update:panel', props.panel === p ? '' : p)
 }
 defineExpose({ activeFilters })
+
+// 鼠标移到字段上显示字段说明（整个面板共用一个提示框，字段多也不卡）
+const byName = computed(() => new Map(props.columns.map((c) => [c.name, c])))
+const tipCol = ref<DbColumnInfo | null>(null)
+const tipEl = ref<HTMLElement>()
+let tipTimer = 0
+function showTip(e: MouseEvent, name: string) {
+  const c = byName.value.get(name)
+  clearTimeout(tipTimer)
+  if (!c) return hideTip()
+  tipEl.value = e.currentTarget as HTMLElement
+  tipCol.value = c
+}
+function hideTip() {
+  clearTimeout(tipTimer)
+  tipTimer = window.setTimeout(() => (tipCol.value = null), 60)
+}
 </script>
 
 <template>
@@ -97,8 +114,10 @@ defineExpose({ activeFilters })
             <el-option :value="true" label="或者" />
           </el-select>
           <span v-else class="join where">WHERE</span>
-          <el-select v-model="f.col" size="small" filterable class="col" placeholder="列">
-            <el-option v-for="c in columns" :key="c" :value="c" :label="c" />
+          <el-select v-model="f.col" size="small" filterable class="col" placeholder="列" @mouseenter="showTip($event, f.col)" @mouseleave="hideTip" @visible-change="hideTip">
+            <el-option v-for="c in columns" :key="c.name" :value="c.name" :label="c.name">
+            <div class="opt" @mouseenter="showTip($event, c.name)" @mouseleave="hideTip">{{ c.name }}</div>
+          </el-option>
           </el-select>
           <el-select v-model="f.op" size="small" class="op">
             <el-option v-for="o in filterOps" :key="o.value" :value="o.value" :label="o.label" />
@@ -130,8 +149,10 @@ defineExpose({ activeFilters })
     <div v-else-if="panel === 'sort'" class="panel">
       <div v-for="(s, i) in ss" :key="i" class="row">
         <span class="join where">{{ i === 0 ? '先按' : '再按' }}</span>
-        <el-select v-model="s.col" size="small" filterable class="col" placeholder="列">
-          <el-option v-for="c in columns" :key="c" :value="c" :label="c" />
+        <el-select v-model="s.col" size="small" filterable class="col" placeholder="列" @mouseenter="showTip($event, s.col)" @mouseleave="hideTip" @visible-change="hideTip">
+          <el-option v-for="c in columns" :key="c.name" :value="c.name" :label="c.name">
+            <div class="opt" @mouseenter="showTip($event, c.name)" @mouseleave="hideTip">{{ c.name }}</div>
+          </el-option>
         </el-select>
         <el-radio-group v-model="s.desc" size="small">
           <el-radio-button :value="false">升序（小到大）</el-radio-button>
@@ -150,6 +171,16 @@ defineExpose({ activeFilters })
         <el-button size="small" type="primary" :icon="Check" @click="apply">应用</el-button>
       </div>
     </div>
+
+    <el-tooltip :visible="!!tipCol" :virtual-ref="tipEl" virtual-triggering placement="right" :show-arrow="false" :offset="10" popper-class="db-col-tip">
+      <template #content>
+        <div v-if="tipCol" class="col-tip">
+          <div class="name">{{ tipCol.name }}<span class="type">{{ tipCol.type }}</span></div>
+          <div v-if="tipCol.comment" class="desc">{{ tipCol.comment }}</div>
+          <div v-else class="desc none">没有写字段说明</div>
+        </div>
+      </template>
+    </el-tooltip>
   </div>
 </template>
 
@@ -227,5 +258,30 @@ defineExpose({ activeFilters })
 }
 .grow {
   flex: 1;
+}
+.opt {
+  margin: 0 -32px 0 -20px;
+  padding: 0 32px 0 20px;
+}
+.col-tip {
+  max-width: 320px;
+  line-height: 1.5;
+}
+.col-tip .name {
+  font-weight: 600;
+}
+.col-tip .type {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.col-tip .desc {
+  margin-top: 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.col-tip .none {
+  opacity: 0.6;
 }
 </style>

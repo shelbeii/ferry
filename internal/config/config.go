@@ -144,6 +144,28 @@ type Artifact struct {
 	Exclude []string `yaml:"exclude"`
 	// Files 附带文件（配置文件等）：和程序放在同一级目录，随版本走（回滚时一起回滚）。只用于 java / binary
 	Files []*ExtraFile `yaml:"files"`
+	// Keep 部署时保留服务器上的（不用包里的）：配置文件等从运行中的版本带进新版本；shared 的放在 data/ 下共用。
+	// 可以只写路径，或 {path, shared}。服务器上还没有时用包里的
+	Keep []*KeepItem `yaml:"keep"`
+}
+
+// KeepItem 部署时保留的一个文件或目录。
+type KeepItem struct {
+	Path   string `yaml:"path" json:"path"`
+	Shared bool   `yaml:"shared" json:"shared,omitempty"` // 放在 data/ 下共用（上传目录等）：只有一份，回滚时不动
+}
+
+// UnmarshalYAML 支持字符串或对象两种写法。
+func (k *KeepItem) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		k.Path = n.Value
+		return nil
+	}
+	if err := checkKeys(n, "path", "shared"); err != nil {
+		return err
+	}
+	type plain KeepItem
+	return n.Decode((*plain)(k))
 }
 
 // Deps 服务器上装依赖的设置。

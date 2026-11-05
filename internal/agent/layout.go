@@ -589,7 +589,7 @@ func (a *Agent) ensureDataFor(s *proto.AppSpec, text string) {
 func (a *Agent) dropEmptyData(s *proto.AppSpec) {
 	dir := a.appDir(s.Name)
 	data := filepath.Join(dir, dirData)
-	if !realDir(data) || len(s.SharedDirs) > 0 || len(s.ArchiveLogs) > 0 || hasFiles(data) {
+	if !realDir(data) || len(s.SharedDirs) > 0 || len(s.ArchiveLogs) > 0 || keepShares(s) || hasFiles(data) {
 		return
 	}
 	p := filepath.ToSlash(dir)

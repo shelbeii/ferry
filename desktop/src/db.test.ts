@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connFromSoftware, dangerOf, passwordEnv } from './db'
+import { connFromSoftware, dangerOf, formatReply, passwordEnv, ttlText } from './db'
 import { statementAt } from './editor/sqlEditor'
 import type { Software } from './ferry'
 
@@ -24,8 +24,30 @@ describe('connFromSoftware', () => {
     const c = connFromSoftware({ kind: 'mysql', name: 'MySQL', state: 'running', via: 'systemd', instance: 'mysql', account: 'admin', listen: ['127.0.0.1:3306'] } as Software, via, 'p')!
     expect(c).toMatchObject({ software: 'mysql', user: 'admin' })
   })
+  it('maps Redis without a user', () => {
+    const c = connFromSoftware({ kind: 'redis', name: 'Redis', state: 'running', via: 'systemd', instance: 'redis', account: 'x', listen: ['0.0.0.0:6380'] } as Software, via, 'p')!
+    expect(c).toMatchObject({ kind: 'redis', port: 6380, host: '127.0.0.1', user: '', software: 'redis' })
+  })
   it('ignores other software', () => {
-    expect(connFromSoftware({ kind: 'redis', name: 'Redis', state: 'running', via: 'systemd' } as Software, via, 'p')).toBeNull()
+    expect(connFromSoftware({ kind: 'nacos', name: 'Nacos', state: 'running', via: 'systemd' } as Software, via, 'p')).toBeNull()
+  })
+})
+
+describe('formatReply', () => {
+  it('formats like redis-cli', () => {
+    expect(formatReply({ t: 'str', v: 'OK' })).toEqual(['OK'])
+    expect(formatReply({ t: 'str', v: 'a"b' })).toEqual(['"a\\"b"'])
+    expect(formatReply({ t: 'int', v: '3' })).toEqual(['(integer) 3'])
+    expect(formatReply({ t: 'nil' })).toEqual(['(nil)'])
+    expect(formatReply({ t: 'arr', items: [] })).toEqual(['(empty array)'])
+    expect(formatReply({ t: 'arr', items: [{ t: 'str', v: 'x' }, { t: 'arr', items: [{ t: 'int', v: '1' }, { t: 'nil' }] }] })).toEqual(['1) "x"', '2) 1) (integer) 1', '   2) (nil)'])
+    expect(formatReply({ t: 'str', v: '# Server\r\nredis_version:7\r\n' })).toEqual(['# Server', 'redis_version:7'])
+  })
+  it('says how long until a key expires', () => {
+    expect(ttlText(-1)).toBe('永不过期')
+    expect(ttlText(30_000)).toBe('30 秒后过期')
+    expect(ttlText(3_720_000)).toBe('1 小时 2 分后过期')
+    expect(ttlText(90_000_000)).toBe('1 天 1 小时后过期')
   })
 })
 

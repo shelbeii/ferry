@@ -388,6 +388,47 @@ export interface InspectApp {
   root?: string
   build?: string
   unit?: string
+  /** 部署时保留服务器上的（artifact.keep） */
+  keep?: KeepItem[]
+}
+
+/** 部署时保留服务器上的一个文件或目录（不用包里的）；shared = 放在 data/ 下共用 */
+export interface KeepItem {
+  path: string
+  shared?: boolean
+}
+
+/** 一项保留在服务器上、本机包里的情况，和这次部署会怎么做 */
+export interface KeepItemReport extends KeepItem {
+  /** 服务器上运行中的版本里：file | dir | link | many（通配符匹配到几个）| none */
+  server: 'file' | 'dir' | 'link' | 'many' | 'none'
+  matches?: number
+  size?: number
+  /** 共用目录（data/ 下）里已经有了 */
+  data?: boolean
+  package?: 'file' | 'dir' | 'none'
+  /** 服务器上的文件和包里的不同：包里改的这次不会上线 */
+  differs?: boolean
+  note: string
+}
+
+/** 运行中的版本里的一个文件或目录（从服务器上选要保留的） */
+export interface KeepEntry {
+  name: string
+  path: string
+  dir?: boolean
+  link?: boolean
+  size?: number
+}
+
+export interface KeepReport {
+  app: string
+  type: string
+  /** 服务器上运行中的版本；空 = 还没部署过 */
+  release?: string
+  items: KeepItemReport[] | null
+  entries?: KeepEntry[] | null
+  more?: boolean
 }
 
 export interface Inspect {
@@ -416,6 +457,8 @@ export interface ReleaseMeta {
   source?: string
   /** 附带文件放到版本目录里的位置 */
   files?: string[]
+  /** 部署时保留了服务器上的（共用的带「（共用）」） */
+  kept?: string[]
 }
 
 /** 正拿着部署锁的操作：谁、在做什么 */
@@ -864,6 +907,8 @@ export interface AppChange {
   filesAdded?: string[] | null
   filesChanged?: string[] | null
   filesRemoved?: string[] | null
+  /** 部署时保留的在服务器上的情况和这次会怎么做 */
+  keep?: KeepItemReport[] | null
 }
 
 export interface DeployReport {
@@ -1120,6 +1165,7 @@ const EV_LABELS: Record<string, string> = {
   RELOAD: '重新加载',
   HOOK: '部署命令',
   CERT: '证书',
+  KEEP: '保留',
   LOGS: '日志',
   RUNTIME: '运行环境',
   SOFTWARE: '软件',

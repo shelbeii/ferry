@@ -108,6 +108,8 @@ func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
 		return a.appRuntimes()
 	case "releases":
 		return a.releases()
+	case "keepscan":
+		return a.keepscan()
 	case "history":
 		return a.history()
 	case "logruns":
@@ -243,6 +245,11 @@ func validateApp(s *proto.AppSpec) error {
 		}
 	default:
 		return fmt.Errorf("%s：未知类型 %q", s.Name, s.Type)
+	}
+	for _, k := range s.Keep {
+		if err := proto.CheckKeep(k, s.FileName, s.Type == proto.TypeStatic); err != nil {
+			return fmt.Errorf("%s：%v", s.Name, err)
+		}
 	}
 	if s.ZD != nil {
 		if err := validateZD(s); err != nil {

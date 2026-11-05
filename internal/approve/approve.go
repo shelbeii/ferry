@@ -70,6 +70,7 @@ type Request struct {
 	// db-exec：在数据库连接 DB（ID；DBName 是它的名称）的库 Database 里执行 Stmts（经服务器连时 Config、Target 是那台服务器）
 	DB       string   `json:"db,omitempty"`
 	DBName   string   `json:"dbName,omitempty"`
+	DBKind   string   `json:"dbKind,omitempty"` // mysql | postgres | redis（redis 时 Stmts 是一行一条的命令）
 	Database string   `json:"database,omitempty"`
 	Stmts    []string `json:"stmts,omitempty"`
 	// ClientConfirmed 用户已经在编程软件里确认了（设置里选了在编程软件里确认时）：桌面版不再弹窗，直接执行

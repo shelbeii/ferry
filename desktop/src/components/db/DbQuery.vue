@@ -162,7 +162,7 @@ onMounted(() => {
   editor = createSqlEditor({
     parent: host.value!,
     doc: props.sql,
-    kind: props.conn.kind,
+    kind: props.conn.kind === 'postgres' ? 'postgres' : 'mysql',
     dark: isDark(),
     onChange: (t) => emit('update:sql', t),
     onRun: (t) => void run(t),

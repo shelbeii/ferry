@@ -107,10 +107,47 @@ func Spec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, error
 		return proto.AppSpec{}, overrideErr
 	}
 	s, err := baseSpec(f, t, a)
-	if err != nil || !a.Hooks.Any() {
+	if err != nil {
 		return s, err
 	}
+	if s.Keep, err = KeepSpec(a, s.FileName, a.Artifact.Keep); err != nil {
+		return s, fmt.Errorf("%s artifact.keep：%w", a.Name, err)
+	}
+	if !a.Hooks.Any() {
+		return s, nil
+	}
 	return s, hookSpec(f, t, a, &s)
+}
+
+// KeepSpec 部署时保留的（配置里的或这次部署选的）：整理路径、检查，去掉重复的；program 是程序文件名（java / binary）。
+func KeepSpec(a *config.App, program string, items []*config.KeepItem) ([]proto.KeepItem, error) {
+	var out []proto.KeepItem
+	seen := map[string]bool{}
+	overlap := func(x, y string) bool { return x == y || strings.HasPrefix(x, y+"/") || strings.HasPrefix(y, x+"/") }
+	for _, k := range items {
+		if k == nil {
+			continue
+		}
+		x := proto.KeepItem{Path: proto.CleanKeepPath(k.Path), Shared: k.Shared}
+		if err := proto.CheckKeep(x, program, a.Type == proto.TypeStatic); err != nil {
+			return nil, err
+		}
+		for _, f := range a.Artifact.Files {
+			if f != nil && f.To != "" && overlap(f.To, x.Path) {
+				return nil, fmt.Errorf("%s 和附带文件 %s 重叠", x.Path, f.To)
+			}
+		}
+		for _, o := range out {
+			if o.Path != x.Path && overlap(o.Path, x.Path) {
+				return nil, fmt.Errorf("%s 和 %s 重复", x.Path, o.Path)
+			}
+		}
+		if !seen[x.Path] {
+			seen[x.Path] = true
+			out = append(out, x)
+		}
+	}
+	return out, nil
 }
 
 // hookEnvNames 钩子执行时 agent 给的环境变量：命令里写 ${FERRY_RELEASE} 也原样交给 shell，不当作 ferry.yaml 的变量

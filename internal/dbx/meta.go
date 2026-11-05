@@ -43,12 +43,16 @@ func TableName(kind, db, schema, table string) string {
 type Database struct {
 	Name   string `json:"name"`
 	System bool   `json:"system,omitempty"` // 系统库（mysql、information_schema……）
+	Keys   int64  `json:"keys,omitempty"`   // Redis：键的个数
 }
 
 var mysqlSystem = map[string]bool{"mysql": true, "information_schema": true, "performance_schema": true, "sys": true}
 
 // Databases 列出库。
 func (cl *Client) Databases(ctx context.Context) ([]Database, error) {
+	if cl.Conn.Kind == Redis {
+		return cl.redisDatabases(ctx)
+	}
 	db, err := cl.DB(ctx, "")
 	if err != nil {
 		return nil, err

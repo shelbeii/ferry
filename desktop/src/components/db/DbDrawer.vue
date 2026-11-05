@@ -2,11 +2,13 @@
 // 「数据库」抽屉：左边是连接 → 库 →（模式）→ 表 的树，右边是标签页（表数据、查询、设计表）。
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Close, Search, Coin, Document, Grid, View, Folder, Connection, Lock } from '@element-plus/icons-vue'
+import { Plus, Refresh, Close, Search, Coin, Document, Grid, View, Folder, Connection, Lock, Key, Monitor } from '@element-plus/icons-vue'
 import type Node from 'element-plus/es/components/tree/src/model/node'
 import DbTableView from './DbTableView.vue'
 import DbQuery from './DbQuery.vue'
 import DbDesign from './DbDesign.vue'
+import DbRedis from './DbRedis.vue'
+import DbRedisConsole from './DbRedisConsole.vue'
 import DbConnDialog from './DbConnDialog.vue'
 import DbSqlConfirm from './DbSqlConfirm.vue'
 import {
@@ -22,7 +24,7 @@ const props = defineProps<{ side: number }>()
 interface TreeData {
   id: string
   label: string
-  type: 'conn' | 'db' | 'schema' | 'table' | 'view' | 'none'
+  type: 'conn' | 'db' | 'schema' | 'table' | 'view' | 'rdb' | 'none'
   conn: DbConn
   db?: string
   schema?: string
@@ -40,7 +42,14 @@ async function loadNode(node: Node, resolve: (d: TreeData[]) => void, reject: ()
   if (node.level === 0) return resolve(roots.value)
   const d = node.data as TreeData
   try {
-    if (d.type === 'conn') {
+    if (d.type === 'conn' && d.conn.kind === 'redis') {
+      // Redis：db0、db1……（没有键的显示成灰色）
+      const r = await dbCall<{ databases: DbDatabase[] }>(d.conn, 'databases', undefined)
+      return resolve(r.databases.map((x) => ({
+        id: `r:${d.conn.id}:${x.name}`, label: `db${x.name}`, type: 'rdb', conn: d.conn, db: x.name, leaf: true, system: !x.keys,
+        hint: x.keys ? `${x.keys.toLocaleString()} 个键` : '空的',
+      })))
+    } else if (d.type === 'conn') {
       const r = await dbCall<{ databases: DbDatabase[] }>(d.conn, 'databases', undefined)
       const dbs = [...r.databases].sort((a, b) => Number(!!a.system) - Number(!!b.system) || a.name.localeCompare(b.name))
       resolve(dbs.length ? dbs.map((x) => ({ id: `d:${d.conn.id}:${x.name}`, label: x.name, type: 'db', conn: d.conn, db: x.name, system: x.system })) : [{ id: `n:${d.id}`, label: '（没有库）', type: 'none', conn: d.conn, leaf: true }])
@@ -84,6 +93,7 @@ function filterNode(v: string, d: TreeData) {
 
 function onNodeClick(d: TreeData, node: Node) {
   if (d.type === 'table' || d.type === 'view') openTable(d)
+  else if (d.type === 'rdb') openRedis(d.conn, d.db!)
   else if (d.type !== 'none' && !node.expanded && !node.isLeaf) node.expand()
 }
 
@@ -91,7 +101,7 @@ function onNodeClick(d: TreeData, node: Node) {
 
 interface Tab {
   key: string
-  kind: 'table' | 'query' | 'design'
+  kind: 'table' | 'query' | 'design' | 'redis' | 'rcmd'
   title: string
   conn: DbConn
   db: string
@@ -103,7 +113,7 @@ interface Tab {
 }
 const tabs = ref<Tab[]>([])
 const active = ref('')
-const refs = reactive<Record<string, { hasChanges?: () => boolean; reload?: () => void } | null>>({})
+const refs = reactive<Record<string, { hasChanges?: () => boolean; reload?: () => void; newKey?: () => void } | null>>({})
 let qn = 0
 
 function openTable(d: { conn: DbConn; db?: string; schema?: string; name?: string; type: string }) {
@@ -124,6 +134,22 @@ function openDesign(conn: DbConn, db: string, schema?: string, table?: string) {
   const key = `g:${conn.id}:${db}:${schema ?? ''}:${table ?? '新表' + Date.now()}`
   if (!tabs.value.some((t) => t.key === key)) tabs.value.push({ key, kind: 'design', title: table ? `设计 ${table}` : '新建表', conn, db, schema, table })
   active.value = key
+}
+function openRedis(conn: DbConn, db: string) {
+  const key = `r:${conn.id}:${db}`
+  if (!tabs.value.some((t) => t.key === key)) tabs.value.push({ key, kind: 'redis', title: `db${db}`, conn, db })
+  active.value = key
+  return key
+}
+function openRedisConsole(conn: DbConn, db = '') {
+  const sid = `rc${Date.now().toString(36)}${++qn}`
+  const key = 'rc:' + sid
+  tabs.value.push({ key, kind: 'rcmd', title: '命令行', conn, db: db || conn.database?.replace(/^db/i, '') || '0', sid })
+  active.value = key
+}
+/** Redis 的库里键变了：树上的键数跟着刷新 */
+function redisChanged(t: Tab) {
+  refreshNode(`c:${t.conn.id}`)
 }
 async function closeTab(key: string) {
   await closeTabs([key])
@@ -184,6 +210,7 @@ function tabMenuDo(k: string) {
   void closeTabs(pick)
 }
 function tabLabel(t: Tab) {
+  if (t.kind === 'redis' || t.kind === 'rcmd') return `${t.title} · ${t.conn.name}`
   return t.kind === 'query' ? `${t.title}${t.db ? ' · ' + t.db : ''}` : t.title
 }
 function tabTip(t: Tab) {
@@ -253,6 +280,18 @@ const menuItems = computed(() => {
   const d = menu.value?.d
   if (!d) return []
   const ro = d.conn.readOnly
+  if (d.conn.kind === 'redis') {
+    if (d.type === 'conn') {
+      return [
+        { k: 'rcmd', t: '命令行' }, { k: 'refresh', t: '刷新' },
+        { k: 'edit', t: '修改连接…', sep: true }, { k: 'copy', t: '复制一份连接…' }, { k: 'close', t: '断开', off: !dbOpened[d.conn.id] }, { k: 'remove', t: '删除连接', danger: true, sep: true },
+      ]
+    }
+    return [
+      { k: 'open', t: '打开' }, { k: 'rcmd', t: '命令行' }, { k: 'new-key', t: '新建键…', off: ro },
+      { k: 'flushdb', t: '清空这个库…', danger: true, off: ro, sep: true },
+    ]
+  }
   switch (d.type) {
     case 'conn':
       return [
@@ -340,6 +379,27 @@ async function menuDo(k: string) {
   if (!d) return
   switch (k) {
     case 'query': return openQuery(d.conn, d.db)
+    case 'rcmd': return openRedisConsole(d.conn, d.db)
+    case 'new-key': {
+      const key = openRedis(d.conn, d.db!)
+      await nextTick()
+      await nextTick()
+      return refs[key]?.newKey?.()
+    }
+    case 'flushdb': {
+      const name = await askName('清空库', `会删掉 db${d.db} 里的全部键，删了就找不回来。确认要清空，请输入「db${d.db}」：`)
+      if (name === null) return
+      if (name !== `db${d.db}`) return void ElMessage.warning('输入的不对，没有清空')
+      try {
+        await dbCall(d.conn, 'redis-edit', d.db, { edit: { op: 'flushdb' } })
+        ElMessage.success('已清空')
+        refreshNode(`c:${d.conn.id}`)
+        refs[`r:${d.conn.id}:${d.db}`]?.reload?.()
+      } catch (e) {
+        void ElMessageBox.alert((e as Error).message, '没有成功', { type: 'error' })
+      }
+      return
+    }
     case 'refresh': return d.type === 'conn' ? refreshNode(d.id) : refreshNode(d.id)
     case 'edit': return void (connDialog.value = { ...d.conn })
     case 'copy': return void (connDialog.value = { ...d.conn, id: '', name: d.conn.name + ' 副本' })
@@ -372,7 +432,7 @@ async function menuDo(k: string) {
       return runOp(d, 'drop-db', [d.db!], '删除库', `c:${d.conn.id}`, d.conn.kind === 'postgres' ? 'postgres' : '')
     }
     case 'new-table': return openDesign(d.conn, d.db!, d.schema)
-    case 'open': return openTable(d)
+    case 'open': return d.type === 'rdb' ? openRedis(d.conn, d.db!) : openTable(d)
     case 'design': return openDesign(d.conn, d.db!, d.schema, d.name)
     case 'select': return openQuery(d.conn, d.db, `SELECT * FROM ${qualified(d)} LIMIT 100;\n`)
     case 'export-csv': return exportNode(d, 'csv')
@@ -433,7 +493,8 @@ watch(dbRequest, async (r) => {
   if (same) {
     void nextTick(() => {
       tree.value?.getNode('c:' + same.id)?.expand()
-      openQuery(same)
+      if (same.kind === 'redis') openRedis(same, same.database?.replace(/^db/i, '') || '0')
+      else openQuery(same)
     })
   } else {
     connDialog.value = r
@@ -451,7 +512,7 @@ onMounted(async () => {
 })
 
 function nodeIcon(d: TreeData) {
-  return { conn: Coin, db: Folder, schema: Folder, table: Grid, view: View, none: Document }[d.type]
+  return { conn: Coin, db: Folder, schema: Folder, table: Grid, view: View, rdb: Folder, none: Document }[d.type]
 }
 </script>
 
@@ -473,7 +534,7 @@ function nodeIcon(d: TreeData) {
         <div class="tree-box">
           <el-empty v-if="!dbConns.length" description="还没有数据库连接" :image-size="60">
             <el-button type="primary" size="small" :icon="Plus" @click="connDialog = { kind: 'mysql', savePassword: true }">新建连接</el-button>
-            <div class="empty-tip">也可以在服务器的「软件」页，从 MySQL、PostgreSQL 的「更多」里点「管理数据」</div>
+            <div class="empty-tip">也可以在服务器的「软件」页，从 MySQL、PostgreSQL、Redis 的「更多」里点「管理数据」</div>
           </el-empty>
           <el-tree
             v-else
@@ -490,9 +551,11 @@ function nodeIcon(d: TreeData) {
             @node-contextmenu="(e: MouseEvent, d: TreeData) => onContext(e, d)"
           >
             <template #default="{ data }">
-              <span class="node" :class="[data.type, { system: data.system }]" :title="data.hint || (data.type === 'conn' ? `${kindLabel[data.conn.kind as 'mysql']} · ${data.conn.user}@${data.conn.container ? '容器 ' + data.conn.container : data.conn.host + ':' + data.conn.port}${data.conn.via ? ' · 经 ' + (data.conn.via.title || data.conn.via.target) : ''}` : '')">
+              <span class="node" :class="[data.type, { system: data.system }]" :title="data.hint || (data.type === 'conn' ? `${kindLabel[data.conn.kind as 'mysql']} · ${data.conn.user ? data.conn.user + '@' : ''}${data.conn.container ? '容器 ' + data.conn.container : data.conn.host + ':' + data.conn.port}${data.conn.via ? ' · 经 ' + (data.conn.via.title || data.conn.via.target) : ''}` : '')">
                 <el-icon class="ni" :class="{ on: data.type === 'conn' && dbOpened[data.conn.id] }"><component :is="nodeIcon(data)" /></el-icon>
                 <span class="nl">{{ data.label }}</span>
+                <span v-if="data.type === 'rdb' && !data.system" class="keys">{{ data.hint.replace(' 个键', '') }}</span>
+                <span v-if="data.type === 'conn' && data.conn.kind === 'redis'" class="kind-mark">Redis</span>
                 <el-icon v-if="data.type === 'conn' && data.conn.readOnly" class="ro" title="只读"><Lock /></el-icon>
                 <span v-if="data.type === 'conn' && data.conn.ai" class="ai-mark" :class="{ write: data.conn.aiWrite && !data.conn.readOnly }" :title="data.conn.aiWrite && !data.conn.readOnly ? '允许 AI 查询和修改（修改每次都要你确认）' : '允许 AI 查询（只读）'">{{ data.conn.aiWrite && !data.conn.readOnly ? 'AI 改' : 'AI' }}</span>
                 <el-icon v-if="data.type === 'conn' && data.conn.via" class="via" :title="'经服务器 ' + (data.conn.via.title || data.conn.via.target)"><Connection /></el-icon>
@@ -504,18 +567,18 @@ function nodeIcon(d: TreeData) {
       <main class="main">
         <div v-if="!tabs.length" class="welcome">
           <h3>数据库</h3>
-          <p>左边点一张表看数据；右键连接、库、表有更多操作（新建查询、新建表、导出……）。</p>
+          <p>左边点一张表看数据；右键连接、库、表有更多操作（新建查询、新建表、导出……）。Redis 点一个库看里面的键，右键有命令行。</p>
           <p>经服务器连的数据库走 SSH 转发，不用在防火墙上开放数据库端口。</p>
           <div class="welcome-btns">
             <el-button type="primary" :icon="Plus" @click="connDialog = { kind: 'mysql', savePassword: true }">新建连接</el-button>
-            <el-button v-if="dbConns.length" @click="openQuery(dbConns[0])">打开查询窗口</el-button>
+            <el-button v-if="dbConns.some((c) => c.kind !== 'redis')" @click="openQuery(dbConns.find((c) => c.kind !== 'redis')!)">打开查询窗口</el-button>
           </div>
         </div>
         <el-tabs v-else v-model="active" type="card" closable class="tabs" @tab-remove="closeTab" @contextmenu="onTabsContext">
           <el-tab-pane v-for="t in tabs" :key="t.key" :name="t.key" lazy>
             <template #label>
               <span :title="tabTip(t)" class="tl">
-                <el-icon><Grid v-if="t.kind === 'table'" /><Document v-else-if="t.kind === 'query'" /><Folder v-else /></el-icon>
+                <el-icon><Grid v-if="t.kind === 'table'" /><Document v-else-if="t.kind === 'query'" /><Key v-else-if="t.kind === 'redis'" /><Monitor v-else-if="t.kind === 'rcmd'" /><Folder v-else /></el-icon>
                 {{ tabLabel(t) }}
               </span>
             </template>
@@ -539,6 +602,15 @@ function nodeIcon(d: TreeData) {
               @update:sql="(s: string) => { t.sql = s; saveTabs() }"
               @update:db="(d: string) => { t.db = d; saveTabs() }"
             />
+            <DbRedis
+              v-else-if="t.kind === 'redis'"
+              :ref="(el) => (refs[t.key] = el as never)"
+              :conn="t.conn"
+              :db="t.db"
+              @console="openRedisConsole(t.conn, t.db)"
+              @changed="redisChanged(t)"
+            />
+            <DbRedisConsole v-else-if="t.kind === 'rcmd'" :conn="t.conn" :db="t.db" :sid="t.sid!" @update:db="(d: string) => (t.db = d)" />
             <DbDesign v-else :conn="t.conn" :db="t.db" :schema="t.schema" :table="t.table" @saved="(n: string, s?: string) => onDesignSaved(t, n, s)" />
           </el-tab-pane>
         </el-tabs>
@@ -563,7 +635,7 @@ function nodeIcon(d: TreeData) {
     <el-dialog :model-value="!!dbPasswordRequest" title="数据库密码" width="420px" append-to-body :close-on-click-modal="false" @close="submitPassword(false)">
       <template v-if="dbPasswordRequest">
         <p class="pw-tip">
-          {{ dbPasswordRequest.rejected ? `${dbPasswordRequest.conn.name} 的密码不对，请重新填：` : `请填 ${dbPasswordRequest.conn.name}（${dbPasswordRequest.conn.user}）的密码：` }}
+          {{ dbPasswordRequest.rejected ? `${dbPasswordRequest.conn.name} 的密码不对，请重新填：` : `请填 ${dbPasswordRequest.conn.name}${dbPasswordRequest.conn.user ? `（${dbPasswordRequest.conn.user}）` : ''}的密码：` }}
         </p>
         <el-input v-model="pw.value" type="password" show-password autofocus @keyup.enter="submitPassword(true)" />
         <el-checkbox v-model="pw.remember" class="pw-remember">记住密码（存在系统凭据库里）</el-checkbox>
@@ -680,6 +752,20 @@ html .db-drawer.el-drawer {
   border-radius: 3px;
   color: var(--el-color-primary);
   border: 1px solid var(--el-color-primary-light-5);
+}
+.keys {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+.kind-mark {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 3px;
+  border-radius: 3px;
+  color: #d6453d;
+  border: 1px solid #d6453d55;
 }
 .ro,
 .via {

@@ -20,6 +20,7 @@ import (
 //	ferry db info|databases <连接>
 //	ferry db tables <连接> <库>
 //	ferry db table|rows|count|apply|design|op|exec|query|export|dump <连接> <库>
+//	ferry db redis-keys|redis-get|redis-edit|redis-cmd <连接> <库编号>（Redis）
 //
 // 其余参数（表名、条件、SQL、改动……）放在环境变量 FERRY_DB_REQ 里（JSON），连接本身（save、test）放在 FERRY_DB_CONN 里。
 // 新填的密码在 FERRY_DB_NEW_PASSWORD；已保存的连接没记住的密码在 FERRY_DB_PASSWORD_<连接 ID>。
@@ -46,11 +47,17 @@ type dbReq struct {
 	Preview bool         `json:"preview"`
 	Max     int          `json:"max"`
 	Stop    bool         `json:"stop"`
+	// Redis
+	Scan    *dbx.RedisScan `json:"scan"`
+	Get     *dbx.RedisGet  `json:"get"`
+	Edit    *dbx.RedisEdit `json:"edit"`
+	Line    string         `json:"line"`    // redis-cmd：一行命令
+	Confirm bool           `json:"confirm"` // redis-cmd：用户已经确认了危险的命令
 }
 
 func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Settings, fail func(error) int) int {
 	if len(c.pos) == 0 {
-		return fail(errors.New("用法：ferry db list | save | remove | test | info | databases | tables | table | rows | count | query | apply | design | op | exec | export | close"))
+		return fail(errors.New("用法：ferry db list | save | remove | test | info | databases | tables | table | rows | count | query | apply | design | op | exec | export | close | redis-keys | redis-get | redis-edit | redis-cmd"))
 	}
 	sub := c.pos[0]
 	args := c.pos[1:]
@@ -234,6 +241,12 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	defer release()
 	ctx := cio.ctx
 	db := dbArg()
+	needRedis := func() error {
+		if cn.Kind != dbx.Redis {
+			return fmt.Errorf("db %s 只能用在 Redis 连接上", sub)
+		}
+		return nil
+	}
 	needDB := func() error {
 		if db == "" && cn.Kind == dbx.MySQL {
 			return fmt.Errorf("用法：ferry db %s <连接> <库>", sub)
@@ -363,7 +376,11 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		if err := engine.AIDBWriteAllowed(cn); err != nil {
 			return fail(err)
 		}
-		rep.Step("在 %s 执行 %d 条语句", cn.Name, len(req.Stmts))
+		unit := "语句"
+		if cn.Kind == dbx.Redis {
+			unit = "命令"
+		}
+		rep.Step("在 %s 执行 %d 条%s", cn.Name, len(req.Stmts), unit)
 		r, err := cl.AIExec(ctx, db, req.Stmts)
 		if err != nil {
 			return fail(err)
@@ -372,8 +389,11 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(engine.AIExecError(r))
 		}
 		for i, x := range r.Results {
-			if x.Affected != nil {
+			switch {
+			case x.Affected != nil:
 				rep.Info("第 %d 条：影响 %d 行", i+1, *x.Affected)
+			case x.ReplyText != "":
+				rep.Info("第 %d 条 %s：%s", i+1, x.SQL, strings.SplitN(x.ReplyText, "\n", 2)[0])
 			}
 		}
 		return out(r)
@@ -383,6 +403,59 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		}
 		r, err := cl.Export(ctx, db, dbx.ExportOptions{Format: req.Format, Out: req.Out, Schema: req.Schema, Table: req.Table, Query: req.SQL, Browse: req.browse()},
 			func(n int64) { rep.Info("已导出 %d 行", n) })
+		if err != nil {
+			return fail(err)
+		}
+		return out(r)
+	case "redis-keys":
+		if err := needRedis(); err != nil {
+			return fail(err)
+		}
+		var o dbx.RedisScan
+		if req.Scan != nil {
+			o = *req.Scan
+		}
+		r, err := cl.RedisKeys(ctx, db, o)
+		if err != nil {
+			return fail(err)
+		}
+		return out(r)
+	case "redis-get":
+		if err := needRedis(); err != nil {
+			return fail(err)
+		}
+		if req.Get == nil {
+			return fail(errors.New("没有指定键"))
+		}
+		r, err := cl.RedisGet(ctx, db, *req.Get)
+		if err != nil {
+			return fail(err)
+		}
+		return out(r)
+	case "redis-edit":
+		if err := needRedis(); err != nil {
+			return fail(err)
+		}
+		if req.Edit == nil {
+			return fail(errors.New("没有要做的改动"))
+		}
+		r, err := cl.RedisApply(ctx, db, *req.Edit)
+		if err != nil {
+			return fail(err)
+		}
+		return out(r)
+	case "redis-cmd":
+		if err := needRedis(); err != nil {
+			return fail(err)
+		}
+		n, err := dbx.ParseRedisDB(db)
+		if err != nil {
+			return fail(err)
+		}
+		if db == "" {
+			n, _ = dbx.ParseRedisDB(cn.Database)
+		}
+		r, err := cl.RedisCommand(ctx, req.Session, n, req.Line, req.Confirm)
 		if err != nil {
 			return fail(err)
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -183,6 +184,112 @@ func AddBackup(path string, b SoftwareBackup) error {
 	out := strings.Join(lines, "\n") + "\n"
 	if crlf {
 		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
+	if err := writeAtomic(path, []byte(out)); err != nil {
+		return err
+	}
+	if _, err := Load(path); err != nil {
+		writeAtomic(path, orig)
+		return fmt.Errorf("修改后的配置校验未通过，已恢复原文件：%w", err)
+	}
+	return nil
+}
+
+var reBareYAML = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]*$`)
+
+// keepFlow 保留的写成一行：[config.js, {path: uploads, shared: true}]。
+func keepFlow(keep []*KeepItem) string {
+	var parts []string
+	for _, k := range keep {
+		p := k.Path
+		if !reBareYAML.MatchString(p) {
+			p = yamlQuote(p)
+		}
+		if k.Shared {
+			parts = append(parts, "{path: "+p+", shared: true}")
+		} else {
+			parts = append(parts, p)
+		}
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// lastLine 节点（含下面的）占到的最后一行。
+func lastLine(n *yaml.Node) int {
+	l := n.Line
+	for _, c := range n.Content {
+		if x := lastLine(c); x > l {
+			l = x
+		}
+	}
+	return l
+}
+
+// SetAppKeep 改写应用的 artifact.keep（部署时保留服务器上的）：写成一行，空 = 去掉。
+// 和 SetAppRuntime 一样按行修改、保留注释；artifact 不是单独的块格式书写时不自动改。改完重新校验，不通过则恢复。
+func SetAppKeep(path, app string, keep []*KeepItem) error {
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(orig, &root); err != nil {
+		return err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("%s 不是 YAML 对象", path)
+	}
+	apps := mapValue(root.Content[0], "apps")
+	if apps == nil || apps.Kind != yaml.SequenceNode {
+		return fmt.Errorf("%s 里没有 apps", path)
+	}
+	var a *yaml.Node
+	for _, n := range apps.Content {
+		if n.Kind == yaml.MappingNode {
+			if v := mapValue(n, "name"); v != nil && strings.EqualFold(v.Value, app) {
+				a = n
+			}
+		}
+	}
+	if a == nil {
+		return fmt.Errorf("没有应用 %s", app)
+	}
+	manual := fmt.Errorf("应用 %s 的 artifact 不是单独的块格式书写，无法自动修改：请手工在它的 artifact 下写 keep: %s", app, keepFlow(keep))
+	art := mapValue(a, "artifact")
+	if art == nil || art.Kind != yaml.MappingNode || art.Style&yaml.FlowStyle != 0 || art.Anchor != "" || len(art.Content) == 0 {
+		return manual
+	}
+	for i := 0; i+1 < len(art.Content); i += 2 {
+		if art.Content[i].Value == "<<" {
+			return manual
+		}
+	}
+	crlf := bytes.Contains(orig, []byte("\r\n"))
+	lines := strings.Split(strings.ReplaceAll(string(orig), "\r\n", "\n"), "\n")
+	indent := strings.Repeat(" ", art.Content[0].Column-1)
+	newLine := indent + "keep: " + keepFlow(keep) + "   # 部署时保留服务器上的（不用包里的）"
+	from, to := 0, -1 // 原来的 keep 占的行（1 起），没有为 0
+	for i := 0; i+1 < len(art.Content); i += 2 {
+		if k := art.Content[i]; k.Value == "keep" {
+			from, to = k.Line, lastLine(art.Content[i+1])
+		}
+	}
+	var repl []string
+	if len(keep) > 0 {
+		repl = []string{newLine}
+	}
+	if from > 0 {
+		lines = append(lines[:from-1], append(repl, lines[to:]...)...)
+	} else if len(keep) > 0 {
+		at := lastLine(art) // 加在 artifact 的最后
+		lines = append(lines[:at], append(repl, lines[at:]...)...)
+	}
+	out := strings.Join(lines, "\n")
+	if crlf {
+		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
+	if out == strings.ReplaceAll(string(orig), "\r\n", "\n") || (crlf && out == string(orig)) {
+		return nil
 	}
 	if err := writeAtomic(path, []byte(out)); err != nil {
 		return err

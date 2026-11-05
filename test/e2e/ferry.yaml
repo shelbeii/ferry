@@ -181,6 +181,15 @@ apps:
       port: 18090
       proxy: {/api/: "http://127.0.0.1:18080/"}
 
+  # 部署时保留服务器上的（artifact.keep）：配置文件用服务器上的，上传目录共用
+  - name: kp
+    type: static
+    order: 81
+    artifact:
+      path: out/kp
+      keep: [config.js, {path: uploads, shared: true}]
+    static: {port: 18099}
+
 # 数据备份（ferry backup 打开后才按时备份）：目录、自己写的命令
 backups:
   - name: files

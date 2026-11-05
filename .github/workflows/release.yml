@@ -3,7 +3,7 @@
 #
 #   git tag v0.12.80 && git push origin v0.12.80
 #
-# 同一个标签重新运行时，已有的 Release 里的文件会被替换。
+# 同一个标签重新运行时，已有的 Release 里的文件和发布说明会被更新。
 name: 发布
 
 on:
@@ -47,6 +47,8 @@ jobs:
           }
           fs.appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + version + '\n');
           NODE
+      - name: 检查发布说明生成
+        run: node --test scripts/release-notes.test.mjs
 
   linux:
     name: Linux 版 ferry
@@ -119,6 +121,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v7
         with:
           path: files
@@ -135,21 +139,11 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.check.outputs.version }}
         run: |
-          cat > notes.md <<EOF
-          ## 下载
-
-          | 文件 | 用途 |
-          | --- | --- |
-          | \`Ferry_${VERSION}_x64-setup.exe\` | Windows 桌面版安装包 |
-          | \`Ferry_${VERSION}_aarch64.dmg\` | macOS 桌面版（Apple 芯片） |
-          | \`Ferry_${VERSION}_x64.dmg\` | macOS 桌面版（Intel） |
-          | \`ferry-linux-amd64\` / \`ferry-linux-arm64\` | Linux 命令行（CI 里部署用，见 [docs/ci.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/ci.md)） |
-          | \`SHA256SUMS.txt\` | 各文件的 sha256 |
-
-          macOS 版是临时签名的：第一次打开要右键 →「打开」，或执行 \`xattr -cr /Applications/Ferry.app\`。
-          EOF
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
+          node scripts/release-notes.mjs --tag "$TAG" --repo "$GITHUB_REPOSITORY" --releases releases.json --output notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md
             gh release upload "$TAG" files/* --clobber
           else
-            gh release create "$TAG" files/* --title "Ferry $VERSION" --notes-file notes.md --generate-notes
+            gh release create "$TAG" files/* --title "Ferry $VERSION" --notes-file notes.md
           fi

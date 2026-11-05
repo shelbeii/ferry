@@ -55,6 +55,8 @@ interface McpRequest {
   /** db-exec：在数据库连接 db（dbName 是名称）的库 database 里执行 stmts；经服务器连时 target 是那台服务器 */
   db?: string
   dbName?: string
+  /** mysql | postgres | redis（redis 时 stmts 是一行一条的命令） */
+  dbKind?: string
   database?: string
   stmts?: string[]
 }
@@ -127,7 +129,7 @@ const clientOf = (r: McpRequest) => r.client || '编程软件'
 const canGrant = (r: McpRequest) =>
   r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick' && r.action !== 'secret' && !isBlock(r)
 const titleOf = (r: McpRequest) => {
-  if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条语句）`
+  if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条${r.dbKind === 'redis' ? '命令' : '语句'}）`
   if (r.action === 'create') return `新建项目 ${r.project}`
   if (r.action.startsWith('sw-')) return `${VERBS[r.action]} ${r.software ?? String(r.input?.name ?? '')}`
   if (r.action.startsWith('port-')) return `${VERBS[r.action]} ${r.port ?? ''}`
@@ -420,7 +422,7 @@ const actionType = (a: string) =>
       </div>
       <el-descriptions :column="1" border size="small" label-width="80px">
         <el-descriptions-item v-if="isDB(shown)" label="数据库">
-          {{ shown.dbName }}<span class="muted mono ml">库 {{ shown.database || '（默认）' }}</span>
+          {{ shown.dbName }}<span class="muted mono ml">{{ shown.dbKind === 'redis' ? `Redis · db${shown.database || 0}` : `库 ${shown.database || '（默认）'}` }}</span>
         </el-descriptions-item>
         <el-descriptions-item v-if="!isDB(shown) || shown.project" label="项目">{{ shown.project }}</el-descriptions-item>
         <el-descriptions-item v-if="isDB(shown) && !shown.target" label="服务器"><span class="muted">这台电脑直接连</span></el-descriptions-item>

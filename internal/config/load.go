@@ -290,6 +290,7 @@ func (f *File) normalize() error {
 			bad("%s：artifact.path 不能为空", where)
 		}
 		checkExtraFiles(a, where, bad)
+		checkKeep(a, where, bad)
 		checkHooks(a, where, bad)
 		if a.KeepReleases != 0 && a.KeepReleases < 2 {
 			bad("%s：keepReleases 至少为 2", where)
@@ -554,6 +555,41 @@ func checkExtraFiles(a *App, where string, bad func(string, ...any)) {
 			}
 		}
 		seen = append(seen, x.To)
+	}
+}
+
+// checkKeep 检查部署时保留的：路径整理好（去掉 ./ 和末尾的 /），不越界、不重复，不和附带文件重叠。
+func checkKeep(a *App, where string, bad func(string, ...any)) {
+	program := ""
+	if a.Type == "java" || a.Type == "binary" {
+		if program = filepath.Base(filepath.FromSlash(a.Artifact.Path)); strings.Contains(program, "${") {
+			program = ""
+		}
+	}
+	var seen []string
+	for i, k := range a.Artifact.Keep {
+		w := fmt.Sprintf("%s：artifact.keep[%d]", where, i)
+		if k == nil {
+			bad("%s：不能为空", w)
+			continue
+		}
+		k.Path = proto.CleanKeepPath(k.Path)
+		if err := proto.CheckKeep(proto.KeepItem{Path: k.Path, Shared: k.Shared}, program, a.Type == "static"); err != nil {
+			bad("%s：%v", w, err)
+			continue
+		}
+		overlap := func(x, y string) bool { return x == y || strings.HasPrefix(x, y+"/") || strings.HasPrefix(y, x+"/") }
+		for _, o := range seen {
+			if overlap(o, k.Path) {
+				bad("%s：%s 和 %s 重复", w, k.Path, o)
+			}
+		}
+		for _, x := range a.Artifact.Files {
+			if x != nil && x.To != "" && overlap(x.To, k.Path) {
+				bad("%s：%s 和附带文件 %s 重叠（附带文件每次用本机的，保留的用服务器上的，只能选一种）", w, k.Path, x.To)
+			}
+		}
+		seen = append(seen, k.Path)
 	}
 }
 

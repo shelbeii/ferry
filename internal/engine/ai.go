@@ -327,7 +327,8 @@ func (e *Engine) aiSystemPrompt(s *session, t *config.Target, mode string) strin
 	}
 	if e.hasAIDB(t) {
 		b.WriteString("\n用户允许你查这台服务器上的数据库：用 db_connections 看有哪些连接，db_schema 看库、表和表结构，db_query 执行只读查询（不要用 run_command 跑 mysql、psql）。" +
-			"db_connections 里 write 为 true 的连接，允许改动时可以用 db_execute 改数据、建表改表（用户看过 SQL 同意才执行）；其他的不能改：需要改时把 SQL 写出来，请用户在 Ferry 的「数据库」里执行。\n")
+			"db_connections 里 write 为 true 的连接，允许改动时可以用 db_execute 改数据、建表改表（用户看过 SQL 同意才执行）；其他的不能改：需要改时把 SQL 写出来，请用户在 Ferry 的「数据库」里执行。" +
+			"Redis 连接用 redis_query 执行只读的命令、redis_execute 改（不要用 run_command 跑 redis-cli）。\n")
 	}
 	return b.String()
 }
