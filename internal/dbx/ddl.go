@@ -364,6 +364,17 @@ func renamedList(cols []string, design []ColumnDef) []string {
 // ---------------------------------------------------------------- PostgreSQL
 
 func pgColumnDef(c ColumnInfo) string {
+	if c.Generated && strings.HasPrefix(c.Extra, "GENERATED ALWAYS AS (") {
+		s := Quote(Postgres, c.Name) + " " + c.Type
+		if c.Collation != "" {
+			s += " COLLATE " + Quote(Postgres, c.Collation)
+		}
+		s += " " + c.Extra
+		if !c.Nullable {
+			s += " NOT NULL"
+		}
+		return s
+	}
 	return pgColDef(ColumnDef{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Default: c.Default, Auto: c.Auto && !isSerialDefault(c.Default), Extra: c.Extra, Collation: c.Collation})
 }
 

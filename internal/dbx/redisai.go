@@ -69,6 +69,7 @@ var aiRedisDeny = map[string]string{
 	"FAILOVER":     "主从关系",
 	"SHUTDOWN":     "会关掉 Redis",
 	"DEBUG":        "调试命令",
+	"DUMP":         "是二进制的序列化数据，读值请用 GET、HGETALL 这类命令",
 	"SAVE":         "会让 Redis 停下来存盘",
 	"BGSAVE":       "存盘",
 	"BGREWRITEAOF": "存盘",
@@ -217,6 +218,9 @@ func (cl *Client) AIRedisQuery(ctx context.Context, dbName, line string) (*AIRed
 	}
 	cctx, cancel := context.WithTimeout(ctx, AIRedisTimeout)
 	defer cancel()
+	if err := aiRedisTooBig(cctx, r, args); err != nil {
+		return nil, err
+	}
 	v, err := r.Do(cctx, toAny(args)...).Result()
 	out := &AIRedisResult{}
 	var re redis.Error

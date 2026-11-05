@@ -161,7 +161,7 @@ func serveOne(ctx context.Context, pool *engine.Pool, id string, args []string, 
 		}
 		return os.Getenv(k)
 	}
-	return run(args, &cliIO{ctx: ctx, stdout: stdout, stderr: stderr, getenv: getenv, pool: pool, tty: tty})
+	return run(args, &cliIO{ctx: ctx, stdout: stdout, stderr: stderr, getenv: getenv, pool: pool, tty: tty, served: true})
 }
 
 // batchWriter 按行切分输出，攒一批再回调（最多等 batchWait，或攒满 batchMax 行）。

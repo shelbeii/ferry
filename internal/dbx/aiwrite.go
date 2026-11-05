@@ -39,10 +39,12 @@ var aiWriteBanned = []struct {
 	re  *regexp.Regexp
 	why string
 }{
-	{regexp.MustCompile(`^(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+(\s*@\s*\S+)?\s+)?(TRUSTED\s+|PROCEDURAL\s+)?` +
+	{regexp.MustCompile(`^(CREATE|ALTER|DROP|RENAME)\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+(\s*@\s*\S+)?\s+)?(TRUSTED\s+|PROCEDURAL\s+)?` +
 		`(USER|ROLE|GROUP|SERVER|EXTENSION|LANGUAGE|PUBLICATION|SUBSCRIPTION|TABLESPACE|EVENT|FOREIGN|SYSTEM|DEFAULT|RESOURCE|LOGFILE|INSTANCE|UNDO)\b`),
 		"不能建、改、删数据库账号、权限和服务器级的对象（账号、角色、扩展、表空间、外部服务器、定时事件、系统设置……）"},
-	{regexp.MustCompile(`^(CREATE|DROP)\s+(DATABASE|SCHEMA)\b`), "不能建库、删库：请用户在 Ferry 的「数据库」里做"},
+	{regexp.MustCompile(`^(CREATE|DROP|ALTER)\s+(DATABASE|SCHEMA)\b`), "不能建库、删库、改库：请用户在 Ferry 的「数据库」里做"},
+	{regexp.MustCompile(`\b(TO|FROM)\s+PROGRAM\b`), "不能执行系统命令（COPY … PROGRAM）"},
+	{regexp.MustCompile(`\bCOPY\b.*\b(TO|FROM)\s+(/|[A-Z]:)`), "不能读写服务器上的文件（COPY … TO / FROM 文件）"},
 	{regexp.MustCompile(`\bCONCURRENTLY\b`), "不能用 CONCURRENTLY（不能在事务里执行）"},
 	{regexp.MustCompile(`\bINTO\s+(OUTFILE|DUMPFILE)\b|\b(DATA|INDEX)\s+DIRECTORY\b`), "不能写服务器上的文件"},
 	{regexp.MustCompile(`\bSONAME\b|\bLANGUAGE\s+(C|INTERNAL|PLPYTHON\w*|PLPERLU|PLTCLU|PLSH|PLV8)\b`), "不能建能执行系统命令的函数（C、plpython 等语言，MySQL 的 SONAME）"},
@@ -137,9 +139,11 @@ var (
 	reDropAll  = regexp.MustCompile(`^(DROP\s+TABLE|TRUNCATE)\b`)
 	reDropAny  = regexp.MustCompile(`^DROP\b`)
 	reNoWhere  = regexp.MustCompile(`^(DELETE|UPDATE)\b`)
-	reWhere    = regexp.MustCompile(`\bWHERE\b`)
 	reAlterDel = regexp.MustCompile(`^ALTER\b.*\bDROP\b`)
 	reDDL      = regexp.MustCompile(`^(CREATE|ALTER|DROP|TRUNCATE|RENAME)\b`)
+	reRoutine  = regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+\s+)?(CONSTRAINT\s+)?(TRIGGER|FUNCTION|PROCEDURE|RULE|AGGREGATE)\b`)
+	reDefiner  = regexp.MustCompile(`\bSECURITY\s+DEFINER\b`)
+	reOwner    = regexp.MustCompile(`\bOWNER\s+TO\b`)
 )
 
 // stmtFlat 去掉注释、字符串内容后的大写文本（判断危险用，不用来放行）。
@@ -167,12 +171,18 @@ func stmtFlat(kind, s string) string {
 	return strings.Join(strings.Fields(strings.ToUpper(b.String())), " ")
 }
 
-// AIWriteDanger 这些语句危险在哪（给确认框标红）；空 = 没发现特别危险的。
+// AIWriteDanger 这些语句危险在哪（给 AI 改动的确认框标红）；空 = 没发现特别危险的。
 func AIWriteDanger(kind string, stmts []string) string {
 	if kind == Redis {
 		return AIRedisDanger(stmts)
 	}
-	var out []string
+	return strings.Join(Dangers(kind, stmts, true), "；")
+}
+
+// Dangers 这些语句危险在哪（去掉重复的）。ai 为 true 时（AI 写的）也提醒建触发器、函数，改所有者这类不容易看出来的；
+// 用户自己在查询窗口写的只提醒删表、清空、不带 WHERE 的删改、删列。
+func Dangers(kind string, stmts []string, ai bool) []string {
+	out := []string{}
 	seen := map[string]bool{}
 	add := func(s string) {
 		if !seen[s] {
@@ -187,7 +197,7 @@ func AIWriteDanger(kind string, stmts []string) string {
 			add("会删掉表或清空表里的全部数据")
 		case reDropAny.MatchString(f):
 			add("会删掉视图、索引等对象")
-		case reNoWhere.MatchString(f) && !reWhere.MatchString(f):
+		case reNoWhere.MatchString(f) && !topWhere(f):
 			if strings.HasPrefix(f, "DELETE") {
 				add("有 DELETE 没写 WHERE，会删掉整张表的数据")
 			} else {
@@ -196,8 +206,40 @@ func AIWriteDanger(kind string, stmts []string) string {
 		case reAlterDel.MatchString(f):
 			add("会删掉列、索引或约束")
 		}
+		if !ai {
+			continue
+		}
+		if reRoutine.MatchString(f) {
+			add("会建触发器、函数或存储过程：以后会自动执行或被调用，看清楚里面做了什么")
+		}
+		if reDefiner.MatchString(f) {
+			add("函数用建它的账号的权限执行（SECURITY DEFINER）")
+		}
+		if reOwner.MatchString(f) {
+			add("会改对象的所有者（OWNER TO）")
+		}
 	}
-	return strings.Join(out, "；")
+	return out
+}
+
+// topWhere 语句本身（不算括号里的子查询）有没有 WHERE。f 是 stmtFlat 后的文本（字符串的内容已经去掉）。
+func topWhere(f string) bool {
+	depth := 0
+	for i := 0; i < len(f); i++ {
+		switch c := f[i]; {
+		case c == '(':
+			depth++
+		case c == ')':
+			depth = max(depth-1, 0)
+		case depth == 0 && strings.HasPrefix(f[i:], "WHERE") && (i == 0 || !isWordByte(f[i-1])) && (i+5 == len(f) || !isWordByte(f[i+5])):
+			return true
+		}
+	}
+	return false
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c >= 0x80
 }
 
 // AIWriteNotes 执行前要让用户知道的（写进确认框）。

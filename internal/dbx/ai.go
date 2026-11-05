@@ -124,7 +124,7 @@ func (cl *Client) AIQuery(ctx context.Context, dbName, src string, max int) (*AI
 	}
 	defer conn.Close()
 	start := time.Now()
-	r, err := cl.aiRun(ctx, conn, stmt, max)
+	r, err := cl.aiRun(ctx, conn, dbName, stmt, max)
 	if err != nil {
 		if ctx.Err() != nil || isTimeout(err) {
 			return nil, fmt.Errorf("查询超过 %d 秒没执行完，已停止：缩小范围（加条件、LIMIT）再查", int(AITimeout.Seconds()))
@@ -135,8 +135,9 @@ func (cl *Client) AIQuery(ctx context.Context, dbName, src string, max int) (*AI
 	return r, nil
 }
 
-func (cl *Client) aiRun(ctx context.Context, conn *sql.Conn, stmt string, max int) (*AIResult, error) {
+func (cl *Client) aiRun(ctx context.Context, conn *sql.Conn, dbName, stmt string, max int) (*AIResult, error) {
 	ms := AITimeout.Milliseconds()
+	id := cl.connID(ctx, conn)
 	if cl.Conn.Kind == MySQL {
 		// 会话级的超时：用完改回默认值，改不回去就不再用这个连接
 		set, reset := fmt.Sprintf("SET SESSION max_execution_time = %d", ms), "SET SESSION max_execution_time = DEFAULT"
@@ -166,8 +167,11 @@ func (cl *Client) aiRun(ctx context.Context, conn *sql.Conn, stmt string, max in
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	cols, out, more, err := readRows(rows, max)
+	if more && id != "" {
+		cl.stopStmt(dbName, id) // 够数了：让数据库停下，不把剩下的读完
+	}
+	rows.Close()
 	if err != nil {
 		return nil, err
 	}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -12,8 +13,13 @@ import (
 // Split 把一段 SQL 按分号拆成语句：跳过引号、注释里的分号，PostgreSQL 的 $$ 函数体；
 // MySQL 支持 DELIMITER（写存储过程时用）。去掉空语句和只有注释的语句。
 func Split(kind, src string) []string {
-	var out []string
-	delim := ";"
+	out, _, _ := splitScan(kind, src, ";", true)
+	return out
+}
+
+// splitScan 拆语句的核心。final 为 false 时（文件读到一半）只返回已经结束的语句（后面跟着分隔符的）：
+// used 是用掉了多少字节（剩下的接上后面读到的再拆），delim 是读到这里时的分隔符（MySQL 的 DELIMITER 改过的）。
+func splitScan(kind, src, delim string, final bool) (out []string, used int, endDelim string) {
 	var cur strings.Builder
 	flush := func() {
 		s := strings.TrimSpace(cur.String())
@@ -38,6 +44,9 @@ func Split(kind, src string) []string {
 				if end >= 0 {
 					line = src[j : j+end]
 				}
+				if end < 0 && !final {
+					break // DELIMITER 这一行还没读完
+				}
 				if d := strings.TrimSpace(line[9:]); d != "" {
 					flush()
 					delim = d
@@ -47,6 +56,7 @@ func Split(kind, src string) []string {
 				} else {
 					i = j + end + 1
 				}
+				used = i
 				continue
 			}
 		}
@@ -99,13 +109,17 @@ func Split(kind, src string) []string {
 		case strings.HasPrefix(src[i:], delim):
 			flush()
 			i += len(delim)
+			used = i
 		default:
 			cur.WriteByte(c)
 			i++
 		}
 	}
-	flush()
-	return out
+	if final {
+		flush()
+		used = n
+	}
+	return out, used, delim
 }
 
 func skipQuoted(kind, s string, i int) int {
@@ -201,6 +215,21 @@ func returnsRows(kind, stmt string) bool {
 	return kind == Postgres && strings.Contains(strings.ToUpper(stripComments(kind, stmt)), "RETURNING")
 }
 
+// reModify 会改数据的关键字（判断 WITH 里有没有 INSERT、UPDATE……用）
+var reModify = regexp.MustCompile(`\b(INSERT|UPDATE|DELETE|MERGE|REPLACE)\b`)
+
+// stoppable 读够行数后可以让数据库停下的语句：只读的查询。INSERT … RETURNING、带 DELETE 的 WITH 这类
+// 停下来会少改数据，要等它执行完。
+func stoppable(kind, stmt string) bool {
+	switch FirstWord(kind, stmt) {
+	case "SELECT", "SHOW", "TABLE", "VALUES", "DESC", "DESCRIBE":
+		return true
+	case "WITH":
+		return !reModify.MatchString(stmtFlat(kind, stmt))
+	}
+	return false
+}
+
 // QueryOptions 执行查询的选项。
 type QueryOptions struct {
 	Session string // 查询窗口的会话 ID
@@ -231,9 +260,13 @@ func (cl *Client) Query(ctx context.Context, dbName, src string, o QueryOptions)
 		return nil, err
 	}
 	defer release()
+	id := cl.sessionID(o.Session)
+	if o.Session == "" {
+		id = cl.connID(ctx, conn)
+	}
 	out := []Result{}
 	for _, s := range stmts {
-		r := cl.runOne(ctx, conn, s, o.Max)
+		r := cl.runOne(ctx, conn, dbName, id, s, o.Max)
 		out = append(out, r)
 		if ctx.Err() != nil {
 			// 取消时驱动会关掉这条连接：会话作废，下次重建
@@ -260,9 +293,15 @@ func firstLine(s string) string {
 	return s
 }
 
-func (cl *Client) runOne(ctx context.Context, conn *sql.Conn, stmt string, max int) Result {
+// runOne 执行一条语句。id 是这条连接在数据库里的编号：点了停止时让数据库停下这条语句；
+// 查询读够 max 行时也让数据库停下（不然驱动会把剩下的结果全部读完再丢掉，表大时要传很久）。
+func (cl *Client) runOne(ctx context.Context, conn *sql.Conn, dbName, id, stmt string, max int) Result {
 	kind := cl.Conn.Kind
 	start := time.Now()
+	if id != "" {
+		stop := context.AfterFunc(ctx, func() { cl.stopStmt(dbName, id) })
+		defer stop()
+	}
 	r := Result{SQL: stmt}
 	fail := func(err error) Result {
 		err = cl.explain(err)
@@ -287,12 +326,30 @@ func (cl *Client) runOne(ctx context.Context, conn *sql.Conn, stmt string, max i
 		q = tx
 	}
 	if returnsRows(kind, stmt) {
+		canStop := id != "" && stoppable(kind, stmt)
+		// PostgreSQL：停下用户事务里的语句会让整个事务作废，先设保存点，停了以后退回到这里
+		savepoint := canStop && tx == nil && kind == Postgres && pgInTx(conn)
+		if savepoint {
+			if _, err := conn.ExecContext(ctx, "SAVEPOINT ferry_more"); err != nil {
+				savepoint, canStop = false, false
+			}
+		}
 		rows, err := q.QueryContext(ctx, stmt)
 		if err != nil {
 			return fail(err)
 		}
 		cols, data, more, err := readRows(rows, max)
+		stopped := more && canStop
+		if stopped {
+			cl.stopStmt(dbName, id)
+		}
 		rows.Close()
+		if savepoint {
+			if stopped {
+				conn.ExecContext(ctx, "ROLLBACK TO SAVEPOINT ferry_more")
+			}
+			conn.ExecContext(ctx, "RELEASE SAVEPOINT ferry_more")
+		}
 		if err != nil {
 			return fail(err)
 		}
@@ -330,9 +387,10 @@ func (cl *Client) Exec(ctx context.Context, dbName string, stmts []string) ([]Re
 		return nil, err
 	}
 	defer release()
+	id := cl.connID(ctx, conn)
 	out := []Result{}
 	for _, s := range stmts {
-		r := cl.runOne(ctx, conn, s, 100)
+		r := cl.runOne(ctx, conn, dbName, id, s, 100)
 		out = append(out, r)
 		if r.Error != "" || ctx.Err() != nil {
 			break

@@ -53,6 +53,10 @@ type dbReq struct {
 	Edit    *dbx.RedisEdit `json:"edit"`
 	Line    string         `json:"line"`    // redis-cmd：一行命令
 	Confirm bool           `json:"confirm"` // redis-cmd：用户已经确认了危险的命令
+	// 导入
+	File     string         `json:"file"`     // import-sql：SQL 文件
+	Continue bool           `json:"continue"` // import-sql：出错后接着执行
+	CSV      *dbx.CSVImport `json:"csv"`      // csv-preview、import-csv
 }
 
 func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Settings, fail func(error) int) int {
@@ -61,6 +65,10 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	}
 	sub := c.pos[0]
 	args := c.pos[1:]
+	// 只给桌面版用：编程软件能执行命令，不这样的话它直接 ferry db exec 就绕过了「允许 AI 查询 / 修改」和确认
+	if !cio.served && sub != "list" && sub != "close" {
+		return fail(errors.New("ferry db 只能由 Ferry 桌面版调用：请在 Ferry 左下角的「数据库」里操作（编程软件请用 Ferry 的 MCP 工具 db_query、db_execute 等，改动要用户确认）"))
+	}
 	out := func(data any) int {
 		if js != nil {
 			js.Result(true, data, nil)
@@ -171,11 +179,14 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		if err != nil {
 			return fail(err)
 		}
-		var pw *string
+		var pw, aiPw *string
 		if v := cio.getenv("FERRY_DB_NEW_PASSWORD"); v != "" {
 			pw = &v
 		}
-		saved, err := dbx.Save(*cn, pw)
+		if v := cio.getenv("FERRY_DB_NEW_AI_PASSWORD"); v != "" {
+			aiPw = &v
+		}
+		saved, err := dbx.Save(*cn, pw, aiPw)
 		if err != nil {
 			return fail(err)
 		}
@@ -227,14 +238,66 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		if err != nil {
 			return fail(err)
 		}
-		return out(map[string]any{"version": cl.Version, "databases": dbs})
+		// AI 用的账号也试一下
+		if cn.AI && cn.AIUser != "" {
+			aiPw := cio.getenv("FERRY_DB_NEW_AI_PASSWORD")
+			if aiPw == "" && cn.ID != "" {
+				if v, ok, err := secret.Get(dbx.AIPasswordAccount(cn.ID)); err == nil && ok {
+					aiPw = v
+				}
+			}
+			ai := *cn.ForAI()
+			ai.ID = "test-ai"
+			_, arelease, err := m.Open(cio.ctx, &ai, aiPw, openTunnel)
+			if err != nil {
+				var ne *dbx.NeedPasswordError
+				if errors.As(err, &ne) {
+					return fail(fmt.Errorf("AI 用的账号 %s 连不上，密码不对：%s", cn.AIUser, ne.Msg))
+				}
+				return fail(fmt.Errorf("AI 用的账号 %s 连不上：%w", cn.AIUser, err))
+			}
+			arelease()
+		}
+		return out(map[string]any{"version": cl.Version, "databases": dbs, "encrypted": cl.Encrypted, "viaSSH": cn.Via != nil})
+	case "csv-preview": // 导入 CSV 前看前几行（不连数据库）
+		if req.CSV == nil {
+			return fail(errors.New("没有选 CSV 文件"))
+		}
+		p, err := dbx.PreviewCSV(req.CSV.CSVOptions)
+		if err != nil {
+			return fail(err)
+		}
+		return out(p)
+	case "danger": // 执行前看哪些语句危险（查询窗口、确认框用；不连数据库）
+		cn, err := connArg()
+		if err != nil {
+			return fail(err)
+		}
+		// 每段都按语法再拆一遍：查询窗口把整段 SQL 当一条传来，一行里也可能写了几条
+		var stmts []string
+		for _, s := range append(req.Stmts, req.SQL) {
+			stmts = append(stmts, dbx.Split(cn.Kind, s)...)
+		}
+		dangers := []string{}
+		if cn.Kind != dbx.Redis {
+			dangers = dbx.Dangers(cn.Kind, stmts, false)
+		}
+		return out(map[string]any{"dangers": dangers, "count": len(stmts)})
 	}
 
 	cn, err := connArg()
 	if err != nil {
 		return fail(err)
 	}
-	cl, release, err := open(cn, false)
+	var cl *dbx.Client
+	var release func()
+	if sub == "ai-exec" || sub == "estimate" {
+		// AI 的改动：和 AI 查询一样的账号（设了 AI 用的账号时用那个）
+		e := &engine.Engine{Rep: rep, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Pool: cio.pool, Ctx: cio.ctx, Getenv: cio.getenv}
+		cl, release, err = e.OpenAIDB(cn)
+	} else {
+		cl, release, err = open(cn, false)
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -372,6 +435,12 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(err)
 		}
 		return out(map[string]any{"results": rs})
+	case "estimate": // 确认框里估算 UPDATE、DELETE 会影响多少行（EXPLAIN，不执行）
+		est, err := cl.EstimateRows(ctx, db, req.Stmts)
+		if err != nil {
+			return fail(err)
+		}
+		return out(map[string]any{"estimates": est, "text": dbx.EstimateText(req.Stmts, est), "candidates": len(dbx.EstimateCandidates(cn.Kind, req.Stmts))})
 	case "ai-exec": // 执行编程软件请求、用户在桌面版同意了的改动（在一个事务里，失败全部撤回）
 		if err := engine.AIDBWriteAllowed(cn); err != nil {
 			return fail(err)
@@ -459,6 +528,39 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		if err != nil {
 			return fail(err)
 		}
+		return out(r)
+	case "import-sql": // 执行 SQL 文件（边读边执行，同一条连接）
+		if strings.TrimSpace(req.File) == "" {
+			return fail(errors.New("没有选 SQL 文件"))
+		}
+		rep.Step("在 %s 执行 %s", cn.Name, req.File)
+		r, err := cl.ImportSQL(ctx, db, dbx.ImportSQLOptions{File: req.File, Continue: req.Continue}, func(done, total, n int64) {
+			rep.Progress(fmt.Sprintf("已执行 %d 条语句", n), done, total)
+		})
+		if err != nil {
+			return fail(err)
+		}
+		for _, e := range r.Errors {
+			rep.Warn("第 %d 条（%s）出错：%s", e.N, e.SQL, e.Error)
+		}
+		if r.Stopped {
+			e := r.Errors[len(r.Errors)-1]
+			return fail(fmt.Errorf("第 %d 条语句出错，停下了（前面 %d 条已经执行、生效）：%s\n%s", e.N, e.N-1, e.Error, e.SQL))
+		}
+		rep.Info("执行了 %d 条语句%s", r.Stmts, map[bool]string{true: fmt.Sprintf("，%d 条出错", r.Failed), false: ""}[r.Failed > 0])
+		return out(r)
+	case "import-csv": // 把 CSV 导进一张表（一个事务，失败全部撤回）
+		if req.CSV == nil || req.CSV.File == "" {
+			return fail(errors.New("没有选 CSV 文件"))
+		}
+		rep.Step("把 %s 导进 %s", req.CSV.File, req.CSV.Table)
+		r, err := cl.ImportCSV(ctx, db, *req.CSV, func(done, total, n int64) {
+			rep.Progress(fmt.Sprintf("已导入 %d 行", n), done, total)
+		})
+		if err != nil {
+			return fail(err)
+		}
+		rep.Info("导入了 %d 行", r.Rows)
 		return out(r)
 	case "dump": // 导出结构（Data 为 true 时连数据一起）成 SQL 文件
 		if strings.TrimSpace(req.Out) == "" {

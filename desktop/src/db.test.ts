@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connFromSoftware, dangerOf, formatReply, passwordEnv, ttlText } from './db'
+import { connFromSoftware, formatReply, passwordEnv, ttlText } from './db'
 import { statementAt } from './editor/sqlEditor'
 import type { Software } from './ferry'
 
@@ -48,21 +48,6 @@ describe('formatReply', () => {
     expect(ttlText(30_000)).toBe('30 秒后过期')
     expect(ttlText(3_720_000)).toBe('1 小时 2 分后过期')
     expect(ttlText(90_000_000)).toBe('1 天 1 小时后过期')
-  })
-})
-
-describe('dangerOf', () => {
-  it('flags destructive statements', () => {
-    expect(dangerOf('DROP TABLE t')).not.toBe('')
-    expect(dangerOf('truncate t')).not.toBe('')
-    expect(dangerOf('DELETE FROM t')).toContain('删掉整张表')
-    expect(dangerOf("UPDATE t SET a = 'where'")).toContain('改整张表')
-    expect(dangerOf('ALTER TABLE t DROP COLUMN a')).not.toBe('')
-  })
-  it('lets normal statements through', () => {
-    expect(dangerOf('DELETE FROM t WHERE id = 1')).toBe('')
-    expect(dangerOf('-- drop table\nSELECT 1')).toBe('')
-    expect(dangerOf('INSERT INTO t VALUES (1)')).toBe('')
   })
 })
 

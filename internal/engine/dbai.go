@@ -56,7 +56,7 @@ func AIDBConns() (list []AIDBConn, hidden int, err error) {
 			hidden++
 			continue
 		}
-		a := AIDBConn{ID: c.ID, Name: c.Name, Kind: c.Kind, Host: c.Host, Port: c.Port, User: c.User, Database: c.Database,
+		a := AIDBConn{ID: c.ID, Name: c.Name, Kind: c.Kind, Host: c.Host, Port: c.Port, User: c.ForAI().User, Database: c.Database,
 			Container: c.Container, Software: c.Software, ReadOnly: c.ReadOnly, Write: c.AIWrite && !c.ReadOnly}
 		if c.Container != "" {
 			a.Host = ""
@@ -131,24 +131,17 @@ func (e *Engine) viaEngine(v *dbx.Via) (*Engine, error) {
 }
 
 // OpenAIDB 打开允许 AI 查询的连接（经服务器时用 e 的连接池和设置连服务器）；用完调用 release。
+// 连接设了 AI 用的账号（AIUser）时用那个账号和它保存的密码。
 func (e *Engine) OpenAIDB(cn *dbx.Conn) (*dbx.Client, func(), error) {
 	if !cn.AI {
 		return nil, nil, fmt.Errorf("数据库连接「%s」没有允许 AI 查询", cn.Name)
 	}
-	pw, have := "", false
-	if cn.SavePassword {
-		v, ok, err := secret.Get(dbx.PasswordAccount(cn.ID))
-		if err != nil {
-			return nil, nil, err
-		}
-		pw, have = v, ok
+	pw, have, err := aiDBPassword(e, cn)
+	if err != nil {
+		return nil, nil, err
 	}
-	if !have && cn.Software != "" && cn.Via != nil {
-		if ve, err := e.viaEngine(cn.Via); err == nil {
-			if v, err := ve.SoftwarePassword(cn.Via.Target, cn.Software); err == nil {
-				pw, have = v, true
-			}
-		}
+	if cn.AIUser != "" && !have {
+		return nil, nil, fmt.Errorf("数据库连接「%s」给 AI 用的账号 %s 没有保存密码：请用户在 Ferry「数据库」里编辑这个连接，填好 AI 账号的密码", cn.Name, cn.AIUser)
 	}
 	open := func(v *dbx.Via) (dbx.Tunnel, error) {
 		ve, err := e.viaEngine(v)
@@ -161,9 +154,11 @@ func (e *Engine) OpenAIDB(cn *dbx.Conn) (*dbx.Client, func(), error) {
 		}
 		return tn, nil
 	}
-	cl, release, err := dbx.Default.Open(e.ctx(), cn, pw, open)
+	cl, release, err := dbx.Default.Open(e.ctx(), cn.ForAI(), pw, open)
 	var ne *dbx.NeedPasswordError
 	switch {
+	case errors.As(err, &ne) && cn.AIUser != "":
+		return nil, nil, fmt.Errorf("数据库连接「%s」给 AI 用的账号 %s 密码不对（%s）：请用户在 Ferry「数据库」里重新填", cn.Name, cn.AIUser, ne.Msg)
 	case errors.As(err, &ne) && !have:
 		return nil, nil, fmt.Errorf("数据库连接「%s」没有保存密码，AI 用不了：请用户在 Ferry「数据库」里编辑这个连接，填好密码并勾选「记住密码」", cn.Name)
 	case errors.As(err, &ne):
@@ -172,6 +167,30 @@ func (e *Engine) OpenAIDB(cn *dbx.Conn) (*dbx.Client, func(), error) {
 		return nil, nil, err
 	}
 	return cl, release, nil
+}
+
+// aiDBPassword AI 连数据库用的密码：AI 的账号时是它保存的密码；否则是保存的密码、这次打开 Ferry 时填过的、Ferry 装这个软件时保存的。
+func aiDBPassword(e *Engine, cn *dbx.Conn) (string, bool, error) {
+	if cn.AIUser != "" {
+		return secret.Get(dbx.AIPasswordAccount(cn.ID))
+	}
+	if cn.SavePassword {
+		v, ok, err := secret.Get(dbx.PasswordAccount(cn.ID))
+		if err != nil || ok {
+			return v, ok, err
+		}
+	}
+	if v := e.getenv(dbx.PasswordEnv(cn.ID)); v != "" {
+		return v, true, nil
+	}
+	if cn.Software != "" && cn.Via != nil {
+		if ve, err := e.viaEngine(cn.Via); err == nil {
+			if v, err := ve.SoftwarePassword(cn.Via.Target, cn.Software); err == nil {
+				return v, true, nil
+			}
+		}
+	}
+	return "", false, nil
 }
 
 // AIDBSchemaIn 看结构的参数。
@@ -535,8 +554,12 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 			if err != nil {
 				return nil // 执行时把原因告诉模型，不用打扰用户
 			}
+			notes := dbx.AIWriteNotes(cn.Kind, stmts)
+			if est := e.aiEstimate(ctx, cn, db, stmts); est != "" {
+				notes = append(notes, est)
+			}
 			detail := fmt.Sprintf("连接：%s，库：%s\n%s\n\n%s", cn.Name, orDefault(db, "（默认）"),
-				strings.Join(dbx.AIWriteNotes(cn.Kind, stmts), "\n"), strings.Join(stmts, ";\n\n")+";")
+				strings.Join(notes, "\n"), strings.Join(stmts, ";\n\n")+";")
 			return &ai.Approval{Kind: "数据库：" + cn.ID, Title: fmt.Sprintf("改数据库 %s：%d 条语句", cn.Name, len(stmts)), Detail: detail,
 				Danger: dbx.AIWriteDanger(cn.Kind, stmts), Once: "改数据库的每条 SQL 都要你看过"}
 		},
@@ -653,6 +676,20 @@ func (e *Engine) AIDBExec(ctx context.Context, cn *dbx.Conn, database string, st
 	}
 	defer release()
 	return cl.AIExec(ctx, database, stmts)
+}
+
+// aiEstimate 确认前估算 UPDATE、DELETE 会影响多少行（EXPLAIN，不执行）；估不了时为空。
+func (e *Engine) aiEstimate(ctx context.Context, cn *dbx.Conn, database string, stmts []string) string {
+	cl, release, err := e.OpenAIDB(cn)
+	if err != nil {
+		return ""
+	}
+	defer release()
+	est, err := cl.EstimateRows(ctx, database, stmts)
+	if err != nil || len(est) == 0 {
+		return ""
+	}
+	return "数据库估计（EXPLAIN，可能不准）：" + dbx.EstimateText(stmts, est)
 }
 
 // AIExecError 改动没成功时给 AI 看的说明：哪一条、什么错、撤回了没有。

@@ -39,6 +39,21 @@ func TestSplitRedisArgs(t *testing.T) {
 	}
 }
 
+func TestRangeLen(t *testing.T) {
+	for _, c := range []struct {
+		n           int64
+		start, stop string
+		want        int64
+	}{
+		{100, "0", "-1", 100}, {100, "0", "9", 10}, {100, "-10", "-1", 10}, {100, "90", "200", 10},
+		{100, "50", "10", 0}, {0, "0", "-1", 0}, {100, "x", "1", 0}, {100, "-500", "-1", 100},
+	} {
+		if got := rangeLen(c.n, c.start, c.stop); got != c.want {
+			t.Errorf("rangeLen(%d, %s, %s) = %d，要 %d", c.n, c.start, c.stop, got, c.want)
+		}
+	}
+}
+
 func TestRedisDanger(t *testing.T) {
 	for _, line := range []string{"FLUSHALL", "flushdb async", "KEYS *", "CONFIG SET maxmemory 1", "shutdown nosave", "ACL SETUSER x on", "CLIENT KILL ID 3", "DEBUG SLEEP 1", "SWAPDB 0 1"} {
 		args, _ := SplitRedisArgs(line)

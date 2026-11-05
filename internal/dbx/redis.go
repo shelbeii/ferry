@@ -85,7 +85,13 @@ func (cl *Client) newRedis(db, pool int) *redis.Client {
 		Username: cl.Conn.User,
 		Password: cl.password,
 		DB:       db,
-		Dialer:   func(ctx context.Context, _, _ string) (net.Conn, error) { return cl.dial(ctx) },
+		Dialer: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			c, err := cl.dial(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return cl.redisTLS(ctx, c)
+		},
 		// RESP2：老版本也认；不发 CLIENT SETINFO、不开维护通知（托管的 Redis 常把这些命令禁掉）
 		Protocol:                 2,
 		DisableIdentity:          true,
@@ -114,6 +120,7 @@ func (cl *Client) redisPing(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	cl.Encrypted = cl.tlsMode() != TLSOff
 	info, err := r.Info(ctx, "server").Result()
 	if err != nil {
 		var re redis.Error

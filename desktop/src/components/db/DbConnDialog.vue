@@ -26,6 +26,10 @@ const blank = () => ({
   readOnly: false,
   ai: false,
   aiWrite: false,
+  aiOwn: false, // AI 用单独的账号
+  aiUser: '',
+  aiPassword: '',
+  tls: 'auto' as 'auto' | 'off' | 'require' | 'verify', // 自动 = 连接里不写
   container: '',
   software: '',
 })
@@ -104,6 +108,9 @@ function fill(c: Partial<DbConn>) {
   f.readOnly = c.readOnly ?? f.readOnly
   f.ai = c.ai ?? f.ai
   f.aiWrite = c.aiWrite ?? f.aiWrite
+  f.aiUser = c.aiUser ?? ''
+  f.aiOwn = !!c.aiUser
+  f.tls = c.tls || 'auto'
   f.savePassword = c.savePassword ?? f.savePassword
   f.container = c.container ?? ''
   f.software = c.software ?? ''
@@ -153,6 +160,8 @@ function payload(): Partial<DbConn> {
     readOnly: f.readOnly,
     ai: f.ai,
     aiWrite: f.ai && !f.readOnly && f.aiWrite,
+    aiUser: f.ai && f.aiOwn ? f.aiUser.trim() : undefined,
+    tls: f.tls === 'auto' ? undefined : f.tls,
     savePassword: f.savePassword,
     color: props.conn?.color,
   }
@@ -164,6 +173,8 @@ function check(): string {
   if (!f.user.trim() && !isRedis.value) return '请填用户名'
   if (isRedis.value && f.database.trim() && !/^(db)?\d+$/i.test(f.database.trim())) return '库编号要填数字（0、1、2……）'
   if (!(Number(f.port) > 0)) return '请填端口'
+  if (f.ai && f.aiOwn && !f.aiUser.trim()) return '请填 AI 用的账号'
+  if (f.ai && f.aiOwn && !f.aiPassword && !(editing.value && props.conn?.aiUser)) return '请填 AI 用的账号的密码'
   return ''
 }
 
@@ -173,9 +184,11 @@ async function test() {
   testing.value = true
   testMsg.value = null
   try {
-    const r = await testDbConn(payload(), f.password || undefined)
+    const r = await testDbConn(payload(), f.password || undefined, (f.ai && f.aiOwn && f.aiPassword) || undefined)
     const keys = r.databases.reduce((n, d) => n + (d.keys ?? 0), 0)
-    testMsg.value = { ok: true, text: isRedis.value ? `连上了：${r.version}，一共 ${keys.toLocaleString()} 个键` : `连上了：${r.version}，有 ${r.databases.length} 个库` }
+    const enc = r.viaSSH && !r.encrypted ? '经 SSH 加密' : r.encrypted ? '已加密' : '没加密'
+    const ai = f.ai && f.aiOwn ? `，AI 的账号 ${f.aiUser.trim()} 也能连上` : ''
+    testMsg.value = { ok: true, text: (isRedis.value ? `连上了：${r.version}，一共 ${keys.toLocaleString()} 个键` : `连上了：${r.version}，有 ${r.databases.length} 个库`) + `（${enc}）${ai}` }
   } catch (e) {
     testMsg.value = { ok: false, text: (e as Error).message }
   } finally {
@@ -188,7 +201,7 @@ async function save() {
   if (err) return (testMsg.value = { ok: false, text: err })
   busy.value = true
   try {
-    const saved = await saveDbConn(payload(), f.password || undefined)
+    const saved = await saveDbConn(payload(), f.password || undefined, (f.ai && f.aiOwn && f.aiPassword) || undefined)
     ElMessage.success(editing.value ? '已保存' : '已添加')
     emit('saved', saved)
   } catch (e) {
@@ -259,6 +272,19 @@ async function save() {
         <el-input v-model="f.password" type="password" show-password :placeholder="editing ? '不改就留空' : f.software ? '可以不填：用 Ferry 安装时保存的密码' : '没有密码就留空'" autocomplete="new-password" />
         <GlassToggle v-model="f.savePassword" class="mt">记住密码（存在系统凭据库里）；不记住时每次打开 Ferry 后第一次连接要填</GlassToggle>
       </el-form-item>
+      <el-form-item label="加密">
+        <el-select v-model="f.tls" class="tls">
+          <el-option value="auto" :label="isRedis || f.via ? '自动（不加密）' : '自动（数据库支持就加密）'" />
+          <el-option value="off" label="不加密" />
+          <el-option value="require" label="加密，不验证证书" />
+          <el-option value="verify" label="加密并验证证书" />
+        </el-select>
+        <div class="note">
+          <template v-if="f.via">经服务器连时 SSH 已经加密了，一般不用再加。</template>
+          <template v-else-if="isRedis">Redis 要单独开加密端口（TLS），开了的话选「加密」并填那个端口。</template>
+          <template v-else>直接连云数据库（比如开了强制 SSL 的）选「加密」；「验证证书」要数据库的证书是正规机构签的、和地址对得上。</template>
+        </div>
+      </el-form-item>
       <el-form-item :label="isRedis ? '默认库编号' : '默认库'">
         <el-input v-model="f.database" :placeholder="isRedis ? '不填是 0（db0）' : f.kind === 'postgres' ? '不填连 postgres' : '可以不填'" />
       </el-form-item>
@@ -271,8 +297,14 @@ async function save() {
         <div v-if="f.ai" class="note">
           <template v-if="isRedis">AI 能看有哪些键、执行只读的命令（GET、HGETALL、SCAN……，一次一条，最多 15 秒）；不能看配置和密码（CONFIG、ACL）。读到的数据会发给 AI 用的模型。</template>
           <template v-else>AI 能看库表结构、执行只读查询（一次一条，最多 15 秒、500 行）；查出来的数据会发给 AI 用的模型。</template>
-          <template v-if="!f.savePassword && !f.software"><br /><b>要勾选「记住密码」</b>：AI 不会问密码，没记住时连不上。</template>
+          <template v-if="!f.savePassword && !f.software && !f.aiOwn"><br /><b>要勾选「记住密码」</b>：AI 不会问密码，没记住时连不上。</template>
         </div>
+        <GlassToggle v-if="f.ai" v-model="f.aiOwn">AI 用单独的账号（建议给 AI 建一个只能查询的账号）</GlassToggle>
+        <div v-if="f.ai && f.aiOwn" class="ai-account">
+          <el-input v-model="f.aiUser" :placeholder="isRedis ? 'ACL 用户名' : '账号'" class="grow" />
+          <el-input v-model="f.aiPassword" type="password" show-password :placeholder="editing && props.conn?.aiUser ? '密码（不改就留空）' : '密码'" autocomplete="new-password" class="grow" />
+        </div>
+        <div v-if="f.ai && f.aiOwn" class="note">AI 查询和修改都用这个账号，密码存在系统凭据库里。数据库按这个账号的权限拦着 AI，比 Ferry 的检查更可靠。</div>
         <GlassToggle v-if="f.ai" v-model="f.aiWrite" :disabled="f.readOnly">{{ isRedis ? '允许 AI 修改（加、改、删键和里面的数据）' : '允许 AI 修改（插入、修改、删除数据，建表改表）' }}</GlassToggle>
         <div v-if="f.ai && f.readOnly" class="note">连接设成了只读，AI 不能改。</div>
         <div v-else-if="f.ai && f.aiWrite" class="note">
@@ -307,6 +339,15 @@ async function save() {
 }
 .port {
   width: 100px;
+}
+.tls {
+  width: 240px;
+}
+.ai-account {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin: 4px 0;
 }
 .mt {
   margin-top: 6px;

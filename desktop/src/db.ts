@@ -27,6 +27,10 @@ export interface DbConn {
   ai?: boolean
   /** 也允许 AI 修改（插入、修改、删除数据，建表改表）：每次都要用户看过 SQL 同意 */
   aiWrite?: boolean
+  /** AI 用这个账号连（建议是只读账号）；空 = 和上面的账号一样 */
+  aiUser?: string
+  /** 加密：空 = 自动 | off | require（不验证证书）| verify（验证证书） */
+  tls?: '' | 'off' | 'require' | 'verify'
   savePassword?: boolean
   color?: string
   created?: string
@@ -378,9 +382,10 @@ export function dbRun<T>(conn: DbConn, sub: string, db: string | undefined, req:
 }
 
 /** 保存连接（新建时 id 为空）。password 为 undefined 表示不改密码。 */
-export async function saveDbConn(c: Partial<DbConn>, password?: string): Promise<DbConn> {
+export async function saveDbConn(c: Partial<DbConn>, password?: string, aiPassword?: string): Promise<DbConn> {
   const env: Record<string, string> = { FERRY_DB_CONN: JSON.stringify(c) }
   if (password) env.FERRY_DB_NEW_PASSWORD = password
+  if (aiPassword) env.FERRY_DB_NEW_AI_PASSWORD = aiPassword
   const saved = await withRetry(undefined, () => call<DbConn>(['db', 'save'], env))
   if (password && !saved.savePassword) sessionEnv[passwordEnv(saved.id)] = password
   if (!saved.savePassword && !password) delete sessionEnv[passwordEnv(saved.id)]
@@ -390,8 +395,9 @@ export async function saveDbConn(c: Partial<DbConn>, password?: string): Promise
 }
 
 /** 测试连接（不保存），返回版本和库。 */
-export async function testDbConn(c: Partial<DbConn>, password?: string): Promise<{ version: string; databases: DbDatabase[] }> {
+export async function testDbConn(c: Partial<DbConn>, password?: string, aiPassword?: string): Promise<{ version: string; databases: DbDatabase[]; encrypted?: boolean; viaSSH?: boolean }> {
   const env: Record<string, string> = { FERRY_DB_CONN: JSON.stringify(c) }
+  if (aiPassword) env.FERRY_DB_NEW_AI_PASSWORD = aiPassword
   if (password) env.FERRY_DB_NEW_PASSWORD = password
   else if (c.id && sessionEnv[passwordEnv(c.id)]) env.FERRY_DB_NEW_PASSWORD = sessionEnv[passwordEnv(c.id)]
   return withRetry({ ...(c as DbConn) }, () => call(['db', 'test'], env), 2)
@@ -460,13 +466,15 @@ export function humanSize(n?: number): string {
 }
 
 /** 粗看一条语句有没有危险（不带 WHERE 的 UPDATE / DELETE、DROP、TRUNCATE）：执行前多问一句 */
-export function dangerOf(sql: string): string {
-  const s = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(--|#)[^\n]*/g, ' ').replace(/'(?:[^'\\]|\\.|'')*'/g, "''").trim()
-  const up = s.toUpperCase()
-  if (/^(DROP|TRUNCATE)\b/.test(up)) return '会删掉表或库里的全部数据'
-  if (/^(DELETE|UPDATE)\b/.test(up) && !/\bWHERE\b/.test(up)) return up.startsWith('DELETE') ? '没有 WHERE，会删掉整张表的数据' : '没有 WHERE，会改整张表的数据'
-  if (/^ALTER\b[\s\S]*\bDROP\b/.test(up)) return '会删掉列、索引或约束'
-  return ''
+/** 这些语句危险在哪（删表、清空、不带 WHERE 的删改、删列）：交给 ferry 按数据库的语法拆语句、判断，和 AI 改动的确认框同一套规则。 */
+export async function sqlDangers(conn: DbConn, what: { sql?: string; stmts?: string[] }): Promise<string[]> {
+  return (await sqlCheck(conn, what)).dangers
+}
+
+/** 危险在哪，和按语法拆开后一共几条语句。 */
+export async function sqlCheck(conn: DbConn, what: { sql?: string; stmts?: string[] }): Promise<{ dangers: string[]; count: number }> {
+  const r = await call<{ dangers: string[]; count: number }>(['db', 'danger', conn.id], reqEnv(what))
+  return { dangers: r.dangers ?? [], count: r.count }
 }
 
 /** 执行改动前给用户看要执行的语句 */

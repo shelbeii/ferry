@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 「数据库」抽屉：左边是连接 → 库 →（模式）→ 表 的树，右边是标签页（表数据、查询、设计表）。
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { ElCheckbox, ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Close, Search, Coin, Document, Grid, View, Folder, Connection, Lock, Key, Monitor } from '@element-plus/icons-vue'
 import type Node from 'element-plus/es/components/tree/src/model/node'
 import DbTableView from './DbTableView.vue'
@@ -11,11 +11,14 @@ import DbRedis from './DbRedis.vue'
 import DbRedisConsole from './DbRedisConsole.vue'
 import DbConnDialog from './DbConnDialog.vue'
 import DbSqlConfirm from './DbSqlConfirm.vue'
+import DbCsvImport from './DbCsvImport.vue'
 import {
   dbOpen, dbConns, closeOnOutside, dbOpened, dbRequest, dbPasswordRequest, loadDbConns, dbCall, saveDbConn, removeDbConn, closeDbConn, confirmSql, passwordEnv,
   humanSize, kindLabel, exportTo, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult,
 } from '../../db'
 import { sessionEnv } from '../../ferry'
+import { pickFile } from '../../platform'
+import { startTask } from '../../state'
 
 const props = defineProps<{ side: number }>()
 
@@ -301,13 +304,14 @@ const menuItems = computed(() => {
     case 'db':
       return [
         { k: 'query', t: '新建查询' }, { k: 'new-table', t: '新建表…', off: ro }, ...(d.conn.kind === 'postgres' ? [{ k: 'create-schema', t: '新建模式…', off: ro }] : []), { k: 'refresh', t: '刷新' },
-        { k: 'export-struct', t: '导出全部表的结构', sep: true }, { k: 'export-dump', t: '导出全部表的结构和数据' },
+        { k: 'export-struct', t: '导出全部表的结构', sep: true }, { k: 'export-dump', t: '导出全部表的结构和数据' }, { k: 'import-sql', t: '执行 SQL 文件…', off: ro },
         { k: 'copy-name', t: '复制库名', sep: true }, { k: 'drop-db', t: '删除库…', danger: true, off: ro, sep: true },
       ]
     case 'schema':
       return [
         { k: 'query', t: '新建查询' }, { k: 'new-table', t: '新建表…', off: ro }, { k: 'refresh', t: '刷新' },
-        { k: 'export-struct', t: '导出全部表的结构', sep: true }, { k: 'export-dump', t: '导出全部表的结构和数据' }, { k: 'copy-name', t: '复制模式名', sep: true },
+        { k: 'export-struct', t: '导出全部表的结构', sep: true }, { k: 'export-dump', t: '导出全部表的结构和数据' }, { k: 'import-sql', t: '执行 SQL 文件…', off: ro },
+        { k: 'copy-name', t: '复制模式名', sep: true },
       ]
     default:
       return [
@@ -315,6 +319,7 @@ const menuItems = computed(() => {
         { k: 'rename', t: '重命名…', off: ro, sep: true }, { k: 'copy-name', t: '复制名称' },
         ...(d.type === 'table' ? [{ k: 'export-struct', t: '导出结构', sep: true }, { k: 'export-dump', t: '导出结构和数据' }] : [{ k: 'export-struct', t: '导出视图定义', sep: true }]),
         { k: 'export-csv', t: '导出数据为 CSV' }, { k: 'export-insert', t: '导出数据为 SQL（INSERT）' },
+        ...(d.type === 'table' ? [{ k: 'import-csv', t: '导入 CSV…', off: ro }] : []),
         ...(d.type === 'table' ? [{ k: 'truncate', t: '清空表…', danger: true, off: ro, sep: true }, { k: 'drop-table', t: '删除表…', danger: true, off: ro }] : [{ k: 'drop-view', t: '删除视图…', danger: true, off: ro, sep: true }]),
       ]
   }
@@ -353,6 +358,30 @@ async function askName(title: string, label: string, value = ''): Promise<string
     return null
   }
 }
+
+// 执行 SQL 文件：边读边执行（文件可以很大），任务面板里看进度、可以停止
+async function importSql(d: TreeData) {
+  const file = await pickFile('选择要执行的 SQL 文件', 'SQL 文件', ['sql', 'txt'])
+  if (!file) return
+  const cont = ref(false)
+  try {
+    await ElMessageBox.confirm(() => h('div', { class: 'import-sql' }, [
+      h('p', `在 ${d.conn.name} 的库 ${d.db} 里执行：`),
+      h('p', { class: 'mono', style: 'word-break: break-all' }, file),
+      h('p', { style: 'margin-top: 8px' }, '文件里的语句一条条直接执行，执行了的不能撤销（Ferry 导出的文件会先删掉同名的表再重建）。'),
+      h(ElCheckbox, { modelValue: cont.value, 'onUpdate:modelValue': (v: unknown) => (cont.value = !!v) }, () => '有语句出错时接着执行后面的（默认停下）'),
+    ]), '执行 SQL 文件', { confirmButtonText: '执行', cancelButtonText: '取消', type: 'warning' })
+  } catch {
+    return
+  }
+  startTask(`执行 SQL 文件：${d.conn.name} / ${d.db}`, ['db', 'import-sql', d.conn.id, d.db ?? ''], (t) => {
+    if (t.status === 'ok') ElMessage.success({ message: '执行完了', duration: 3000 })
+    refreshNode(d.id)
+  }, { FERRY_DB_REQ: JSON.stringify({ file, continue: cont.value }) })
+}
+
+const csvTarget = ref<{ conn: DbConn; db: string; schema?: string; table: string } | null>(null)
+let csvNode = '' // 导入完刷新这个节点（表的行数）：对话框先关了，所以另外记着
 
 function exportNode(d: TreeData, kind: ExportKind) {
   void exportTo(d.conn, d.db ?? '', { schema: d.schema, table: d.name }, kind)
@@ -439,6 +468,11 @@ async function menuDo(k: string) {
     case 'export-insert': return exportNode(d, 'insert')
     case 'export-struct': return exportNode(d, 'struct')
     case 'export-dump': return exportNode(d, 'dump')
+    case 'import-sql': return importSql(d)
+    case 'import-csv':
+      csvNode = parentId(d)
+      csvTarget.value = { conn: d.conn, db: d.db ?? '', schema: d.schema, table: d.name! }
+      return
     case 'rename': return renameNode(d)
     case 'copy-name':
       await navigator.clipboard.writeText(d.name ?? d.schema ?? d.db ?? '')
@@ -632,6 +666,7 @@ function nodeIcon(d: TreeData) {
 
     <DbConnDialog :conn="connDialog" @close="connDialog = null" @saved="onSaved" />
     <DbSqlConfirm />
+    <DbCsvImport :target="csvTarget" @close="csvTarget = null" @done="refreshNode(csvNode)" />
     <el-dialog :model-value="!!dbPasswordRequest" title="数据库密码" width="420px" append-to-body :close-on-click-modal="false" @close="submitPassword(false)">
       <template v-if="dbPasswordRequest">
         <p class="pw-tip">

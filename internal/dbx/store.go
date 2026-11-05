@@ -42,6 +42,9 @@ type Conn struct {
 	Container string `json:"container,omitempty"`
 	// Software 是 Ferry 在这台服务器上装的软件（实例名）：没单独保存密码时用安装时保存的密码
 	Software string `json:"software,omitempty"`
+	// TLS 加密：空 = 自动（这台电脑直接连 MySQL、PostgreSQL 时数据库支持就加密；经服务器连和 Redis 不加密）|
+	// off 不加密 | require 加密，不验证证书 | verify 加密并验证证书（见 tls.go）
+	TLS string `json:"tls,omitempty"`
 	// ReadOnly 只许查，不许改（生产服务器上的数据库新建时默认打开）
 	ReadOnly bool `json:"readOnly,omitempty"`
 	// SavePassword 密码保存在系统凭据库里（否则每次打开 Ferry 后第一次连接时问）
@@ -49,7 +52,9 @@ type Conn struct {
 	// AI 允许 AI 查询（编程软件经 MCP、Ferry 的 AI 助手）：只能看结构、执行只读查询（见 ai.go）；查出来的数据会发给 AI 的模型
 	AI bool `json:"ai,omitempty"`
 	// AIWrite 也允许 AI 修改：插入、修改、删除数据，建表改表（见 aiwrite.go），每次都要用户看过 SQL 同意。要先允许 AI 查询，只读的连接不行
-	AIWrite bool   `json:"aiWrite,omitempty"`
+	AIWrite bool `json:"aiWrite,omitempty"`
+	// AIUser AI 用这个账号连（建议是只有查询权限的账号）；为空时和用户一样用 User。密码另存在凭据库里（AIPasswordAccount）
+	AIUser  string `json:"aiUser,omitempty"`
 	Color   string `json:"color,omitempty"`
 	Created string `json:"created,omitempty"`
 }
@@ -107,14 +112,32 @@ func (c *Conn) Check() error {
 	if !c.AI || c.ReadOnly {
 		c.AIWrite = false
 	}
+	c.AIUser = strings.TrimSpace(c.AIUser)
+	if !c.AI {
+		c.AIUser = ""
+	}
 	if c.Container != "" && c.Via == nil {
 		return errors.New("连容器里的数据库要经服务器连")
 	}
-	return nil
+	return checkTLS(c)
 }
 
 // PasswordAccount 密码在凭据库里的账户名。
 func PasswordAccount(id string) string { return secret.KindDB + ":" + id }
+
+// AIPasswordAccount AI 用的账号（Conn.AIUser）的密码在凭据库里的账户名。
+func AIPasswordAccount(id string) string { return secret.KindDB + ":" + id + ":ai" }
+
+// ForAI AI 连数据库用的连接：设了 AIUser 时换成那个账号（ID 后面加 #ai，和用户自己用的连接分开）。
+func (c *Conn) ForAI() *Conn {
+	if c.AIUser == "" {
+		return c
+	}
+	a := *c
+	a.ID = c.ID + "#ai"
+	a.User = c.AIUser
+	return &a
+}
 
 // PasswordEnv 桌面版把用户刚输入、不要求记住的密码这样传给 ferry。
 func PasswordEnv(id string) string {
@@ -191,7 +214,8 @@ func Get(id string) (*Conn, error) {
 }
 
 // Save 新建（ID 为空）或修改连接。password 不为 nil 时：SavePassword 打开则存进凭据库，否则从凭据库删掉。
-func Save(c Conn, password *string) (*Conn, error) {
+// aiPassword 是 AI 用的账号的密码（AIUser 不为空时总是存进凭据库：AI 不会问密码）；为 nil 时不改。
+func Save(c Conn, password, aiPassword *string) (*Conn, error) {
 	if err := c.Check(); err != nil {
 		return nil, err
 	}
@@ -233,6 +257,16 @@ func Save(c Conn, password *string) (*Conn, error) {
 			return nil, err
 		}
 	}
+	switch {
+	case c.AIUser == "":
+		if err := secret.Delete(AIPasswordAccount(c.ID)); err != nil {
+			return nil, err
+		}
+	case aiPassword != nil:
+		if err := secret.SetLabeled(AIPasswordAccount(c.ID), *aiPassword, c.Name+"（AI）"); err != nil {
+			return nil, err
+		}
+	}
 	if err := write(cs); err != nil {
 		return nil, err
 	}
@@ -262,6 +296,7 @@ func Remove(id string) error {
 	if err := write(out); err != nil {
 		return err
 	}
+	secret.Delete(AIPasswordAccount(id))
 	return secret.Delete(PasswordAccount(id))
 }
 

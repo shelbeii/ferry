@@ -1,12 +1,24 @@
 <script setup lang="ts">
 // 执行改动前确认：列出要执行的语句，危险的（删表、不带 WHERE 的删改）标出来。
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, WarningFilled } from '@element-plus/icons-vue'
-import { dangerOf, sqlConfirm } from '../../db'
+import { sqlCheck, sqlConfirm } from '../../db'
 
 const req = computed(() => sqlConfirm.value)
-const dangers = computed(() => [...new Set((req.value?.stmts ?? []).map(dangerOf).filter(Boolean))])
+const dangers = ref<string[]>([])
+const count = ref(0) // 按语法拆开后几条（查询窗口把整段当一条传来）
+watch(req, async (r) => {
+  dangers.value = []
+  count.value = r?.stmts.length ?? 0
+  if (!r) return
+  try {
+    const c = await sqlCheck(r.conn, { stmts: r.stmts })
+    if (sqlConfirm.value === r) [dangers.value, count.value] = [c.dangers, c.count || count.value]
+  } catch {
+    // 判断不了时不标；语句照样列出来给用户看
+  }
+})
 const text = computed(() => (req.value?.stmts ?? []).map((s) => s.trim().replace(/;$/, '') + ';').join('\n\n'))
 
 function done(ok: boolean) {
@@ -24,7 +36,7 @@ async function copy() {
   <el-dialog :model-value="!!req" :title="req?.title" width="720px" append-to-body :close-on-click-modal="false" @close="done(false)">
     <template v-if="req">
       <div class="where">
-        在 <b>{{ req.conn.name }}</b> 上执行 {{ req.stmts.length }} 条语句{{ req.conn.via ? `（经服务器 ${req.conn.via.title || req.conn.via.target}）` : '' }}：
+        在 <b>{{ req.conn.name }}</b> 上执行 {{ count }} 条语句{{ req.conn.via ? `（经服务器 ${req.conn.via.title || req.conn.via.target}）` : '' }}：
       </div>
       <el-alert v-for="d in dangers" :key="d" type="error" :closable="false" show-icon class="danger">
         <template #title><el-icon><WarningFilled /></el-icon> 注意：{{ d }}，做了就改不回来</template>

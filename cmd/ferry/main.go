@@ -233,6 +233,7 @@ type cliIO struct {
 	getenv func(string) string
 	pool   *engine.Pool // ferry serve 的连接池；命令行下为空（每次新建连接）
 	tty    *ttyIO       // ferry serve 里终端请求的键盘输入、窗口大小与输出；命令行下为空
+	served bool         // 在 ferry serve 里（桌面版发来的请求）
 }
 
 func main() {

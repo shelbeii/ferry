@@ -184,7 +184,7 @@ func (s *server) dbChange(ctx context.Context, req *mcp.CallToolRequest, conn, d
 	r := approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "db-exec",
 		Database: db, Stmts: stmts, Reason: strings.TrimSpace(reason)}
 	fillDB(&r, cn, f, t)
-	return s.ask(ctx, req, r, st.MCP.ConfirmIn == "client")
+	return s.ask(ctx, req, r, false) // 改数据库始终在 Ferry 里确认：编程软件的确认框可能被它自己点掉
 }
 
 // DBChangeAllowed 这个数据库连接能不能经 MCP 改：设置里允许编程软件请求改动，连接允许 AI 修改、不是只读；
@@ -232,7 +232,11 @@ func fillDB(r *approve.Request, cn *dbx.Conn, f *config.File, t *config.Target) 
 	if cn.Kind == dbx.Redis {
 		db = "db" + strings.TrimPrefix(strings.ToLower(orZero(r.Database)), "db")
 	}
-	head := fmt.Sprintf("数据库 %s（%s，%s），库 %s。%s", cn.Name, kindName(cn.Kind), where, db, strings.Join(dbx.AIWriteNotes(cn.Kind, r.Stmts), "；"))
+	account := ""
+	if cn.AIUser != "" {
+		account = "，用 AI 的账号 " + cn.AIUser
+	}
+	head := fmt.Sprintf("数据库 %s（%s，%s%s），库 %s。%s", cn.Name, kindName(cn.Kind), where, account, db, strings.Join(dbx.AIWriteNotes(cn.Kind, r.Stmts), "；"))
 	body := strings.Join(r.Stmts, ";\n\n") + ";"
 	if cn.Kind == dbx.Redis {
 		body = strings.Join(r.Stmts, "\n")
@@ -261,8 +265,8 @@ func orZero(s string) string {
 // prepareDB 桌面版收到改数据库的请求、给用户看之前再查一遍，确认框里的内容按连接重新生成。
 func prepareDB(r *approve.Request) error {
 	st, _ := settings.Load()
-	if r.ClientConfirmed && st.MCP.ConfirmIn != "client" {
-		return errors.New("Ferry 设置里没有选在编程软件里确认改动：要在 Ferry 里确认")
+	if r.ClientConfirmed {
+		return errors.New("改数据库只能在 Ferry 里确认")
 	}
 	cn, err := dbx.Get(r.DB)
 	if err != nil {

@@ -237,7 +237,7 @@ onMounted(loadCallCount)
       </div>
       <p v-if="confirmIn === 'client'" class="muted small">
         编程软件支持时（MCP 的表单确认），确认框显示在编程软件里，你在那里点同意，Ferry 不再弹窗、直接执行；不支持的编程软件仍在 Ferry 里确认。编程软件没把确认框给你看就回答了（2 秒内），或者你关掉了确认框，也改在 Ferry 里弹窗；调用记录里能看到它每次回答了什么。
-        这样确认的可靠程度取决于编程软件：它能执行命令时，也可能绕过确认，所以只在你信任的编程软件里这样用。密码始终在 Ferry 里填。
+        这样确认的可靠程度取决于编程软件：它能执行命令时，也可能绕过确认，所以只在你信任的编程软件里这样用。密码始终在 Ferry 里填，改数据库也始终在 Ferry 里确认（改错了数据撤不回）。
       </p>
       <el-radio-group v-model="scope" size="small">
         <el-radio value="all">全部非生产服务器</el-radio>

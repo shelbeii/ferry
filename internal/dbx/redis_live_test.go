@@ -257,6 +257,33 @@ func TestRedisLive(t *testing.T) {
 	if q, _ := cl.AIRedisQuery(ctx, db, "LRANGE app:queue 0 -1"); q == nil || q.Reply.T != "arr" {
 		t.Errorf("AI 查列表：%+v", q)
 	}
+	// 大键不许一次读完，要分批
+	rc, _ := cl.redisOf(ctx, db)
+	big := []any{"HSET", "ai:big"}
+	for i := 0; i <= aiRedisBigItems; i++ {
+		big = append(big, "f"+strconv.Itoa(i), "v")
+	}
+	if err := rc.Do(ctx, big...).Err(); err != nil {
+		t.Fatal(err)
+	}
+	rc.RPush(ctx, "ai:bigl", big[2:]...)
+	for _, c := range []struct{ cmd, want string }{
+		{"HGETALL ai:big", "HSCAN"},
+		{"HKEYS ai:big", "HSCAN"},
+		{"LRANGE ai:bigl 0 -1", "LRANGE ai:bigl 0 199"},
+		{"SCAN 0 COUNT 100000", "COUNT 最多"},
+		{"DUMP ai:big", "不能用 DUMP"},
+	} {
+		if _, err := cl.AIRedisQuery(ctx, db, c.cmd); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s 应该拒绝（%s）：%v", c.cmd, c.want, err)
+		}
+	}
+	for _, cmd := range []string{"LRANGE ai:bigl 0 199", "HSCAN ai:big 0 COUNT 200", "HLEN ai:big", "HGET ai:big f1"} {
+		if _, err := cl.AIRedisQuery(ctx, db, cmd); err != nil {
+			t.Errorf("%s 应该可以：%v", cmd, err)
+		}
+	}
+	rc.Del(ctx, "ai:big", "ai:bigl")
 	x, err := cl.AIExec(ctx, db, []string{"SET ai:n 5", "INCR ai:n", "HSET ai:h f v"})
 	if err != nil || !x.OK || !x.Committed || len(x.Results) != 3 || x.Results[1].ReplyText != "(integer) 6" {
 		t.Fatalf("AI 改：%+v %v", x, err)

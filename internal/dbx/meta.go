@@ -197,6 +197,8 @@ type TableInfo struct {
 	Charset   string   `json:"charset,omitempty"`
 	PKName    string   `json:"pkName,omitempty"` // PostgreSQL 主键约束名
 	DDL       string   `json:"ddl"`
+	// checks PostgreSQL 的检查约束（导出时不带外键重新拼建表语句用）
+	checks []string
 }
 
 // TableInfo 读表结构。
@@ -455,6 +457,9 @@ func pgTable(ctx context.Context, db *sql.DB, schema, table string) (*TableInfo,
 		}
 		if gen != "" {
 			c.Generated = true
+			if def.Valid { // 计算列的表达式（建表语句里要带上）
+				c.Extra = "GENERATED ALWAYS AS (" + def.String + ") STORED"
+			}
 		}
 		if ident != "" {
 			c.Auto = true
@@ -558,6 +563,7 @@ func pgTable(ctx context.Context, db *sql.DB, schema, table string) (*TableInfo,
 		ti.DDL = "CREATE " + word + " " + reg + " AS\n" + def
 		return ti, nil
 	}
+	ti.checks = checks
 	ti.DDL = pgDDL(ti, checks)
 	return ti, nil
 }

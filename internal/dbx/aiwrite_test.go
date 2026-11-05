@@ -66,6 +66,12 @@ func TestCheckAIWrite(t *testing.T) {
 		{Postgres, "app", "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_terminate_backend(1); END $$", "函数"},
 		{Postgres, "app", "UPDATE pg_catalog.pg_class SET relname = 'x'", "系统表"},
 		{Postgres, "app", "DELETE FROM t WHERE id = 1; SELECT pg_sleep(100)", "第 2 条"},
+		{MySQL, "app", "RENAME USER 'app'@'%' TO 'x'@'%'", "账号"},
+		{MySQL, "app", "ALTER DATABASE app CHARACTER SET latin1", "改库"},
+		{Postgres, "app", "ALTER DATABASE postgres OWNER TO x", "改库"},
+		{Postgres, "app", "ALTER SCHEMA public RENAME TO x", "改库"},
+		{Postgres, "app", "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'COPY (SELECT 1) TO PROGRAM ''id'''; END $$", "系统命令"},
+		{Postgres, "app", "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN COPY t TO '/tmp/x'; END $$", "文件"},
 	}
 	for _, c := range bad {
 		_, err := CheckAIWrite(c.kind, c.db, c.sql)
@@ -86,6 +92,13 @@ func TestAIWriteDanger(t *testing.T) {
 		{"DROP VIEW v", "视图"},
 		{"ALTER TABLE t DROP COLUMN a", "删掉列"},
 		{"INSERT INTO t VALUES (1)", ""},
+		{"CREATE TRIGGER tg AFTER INSERT ON t FOR EACH ROW SET @a = 1", "触发器"},
+		{"CREATE DEFINER=`root`@`%` PROCEDURE p() SELECT 1", "存储过程"},
+		{"CREATE OR REPLACE FUNCTION f() RETURNS int SECURITY DEFINER RETURN 1", "SECURITY DEFINER"},
+		{"ALTER TABLE t OWNER TO x", "所有者"},
+		{"UPDATE t SET a = (SELECT b FROM u WHERE u.id = 1)", "UPDATE 没写 WHERE"},
+		{"DELETE FROM t WHERE id IN (SELECT id FROM u WHERE x = 1)", ""},
+		{"UPDATE t SET nowhere = 1, a = 'WHERE'", "UPDATE 没写 WHERE"},
 	}
 	for _, c := range cases {
 		got := AIWriteDanger(MySQL, Split(MySQL, c.sql))
@@ -101,6 +114,19 @@ func TestAIWriteDanger(t *testing.T) {
 	}
 	if n := AIWriteNotes(Postgres, []string{"ALTER TABLE t ADD c INT"}); !strings.Contains(n[0], "也能撤回") {
 		t.Fatal(n)
+	}
+}
+
+// 查询窗口里用户自己写的：按语句拆开判断（一行里写几条也行），只提醒删表、不带 WHERE 这类
+func TestDangersHuman(t *testing.T) {
+	if d := Dangers(MySQL, Split(MySQL, "SELECT 1; DELETE FROM t"), false); len(d) != 1 || !strings.Contains(d[0], "DELETE") {
+		t.Fatal(d)
+	}
+	if d := Dangers(Postgres, Split(Postgres, "CREATE FUNCTION f() RETURNS int SECURITY DEFINER AS $$ SELECT 1 $$ LANGUAGE sql"), false); len(d) != 0 {
+		t.Fatal(d)
+	}
+	if d := Dangers(MySQL, Split(MySQL, "-- DROP TABLE t\nSELECT 'DELETE FROM t'"), false); len(d) != 0 {
+		t.Fatal(d)
 	}
 }
 

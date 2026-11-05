@@ -6,7 +6,7 @@ import { ElMessage } from 'element-plus'
 import { CaretRight, VideoPlay, CircleClose, Clock, Download, Delete } from '@element-plus/icons-vue'
 import DbGrid from './DbGrid.vue'
 import { createSqlEditor, type SqlEditor } from '../../editor/sqlEditor'
-import { dbCall, dbRun, confirmSql, dangerOf, closeDbSession, type DbConn, type DbResult, type DbDatabase, type DbTable } from '../../db'
+import { dbCall, dbRun, confirmSql, sqlDangers, closeDbSession, type DbConn, type DbResult, type DbDatabase, type DbTable } from '../../db'
 import { startTask } from '../../state'
 import { pickSaveFile, reveal } from '../../platform'
 
@@ -72,7 +72,13 @@ watch(dbName, (v) => {
 async function run(text: string) {
   const sql = text.trim()
   if (!sql || running.value) return
-  const dangers = sql.split(/;\s*\n/).map(dangerOf).filter(Boolean)
+  let dangers: string[] = []
+  try {
+    dangers = await sqlDangers(props.conn, { sql })
+  } catch (e) {
+    error.value = (e as Error).message
+    return
+  }
   if (dangers.length && !(await confirmSql(props.conn, '确认执行', [sql], { note: '查询窗口里的语句直接执行，没有撤销。' }))) return
   running.value = true
   error.value = ''

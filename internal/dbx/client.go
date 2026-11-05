@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,7 +53,11 @@ type Client struct {
 	users    int
 	lastUsed time.Time
 	closed   bool
-	Version  string
+	// stale 已经换成新的了（改了连接、通道断了）：没人用了就关掉
+	stale   bool
+	Version string
+	// Encrypted 连接加密了（TLS；经 SSH 的不算）
+	Encrypted bool
 
 	// Redis：各个库的连接池、命令行窗口的连接、命令是否只读（COMMAND INFO 查过的）
 	rdbs         map[int]*redis.Client
@@ -64,6 +69,7 @@ type Client struct {
 type session struct {
 	db       string
 	conn     *sql.Conn
+	id       string // 这条连接在数据库里的编号（停止语句时用，见 connID）
 	lastUsed time.Time
 }
 
@@ -71,6 +77,8 @@ type session struct {
 type Manager struct {
 	mu      sync.Mutex
 	clients map[string]*Client // 连接 ID → 状态
+	// opening 正在打开的连接：同一个连接同时来的请求等它打开完再复用（不然后一个会把前一个正在用的关掉）
+	opening map[string]chan struct{}
 	keep    bool
 	once    sync.Once
 }
@@ -94,6 +102,7 @@ func (m *Manager) reap() {
 		for id, c := range m.clients {
 			c.mu.Lock()
 			idle := c.users == 0 && time.Since(c.lastUsed) > IdleClose
+			dead := c.users == 0 && c.tn != nil && !c.tn.Alive()
 			// 查询窗口的会话单独按空闲时间关
 			for sid, s := range c.sessions {
 				if time.Since(s.lastUsed) > IdleClose {
@@ -108,7 +117,7 @@ func (m *Manager) reap() {
 				}
 			}
 			c.mu.Unlock()
-			if idle || (c.tn != nil && !c.tn.Alive() && c.users == 0) {
+			if idle || dead {
 				delete(m.clients, id)
 				c.close()
 			}
@@ -126,45 +135,82 @@ func clientKey(c *Conn, password string) string {
 // Open 取得打开着的连接（复用或新建）；用完调用 release。
 func (m *Manager) Open(ctx context.Context, c *Conn, password string, open OpenTunnel) (*Client, func(), error) {
 	key := clientKey(c, password)
-	m.mu.Lock()
-	cl := m.clients[c.ID]
-	if cl != nil && (cl.key != key || (cl.tn != nil && !cl.tn.Alive())) {
-		delete(m.clients, c.ID)
-		cl.mu.Lock()
-		busy := cl.users > 0
-		cl.mu.Unlock()
-		if !busy {
-			cl.close()
+	for {
+		m.mu.Lock()
+		if ch := m.opening[c.ID]; ch != nil {
+			m.mu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
 		}
-		cl = nil
-	}
-	if cl != nil {
-		cl.mu.Lock()
-		cl.users++
-		cl.mu.Unlock()
+		cl := m.clients[c.ID]
+		if cl != nil && (cl.key != key || (cl.tn != nil && !cl.tn.Alive())) {
+			delete(m.clients, c.ID)
+			cl.retire()
+			cl = nil
+		}
+		if cl != nil {
+			cl.mu.Lock()
+			cl.users++
+			cl.mu.Unlock()
+			m.mu.Unlock()
+			return cl, m.releaser(cl), nil
+		}
+		if !m.keep {
+			m.mu.Unlock()
+			cl, err := connect(ctx, c, key, password, open)
+			if err != nil {
+				return nil, nil, err
+			}
+			return cl, func() { cl.close() }, nil
+		}
+		ch := make(chan struct{})
+		if m.opening == nil {
+			m.opening = map[string]chan struct{}{}
+		}
+		m.opening[c.ID] = ch
 		m.mu.Unlock()
+
+		cl, err := connect(ctx, c, key, password, open)
+		m.mu.Lock()
+		delete(m.opening, c.ID)
+		close(ch)
+		if err == nil {
+			if old := m.clients[c.ID]; old != nil {
+				old.retire()
+			}
+			m.clients[c.ID] = cl
+		}
+		m.mu.Unlock()
+		if err != nil {
+			return nil, nil, err
+		}
 		return cl, m.releaser(cl), nil
 	}
-	m.mu.Unlock()
+}
 
-	cl = &Client{Conn: *c, key: key, password: password, dbs: map[string]*sql.DB{}, sessions: map[string]*session{}, users: 1, lastUsed: time.Now()}
+// connect 新建连接：经服务器时先打开通道，再连一次数据库（密码不对、连不上时现在就报错）。
+func connect(ctx context.Context, c *Conn, key, password string, open OpenTunnel) (*Client, error) {
+	cl := &Client{Conn: *c, key: key, password: password, dbs: map[string]*sql.DB{}, sessions: map[string]*session{}, users: 1, lastUsed: time.Now()}
 	cl.addr = c.Addr()
 	if c.Via != nil {
 		tn, err := open(c.Via)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		cl.tn = tn
 		if c.Container != "" {
 			addr, err := tn.ContainerAddr(ctx, c.Container, c.Port)
 			if err != nil {
 				tn.Close()
-				return nil, nil, err
+				return nil, err
 			}
 			cl.addr = addr
 		}
 	}
-	// 先连一次：密码不对、连不上时现在就报错
 	var err error
 	if c.Kind == Redis {
 		err = cl.redisPing(ctx)
@@ -176,21 +222,9 @@ func (m *Manager) Open(ctx context.Context, c *Conn, password string, open OpenT
 	}
 	if err != nil {
 		cl.close()
-		return nil, nil, err
+		return nil, err
 	}
-	m.mu.Lock()
-	if m.keep {
-		if old := m.clients[c.ID]; old != nil {
-			old.close()
-		}
-		m.clients[c.ID] = cl
-	}
-	keep := m.keep
-	m.mu.Unlock()
-	if !keep {
-		return cl, func() { cl.close() }, nil
-	}
-	return cl, m.releaser(cl), nil
+	return cl, nil
 }
 
 func pingVersion(ctx context.Context, cl *Client, db *sql.DB) error {
@@ -201,6 +235,7 @@ func pingVersion(ctx context.Context, cl *Client, db *sql.DB) error {
 		return cl.explain(err)
 	}
 	cl.Version = v
+	cl.checkEncrypted(ctx, db)
 	return nil
 }
 
@@ -211,17 +246,21 @@ func (m *Manager) releaser(cl *Client) func() {
 			cl.mu.Lock()
 			cl.users--
 			cl.lastUsed = time.Now()
+			gone := cl.stale && cl.users == 0
 			cl.mu.Unlock()
+			if gone {
+				cl.close()
+			}
 		})
 	}
 }
 
-// Close 关闭这个连接打开着的一切（改了、删了连接，或用户点了断开）。id 为空时全部关闭。
+// Close 关闭这个连接打开着的一切（改了、删了连接，或用户点了断开），包括 AI 用单独账号打开的（ID#ai）。id 为空时全部关闭。
 func (m *Manager) Close(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k, c := range m.clients {
-		if id == "" || k == id {
+		if id == "" || k == id || strings.HasPrefix(k, id+"#") {
 			delete(m.clients, k)
 			c.close()
 		}
@@ -256,6 +295,17 @@ func (m *Manager) CloseSession(id, sid string) {
 	if s := cl.rsess[sid]; s != nil {
 		s.close()
 		delete(cl.rsess, sid)
+	}
+}
+
+// retire 已经换成新的了：没人在用就现在关，有人在用就等用完再关。
+func (cl *Client) retire() {
+	cl.mu.Lock()
+	cl.stale = true
+	idle := cl.users == 0
+	cl.mu.Unlock()
+	if idle {
+		cl.close()
 	}
 }
 
@@ -320,7 +370,14 @@ func (cl *Client) DB(ctx context.Context, name string) (*sql.DB, error) {
 		cfg.InterpolateParams = true
 		cfg.ClientFoundRows = true // UPDATE 的影响行数按匹配到的行算（值没变也算 1 行）
 		cfg.AllowNativePasswords = true
-		cfg.AllowCleartextPasswords = cl.tn != nil // 只在 SSH 通道里允许明文密码
+		switch cl.tlsMode() {
+		case tlsPrefer:
+			cfg.TLS, cfg.AllowFallbackToPlaintext = cl.tlsConfig(), true
+		case TLSRequire, TLSVerify:
+			cfg.TLS = cl.tlsConfig()
+		}
+		// 明文密码只在 SSH 通道里、一定加密时允许
+		cfg.AllowCleartextPasswords = cl.tn != nil || cl.tlsMode() == TLSRequire || cl.tlsMode() == TLSVerify
 		if err := cfg.Apply(mysql.Charset("utf8mb4", "")); err != nil {
 			return nil, err
 		}
@@ -345,8 +402,15 @@ func (cl *Client) DB(ctx context.Context, name string) (*sql.DB, error) {
 		cfg.Password = cl.password
 		cfg.Database = name
 		cfg.ConnectTimeout = dialTimeout
-		cfg.TLSConfig = nil // 经 SSH 通道或内网；不协商 TLS
+		cfg.TLSConfig = nil
 		cfg.Fallbacks = nil
+		switch cl.tlsMode() {
+		case tlsPrefer: // 先试加密，数据库不支持时不加密再连
+			cfg.TLSConfig = cl.tlsConfig()
+			cfg.Fallbacks = []*pgconn.FallbackConfig{{Host: cfg.Host, Port: cfg.Port}}
+		case TLSRequire, TLSVerify:
+			cfg.TLSConfig = cl.tlsConfig()
+		}
 		cfg.RuntimeParams = map[string]string{"application_name": "Ferry"}
 		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 		cfg.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) { return cl.dial(ctx) }
@@ -385,7 +449,9 @@ func (cl *Client) Session(ctx context.Context, sid, dbName string) (*sql.Conn, f
 	cl.mu.Unlock()
 	if s != nil {
 		if err := s.conn.PingContext(ctx); err == nil {
+			cl.mu.Lock()
 			s.lastUsed = time.Now()
+			cl.mu.Unlock()
 			return s.conn, func() {}, nil
 		}
 		cl.mu.Lock()
@@ -401,10 +467,75 @@ func (cl *Client) Session(ctx context.Context, sid, dbName string) (*sql.Conn, f
 	if err != nil {
 		return nil, nil, cl.explain(err)
 	}
+	id := cl.connID(ctx, c)
 	cl.mu.Lock()
-	cl.sessions[sid] = &session{db: dbName, conn: c, lastUsed: time.Now()}
+	cl.sessions[sid] = &session{db: dbName, conn: c, id: id, lastUsed: time.Now()}
 	cl.mu.Unlock()
 	return c, func() {}, nil
+}
+
+// sessionID 查询窗口会话的连接编号。
+func (cl *Client) sessionID(sid string) string {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	if s := cl.sessions[sid]; s != nil {
+		return s.id
+	}
+	return ""
+}
+
+// connID 这条连接在数据库里的编号：MySQL 的 CONNECTION_ID()、PostgreSQL 的进程号。拿不到时为空。
+func (cl *Client) connID(ctx context.Context, conn *sql.Conn) string {
+	switch cl.Conn.Kind {
+	case Postgres:
+		var pid uint32
+		conn.Raw(func(dc any) error {
+			if c, ok := dc.(*stdlib.Conn); ok {
+				pid = c.Conn().PgConn().PID()
+			}
+			return nil
+		})
+		if pid != 0 {
+			return strconv.FormatUint(uint64(pid), 10)
+		}
+	case MySQL:
+		var id uint64
+		if err := conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&id); err == nil {
+			return strconv.FormatUint(id, 10)
+		}
+	}
+	return ""
+}
+
+// stopStmt 让数据库停下编号为 id 的连接正在执行的语句（用另一条连接：MySQL KILL QUERY，PostgreSQL pg_cancel_backend）。
+// 只断开连接时 MySQL 会把语句执行完（UPDATE 照样生效），所以点停止、读够行数时都要这样停。
+func (cl *Client) stopStmt(dbName, id string) {
+	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	db, err := cl.DB(ctx, dbName)
+	if err != nil {
+		return
+	}
+	q := "KILL QUERY " + id
+	if cl.Conn.Kind == Postgres {
+		q = "SELECT pg_cancel_backend(" + id + ")"
+	}
+	db.ExecContext(ctx, q)
+}
+
+// pgInTx PostgreSQL 的这条连接在用户自己开的事务里（停语句会让整个事务作废，要先设保存点）。
+func pgInTx(conn *sql.Conn) bool {
+	in := false
+	conn.Raw(func(dc any) error {
+		if c, ok := dc.(*stdlib.Conn); ok {
+			in = c.Conn().PgConn().TxStatus() == 'T'
+		}
+		return nil
+	})
+	return in
 }
 
 // DropSession 会话出错断开了：下次重新建。
@@ -424,6 +555,9 @@ func (cl *Client) explain(err error) error {
 	}
 	if s := err.Error(); strings.Contains(s, "without any password configured") || strings.Contains(s, "no password is set") {
 		return errors.New("这个 Redis 没有设密码：在连接里把密码清空（修改连接，清掉记住的密码）")
+	}
+	if te := cl.tlsError(err); te != nil {
+		return te
 	}
 	if authFailed(err) {
 		return &NeedPasswordError{ID: cl.Conn.ID, Name: cl.Conn.Name, Env: PasswordEnv(cl.Conn.ID), Rejected: true, Msg: err.Error()}

@@ -104,8 +104,24 @@ watch(current, (r) => {
   if (r) {
     shown.value = r
     grant.value = false
+    if (isDB(r)) void estimateRows(r)
   }
 })
+
+// 改数据库：用 EXPLAIN 估算 UPDATE、DELETE 会影响多少行（不执行，几秒内估不出来就算了）
+const estimate = ref<{ id: string; text: string; max: number; error?: string; busy?: boolean } | null>(null)
+async function estimateRows(r: McpRequest) {
+  estimate.value = null
+  if (r.dbKind === 'redis' || !r.db || !(r.stmts ?? []).some((x) => /\b(UPDATE|DELETE)\b/i.test(x))) return
+  estimate.value = { id: r.id, text: '', max: 0, busy: true }
+  try {
+    const x = await call<{ estimates: { rows: number }[]; text: string; candidates: number }>(['db', 'estimate', r.db, r.database ?? ''], { FERRY_DB_REQ: JSON.stringify({ stmts: r.stmts ?? [] }) })
+    if (estimate.value?.id !== r.id) return
+    estimate.value = x.candidates ? { id: r.id, text: x.text, max: Math.max(0, ...x.estimates.map((e) => e.rows)) } : null
+  } catch (e) {
+    if (estimate.value?.id === r.id) estimate.value = { id: r.id, text: '', max: 0, error: (e as Error).message }
+  }
+}
 const deciding = ref(false)
 const grant = ref(false)
 const now = ref(Date.now())
@@ -435,6 +451,13 @@ const actionType = (a: string) =>
         <el-descriptions-item v-for="(d, i) in isBlock(shown) || shown.action === 'secret' ? [] : (shown.detail ?? [])" :key="i" :label="i === 0 ? '详情' : ''">
           <span class="detail">{{ d }}</span>
         </el-descriptions-item>
+        <el-descriptions-item v-if="isDB(shown) && estimate?.id === shown.id" label="影响行数">
+          <span v-if="estimate.busy" class="muted">正在估算…</span>
+          <span v-else-if="estimate.error" class="muted">估算不了：{{ estimate.error }}</span>
+          <span v-else-if="estimate.text" :class="{ 'big-rows': estimate.max >= 1000 }">{{ estimate.text }}</span>
+          <span v-else class="muted">估算不了（表可能在这批语句里才建）</span>
+          <div class="muted small">数据库按统计信息估的（EXPLAIN，不执行语句），可能和实际差不少</div>
+        </el-descriptions-item>
         <el-descriptions-item label="理由">
           <span v-if="shown.reason" class="reason">{{ shown.reason }}</span>
           <span v-else class="muted">（没有说明）</span>
@@ -491,6 +514,10 @@ const actionType = (a: string) =>
   margin-left: 8px;
 }
 .reason,
+.big-rows {
+  color: var(--el-color-danger);
+  font-weight: 600;
+}
 .detail {
   white-space: pre-wrap;
   word-break: break-all;
