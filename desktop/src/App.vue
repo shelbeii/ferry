@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { pickConfig, pickSaveFile } from './platform'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete, List, Setting, Monitor, Fold, Expand, FolderOpened, MoreFilled, EditPen, SwitchButton, Search, Compass, Coin } from '@element-plus/icons-vue'
+import { Plus, Delete, List, Setting, Monitor, Fold, Expand, FolderOpened, MoreFilled, EditPen, SwitchButton, Search, Compass, Coin, Download } from '@element-plus/icons-vue'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from './platform'
@@ -19,6 +19,7 @@ import ConnectionView from './components/ConnectionView.vue'
 import McpApprovals from './components/McpApprovals.vue'
 import { completeRequest, requestKey } from './requestQueue'
 import { dbOpen, dbRequest } from './db'
+import { startAutoCheck, updater } from './update'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const SettingsDialog = defineAsyncComponent(() => import('./components/SettingsDialog.vue'))
@@ -26,6 +27,7 @@ const NewProjectDialog = defineAsyncComponent(() => import('./components/NewProj
 const ConnectionDialog = defineAsyncComponent(() => import('./components/ConnectionDialog.vue'))
 const BusyDialog = defineAsyncComponent(() => import('./components/BusyDialog.vue'))
 const BrowserDrawer = defineAsyncComponent(() => import('./components/BrowserDrawer.vue'))
+const UpdateDialog = defineAsyncComponent(() => import('./components/UpdateDialog.vue'))
 // 浏览器第一次打开后一直留着（关上抽屉网页还在，再打开接着用）
 const browserUsed = ref(false)
 watch(browserOpen, (v) => v && (browserUsed.value = true))
@@ -84,6 +86,7 @@ async function initialize() {
 }
 onMounted(async () => {
   await initialize()
+  startAutoCheck() // GitHub 上有新版本时提示（设置 → 关于 →「自动检查更新」）
   if (isTauri) {
     // 有任务进行中时关闭窗口先确认（设置 → 界面）
     await getCurrentWindow().onCloseRequested(async (e) => {
@@ -296,6 +299,13 @@ async function moveConfig(path: string) {
           </el-badge>
         </button>
       </el-tooltip>
+      <el-tooltip v-if="updater.info?.newer" :show-after="HOVER_DELAY" :content="`有新版本 ${updater.info.latest}，点这里更新`" placement="right">
+        <button class="rail-btn rail-update" aria-label="有新版本" @click="updater.dialog = true">
+          <el-badge is-dot class="rail-badge">
+            <el-icon :size="18"><Download /></el-icon>
+          </el-badge>
+        </button>
+      </el-tooltip>
       <el-tooltip :show-after="HOVER_DELAY" content="设置" placement="right">
         <button class="rail-btn" aria-label="设置" @click="settingsOpen = true">
           <el-icon :size="18"><Setting /></el-icon>
@@ -421,6 +431,7 @@ async function moveConfig(path: string) {
     <TerminalHost />
     <McpApprovals />
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
+    <UpdateDialog v-if="updater.dialog" />
     <NewProjectDialog v-if="newOpen" @close="newOpen = false" />
     <TrustDialog
       v-if="trustRequest && (trustRequest.config || current)"
@@ -505,6 +516,9 @@ async function moveConfig(path: string) {
 .rail-btn:focus-visible {
   outline: 2px solid var(--el-color-primary);
   outline-offset: 1px;
+}
+.rail-update {
+  color: var(--el-color-primary);
 }
 .rail-gap {
   flex: 1;

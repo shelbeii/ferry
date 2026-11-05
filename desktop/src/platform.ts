@@ -345,3 +345,8 @@ export async function openUrl(url: string): Promise<void> {
   const { openUrl } = await import('@tauri-apps/plugin-opener')
   await openUrl(url)
 }
+
+/** 退出 Ferry（更新时安装程序已经启动）；浏览器调试时什么也不做。 */
+export async function exitApp(): Promise<void> {
+  if (isTauri) await invoke('exit_app')
+}

@@ -87,6 +87,14 @@ fn write_config(webview: tauri::Webview, path: String, content: String) -> Resul
     })
 }
 
+/// 退出 Ferry（更新：安装程序已经启动，由它装好后重新打开）。不经过关闭窗口的确认。
+#[tauri::command]
+fn exit_app(webview: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
+    main_only(&webview)?;
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -108,6 +116,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_config,
             write_config,
+            exit_app,
             browser::browser_tabs,
             browser::browser_new_tab,
             browser::browser_select_tab,

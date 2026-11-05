@@ -205,7 +205,7 @@ type Runtime struct {
 	CacheDir string `json:"cacheDir"`
 	// NginxSource nginx 的下载源：nginx-binaries 格式（目录下有 index.json）；空 = https://jirutka.github.io/nginx-binaries
 	NginxSource string `json:"nginxSource"`
-	// GitHubMirror 从 GitHub 下载软件（Nacos、Sentinel）时加在地址前面的加速前缀，如 https://ghfast.top/；空 = 直接下载
+	// GitHubMirror 从 GitHub 下载软件（Nacos、Sentinel）和 Ferry 的更新时加在地址前面的加速前缀，如 https://ghfast.top/；空 = 直接下载
 	GitHubMirror string `json:"githubMirror"`
 	// MySQLSource MySQL 的下载源（目录结构同 https://cdn.mysql.com）；空 = 官方
 	MySQLSource string `json:"mysqlSource"`
@@ -225,6 +225,8 @@ type UI struct {
 	Glass bool `json:"glass"`
 	// GlassTransparency 玻璃的透明度 0～100（默认 90，见 DefaultGlassTransparency）：越大越透明（列表从工具栏下面滑过时看得越清楚），越小磨砂越重、越不透
 	GlassTransparency int `json:"glassTransparency"`
+	// CheckUpdate 桌面版自动检查 GitHub 上有没有新版本（打开后和之后每隔几小时；默认 true）
+	CheckUpdate bool `json:"checkUpdate"`
 }
 
 // Desktop 桌面版的项目列表。
@@ -247,7 +249,7 @@ func Defaults() Settings {
 	return Settings{
 		Connect: Connect{TimeoutSec: 15, UploadStreams: 6, IdleMinutes: 15, StatusMinutes: 1},
 		Logs:    Logs{BuildLogDays: 30},
-		UI:      UI{Theme: "system", TaskKeep: 50, TaskKeepDays: 30, TaskMaxMB: 100, ConfirmClose: true, Notify: true, Glass: true, GlassTransparency: DefaultGlassTransparency},
+		UI:      UI{Theme: "system", TaskKeep: 50, TaskKeepDays: 30, TaskMaxMB: 100, ConfirmClose: true, Notify: true, Glass: true, GlassTransparency: DefaultGlassTransparency, CheckUpdate: true},
 	}
 }
 

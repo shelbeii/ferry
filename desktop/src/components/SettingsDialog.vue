@@ -13,6 +13,7 @@ import { appInfo, browserDataUsage, clearBrowserData, clearUiCache, isTauri, uiC
 import { clearHistory } from '../browser/address'
 import { glass, GLASS_TRANSPARENCY_DEFAULT } from '../glass/runtime'
 import GlassToggle from './glass/GlassToggle.vue'
+import { checkUpdate, updater } from '../update'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const TemplateEditor = defineAsyncComponent(() => import('./TemplateEditor.vue'))
@@ -28,14 +29,14 @@ const sections = [
   { name: 'storage', label: '存储', group: '常规', description: '管理数据位置、磁盘占用和记录保留策略。', keywords: '目录 日志 清理 任务 浏览器 缓存 Cookie 界面缓存 临时文件' },
   { name: 'connect', label: '连接', group: '常规', description: '设置连接、上传和自动刷新行为。', keywords: 'SSH 超时 密钥 端口' },
   { name: 'secrets', label: '凭据', group: '常规', description: '查看和管理保存在本机系统凭据库中的密码与密钥。', keywords: '密码 key token' },
-  { name: 'ui', label: '界面', group: '常规', description: '调整主题、任务展示与通知体验。', keywords: '主题 深色 通知 液态玻璃 玻璃 动画' },
+  { name: 'ui', label: '界面', group: '常规', description: '调整主题、任务展示与通知体验。', keywords: '主题 深色 通知 液态玻璃 玻璃 动画 检查更新' },
   { name: 'build', label: '构建', group: '部署与运行', description: '为构建程序配置环境变量与工具路径。', keywords: 'JAVA_HOME PATH Maven' },
   { name: 'deploy', label: '部署', group: '部署与运行', description: '配置团队身份、部署默认行为与证书密钥。', keywords: '团队 DNS HTTPS' },
   { name: 'notify', label: '通知', group: '部署与运行', description: '将部署和回滚结果发送到团队使用的通知渠道。', keywords: '企业微信 钉钉 飞书 机器人' },
   { name: 'runtime', label: '运行环境', group: '部署与运行', description: '管理 JDK、nginx、软件安装包与安装模板。', keywords: 'Java 安装包 模板 nginx' },
   { name: 'ai', label: 'AI', group: '集成', description: '管理助手使用的模型、连接参数和 API Key。', keywords: '模型 服务商' },
   { name: 'cli', label: '命令行与 MCP', group: '集成', description: '接入编程工具，管理可用能力与调用权限。', keywords: 'Claude Cursor PATH 工具 权限' },
-  { name: 'about', label: '关于', group: '应用', description: '版本信息与运行环境，排查问题时可复制完整诊断信息。', keywords: '版本 更新' },
+  { name: 'about', label: '关于', group: '应用', description: '版本信息与运行环境，排查问题时可复制完整诊断信息。', keywords: '版本 更新 检查更新 新版本' },
 ]
 const navigationGroups = computed(() => ['常规', '部署与运行', '集成', '应用'].map((label) => ({ label, items: sections.filter((s) => s.group === label && `${s.label} ${s.description} ${s.keywords}`.toLowerCase().includes(settingsQuery.value.trim().toLowerCase())) })).filter((g) => g.items.length))
 const currentSection = computed(() => sections.find((s) => s.name === tab.value) ?? sections[0])
@@ -494,6 +495,15 @@ function aboutText(): string {
     `系统 ${navigator.userAgent}`,
   ]
   return lines.join('\n')
+}
+
+async function manualCheck() {
+  try {
+    const r = await checkUpdate(true)
+    if (r?.newer) updater.dialog = true
+  } catch {
+    // 原因显示在「更新」一行
+  }
 }
 
 async function copyAbout() {
@@ -1019,7 +1029,7 @@ async function pickKeyDir() {
         <el-form v-if="rt" label-width="110px">
           <el-form-item label="GitHub 加速">
             <el-input v-model="rt!.githubMirror" class="mono" :placeholder="'不填 = 直接从 GitHub 下载；如 https://ghfast.top/'" />
-            <div class="muted small">GitHub 下载慢时填加速地址；也可以下载好后点「导入安装包」</div>
+            <div class="muted small">GitHub 下载慢时填加速地址（软件安装包和 Ferry 自己的更新都用它）；软件也可以下载好后点「导入安装包」</div>
           </el-form-item>
           <el-form-item label="MySQL 下载源">
             <el-input v-model="rt!.mysqlSource" class="mono" :placeholder="'https://cdn.mysql.com（默认）'" />
@@ -1146,6 +1156,12 @@ async function pickKeyDir() {
               <div class="muted small">部署、启停等用时 10 秒以上的任务结束时，以及编程软件请求改动服务器、等你确认时；任务栏图标也会闪</div>
             </div>
           </el-form-item>
+          <el-form-item label="检查更新">
+            <div>
+              <GlassToggle v-model="form.ui.checkUpdate">自动检查 GitHub 上有没有新版本</GlassToggle>
+              <div class="muted small">打开 Ferry 后和之后每 6 小时查一次，有新版本时提示；也可以在<el-button link type="primary" class="inline-link" @click="tab = 'about'">「关于」</el-button>里手动检查</div>
+            </div>
+          </el-form-item>
         </el-form>
         <p class="muted small">
           任务面板里的任务记录保留多少，在<el-button link type="primary" class="inline-link" @click="tab = 'storage'">「存储」</el-button>里设置。
@@ -1176,6 +1192,20 @@ async function pickKeyDir() {
           <el-descriptions-item label="运行环境">{{ cli ? `${cli.go} · ${cli.os}/${cli.arch}` : '…' }}</el-descriptions-item>
           <el-descriptions-item label="数据目录"><span class="mono">{{ dataDir?.dir }}</span></el-descriptions-item>
           <el-descriptions-item label="设置文件"><span class="mono">{{ info?.file }}</span></el-descriptions-item>
+          <el-descriptions-item label="更新">
+            <div class="update-row">
+              <span v-if="updater.checking" class="muted">正在检查…</span>
+              <span v-else-if="updater.info?.newer">有新版本 <b>{{ updater.info.latest }}</b></span>
+              <span v-else-if="updater.info">已是最新版本<span class="muted">（GitHub 上最新发布的是 {{ updater.info.latest }}）</span></span>
+              <span v-else-if="updater.checkError" class="danger">检查失败：{{ updater.checkError }}</span>
+              <span v-else class="muted">还没检查过</span>
+              <el-button v-if="updater.info?.newer" type="primary" size="small" @click="updater.dialog = true">查看并更新</el-button>
+              <el-button v-else size="small" :loading="updater.checking" @click="manualCheck">检查更新</el-button>
+            </div>
+            <div class="muted small">
+              {{ appSettings?.ui.checkUpdate === false ? '没开自动检查' : '打开 Ferry 后和之后每 6 小时自动查一次' }}（在<el-button link type="primary" class="inline-link" @click="tab = 'ui'">「界面」</el-button>里改）。从 GitHub 下载，下载慢或打不开时可以在<el-button link type="primary" class="inline-link" @click="tab = 'runtime'">「运行环境」</el-button>填 GitHub 加速。
+            </div>
+          </el-descriptions-item>
         </el-descriptions>
         <div class="row about-actions">
           <el-button :icon="CopyDocument" @click="copyAbout">复制版本信息</el-button>
@@ -1313,6 +1343,13 @@ h4.sub {
 .about-table :deep(.el-descriptions__content) { overflow-wrap: anywhere; }
 .about-table :deep(.el-descriptions__label) {
   width: 120px;
+}
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
 }
 .about-actions {
   margin-top: 4px;

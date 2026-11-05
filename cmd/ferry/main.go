@@ -141,6 +141,8 @@ const usage = `ferry —— 后端 / 前端部署工具
   mcp-tools                     编程软件能用的 MCP 工具：作用、参数、是否要确认
   mcp                           MCP 服务（stdin / stdout）：让 Claude Code、Cursor 等编程软件查看 Ferry 的项目、服务器状态和日志
   version
+  update   [check] | download | install [--restart]   检查 GitHub 上有没有新版本；下载这台电脑用的安装包（校验 SHA256）；
+                                下载并安装（Windows 运行安装包，--restart 装好后重新打开桌面版；macOS 打开 .dmg；Linux 替换 ferry）
   serve                         常驻模式（桌面版使用）：stdin 逐行读 JSON 请求，连接在请求之间复用
 
 应用可写多个或逗号分隔，不写 = 目标上的全部应用（按 order 顺序）。
@@ -174,7 +176,7 @@ var boolFlags = map[string]bool{
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
-	"ai": true,
+	"ai": true, "restart": true,
 }
 
 func parseArgs(argv []string) (*cli, error) {
@@ -332,6 +334,8 @@ func run(argv []string, cio *cliIO) int {
 	switch {
 	case cmd == "settings":
 		return settingsCmd(c, cio, js, con, st, fail)
+	case cmd == "update":
+		return updateCmd(c, cio, js, con, st, fail)
 	case cmd == "ai-secret":
 		return aiSecretCmd(c, cio, js, fail)
 	case cmd == "datadir":
