@@ -55,6 +55,9 @@ func Check(a *config.App, p string, notBefore time.Time, targetArch string) (*In
 		if err := checkStatic(p, a.Artifact.Verify.Static, info); err != nil {
 			return nil, err
 		}
+		if err := checkDirSize(a, p, info); err != nil {
+			return nil, err
+		}
 		if !notBefore.IsZero() {
 			if newest, err := newestFile(p); err == nil && newest.Before(notBefore.Add(-2*time.Second)) {
 				return nil, fmt.Errorf("%s 里的文件都早于本次构建开始时间，构建可能没有输出到这里", p)
@@ -67,6 +70,9 @@ func Check(a *config.App, p string, notBefore time.Time, targetArch string) (*In
 			return nil, fmt.Errorf("%s 的产物应是目录（源码目录或构建输出的目录）：%s", a.Type, p)
 		}
 		if err := checkDirApp(a, p, notBefore, info); err != nil {
+			return nil, err
+		}
+		if err := checkDirSize(a, p, info); err != nil {
 			return nil, err
 		}
 		return info, nil
@@ -278,6 +284,14 @@ func checkStatic(dir string, v *config.StaticVerify, info *Info) error {
 		}
 		return nil
 	})
+}
+
+// checkDirSize 目录产物：要上传的文件加起来不能小于 verify.minSize（构建只输出了一部分时拦下来）。
+func checkDirSize(a *config.App, dir string, info *Info) error {
+	if min := a.Artifact.Verify.MinSize; min > 0 && info.Size < min {
+		return fmt.Errorf("%s 里要上传的文件一共只有 %d 字节，小于 minSize %d", dir, info.Size, min)
+	}
+	return nil
 }
 
 func newestFile(dir string) (time.Time, error) {

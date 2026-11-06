@@ -605,7 +605,7 @@
           {
            "name": "minSize",
            "label": "最小字节数",
-           "doc": "产物比这个小就不上传",
+           "doc": "产物比这个小就不上传；目录（static、python、node、dotnet）按要上传的文件加起来算",
            "kind": "num",
            "type": "数字",
            "min": 0,
@@ -1131,6 +1131,23 @@
           "dotnet"
          ],
          "default": "true"
+        },
+        {
+         "name": "autostartDelay",
+         "label": "开机后等多久再启动",
+         "doc": "开机后过这么久才启动应用（1 秒～1 小时），比如等数据库、注册中心先就绪。只影响开机：部署、重启、意外退出后的重启都不等。服务器上用 systemd 定时器做，几乎不占资源",
+         "kind": "dur",
+         "type": "时长",
+         "appTypes": [
+          "java",
+          "binary",
+          "python",
+          "node",
+          "dotnet"
+         ],
+         "default": "不等，开机马上启动",
+         "min": 1,
+         "max": 3600
         },
         {
          "name": "after",

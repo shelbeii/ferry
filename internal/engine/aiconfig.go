@@ -132,6 +132,9 @@ func ConfigPlanResult(p *config.EditPlan, written bool) map[string]any {
 	if len(p.Problems) > 0 {
 		out["problems"] = p.Problems
 	}
+	if len(p.Warnings) > 0 {
+		out["warnings"] = p.Warnings
+	}
 	if d := ai.LineDiff(p.Old, p.New); d != "" {
 		out["diff"] = d
 	}
@@ -357,8 +360,10 @@ func ConfigRead(configPath, path string, local bool) (any, error) {
 			}
 		}
 	}
-	if _, err := config.LoadContent(src, configPath); err != nil {
+	if f, err := config.LoadContent(src, configPath); err != nil {
 		out["problems"] = strings.Split(strings.TrimSpace(err.Error()), "\n")
+	} else if len(f.Warnings) > 0 {
+		out["warnings"] = f.WarningLines()
 	}
 	return out, nil
 }

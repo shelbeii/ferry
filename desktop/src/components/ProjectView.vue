@@ -869,11 +869,20 @@ function stateTip(s: AppStatus): string {
   parts.push(at ? (s.active === 'active' ? `${what}，${at} 起` : `${what}（上次启动于 ${at}）`) : what)
   if (notFerry(s)) parts.push('不是通过 Ferry 部署的，没有版本记录')
   if (s.stopped && s.active !== 'active') parts.push(STOPPED_TIP)
-  else if (s.autostart !== undefined) parts.push(s.autostart ? '开机自启' : '开机不自启')
+  else if (s.autostart !== undefined) parts.push(s.autostart ? (s.bootDelaySec ? `开机自启（开机后等 ${durationText(s.bootDelaySec)}再启动）` : '开机自启') : '开机不自启')
   const r = restartText(s)
   if (r) parts.push(r)
   if (s.restarts) parts.push(`这次启动后自动重启过 ${s.restarts} 次`)
   return parts.join('；')
+}
+
+// 秒数写成 90 秒、2 分钟、1 分 30 秒
+function durationText(sec: number): string {
+  if (sec < 60) return `${sec} 秒`
+  const m = Math.floor(sec / 60)
+  const r = sec % 60
+  if (m >= 60 && !r && m % 60 === 0) return `${m / 60} 小时`
+  return r ? `${m} 分 ${r} 秒` : `${m} 分钟`
 }
 
 const STOPPED_TIP = '在 Ferry 里手动停止的：开机不会自己启动，服务器告警也不报；点「启动」恢复'

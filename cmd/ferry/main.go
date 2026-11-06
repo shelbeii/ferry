@@ -526,9 +526,16 @@ func run(argv []string, cio *cliIO) int {
 
 	case "validate":
 		if js != nil {
-			return ok(map[string]any{"project": f.Project, "apps": f.AppNames(), "targets": f.TargetNames()})
+			out := map[string]any{"project": f.Project, "apps": f.AppNames(), "targets": f.TargetNames()}
+			if len(f.Warnings) > 0 {
+				out["warnings"] = f.Warnings
+			}
+			return ok(out)
 		}
 		con.OK("%s：项目 %s，%d 个应用，%d 个目标", f.Path, f.Project, len(f.Apps), len(f.Targets))
+		for _, w := range f.Warnings {
+			con.Warn("%s", w)
+		}
 		return 0
 
 	case "plan":

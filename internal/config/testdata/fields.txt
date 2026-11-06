@@ -46,6 +46,7 @@ apps.[].service.after
 apps.[].service.archiveLogs
 apps.[].service.args
 apps.[].service.autostart
+apps.[].service.autostartDelay
 apps.[].service.conflicts
 apps.[].service.description
 apps.[].service.diagLogs

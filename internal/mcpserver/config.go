@@ -118,23 +118,29 @@ func (s *server) addConfigTools(m *mcp.Server) {
 				return out, nil
 			}
 			var verr error
+			var f *config.File
 			if in.Content != "" {
-				_, verr = config.LoadContent([]byte(in.Content), p.Config)
+				f, verr = config.LoadContent([]byte(in.Content), p.Config)
 			} else if in.Scope == "local" {
-				var f *config.File
 				if f, verr = config.Load(p.Config); verr == nil {
 					var l *config.Local
 					if l, verr = config.ReadLocal(f.Project, f.Path); verr == nil {
 						verr = config.CheckLocal(f, l)
 					}
 				}
+				f = nil // 本机设置：ferry.yaml 里的提示不在这里报
 			} else {
-				_, verr = config.Load(p.Config)
+				f, verr = config.Load(p.Config)
 			}
 			if verr != nil {
 				return map[string]any{"ok": false, "problems": strings.Split(strings.TrimSpace(verr.Error()), "\n")}, nil
 			}
-			return map[string]any{"ok": true}, nil
+			out := map[string]any{"ok": true}
+			if f != nil && len(f.Warnings) > 0 {
+				out["warnings"] = f.WarningLines()
+				out["note"] = "warnings 里的能用、不挡部署，只是写了不起作用：删掉，或者换成这种应用用得到的写法"
+			}
+			return out, nil
 		}))
 	addTool(s, m, &mcp.Tool{Name: "config_edit", Title: "改配置",
 		Description: "按路径增删改项目配置 ferry.yaml（scope 为 local 时改这台电脑的本机设置）：只改要改的那几行，注释、空行和写法保留；改完先校验，不通过不改、返回问题。" +

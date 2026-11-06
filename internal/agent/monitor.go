@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -265,6 +266,42 @@ func unitNoAutostart(path string) bool {
 	return false
 }
 
+// unitBootDelay 单元文件第二行的 bootDelay=秒（service.autostartDelay）；没有时 0。
+func unitBootDelay(path string) int {
+	b, _ := os.ReadFile(path)
+	for i, l := range strings.Split(string(b), "\n") {
+		if i > 3 {
+			break
+		}
+		if strings.HasPrefix(l, "# project=") {
+			for _, kv := range strings.Fields(l) {
+				if v, ok := strings.CutPrefix(kv, "bootDelay="); ok {
+					n, _ := strconv.Atoi(v)
+					return n
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// sinceBoot 开机多久了（读 /proc/uptime；测试时换掉）。读不到时 ok 为 false。
+var sinceBoot = func() (time.Duration, bool) {
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0, false
+	}
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		return 0, false
+	}
+	sec, err := strconv.ParseFloat(f[0], 64)
+	if err != nil {
+		return 0, false
+	}
+	return time.Duration(sec * float64(time.Second)), true
+}
+
 // zdIdleSlot 不停机发布空着的槽位（不是 slot 文件里正在用的那个）。
 func zdIdleSlot(root, app, unit string) bool {
 	b, err := os.ReadFile(filepath.Join(root, dirMeta, "apps", app, "slot"))
@@ -358,10 +395,18 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 			continue // 在 Ferry 里手动停的、不停机发布空着的槽位
 		}
 		enabled, _ := a.Sys.Shell("systemctl is-enabled "+shellQuote(u)+" 2>/dev/null", 10*time.Second)
-		if strings.TrimSpace(enabled) != "enabled" && !unitNoAutostart(filepath.Join(a.Sys.UnitDir(), u)) {
+		path := filepath.Join(a.Sys.UnitDir(), u)
+		delay := unitBootDelay(path)
+		if strings.TrimSpace(enabled) != "enabled" && delay > 0 && a.hasBootTimer(u) {
+			enabled = a.bootEnabled(u, strings.TrimSpace(enabled)) // 开机自启交给了定时器
+		}
+		if strings.TrimSpace(enabled) != "enabled" && !unitNoAutostart(path) {
 			continue // 没设开机自启的：在服务器上用 systemctl 停掉、关掉的（autostart: false 的应用除外，它也应该在运行）
 		}
 		p := a.Sys.UnitProps(u)
+		if up, ok := sinceBoot(); ok && delay > 0 && up < time.Duration(delay)*time.Second+2*time.Minute && (p.Active == "inactive" || p.Active == "activating") {
+			continue // 开机后还在等 autostartDelay（多留 2 分钟启动）
+		}
 		switch {
 		case p.Sub == "auto-restart" || p.Active == "activating" && p.Sub == "auto-restart":
 			out = append(out, finding{proto.MonitorProblem{Key: "unit:" + u, Level: "bad", Text: fmt.Sprintf("应用 %s 启动失败，正在反复重启（%s）", info[1], u)}, ek})

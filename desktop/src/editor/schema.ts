@@ -184,6 +184,11 @@ const service = obj('服务', 'systemd 服务：怎样启动程序', {
     default: '出错退出时等 5 秒重启，一直重启',
   },
   autostart: bool('开机自启', '服务器重启后自动启动。在 Ferry 里手动「停止」的应用开机不会起来，「启动」后恢复', { appTypes: svc, default: 'true' }),
+  autostartDelay: dur(
+    '开机后等多久再启动',
+    '开机后过这么久才启动应用（1 秒～1 小时），比如等数据库、注册中心先就绪。只影响开机：部署、重启、意外退出后的重启都不等。服务器上用 systemd 定时器做，几乎不占资源',
+    { appTypes: svc, default: '不等，开机马上启动', min: 1, max: 3600 },
+  ),
   after: list('开机时先等这些服务', '开机时这些服务先启动、再启动应用（After=），如 mysqld、redis、docker（自动补 .service）；只管顺序，不会替你启动它们', { appTypes: svc }),
   zeroDowntime: obj(
     '不停机发布',
@@ -231,7 +236,7 @@ const app: SchemaNode = obj('应用', '一个可部署的应用', {
         nonEmptyLibs: bool('依赖不能是空包', '上面匹配到的依赖里必须有 .class'),
       }, { appTypes: ['java'] }),
       static: obj('静态目录检查', '前端目录里必须有某个文件', { index: str('必须有的文件', '相对产物目录', { default: 'index.html' }) }, { appTypes: ['static'] }),
-      minSize: num('最小字节数', '产物比这个小就不上传', { min: 0, unit: '字节' }),
+      minSize: num('最小字节数', '产物比这个小就不上传；目录（static、python、node、dotnet）按要上传的文件加起来算', { min: 0, unit: '字节' }),
     }),
     files: {
       ...list('附带文件', '配置文件、证书目录等：和程序放在同一级目录（程序的工作目录），每次部署都上传，回滚时一起回滚；程序只能读'),

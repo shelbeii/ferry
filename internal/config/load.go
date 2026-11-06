@@ -80,6 +80,7 @@ func LoadContent(data []byte, path string) (*File, error) {
 	if err := f.normalize(); err != nil {
 		return nil, fmt.Errorf("%s:\n%w", abs, err)
 	}
+	f.Warnings = unusedFields(f, data)
 	return f, nil
 }
 
@@ -375,6 +376,14 @@ func (f *File) normalize() error {
 				}
 			}
 			checkRestart(s.Restart, where, bad)
+			if d := s.AutostartDelay; d != nil {
+				switch {
+				case d.Std() < time.Second || d.Std() > time.Hour:
+					bad("%s：service.autostartDelay 写 1s～1h（当前 %s），不写 = 开机马上启动", where, d.Std())
+				case !s.AutostartOn():
+					bad("%s：autostart 是 false（开机不自启）时不用写 service.autostartDelay", where)
+				}
+			}
 			normalizeHealth(&s.Health, where, bad)
 			if z := s.ZeroDowntime; z != nil {
 				checkZD(z, where, bad)
@@ -696,7 +705,7 @@ func hasServiceExtras(s *Service) bool {
 		len(s.Env) > 0 || len(s.EnvFile) > 0 || len(s.ExecStartPre) > 0 || len(s.Conflicts) > 0 || len(s.SharedDirs) > 0 ||
 		len(s.DiagLogs) > 0 || s.ArchiveLogs != nil || s.Health.TCP != "" || s.Health.HTTP != "" ||
 		len(s.UnitExtra.Unit)+len(s.UnitExtra.Service)+len(s.UnitExtra.Install) > 0 || s.ZeroDowntime != nil ||
-		s.Restart != nil || s.Autostart != nil || len(s.After) > 0
+		s.Restart != nil || s.Autostart != nil || s.AutostartDelay != nil || len(s.After) > 0
 }
 
 // reUnitAny after 里也可以写 .target、.socket、.mount 这类单元（如 docker.socket、remote-fs.target）。

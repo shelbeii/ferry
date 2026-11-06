@@ -197,6 +197,7 @@ func (a *Agent) zdSwitch(s *proto.AppSpec, id, prev string, hooks bool) (string,
 			a.warn(proto.EvWarn, s.Name, "%v", err)
 		}
 		a.Sys.Systemctl("disable", oldUnit)
+		a.removeBootTimer(oldUnit) // 开机延迟启动的定时器跟着运行中的槽位
 	}
 	for _, c := range s.Conflict {
 		if isRunning(a.Sys.UnitProps(c)) {
@@ -300,6 +301,7 @@ func (a *Agent) leaveZD(s *proto.AppSpec) {
 		a.Sys.Systemctl("stop", u)
 		if u != s.Unit {
 			a.Sys.Systemctl("disable", u)
+			a.removeBootTimer(u)
 			os.Remove(a.unitPath(u))
 		}
 	}

@@ -33,6 +33,8 @@ type File struct {
 	Dir  string `yaml:"-"` // 配置文件所在目录：相对路径都相对它
 	// LocalVars 值来自本机设置的变量（见 Local）
 	LocalVars []string `yaml:"-"`
+	// Warnings 写了不起作用的地方（不挡部署），见 unused.go
+	Warnings []Warning `yaml:"-"`
 }
 
 // GitPolicy 部署前对本地工作区的要求。
@@ -250,7 +252,7 @@ type Service struct {
 	Unit        string `yaml:"unit"` // 默认 <project>-<app>（小写），自动补 .service
 	Description string `yaml:"description"`
 	User        string `yaml:"user"`    // 默认目标的 runAs
-	Workdir     string `yaml:"workdir"` // 默认 ${shared}
+	Workdir     string `yaml:"workdir"` // 默认 ${running}（运行中的版本目录）
 	Java        string `yaml:"java"`    // java 可执行文件，默认 /usr/bin/java
 	// Runtime 由 Ferry 提供运行环境（自动下载 JDK、上传到服务器）；设置后不要再写 java
 	Runtime      *Runtime          `yaml:"runtime"`
@@ -270,6 +272,8 @@ type Service struct {
 	Restart *Restart `yaml:"restart"`
 	// Autostart 开机自启；不写 = 是。手动「停止」的应用开机不会自己起来，「启动」后恢复
 	Autostart *bool `yaml:"autostart"`
+	// AutostartDelay 开机后等多久再启动（服务器上用 systemd 定时器 OnBootSec）；不写 = 开机马上启动。只影响开机，部署、重启不等
+	AutostartDelay *Duration `yaml:"autostartDelay"`
 	// After 开机时等这些服务先启动再启动应用（如 mysqld、redis、docker），自动补 .service
 	After     []string  `yaml:"after"`
 	UnitExtra UnitExtra `yaml:"unitExtra"`

@@ -495,6 +495,8 @@ export interface AppStatus {
   serving?: string
   /** 开机自启（服务；不知道时没有） */
   autostart?: boolean
+  /** 开机自启时开机后等多少秒再启动（service.autostartDelay） */
+  bootDelaySec?: number
   /** 意外退出后的重启方式：on-failure / always / no；restartSec 等多久（systemd 的写法，如 5s） */
   restart?: string
   restartSec?: string

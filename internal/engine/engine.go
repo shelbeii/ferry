@@ -229,6 +229,15 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 	if note := localPathVarsNote(f, targets); note != "" {
 		e.Rep.Warn("%s", note)
 	}
+	var deployed []*config.App
+	for _, p := range plans {
+		for _, it := range p.items {
+			deployed = append(deployed, it.app)
+		}
+	}
+	for _, w := range f.AppWarnings(deployed) {
+		e.Rep.Warn("%s", w)
+	}
 
 	// 先连接、预检全部目标：任何一台有问题都不开始构建
 	defer func() {

@@ -304,6 +304,28 @@ t "部署失败时失败版本的日志留在它的目录里（便于排查）" 
 t "logs --runs 表格" ok "（当前运行）" -- F logs e2e-a api --runs
 t "releases --json 带归档数" ok '"logRuns":' -- F releases e2e-b api --json
 
+step "开机后等一会儿再启动（autostartDelay）"
+# 开机自启交给定时器，服务本身不 enable；去掉后改回来。配置用 ferry config-edit 改
+cp "$OUT/demo-v1" "$OUT/api"   # 线上现在是回滚后的 v1：这一段部署的也是 v1
+cp "$E2E/ferry.yaml" "$OUT/boot.yaml"
+sed -i 's#: out/#: #' "$OUT/boot.yaml"
+FB() { FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/boot.yaml" "$@"; }
+t "config-edit 加上 autostartDelay" ok "已写入" -- env FERRY_CONFIG_EDIT='{"edits":[{"op":"set","path":"apps.api.service.autostartDelay","value":"45s"}]}' FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/boot.yaml" config-edit
+t "config-edit 只加了一行" ok "      autostartDelay: 45s" -- grep -n "autostartDelay" "$OUT/boot.yaml"
+t "开机后延迟启动：部署" ok "部署完成" -- FB deploy e2e-b api --skip-build
+bootunits() { dx b 'echo $(systemctl is-active e2e-api.service) $(systemctl is-enabled e2e-api.service) $(systemctl is-enabled e2e-api.timer) $(grep OnBootSec /etc/systemd/system/e2e-api.timer)'; }
+t "定时器开机后 45 秒启动，服务本身不 enable" ok "active disabled enabled OnBootSec=45" -- bootunits
+t "status：开机自启、开机后等 45 秒" ok '"autostart":true,"bootDelaySec":45' -- FB status e2e-b api --json
+bootstopped() { FB stop e2e-b api >/dev/null 2>&1; dx b 'echo $(systemctl is-enabled e2e-api.timer)'; }
+t "停止时定时器也关掉" ok "disabled" -- bootstopped
+FB start e2e-b api >/dev/null 2>&1
+t "启动后定时器恢复" ok "active disabled enabled" -- bootunits
+t "config-edit 去掉 autostartDelay" ok "已写入" -- env FERRY_CONFIG_EDIT='{"edits":[{"op":"delete","path":"apps.api.service.autostartDelay"}]}' FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/boot.yaml" config-edit
+t "去掉后部署" ok "部署完成" -- FB deploy e2e-b api --skip-build
+notimer() { dx b 'echo $(test -e /etc/systemd/system/e2e-api.timer && echo still || echo gone) $(systemctl is-active e2e-api.service) $(systemctl is-enabled e2e-api.service)'; }
+t "定时器删掉了，服务自己开机自启" ok "gone active enabled" -- notimer
+cp "$OUT/demo-v2" "$OUT/api"
+
 step "接管已有单元"
 dx a 'printf "[Unit]\nDescription=legacy leg\n[Service]\nUser=demo\nEnvironment=PORT=18082\nExecStart=/usr/local/bin/demoserver\n[Install]\nWantedBy=multi-user.target\n" > /etc/systemd/system/e2e-leg.service && systemctl daemon-reload && systemctl enable --now e2e-leg >/dev/null 2>&1'
 sleep 1

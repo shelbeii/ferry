@@ -31,6 +31,11 @@ apps:
     artifact: {path: never}
     service:
       restart: no
+  - name: late
+    type: binary
+    artifact: {path: late}
+    service:
+      autostartDelay: 2m
 `
 
 func TestRestartUnit(t *testing.T) {
@@ -89,4 +94,14 @@ func TestRestartUnit(t *testing.T) {
 
 	text, _ = unit("never")
 	check("never", text, []string{"Restart=no"}, []string{"RestartSec", "StartLimit"})
+
+	// 开机后等 2 分钟再启动：交给服务器上的定时器，单元文件里记下（服务器告警用）
+	s, err := Spec(f, tg, f.App("late"))
+	if err != nil || s.BootDelaySec != 120 || s.NoAutostart {
+		t.Fatalf("late：%+v %v", s.BootDelaySec, err)
+	}
+	check("late", s.UnitText, []string{"# project=shop app=late target=t1 bootDelay=120", "WantedBy=multi-user.target"}, nil)
+	if s, _ := Spec(f, tg, f.App("plain")); s.BootDelaySec != 0 {
+		t.Error("plain 不延迟")
+	}
 }

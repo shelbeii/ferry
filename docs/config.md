@@ -1,6 +1,7 @@
 # ferry.yaml 配置说明
 
 ferry 从当前目录向上查找 `ferry.yaml`，也可以 `-c` 指定。未知字段、未定义的变量、重名应用、重复的单元名都会在 `ferry validate` 时报错。
+写在用不到它的应用上的项（如 java 应用写了 `static.port`、binary 写了 `jvmArgs`）不报错、也不起作用：`ferry validate`、部署时会提示，桌面版表单里标出「用不到这项」。
 本机路径（产物、构建目录、私钥）相对配置文件所在目录，支持 `~`。
 
 每一项的意思、写法在桌面版的表单和编辑器补全里都有说明；Ferry 的 AI 助手和编程软件（MCP 的 `config_schema`、`ferry config-schema`）查的是同一份。
@@ -125,7 +126,7 @@ apps:
 | `deps` | python、node：部署时在服务器上装依赖。`registry`：镜像源；`python`：建 venv 用的 Python（默认 `python3`）；`off: true`：不装 |
 | `artifact.verify.springBoot` | `{}` 检查是 Spring Boot 可执行 JAR；`requireLibs`：BOOT-INF/lib 下必须有的依赖（通配符）；`nonEmptyLibs`：这些依赖必须包含 .class |
 | `artifact.verify.static.index` | 静态目录必须有的文件，默认 `index.html` |
-| `artifact.verify.minSize` | 最小字节数 |
+| `artifact.verify.minSize` | 最小字节数；目录产物按要上传的文件加起来算 |
 | `artifact.files` | java / binary 的附带文件（配置文件、证书、启动脚本等）：和程序放在同一级目录，随版本走。见下文 |
 | `keepReleases` | 覆盖目标的设置 |
 | `root` | 应用自己的部署根目录，应用目录为 `<root>/apps/<应用>`；不设置 = 目标的 `root`。见下文 |
@@ -285,6 +286,7 @@ apps:
 | `health.stable` | 无健康检查时 10s | 健康检查通过后还要稳定运行多久 |
 | `restart` | 出错退出时等 5 秒重启 | 意外退出后怎么重启，见下文「重启和开机自启」 |
 | `autostart` | `true` | 开机自启 |
+| `autostartDelay` | 不等 | 开机后等多久再启动（1s～1h），只影响开机 |
 | `after` | | 开机时先等这些服务启动（如 `mysqld`、`redis`、`docker`，自动补 `.service`） |
 | `zeroDowntime` | | 不停机发布：新版本在另一个端口启动、就绪后再停旧的。见下文 |
 | `unitExtra.unit/service/install` | | 追加到单元文件各段末尾的原样行（systemd 中后出现的单值设置会覆盖前面的） |
@@ -310,11 +312,15 @@ apps:
         within: 10m       # 在多长时间里数重启次数（1s～24h），默认 10m；要和 max 一起写
       # restart: always   # 也可以只写方式
       autostart: true     # 开机自启，默认 true
+      autostartDelay: 60s # 开机后等 60 秒再启动（1s～1h），默认不等
       after: [mysqld, redis, docker]   # 开机时先等这些服务启动
 ```
 
 - 用 Ferry、`systemctl stop` 停止的不会被重启。
 - `max`、`within` 防止起不来的程序（配置写错、端口被占）一直被反复拉起：上面的例子是 10 分钟里要重启第 6 次时就停下。次数只在这段时间里算，过了从头算，一天崩一次的程序每次都会被拉起。停下后改好问题，在 Ferry 里点「启动」或重新部署。
+- `autostartDelay`：开机后过这么久才启动应用，比如等数据库、注册中心先就绪。只影响开机，部署、重启、意外退出后的重启都不等。
+  服务器上用 systemd 定时器做（和服务同名的 `.timer`，`OnBootSec`）：开机自启交给定时器，服务本身不 enable；定时器不是常驻进程，开机时触发一次，几乎不占资源。
+  去掉这一项后下次部署删掉定时器，改回服务自己开机自启；服务器告警在开机后的等待时间里（再多留 2 分钟）不报「应用停了」。
 - 在 Ferry 里「停止」的应用同时取消开机自启：服务器重启后不会自己起来，服务器告警也不报它停了；「启动」、部署、回滚后恢复（`autostart: false` 的应用一直不开机自启）。
 - `after` 只管开机时的先后（`After=`），不会替你启动这些服务。Docker 里的数据库写 `docker`：只等到 Docker 起来，容器里的程序可能还没就绪，应用连不上时靠自动重启再连。
 - `max` 同时写成新旧两种 systemd 都认的写法（CentOS 7 的 systemd 219 也有效）。

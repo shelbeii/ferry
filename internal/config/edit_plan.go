@@ -24,6 +24,7 @@ type EditPlan struct {
 	Old, New string   // 改前、改后的内容（\n 换行）
 	Base     string   // 改前内容的摘要（sha256）：写入时文件变了就不写
 	Problems []string // 改后校验出的问题：有问题时不能写
+	Warnings []string // 这次改出来的、写了不起作用的地方（能写，提醒一下）
 	Changed  []string // 改到的字段，如 apps.api.service.jvmArgs
 	Danger   string   // 要特别提醒用户的（会执行的命令、登录方式……）
 
@@ -65,8 +66,21 @@ func PlanEdit(configPath string, edits []Edit) (*EditPlan, error) {
 	p.old, _ = decodeGeneric(p.Old)
 	newData, _ := decodeGeneric(p.New)
 	p.Changed = changedPaths(p.old, newData)
-	if _, err := LoadContent(out, configPath); err != nil {
+	if nf, err := LoadContent(out, configPath); err != nil {
 		p.Problems = problemLines(err)
+	} else {
+		// 这次改出来的「写了不起作用」（原来就有的不算）：能写，但要告诉改的人
+		had := map[string]bool{}
+		if of, err := LoadContent(src, configPath); err == nil {
+			for _, w := range of.Warnings {
+				had[w.Path] = true
+			}
+		}
+		for _, w := range nf.Warnings {
+			if !had[w.Path] {
+				p.Warnings = append(p.Warnings, w.String())
+			}
+		}
 	}
 	return p, p.check()
 }

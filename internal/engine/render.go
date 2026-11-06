@@ -280,6 +280,9 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 	s.User = appUser(t, a)
 	s.Conflict = svc.Conflicts
 	s.NoAutostart = !svc.AutostartOn()
+	if d := svc.AutostartDelay; d != nil && !s.NoAutostart {
+		s.BootDelaySec = int(d.Std().Seconds())
+	}
 	if s.SharedDirs, err = sc.ExpandAll(svc.SharedDirs); err != nil {
 		return s, wrap("sharedDirs", err)
 	}
@@ -441,7 +444,10 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	line("%s — 由 ferry 生成，手工修改会在下次部署时被覆盖", agent.ManagedMarker)
-	if svc.AutostartOn() {
+	if d := svc.AutostartDelay; svc.AutostartOn() && d != nil {
+		// 服务器告警：开机自启由定时器做（服务本身没 enable），开机后这段时间里还没起来不算停了
+		line("# project=%s app=%s target=%s bootDelay=%d", f.Project, a.Name, t.Name, int(d.Std().Seconds()))
+	} else if svc.AutostartOn() {
 		line("# project=%s app=%s target=%s", f.Project, a.Name, t.Name)
 	} else {
 		line("# project=%s app=%s target=%s autostart=no", f.Project, a.Name, t.Name) // 服务器告警：没开机自启也要在运行

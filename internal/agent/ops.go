@@ -177,6 +177,7 @@ func (a *Agent) toLegacy(s *proto.AppSpec) error {
 			return err
 		}
 		a.deactivate(s.Name)
+		a.removeBootTimer(s.Unit) // 接管前的单元文件是原来的，开机自启也按原来的
 		a.Sys.Systemctl("enable", s.Unit)
 		if err := a.Sys.Systemctl("restart", s.Unit); err != nil {
 			return err
@@ -188,6 +189,7 @@ func (a *Agent) toLegacy(s *proto.AppSpec) error {
 		return nil
 	}
 	a.Sys.Systemctl("disable", s.Unit)
+	a.removeBootTimer(s.Unit)
 	os.Remove(a.unitPath(s.Unit))
 	a.Sys.Systemctl("daemon-reload")
 	a.deactivate(s.Name)
@@ -253,7 +255,7 @@ func (a *Agent) control() int {
 			} else {
 				// 手动停的：开机不再自己起来，告警也不报它停了；「启动」、部署后恢复
 				a.markStopped(s.Name, true)
-				if err := a.Sys.Systemctl("disable", s.Unit); err != nil {
+				if err := a.bootOff(s.Unit); err != nil {
 					a.warn(proto.EvWarn, s.Name, "取消开机自启失败：%v", err)
 				}
 			}
@@ -390,14 +392,102 @@ func (a *Agent) markStopped(app string, on bool) {
 func (a *Agent) isStopped(app string) bool { return exists(stoppedFile(a.meta(), app)) }
 
 // autostart 部署、启动后按配置设开机自启：autostart: false 时关掉（以前设过的也关掉）。
+// 写了 autostartDelay 时开机自启交给定时器（开机后等一会儿再启动），服务本身不 enable。
 func (a *Agent) autostart(s *proto.AppSpec, unit string) {
 	if s.NoAutostart {
-		a.Sys.Systemctl("disable", unit)
+		a.bootOff(unit)
 		return
+	}
+	if s.BootDelaySec > 0 {
+		err := a.installBootTimer(s.Name, unit, s.BootDelaySec)
+		if err == nil {
+			err = a.Sys.Systemctl("enable", bootTimer(unit))
+		}
+		if err == nil {
+			a.Sys.Systemctl("disable", unit) // 开机由定时器启动
+			return
+		}
+		a.warn(proto.EvWarn, s.Name, "设置开机后延迟启动失败（改成开机马上启动）：%v", err)
+	} else {
+		a.removeBootTimer(unit)
 	}
 	if err := a.Sys.Systemctl("enable", unit); err != nil {
 		a.warn(proto.EvWarn, s.Name, "设置开机自启失败：%v", err)
 	}
+}
+
+// bootTimer 开机后延迟启动用的定时器：shop-api.service → shop-api.timer。
+func bootTimer(unit string) string { return strings.TrimSuffix(unit, ".service") + ".timer" }
+
+// hasBootTimer 有 Ferry 生成的开机延迟启动定时器。
+func (a *Agent) hasBootTimer(unit string) bool {
+	b, err := os.ReadFile(a.unitPath(bootTimer(unit)))
+	return err == nil && strings.HasPrefix(string(b), ManagedMarker)
+}
+
+// installBootTimer 写开机后等 sec 秒再启动 unit 的定时器（内容变化时）。
+func (a *Agent) installBootTimer(app, unit string, sec int) error {
+	text := fmt.Sprintf(`%s — 由 ferry 生成：开机后等 %d 秒再启动 %s（service.autostartDelay），手工修改会在下次部署时被覆盖
+[Unit]
+Description=开机后 %d 秒启动 %s
+
+[Timer]
+OnBootSec=%d
+AccuracySec=1s
+Unit=%s
+
+[Install]
+WantedBy=timers.target
+`, ManagedMarker, sec, unit, sec, unit, sec, unit)
+	if p := a.unitPath(bootTimer(unit)); !a.hasBootTimer(unit) {
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("%s 已经有了，不是 Ferry 生成的，不覆盖", p)
+		}
+	}
+	return a.installUnit(app, bootTimer(unit), []byte(text))
+}
+
+// removeBootTimer 去掉开机延迟启动的定时器（不再写 autostartDelay、不用这个单元了）。
+func (a *Agent) removeBootTimer(unit string) {
+	if !a.hasBootTimer(unit) {
+		return
+	}
+	a.Sys.Systemctl("disable", "--now", bootTimer(unit))
+	os.Remove(a.unitPath(bootTimer(unit)))
+	a.Sys.Systemctl("daemon-reload")
+}
+
+// bootOff 开机不自启：服务和开机延迟启动的定时器都关掉（定时器文件留着，「启动」、部署后再打开）。
+func (a *Agent) bootOff(unit string) error {
+	err := a.Sys.Systemctl("disable", unit)
+	if a.hasBootTimer(unit) {
+		if e := a.Sys.Systemctl("disable", bootTimer(unit)); err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
+// bootTimerDelay 开机延迟启动的定时器里写的秒数（OnBootSec=）；没有时 0。
+func (a *Agent) bootTimerDelay(unit string) int {
+	b, _ := os.ReadFile(a.unitPath(bootTimer(unit)))
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "OnBootSec="); ok {
+			n, _ := strconv.Atoi(v)
+			return n
+		}
+	}
+	return 0
+}
+
+// bootEnabled 开机会不会自己起来：服务 enable 了，或者开机延迟启动的定时器 enable 了。
+func (a *Agent) bootEnabled(unit, unitState string) string {
+	if unitState != "enabled" && unitState != "enabled-runtime" && a.hasBootTimer(unit) {
+		if t := a.Sys.UnitProps(bootTimer(unit)).Enabled; t == "enabled" || t == "enabled-runtime" {
+			return t
+		}
+	}
+	return unitState
 }
 
 // ---------------------------------------------------------------- status / releases
@@ -439,10 +529,13 @@ func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.
 		p := a.Sys.UnitProps(s.Unit)
 		st.Active, st.Sub, st.PID, st.Since = p.Active, p.Sub, p.PID, p.Since
 		st.Restart, st.RestartSec, st.Restarts = p.Restart, p.RestartSec, p.Restarts
-		switch p.Enabled {
+		switch boot := a.bootEnabled(s.Unit, p.Enabled); boot {
 		case "enabled", "enabled-runtime":
 			on := true
 			st.Autostart = &on
+			if boot != p.Enabled {
+				st.BootDelaySec = a.bootTimerDelay(s.Unit)
+			}
 		case "disabled":
 			off := false
 			st.Autostart = &off

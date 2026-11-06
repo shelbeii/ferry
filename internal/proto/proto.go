@@ -160,6 +160,8 @@ type AppSpec struct {
 	Conflict []string `json:"conflicts,omitempty"`
 	// NoAutostart service.autostart: false：部署、启动后不设开机自启
 	NoAutostart bool `json:"noAutostart,omitempty"`
+	// BootDelaySec service.autostartDelay：开机后等这么多秒再启动（用 systemd 定时器，服务本身不设开机自启）；0 = 开机马上启动
+	BootDelaySec int `json:"bootDelaySec,omitempty"`
 
 	SharedDirs []string `json:"sharedDirs,omitempty"` // shared 下要创建的子目录（属主为 User）
 	// ArchiveLogs shared 下的日志目录：切换版本时随离开的版本归档，新的运行从空目录开始
@@ -626,6 +628,8 @@ type AppStatus struct {
 	Busy *LockHolder `json:"busy,omitempty"`
 	// Autostart 开机自启（服务；不知道时为空）
 	Autostart *bool `json:"autostart,omitempty"`
+	// BootDelaySec 开机自启时开机后等多少秒再启动（service.autostartDelay，服务器上的定时器）；0 = 马上
+	BootDelaySec int `json:"bootDelaySec,omitempty"`
 	// Restart 意外退出后的重启方式（on-failure / always / no）、RestartSec 等多久（如 5s）
 	Restart    string `json:"restart,omitempty"`
 	RestartSec string `json:"restartSec,omitempty"`

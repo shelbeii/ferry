@@ -752,12 +752,13 @@ func (a *Agent) restoreService(s *proto.AppSpec, failed, prev string, wasActive 
 	}
 	if before == nil {
 		a.Sys.Systemctl("disable", s.Unit)
+		a.removeBootTimer(s.Unit)
 		os.Remove(a.unitPath(s.Unit))
 		a.Sys.Systemctl("daemon-reload")
 	} else if err := a.installUnit(s.Name, s.Unit, before); err != nil {
 		return err
 	} else if a.isStopped(s.Name) {
-		a.Sys.Systemctl("disable", s.Unit) // 部署前是手动停着的：部署时打开的开机自启再关掉
+		a.bootOff(s.Unit) // 部署前是手动停着的：部署时打开的开机自启再关掉
 	}
 	if wasActive && before != nil {
 		if err := a.Sys.Systemctl("restart", s.Unit); err != nil {
