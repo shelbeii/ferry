@@ -324,6 +324,13 @@ func (e *Engine) aiSystemPrompt(s *session, t *config.Target, mode string) strin
 			fmt.Fprintf(&b, "- %s · %s · %s\n", a.Name, a.Type, unit)
 		}
 		b.WriteString("查看应用优先用 app_status、app_logs，比自己拼命令可靠。\n")
+		b.WriteString(ConfigToolsHelp)
+		if mode == AIConfirm {
+			b.WriteString("改了的配置下次部署才生效：改完告诉用户，要不要部署由用户决定。")
+		} else {
+			b.WriteString("现在是只读模式，不能用 config_edit：要改配置时把要改的写出来。")
+		}
+		b.WriteString("\n")
 	}
 	if e.hasAIDB(t) {
 		b.WriteString("\n用户允许你查这台服务器上的数据库：用 db_connections 看有哪些连接，db_schema 看库、表和表结构，db_query 执行只读查询（不要用 run_command 跑 mysql、psql）。" +
@@ -354,6 +361,7 @@ func toJSON(v any) string {
 func (e *Engine) aiTools(s *session, t *config.Target, mode, conv string) []ai.Tool {
 	tools := e.aiToolList(s, t, mode, conv)
 	tools = append(tools, e.aiDBTools(t, mode == AIConfirm)...)
+	tools = append(tools, e.aiConfigTools(t, mode == AIConfirm)...)
 	if t.Production {
 		for i := range tools {
 			if approve := tools[i].Approve; approve != nil {

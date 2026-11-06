@@ -1,9 +1,10 @@
 <script setup lang="ts">
-// 表单里一个配置的输入框：按类型用文字框、下拉、是 / 否、列表、键值对。
+// 表单里一个配置的输入框：按类型用文字框、数字框、时长（数字 + 单位）、下拉、是 / 否、列表、键值对。
 // 文字在离开输入框或回车时才写回（打字过程中不改配置）；清空 = 删除这项（用默认值）。
 import { computed, ref, watch } from 'vue'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import type { SchemaNode } from '../../editor/schema'
+import { DUR_UNITS, durMs, durText, splitDur } from '../../editor/duration'
 
 type Scalar = string | number | boolean | null
 export type FieldValue = Scalar | string[] | [string, string][] | undefined
@@ -18,6 +19,14 @@ const props = defineProps<{
 const emit = defineEmits<{ commit: [value: FieldValue] }>()
 
 const placeholder = computed(() => (props.node.default ? `不写：${props.node.default}` : props.node.required ? '必填' : '不写'))
+/** 数字框、时长框很窄，默认值写在框后面 */
+const shortPlaceholder = computed(() => (props.node.required ? '必填' : '不写'))
+const defaultText = computed(() => {
+  const d = props.node.default
+  if (!d) return ''
+  if (props.node.kind === 'dur') return durMs(d) != null ? durText(d) : d
+  return props.node.unit && /^\d+$/.test(d) ? `${d} ${props.node.unit}` : d
+})
 
 // ---------------------------------------------------------------- 文字、数字、时长
 
@@ -43,7 +52,72 @@ function commitText() {
   emit('commit', s)
 }
 
-const numError = computed(() => props.node.kind === 'num' && draft.value.trim() !== '' && !/^-?\d+$/.test(draft.value.trim()) && !draft.value.includes('${'))
+// 数字框只能输入数字（min 小于 0 或没写 min 时可以有负号）
+const allowNeg = computed(() => props.node.min == null || props.node.min < 0)
+function onNumInput(v: string) {
+  let s = v.replace(/[^\d-]/g, '')
+  s = allowNeg.value && s.startsWith('-') ? '-' + s.slice(1).replace(/-/g, '') : s.replace(/-/g, '')
+  draft.value = s
+}
+
+function rangeText(lo?: number, hi?: number, fmt: (n: number) => string = String): string {
+  if (lo != null && hi != null) return `要在 ${fmt(lo)}～${fmt(hi)} 之间`
+  if (lo != null) return `至少 ${fmt(lo)}`
+  if (hi != null) return `最多 ${fmt(hi)}`
+  return ''
+}
+
+const numError = computed(() => {
+  if (props.node.kind !== 'num') return ''
+  const s = draft.value.trim()
+  if (!s) return ''
+  if (!/^-?\d+$/.test(s)) return '要写整数'
+  const n = Number(s)
+  const { min, max } = props.node
+  return (min != null && n < min) || (max != null && n > max) ? rangeText(min, max) : ''
+})
+
+// ---------------------------------------------------------------- 时长：数字 + 单位
+
+const durNum = ref('')
+const durUnit = ref('s')
+/** 配置里的值写法不认识（如 1.5x）：用文字框原样改 */
+const durRaw = computed(() => props.node.kind === 'dur' && props.value != null && !Array.isArray(props.value) && props.value !== '' && splitDur(props.value) == null)
+watch(
+  () => props.value,
+  (v) => {
+    const p = v == null || Array.isArray(v) || v === '' ? null : splitDur(v)
+    durNum.value = p ? String(p.n) : ''
+    if (p) durUnit.value = p.u
+    else if (v == null && props.node.default) durUnit.value = splitDur(props.node.default)?.u ?? 's'
+  },
+  { immediate: true },
+)
+
+function onDurInput(v: string) {
+  durNum.value = v.replace(/\D/g, '')
+}
+
+function commitDur() {
+  const s = durNum.value.trim()
+  if (!s) return props.value == null ? undefined : emit('commit', undefined)
+  const next = `${Number(s)}${durUnit.value}`
+  const cur = splitDur(props.value)
+  if (cur && cur.n === Number(s) && cur.u === durUnit.value) return
+  emit('commit', next)
+}
+
+function setDurUnit(u: string) {
+  durUnit.value = u
+  if (durNum.value.trim()) commitDur()
+}
+
+const durError = computed(() => {
+  if (props.node.kind !== 'dur' || !durNum.value.trim()) return ''
+  const sec = (Number(durNum.value) * (DUR_UNITS.find((u) => u.v === durUnit.value)?.ms ?? 1000)) / 1000
+  const { min, max } = props.node
+  return (min != null && sec < min) || (max != null && sec > max) ? rangeText(min, max, (n) => durText(n)) : ''
+})
 
 // ---------------------------------------------------------------- 下拉
 
@@ -144,10 +218,49 @@ function delPair(i: number) {
     <el-option v-for="v in node.values" :key="v" :label="v" :value="v" />
   </el-select>
 
-  <!-- 文字、数字、时长 -->
-  <div v-else-if="node.kind === 'str' || node.kind === 'num' || node.kind === 'dur'" class="ctl-text">
+  <!-- 数字：只能输入数字 -->
+  <div v-else-if="node.kind === 'num'" class="ctl-text">
+    <el-input
+      :model-value="draft"
+      :placeholder="shortPlaceholder"
+      :disabled="disabled"
+      inputmode="numeric"
+      clearable
+      size="small"
+      class="ctl-num"
+      @update:model-value="onNumInput"
+      @change="commitText"
+    >
+      <template v-if="node.unit" #append>{{ node.unit }}</template>
+    </el-input>
+    <span v-if="numError" class="ev-error small">{{ numError }}</span>
+    <span v-else-if="defaultText && !draft.trim()" class="muted small">不写时：{{ defaultText }}</span>
+  </div>
+
+  <!-- 时长：数字 + 单位 -->
+  <div v-else-if="node.kind === 'dur' && !durRaw" class="ctl-text">
+    <el-input
+      :model-value="durNum"
+      :placeholder="shortPlaceholder"
+      :disabled="disabled"
+      inputmode="numeric"
+      clearable
+      size="small"
+      class="ctl-num"
+      @update:model-value="onDurInput"
+      @change="commitDur"
+    />
+    <el-select :model-value="durUnit" size="small" class="ctl-unit" :disabled="disabled" aria-label="单位" @update:model-value="setDurUnit">
+      <el-option v-for="u in DUR_UNITS" :key="u.v" :label="u.label" :value="u.v" />
+    </el-select>
+    <span v-if="durError" class="ev-error small">{{ durError }}</span>
+    <span v-else-if="defaultText && !durNum.trim()" class="muted small">不写时：{{ defaultText }}</span>
+  </div>
+
+  <!-- 文字（还有写法不认识的时长） -->
+  <div v-else-if="node.kind === 'str' || node.kind === 'dur'" class="ctl-text">
     <el-input v-model="draft" :placeholder="placeholder" :disabled="disabled" clearable size="small" @change="commitText" />
-    <span v-if="numError" class="ev-error small">要写数字</span>
+    <span v-if="durRaw" class="ev-error small">时长写法不对，如 30s、5m、1h，清空后重新填</span>
   </div>
 
   <!-- 列表：有候选值时多选 -->
@@ -170,7 +283,15 @@ function delPair(i: number) {
   <!-- 列表 -->
   <div v-else-if="node.kind === 'list'" class="ctl-rows">
     <div v-for="(_, i) in rows" :key="i" class="ctl-row">
-      <el-input v-model="rows[i]" size="small" :disabled="disabled" @change="commitRows" />
+      <el-input
+        :model-value="rows[i]"
+        size="small"
+        :disabled="disabled"
+        :inputmode="node.numbers ? 'numeric' : undefined"
+        :class="{ 'ctl-num': node.numbers }"
+        @update:model-value="(v: string) => (rows[i] = node.numbers ? v.replace(/\D/g, '') : v)"
+        @change="commitRows"
+      />
       <el-button :icon="Delete" size="small" text :disabled="disabled" aria-label="删除这一项" @click="delRow(i)" />
     </div>
     <el-button :icon="Plus" size="small" text type="primary" :disabled="disabled" @click="addRow">添加一项</el-button>
@@ -201,6 +322,14 @@ function delPair(i: number) {
   align-items: center;
   gap: 8px;
   max-width: 520px;
+}
+.ctl-num {
+  width: 160px;
+  flex: none;
+}
+.ctl-unit {
+  width: 88px;
+  flex: none;
 }
 .ctl-rows {
   display: flex;

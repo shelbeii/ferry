@@ -11,7 +11,7 @@ import { ElMessage, ElNotification } from 'element-plus'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { call, ferry, type FerryLine, type Running } from '../ferry'
 import { isTauri } from '../platform'
-import { addProject, notifyUser, startTask, type Task } from '../state'
+import { addProject, noteConfigWritten, notifyUser, startTask, type Task } from '../state'
 import SecretForm, { type SecretField, type SecretValue } from './SecretForm.vue'
 
 interface McpRequest {
@@ -21,7 +21,7 @@ interface McpRequest {
   client?: string
   action:
     | 'deploy' | 'start' | 'stop' | 'restart' | 'rollback' | 'sw-start' | 'sw-stop' | 'sw-restart' | 'port-open' | 'port-close' | 'fw-enable' | 'ssh-kick' | 'backup-run' | 'create'
-    | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret' | 'sw-upgrade' | 'sw-restore' | 'sw-backup' | 'db-exec'
+    | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret' | 'sw-upgrade' | 'sw-restore' | 'sw-backup' | 'db-exec' | 'config-edit'
   project: string
   config: string
   target: string
@@ -42,7 +42,8 @@ interface McpRequest {
   /** create：向导的内容（原样交给 ferry create）与按它生成的 ferry.yaml（桌面版这边生成的） */
   spec?: unknown
   content?: string
-  /** exec、write-file、install、tpl-save：用服务器助手的工具执行（tool + input）；detail 是 Ferry 按参数算出的确认内容 */
+  /** exec、write-file、install、tpl-save：用服务器助手的工具执行（tool + input）；detail 是 Ferry 按参数算出的确认内容。
+   *  config-edit：input 是要做的修改（交给 ferry config-edit，带着确认时的原文摘要 base），detail 是差异 */
   tool?: string
   input?: Record<string, unknown>
   danger?: string
@@ -88,13 +89,16 @@ const VERBS: Record<string, string> = {
   'sw-restore': '恢复软件',
   'sw-backup': '设置数据备份',
   'db-exec': '改数据库',
+  'config-edit': '改项目配置',
 }
 // 用服务器助手的工具执行的操作：确认内容按命令、差异整块显示，每次都要确认
 const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save', 'sw-upgrade', 'sw-restore', 'sw-backup']
 const isAI = (r: McpRequest) => AI_ACTIONS.includes(r.action)
 const isDB = (r: McpRequest) => r.action === 'db-exec'
+const isCfg = (r: McpRequest) => r.action === 'config-edit'
+const cfgLocal = (r: McpRequest) => isCfg(r) && r.input?.scope === 'local'
 // 确认内容整块显示（命令、差异、SQL）
-const isBlock = (r: McpRequest) => isAI(r) || isDB(r)
+const isBlock = (r: McpRequest) => isAI(r) || isDB(r) || isCfg(r)
 
 const queue = ref<McpRequest[]>([])
 const current = computed(() => queue.value[0])
@@ -147,6 +151,7 @@ const canGrant = (r: McpRequest) =>
 const titleOf = (r: McpRequest) => {
   if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条${r.dbKind === 'redis' ? '命令' : '语句'}）`
   if (r.action === 'create') return `新建项目 ${r.project}`
+  if (isCfg(r)) return cfgLocal(r) ? '改这台电脑的本机设置' : '改项目配置 ferry.yaml'
   if (r.action.startsWith('sw-')) return `${VERBS[r.action]} ${r.software ?? String(r.input?.name ?? '')}`
   if (r.action.startsWith('port-')) return `${VERBS[r.action]} ${r.port ?? ''}`
   if (r.action === 'fw-enable') return VERBS[r.action]
@@ -286,6 +291,10 @@ function execute(r: McpRequest) {
     createProject(r)
     return
   }
+  if (isCfg(r)) {
+    editConfig(r)
+    return
+  }
   if (isDB(r)) {
     const title = `${titleOf(r)}（${clientOf(r)} 请求）`
     const args = ['db', 'ai-exec', r.db ?? '', r.database ?? '']
@@ -378,6 +387,21 @@ async function createProject(r: McpRequest) {
   call(['mcp-decide', r.id, 'done'], { FERRY_MCP_OUTCOME: JSON.stringify(outcome) }).catch(() => {})
 }
 
+/** 改项目配置 / 本机设置：按确认时算好的修改写入（文件在确认后又被改过就不写）。 */
+async function editConfig(r: McpRequest) {
+  const outcome: { ok: boolean; error?: string; data?: unknown } = { ok: false }
+  try {
+    outcome.data = await call(['config-edit', '-c', r.config], { FERRY_CONFIG_EDIT: JSON.stringify(r.input ?? {}) })
+    outcome.ok = true
+    noteConfigWritten(r.config)
+    ElMessage.success(`已${cfgLocal(r) ? '改好本机设置' : '改好项目配置'}（${clientOf(r)} 请求）：下次部署时生效`)
+  } catch (e) {
+    outcome.error = (e as Error).message
+    ElMessage.error(`改配置失败：${outcome.error}`)
+  }
+  call(['mcp-decide', r.id, 'done'], { FERRY_MCP_OUTCOME: JSON.stringify(outcome) }).catch(() => {})
+}
+
 function lineText(l: FerryLine): string {
   const head = [l.kind === 'event' ? l.code : l.kind === 'step' ? '==>' : l.kind === 'error' ? '✗' : l.kind === 'warn' ? '!' : '', l.app]
     .filter(Boolean)
@@ -422,7 +446,7 @@ const actionType = (a: string) =>
 <template>
   <el-dialog
     :model-value="!!current"
-    :title="shown?.action === 'create' ? '编程软件请求新建项目' : shown?.action === 'secret' ? '编程软件请你填写' : shown && isDB(shown) ? '编程软件请求改数据库' : '编程软件请求改动服务器'"
+    :title="shown?.action === 'create' ? '编程软件请求新建项目' : shown?.action === 'secret' ? '编程软件请你填写' : shown && isDB(shown) ? '编程软件请求改数据库' : shown && isCfg(shown) ? '编程软件请求改配置' : '编程软件请求改动服务器'"
     width="560px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
@@ -442,7 +466,7 @@ const actionType = (a: string) =>
         </el-descriptions-item>
         <el-descriptions-item v-if="!isDB(shown) || shown.project" label="项目">{{ shown.project }}</el-descriptions-item>
         <el-descriptions-item v-if="isDB(shown) && !shown.target" label="服务器"><span class="muted">这台电脑直接连</span></el-descriptions-item>
-        <el-descriptions-item v-else-if="shown.action === 'create'" label="配置文件">
+        <el-descriptions-item v-else-if="shown.action === 'create' || isCfg(shown)" label="配置文件">
           <span class="mono">{{ shown.config }}</span>
         </el-descriptions-item>
         <el-descriptions-item v-else label="服务器">
@@ -480,6 +504,7 @@ const actionType = (a: string) =>
         <template v-if="shown.action === 'create'">同意后生成这个文件，并加进 Ferry 的项目列表；不连服务器、不部署。</template>
         <template v-else-if="shown.action === 'secret'">填的内容只记在这次打开的 Ferry 里，执行时才用上；{{ clientOf(shown) }} 只拿到代号，看不到内容。Ferry 退出或这次连接断开后要重新填。</template>
         <template v-else-if="isDB(shown)">同意后由 Ferry 执行，任务面板里能看到过程；结果交回编程软件。</template>
+        <template v-else-if="isCfg(shown)">同意后由 Ferry 按上面的差异改{{ cfgLocal(shown) ? '这台电脑的本机设置' : '这个文件' }}，别的地方不动；改了的配置下次部署才生效。不连服务器。</template>
         <template v-else>同意后由 Ferry 执行，任务面板里能看到过程、可以停止；结果交回编程软件，部署记录里会标明经它请求。</template>
         看不明白要做什么时请拒绝。
         <template v-if="queue.length > 1">后面还有 {{ queue.length - 1 }} 个请求。</template>

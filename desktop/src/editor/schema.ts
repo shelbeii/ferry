@@ -49,6 +49,11 @@ export interface SchemaNode {
   numbers?: boolean
   /** list：也可以只写一个值（不写成列表） */
   single?: boolean
+  /** num：最小、最大值；dur：最短、最长（秒）。超出时表单里提示 */
+  min?: number
+  max?: number
+  /** num：数字后面显示的单位（次、个） */
+  unit?: string
 }
 
 type Opts = Partial<Omit<SchemaNode, 'label' | 'doc'>>
@@ -85,8 +90,8 @@ const health = (forStatic = false): SchemaNode =>
       http: str('HTTP 地址', 'http:// 或 https:// 开头，返回 2xx/3xx（或 status 指定的状态码）就算健康'),
       status: list('HTTP 状态码', '认为健康的状态码，如 [200]', { numbers: true, default: '2xx、3xx', needs: 'http' }),
       contains: str('响应里要有的文字', 'HTTP 响应里必须包含的文字', { needs: 'http' }),
-      timeout: dur('最长等待', '等多久还不健康就算启动失败，如 90s、2m', { default: forStatic ? '30s' : '180s' }),
-      stable: dur('稳定运行多久', '通过后还要稳定运行多久', { default: '没有 tcp、http 时 10s，否则 0' }),
+      timeout: dur('最长等待', '等多久还不健康就算启动失败', { default: forStatic ? '30s' : '180s' }),
+      stable: dur('稳定运行多久', '通过后还要稳定运行多久', { default: '没有 tcp、http 时 10 秒，否则 0' }),
     },
   )
 
@@ -97,7 +102,7 @@ function hookItem(): SchemaNode {
     {
       run: str('命令', '用 sh -c 执行，如 java -jar flyway.jar migrate', { required: true }),
       user: str('执行用户', '以谁的身份执行；可以写 root', { default: '应用的运行用户' }),
-      timeout: dur('最长执行多久', '最多 2h', { default: '5m' }),
+      timeout: dur('最长执行多久', '最多 2 小时', { default: '5m', min: 0, max: 7200 }),
       optional: bool('失败也接着部署', '失败只提示、接着部署', { default: 'false（失败就中止）' }),
     },
     { type: '字符串或对象', short: 'run' },
@@ -153,17 +158,25 @@ const service = obj('服务', 'systemd 服务：怎样启动程序', {
   restart: {
     ...obj(
       '意外退出后重启',
-      '程序意外退出后怎么重启（用 Ferry 或 systemctl 停止的不会重启）。可以只写方式：restart: always',
+      '程序自己退出了（崩溃、被系统杀掉）怎么自动拉起来。在 Ferry 里点「停止」或用 systemctl stop 停的不会被拉起。只改「什么时候重启」时可以只写一个值，如 restart: always',
       {
         when: pick(
           '什么时候重启',
-          'on-failure：出错退出、被信号杀掉（含 kill -9、内存不够被系统杀掉）时重启；always：任何退出都重启（含正常退出、被普通 kill 结束）；no：不重启',
+          'on-failure：出错退出、被强制结束（kill -9、内存不够被系统杀掉）时重启，正常退出不重启；always：不管怎么退出都重启；no：不自动重启',
           ['on-failure', 'always', 'no'],
           { default: 'on-failure' },
         ),
-        delay: dur('等多久再重启', '0～10m', { default: '5s' }),
-        max: num('最多重启几次', 'within 时间内最多重启几次（1～100），超过就不再重启：应用停着，服务器告警会报', { default: '不限，一直重启' }),
-        within: dur('多长时间内', '和 max 一起用', { default: '10m', needs: 'max' }),
+        delay: dur('等多久再重启', '程序退出后等多久再启动，0 秒～10 分钟', { default: '5s', min: 0, max: 600 }),
+        max: num(
+          '最多重启几次',
+          '在下面「多长时间内」这段时间里最多自动重启几次（1～100）。次数用完还要重启时就不再重启，应用停着，打开了服务器告警会报「应用停了」。用来防止起不来的程序（配置写错、端口被占）一直被反复拉起',
+          { default: '不限，一直重启', min: 1, max: 100, unit: '次' },
+        ),
+        within: dur(
+          '多长时间内',
+          '和「最多重启几次」一起用：在这段时间里数重启次数，过了这段时间从头算（1 秒～24 小时）。例：3 次、10 分钟 = 10 分钟里要重启第 4 次时就停下；一天崩一次的程序每次都会重启',
+          { default: '10m', needs: 'max', min: 1, max: 86400 },
+        ),
       },
     ),
     type: '字符串或对象',
@@ -178,7 +191,7 @@ const service = obj('服务', 'systemd 服务：怎样启动程序', {
     {
       ports: list('两个端口', '轮流用，如 [9201, 19201]', { numbers: true, required: true }),
       listen: str('对外端口', '直接对外的应用：Ferry 的 nginx 监听这个端口（8080 或 0.0.0.0:8080），转发到运行中的版本'),
-      drain: dur('停旧版本前等多久', '新版本接上后等多久再停旧版本（还在处理的请求做完、注册中心摘掉旧版本），最多 10m', { default: '30s' }),
+      drain: dur('停旧版本前等多久', '新版本接上后等多久再停旧版本（还在处理的请求做完、注册中心摘掉旧版本），最多 10 分钟', { default: '30s', min: 0, max: 600 }),
       nginx: str('nginx 版本', 'listen 用的 nginx 版本系列，如 1.30', { needs: 'listen', default: '服务器上 Ferry 已装的' }),
     },
     { appTypes: svc },
@@ -218,7 +231,7 @@ const app: SchemaNode = obj('应用', '一个可部署的应用', {
         nonEmptyLibs: bool('依赖不能是空包', '上面匹配到的依赖里必须有 .class'),
       }, { appTypes: ['java'] }),
       static: obj('静态目录检查', '前端目录里必须有某个文件', { index: str('必须有的文件', '相对产物目录', { default: 'index.html' }) }, { appTypes: ['static'] }),
-      minSize: num('最小字节数', '产物比这个小就不上传'),
+      minSize: num('最小字节数', '产物比这个小就不上传', { min: 0, unit: '字节' }),
     }),
     files: {
       ...list('附带文件', '配置文件、证书目录等：和程序放在同一级目录（程序的工作目录），每次部署都上传，回滚时一起回滚；程序只能读'),
@@ -275,7 +288,7 @@ const app: SchemaNode = obj('应用', '一个可部署的应用', {
     beforeSwitch: { ...list('切换前', '新版本放好之后、停止旧版本之前执行（工作目录是新版本的目录），如数据库迁移；失败时不切换，线上照旧'), kind: 'objList', item: hookItem() },
     afterSwitch: { ...list('切换后', '新版本就绪之后执行（工作目录是 running/），如预热、刷新缓存；失败时回滚（optional 的只提示）'), kind: 'objList', item: hookItem() },
   }),
-  keepReleases: num('保留几个版本', '至少 2', { default: '服务器的设置（5）' }),
+  keepReleases: num('保留几个版本', '至少 2', { default: '服务器的设置（5）', min: 2, unit: '个' }),
   root: str('部署根目录', '应用自己的部署根目录（应用目录为 <root>/apps/<应用>），用于把它放到另一个分区；可以用 ${变量}（如各服务器 vars 里的数据盘路径）', { default: '服务器的 root' }),
   vars: strMap('变量', '应用自己的变量（优先于服务器、项目的变量）'),
 })
@@ -283,7 +296,7 @@ const app: SchemaNode = obj('应用', '一个可部署的应用', {
 const target: SchemaNode = obj('服务器', '一台要部署到的服务器', {
   title: str('显示名', '界面上显示的名字，可以是中文', { default: '服务器的名字' }),
   host: str('服务器地址', 'IP 或域名', { required: true }),
-  port: num('SSH 端口', '', { default: '22' }),
+  port: num('SSH 端口', '', { default: '22', min: 1, max: 65535 }),
   user: str('SSH 用户', '', { default: 'root' }),
   auth: pick('登录方式', 'key：私钥或 ssh-agent；password：密码（密码不写在这里，存在系统凭据库）', ['key', 'password'], { default: 'key' }),
   identityFile: str('私钥', '相对配置文件所在目录，支持 ~；用「配置免密登录」可以自动生成并写入。登录方式是 password 时不要写'),
@@ -292,9 +305,9 @@ const target: SchemaNode = obj('服务器', '一台要部署到的服务器', {
   root: str('部署根目录', '必须归 root 且其他人不可写', { default: '/opt/<项目名>' }),
   runAs: str('运行用户', '服务默认的运行用户（不能是 root；服务器上没有时部署会自动创建）'),
   arch: pick('CPU 架构', '和服务器不符时报错', ['amd64', 'arm64'], { default: '自动' }),
-  keepReleases: num('保留几个版本', '每个应用保留的版本数，至少 2', { default: '5' }),
+  keepReleases: num('保留几个版本', '每个应用保留的版本数，至少 2', { default: '5', min: 2, unit: '个' }),
   ferryDir: str('Ferry 组件目录', 'agent、Ferry 提供的 JDK 放在服务器上的哪里；必须归 root、其他人不可写，同一台服务器上的项目共用', { default: '/usr/local/lib/ferry' }),
-  uploadStreams: num('上传并行连接数', '1～32：8 MB 以上切片后多条连接同时传，VPN 等对单条连接限速时调大', { default: '设置里的值（6）' }),
+  uploadStreams: num('上传并行连接数', '1～32：8 MB 以上切片后多条连接同时传，VPN 等对单条连接限速时调大', { default: '设置里的值（6）', min: 1, max: 32, unit: '条' }),
   confirm: bool('部署前确认', '部署、回滚前先确认', { default: 'true' }),
   production: bool('生产服务器', 'AI 助手的每个改动都要确认（不能「同类不再询问」），界面上标出「生产」'),
   aiChanges: bool('允许 AI 助手改动', '每步都要确认；false = 只能查看', { default: 'true' }),
@@ -315,7 +328,7 @@ const db = (name: string, tool: string, port: number, user: string): SchemaNode 
   obj(name, `${name} 数据库（用 ${tool} 导出）；密码写在 envFile 里`, {
     database: str('库名', '* 为全部库', { required: true }),
     host: str('地址', '', { default: '127.0.0.1（写了容器时在容器里连本机）' }),
-    port: num('端口', '', { default: String(port) }),
+    port: num('端口', '', { default: String(port), min: 1, max: 65535 }),
     user: str('用户', '', { default: user }),
     container: str('Docker 容器', '数据库在 Docker 容器里（如 1Panel 装的 1Panel-mysql-xxxx）：在容器里执行；没写密码时用容器自己的'),
     bin: str('程序目录', `${tool} 所在的目录（服务器上的绝对路径）；不在 PATH 里时写，如 Ferry 装的 MySQL 的 <安装目录>/mysql/bin`),
@@ -330,7 +343,7 @@ const backup: SchemaNode = obj('数据备份', '一项数据备份：MySQL、Pos
   restore: str('恢复命令', '备份的内容从标准输入进来', { needs: 'command' }),
   envFile: list('环境变量文件', '执行时读的环境变量文件（服务器上）：MYSQL_PWD=…、PGPASSWORD=…', { single: true }),
   schedule: pick('什么时候备份', 'daily 每天 3 点、hourly 每小时、weekly 每周，或 systemd 的 OnCalendar（如 *-*-* 02:30:00）', ['daily', 'hourly', 'weekly'], { open: true, default: 'daily' }),
-  keep: num('保留几份', '最多 1000', { default: '7' }),
+  keep: num('保留几份', '1～1000', { default: '7', min: 1, max: 1000, unit: '份' }),
   beforeDeploy: bool('部署前先备份', '失败就不部署'),
   targets: list('只在这些服务器上', '服务器名', { default: '全部服务器' }),
 }, { oneOf: [['mysql', 'postgres', 'paths', 'command']], oneOfRequired: true })

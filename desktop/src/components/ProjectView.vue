@@ -4,7 +4,7 @@ import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount,
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { Refresh, Upload, VideoPlay, VideoPause, RefreshRight, Clock, EditPen, Key, Monitor, ChatDotRound, Grid, List, SwitchButton, Setting, ArrowDown, Tools, Bell, Box, Connection, User, DataLine } from '@element-plus/icons-vue'
 import { call, FerryError, latencyInfo, latencyTip, shortCommit, time, type AppStatus, type ConnStatus, type LockHolder, type ExtraPort, type Inspect, type InspectTarget } from '../ferry'
-import { addProject, addTerminal, aiAskRequest, startTask, trustRequest, trustedTick, secretRequest, localRequest, appSettings, tasks, projectSummary, projectTraits, type Project } from '../state'
+import { addProject, addTerminal, aiAskRequest, configWritten, startTask, trustRequest, trustedTick, secretRequest, localRequest, appSettings, tasks, projectSummary, projectTraits, type Project } from '../state'
 import SoftwarePanel from './SoftwarePanel.vue'
 import RowActions from './RowActions.vue'
 import type { RowAction } from '../rowActions'
@@ -226,6 +226,11 @@ async function openAi(t: string, question = '') {
   await nextTick()
   aiDrawers[t]?.ask(question)
 }
+// AI 改了这个项目的配置（助手的 config_edit、编程软件请求的改配置）：重新读一遍
+watch(configWritten, (r) => {
+  const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase()
+  if (r && norm(r.config) === norm(props.project.path)) void loadInspect()
+})
 // 任务面板里点了「让 AI 看看」：是这个项目的就打开对应服务器的 AI 助手
 watch(
   aiAskRequest,

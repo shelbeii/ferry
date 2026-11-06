@@ -9,7 +9,7 @@ import { Promotion, VideoPause, Plus, Setting, CaretRight, CaretBottom, Loading,
 import MarkdownIt from 'markdown-it'
 import { call, ferry, isSecretKind, type FerryLine } from '../ferry'
 import { onFileDrop, openUrl, pickSaveFile } from '../platform'
-import { appSettings, secretRequest, trustRequest, settingsRequest } from '../state'
+import { appSettings, secretRequest, trustRequest, settingsRequest, noteConfigWritten } from '../state'
 import { defaultEffort, effortLabel, effortOptions, modelEffort, addUsage, zeroUsage, usageText, findModelByName, cost, money, tokens, type Usage } from '../ai'
 import { supportsImages, prepareImage, base64Blob, imageUrl, MAX_IMAGES, type AiImage } from '../ai'
 import GlassPane from './glass/GlassPane.vue'
@@ -410,6 +410,7 @@ function onLine(l: FerryLine) {
       it.isError = ev.isError
       it.done = true
       it.waiting = false
+      if (it.call?.name === 'config_edit' && !ev.isError) noteConfigWritten(props.config)
       // 改动的结果默认展开（看得到执行了什么），查看的出错才展开
       it.expanded = !!ev.isError || (!!it.approval && it.decision !== 'reject')
     }
@@ -779,6 +780,15 @@ function callTitle(c: Call): string {
       return `查询数据库${i.database ? ' ' + i.database : ''}`
     case 'db_execute':
       return `改数据库${i.connection ? ' ' + i.connection : ''}${i.database ? ' · ' + i.database : ''}`
+    case 'config_schema':
+      return i.query ? `查配置项：${i.query}` : i.path ? `查配置项 ${i.path} 的说明` : '查有哪些配置项'
+    case 'config_get':
+      return i.scope === 'local' ? '看这台电脑的本机设置' : i.path ? `看配置 ${i.path}` : '看项目配置 ferry.yaml'
+    case 'config_edit': {
+      const edits = (c.input.edits as { path?: string }[] | undefined) ?? []
+      const what = edits.map((e) => e.path).filter(Boolean).slice(0, 3).join('、')
+      return `${i.scope === 'local' ? '改本机设置' : '改项目配置'}${what ? '：' + what : ''}${edits.length > 3 ? ` 等 ${edits.length} 处` : ''}`
+    }
     case 'redis_query':
       return `Redis：${String(i.command ?? '').slice(0, 60)}`
     case 'redis_execute':

@@ -62,7 +62,7 @@ var actionNames = map[string]string{"deploy": "部署", "start": "启动", "stop
 	"sw-start": "启动软件", "sw-stop": "停止软件", "sw-restart": "重启软件", "port-open": "放行端口", "port-close": "关闭端口",
 	"fw-enable": "打开防火墙", "ssh-kick": "断开 SSH 连接", "backup-run": "现在备份", "create": "新建项目",
 	"exec": "执行命令", "write-file": "写文件", "install": "安装软件", "tpl-save": "保存软件模板", "secret": "填写密码",
-	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份", "db-exec": "改数据库"}
+	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份", "db-exec": "改数据库", "config-edit": "改项目配置"}
 
 // reSoftware Ferry 装的软件的名称（安装时的 --name）。
 var reSoftware = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -167,6 +167,9 @@ func PrepareRequest(r *approve.Request) error {
 	}
 	if r.Action == "db-exec" {
 		return prepareDB(r)
+	}
+	if r.Action == "config-edit" {
+		return prepareConfigEdit(r)
 	}
 	if r.Action == "create" {
 		content, err := generateProject(r.Spec, r.Config)
@@ -682,7 +685,6 @@ func (s *server) submit(r approve.Request) *op {
 			o.decision = &d
 		}
 		o.mu.Unlock()
-		close(o.done)
 		args, _ := json.Marshal(map[string]any{"project": r.Project, "target": r.Target, "apps": r.Apps, "name": cmp.Or(r.Software, r.Backup), "port": r.Port, "action": actionNames[r.Action]})
 		entry := callEntry{Time: time.Now(), Client: r.Client, Tool: r.Action + "（结果）", Op: r.ID, Args: args, Ms: time.Since(o.started).Milliseconds()}
 		switch {
@@ -701,6 +703,7 @@ func (s *server) submit(r approve.Request) *op {
 			}
 		}
 		writeLog(entry)
+		close(o.done) // 记下结果之后再告诉等着的调用
 	})
 	return o
 }
@@ -710,6 +713,13 @@ func opTitle(r approve.Request) string {
 	switch {
 	case r.Action == "create":
 		return "新建项目 " + r.Project + "（" + r.Config + "）"
+	case r.Action == "config-edit":
+		var in engine.ConfigEditInput
+		json.Unmarshal(r.Input, &in)
+		if in.Scope == "local" {
+			return "改本机设置 " + r.Project
+		}
+		return "改项目配置 " + r.Project + "（" + r.Config + "）"
 	case strings.HasPrefix(r.Action, "sw-"):
 		name := r.Software
 		if r.Tool != "" { // 升级、恢复、设置备份：名称在给助手工具的参数里

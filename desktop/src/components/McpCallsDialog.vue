@@ -46,6 +46,10 @@ const TOOL_NAMES: Record<string, string> = {
   monitor_status: '服务器告警',
   backup_status: '数据备份',
   task_status: '查进展',
+  config_schema: '配置项的说明',
+  config_get: '查看配置',
+  config_check: '检查配置',
+  config_edit: '请求改配置',
   db_connections: '数据库连接',
   db_schema: '数据库结构',
   db_query: '数据库查询',
@@ -73,7 +77,7 @@ function argsText(c: CallEntry) {
   const parts: string[] = []
   const spec = a.spec as { project?: string } | undefined
   if (spec?.project) parts.push(`项目 ${spec.project}`)
-  for (const k of ['project', 'target', 'app', 'apps', 'action', 'name', 'command', 'keyword', 'dir', 'id']) {
+  for (const k of ['project', 'target', 'app', 'apps', 'action', 'name', 'command', 'keyword', 'dir', 'id', 'path', 'query', 'scope']) {
     const v = a[k]
     if (v === undefined || v === '' || (Array.isArray(v) && !v.length)) continue
     parts.push(Array.isArray(v) ? v.join('、') : String(v))

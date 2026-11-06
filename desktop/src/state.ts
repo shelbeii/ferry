@@ -566,6 +566,12 @@ export async function hangupConnection(name: string, title = name) {
 /** 「让 AI 看看」：打开这个项目、这台服务器的 AI 助手，新开一个对话问这句话（项目页接着处理） */
 export const aiAskRequest = ref<{ config: string; target: string; text: string } | null>(null)
 
+/** AI（Ferry 的助手、编程软件经 MCP）改了这个项目的配置：打开着的项目页重新读一遍 */
+export const configWritten = ref<{ config: string; at: number } | null>(null)
+export function noteConfigWritten(config: string) {
+  configWritten.value = { config, at: Date.now() }
+}
+
 // 命令的第二项是服务器的（deploy prod-a,prod-b → prod-a）
 function targetOf(args: string[]): string | undefined {
   return commandTarget(args)

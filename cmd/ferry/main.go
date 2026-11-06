@@ -45,6 +45,10 @@ const usage = `ferry —— 后端 / 前端部署工具
   create   -c <路径> [--dry-run|--check] 按环境变量 FERRY_CREATE_VALUE 里的 JSON 生成 ferry.yaml（向导用；不覆盖已有文件）
   probe    prepare | <目标> -c <临时配置> [--create-user <用户>]  新建项目时测试连接、检查服务器（向导用，内容在 FERRY_PROBE_VALUE）
   validate                      校验配置
+  config-schema [<路径>] [--query <关键字>]  配置项的说明（每项的意思、写法；AI 用的同一份）
+  config-get    [<路径>] [--local]         现在的配置（某一项；--local 看本机设置）
+  config-edit   [--local] [--dry-run]      按路径改配置（修改在环境变量 FERRY_CONFIG_EDIT 里：{"edits":[{"op","path","value"}]}）；
+                                           只改要改的那几行，改完校验，不通过不写；--dry-run 只显示差异
   plan     <目标> [应用…]        查看将执行的构建、产物和 systemd 单元（不连接服务器）
   trust    <目标> [--expect <指纹>]  核对并记录服务器主机公钥（首次连接前执行）
   hostkey  <目标>               只取服务器主机公钥指纹与记录状态
@@ -171,7 +175,7 @@ type cli struct {
 var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": true, "limit": true, "offset": true, "tool": true, "client": true, "result": true, "since": true, "until": true, "q": true, "n": true, "expect": true, "key": true, "passphrase": true, "account": true,
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
 	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
-	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "keep-files": true}
+	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "keep-files": true, "query": true}
 var boolFlags = map[string]bool{
 	"with-secrets": true,
 	"y":            true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
@@ -367,6 +371,8 @@ func run(argv []string, cio *cliIO) int {
 		return 0
 	case cmd == "create":
 		return createCmd(c, cio, js, con, fail)
+	case cmd == "config-schema" || cmd == "config-get" || cmd == "config-edit":
+		return configToolCmd(cmd, c, cio, js, fail)
 	case cmd == "probe" && len(c.pos) > 0 && c.pos[0] == "prepare":
 		return probePrepareCmd(cio, js, fail)
 	case cmd == "connection":
