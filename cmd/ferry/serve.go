@@ -45,6 +45,7 @@ func serve(in io.Reader, out io.Writer) int {
 	defer pool.Close()
 	dbx.Default.Keep() // 「数据库」的连接在请求之间留着，空闲 10 分钟后关
 	defer dbx.Default.Close("")
+	defer engine.CloseForwards(0) // 「打开网页」经 SSH 转发开的本机端口
 
 	var mu sync.Mutex
 	enc := json.NewEncoder(out)

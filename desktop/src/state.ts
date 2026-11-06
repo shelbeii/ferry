@@ -232,6 +232,9 @@ export const tasks = reactive<Task[]>([])
 export const drawerOpen = ref(false)
 /** 内置浏览器的抽屉（BrowserDrawer.vue） */
 export const browserOpen = ref(false)
+/** 要在内置浏览器里打开的网址（「软件」页「打开网页」）：浏览器打开后接过去，开着这个网址的标签就切过去。
+ *  login：网页加载完后替用户填好账号密码、点登录（只在这个网站上，Rust 那边只留两分钟） */
+export const browserRequest = ref<{ url: string; login?: { user: string; password: string } } | null>(null)
 export const selectedTaskId = ref<number | null>(null)
 let nextId = 1
 

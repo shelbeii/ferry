@@ -1038,6 +1038,44 @@ type Software struct {
 	Hosting    *NginxHosting      `json:"hosting,omitempty"`
 	Dir        string             `json:"dir,omitempty"`       // Ferry 安装的：安装目录
 	Locations  []SoftwareLocation `json:"locations,omitempty"` // 容器在主机上的位置
+	// Web 能在浏览器里打开的网页：控制台、管理面板、网站
+	Web []WebPanel `json:"web,omitempty"`
+}
+
+// HidePanelEntrances 去掉 1Panel、宝塔面板的安全入口（给 AI 看的时候：入口是防扫描的，不发给模型）。
+func (r *SoftwareReport) HidePanelEntrances() *SoftwareReport {
+	if r == nil {
+		return r
+	}
+	for i := range r.Items {
+		it := &r.Items[i]
+		if it.Kind != "1panel" && it.Kind != "bt" || len(it.Web) == 0 {
+			continue
+		}
+		web := append([]WebPanel(nil), it.Web...)
+		for j := range web {
+			if web[j].Path != "" && web[j].Path != "/" {
+				web[j].Path, web[j].Note = "/", "安全入口不给 AI 看：请用户在 Ferry「软件」页的「打开面板」里打开"
+			}
+		}
+		it.Web = web
+	}
+	return r
+}
+
+// WebPanel 软件的一个网页（Nacos 控制台、1Panel 面板……）。
+type WebPanel struct {
+	Label  string `json:"label"`  // 控制台、面板、网站 :80
+	Scheme string `json:"scheme"` // http | https
+	// Port 主机上的端口；0 = 只在容器里监听、没有映射到主机（只能经服务器连容器的地址）
+	Port  int `json:"port,omitempty"`
+	Inner int `json:"inner,omitempty"` // 容器里的端口（Port 为 0 时用）
+	// Local 只在服务器本机监听（127.0.0.1）：这台电脑直接连不上，要经 SSH 转发
+	Local bool   `json:"local,omitempty"`
+	Path  string `json:"path,omitempty"` // 以 / 开头；1Panel、宝塔的安全入口也在这里
+	Note  string `json:"note,omitempty"` // 默认账号、怎么登录
+	// Host 网站的域名（nginx 的 server_name）：同一个端口上有几个网站时按它分，打开时要用它当地址（经转发时改请求里的 Host）
+	Host string `json:"host,omitempty"`
 }
 
 type SoftwareLocation struct {

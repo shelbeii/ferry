@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -335,11 +336,45 @@ func (cl *Client) close() {
 
 func (cl *Client) dial(ctx context.Context) (net.Conn, error) {
 	if cl.tn != nil {
-		return cl.tn.Dial(ctx, cl.addr)
+		c, err := cl.tn.Dial(ctx, cl.addr)
+		if err != nil {
+			return nil, err
+		}
+		return withDeadlines(c), nil
 	}
 	d := net.Dialer{Timeout: dialTimeout}
 	return d.DialContext(ctx, "tcp", cl.addr)
 }
+
+// withDeadlines 经 SSH 转发的连接不支持读写超时（SetDeadline 报 ssh: tcpChan: deadline not supported），
+// go-redis 设超时失败就不用这个连接。中间接一个 net.Pipe（支持超时）、两头对拷：超时照常生效，
+// 超时后客户端关掉连接，对拷的两头也跟着关。
+func withDeadlines(c net.Conn) net.Conn {
+	if c.SetDeadline(time.Time{}) == nil {
+		return c
+	}
+	a, b := net.Pipe()
+	safe.Go("数据库连接对拷", func() {
+		io.Copy(c, b)
+		c.Close()
+		b.Close()
+	})
+	safe.Go("数据库连接对拷", func() {
+		io.Copy(b, c)
+		b.Close()
+		c.Close()
+	})
+	return &pipeConn{Conn: a, local: c.LocalAddr(), remote: c.RemoteAddr()}
+}
+
+// pipeConn 地址用原来连接的（net.Pipe 的地址是 pipe）。
+type pipeConn struct {
+	net.Conn
+	local, remote net.Addr
+}
+
+func (p *pipeConn) LocalAddr() net.Addr  { return p.local }
+func (p *pipeConn) RemoteAddr() net.Addr { return p.remote }
 
 // DB 某个库的连接池；name 为空时用连接的默认库。
 func (cl *Client) DB(ctx context.Context, name string) (*sql.DB, error) {

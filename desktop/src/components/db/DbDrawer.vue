@@ -14,7 +14,7 @@ import DbSqlConfirm from './DbSqlConfirm.vue'
 import DbCsvImport from './DbCsvImport.vue'
 import {
   dbOpen, dbConns, closeOnOutside, dbOpened, dbRequest, dbPasswordRequest, loadDbConns, dbCall, saveDbConn, removeDbConn, closeDbConn, confirmSql, passwordEnv,
-  humanSize, kindLabel, exportTo, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult,
+  humanSize, kindLabel, exportTo, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult, type DbFrom,
 } from '../../db'
 import { sessionEnv } from '../../ferry'
 import { pickFile } from '../../platform'
@@ -489,11 +489,24 @@ function parentId(d: TreeData) {
 
 // ---------------------------------------------------------------- 连接对话框、密码
 
-const connDialog = ref<Partial<DbConn> | null>(null)
+const connDialog = ref<(Partial<DbConn> & { from?: DbFrom }) | null>(null)
 async function onSaved(c: DbConn) {
+  const fromSoftware = !!connDialog.value?.from && !connDialog.value.id
   connDialog.value = null
   for (const t of tabs.value) if (t.conn.id === c.id) t.conn = c
   treeKey.value++
+  // 从「软件」页新建的：存好就打开
+  if (fromSoftware) {
+    await loadDbConns().catch(() => {})
+    void nextTick(() => openConn(dbConns.value.find((x) => x.id === c.id) ?? c))
+  }
+}
+
+/** 展开连接、打开查询窗口（Redis 打开键列表） */
+function openConn(c: DbConn) {
+  tree.value?.getNode('c:' + c.id)?.expand()
+  if (c.kind === 'redis') openRedis(c, c.database?.replace(/^db/i, '') || '0')
+  else openQuery(c)
 }
 
 const pw = reactive({ value: '', remember: false })
@@ -517,19 +530,24 @@ async function submitPassword(ok: boolean) {
   r.resolve(true)
 }
 
-// 「软件」页点了「管理数据」
+// 「软件」页点了「连接数据库」
 watch(dbRequest, async (r) => {
   if (!r) return
   dbRequest.value = null
   dbOpen.value = true
   if (!dbConns.value.length) await loadDbConns().catch(() => {})
-  const same = dbConns.value.find((c) => c.via && r.via && c.via.config === r.via.config && c.via.target === r.via.target && c.port === r.port && (c.container ?? '') === (r.container ?? '') && c.kind === r.kind)
+  // 已经保存过这个数据库的连接（直接连的或经这台服务器连的）：直接打开它
+  const f = r.from
+  const same = dbConns.value.find((c) => {
+    if (c.kind !== r.kind) return false
+    if (f) {
+      if (!c.via) return !!f.endpoint.direct && c.host === f.host && c.port === f.endpoint.direct
+      return c.via.config === f.via.config && c.via.target === f.via.target && c.port === f.endpoint.ssh.port && (c.container ?? '') === (f.endpoint.ssh.container ?? '')
+    }
+    return !!c.via && !!r.via && c.via.config === r.via.config && c.via.target === r.via.target && c.port === r.port && (c.container ?? '') === (r.container ?? '')
+  })
   if (same) {
-    void nextTick(() => {
-      tree.value?.getNode('c:' + same.id)?.expand()
-      if (same.kind === 'redis') openRedis(same, same.database?.replace(/^db/i, '') || '0')
-      else openQuery(same)
-    })
+    void nextTick(() => openConn(same))
   } else {
     connDialog.value = r
   }
@@ -568,7 +586,7 @@ function nodeIcon(d: TreeData) {
         <div class="tree-box">
           <el-empty v-if="!dbConns.length" description="还没有数据库连接" :image-size="60">
             <el-button type="primary" size="small" :icon="Plus" @click="connDialog = { kind: 'mysql', savePassword: true }">新建连接</el-button>
-            <div class="empty-tip">也可以在服务器的「软件」页，从 MySQL、PostgreSQL、Redis 的「更多」里点「管理数据」</div>
+            <div class="empty-tip">也可以在服务器的「软件」页，从 MySQL、PostgreSQL、Redis 的「更多」里点「连接数据库」</div>
           </el-empty>
           <el-tree
             v-else

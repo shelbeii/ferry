@@ -8,7 +8,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from './platform'
 import { call, FerryError, type Connection, type Inspect } from './ferry'
 import { connectionsPath as connPath, CONN_PREFIX, pageTerminals, loadTaskHistory } from './state'
-import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, browserOpen, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, projectTraits, uiPref, setUiPref } from './state'
+import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, browserOpen, browserRequest, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, projectTraits, uiPref, setUiPref } from './state'
 import ProjectScene from './components/ProjectScene.vue'
 import ProjectView from './components/ProjectView.vue'
 import TaskDrawer from './components/TaskDrawer.vue'
@@ -31,6 +31,7 @@ const UpdateDialog = defineAsyncComponent(() => import('./components/UpdateDialo
 // 浏览器第一次打开后一直留着（关上抽屉网页还在，再打开接着用）
 const browserUsed = ref(false)
 watch(browserOpen, (v) => v && (browserUsed.value = true))
+watch(browserRequest, (v) => v && (browserOpen.value = true))
 // 「数据库」：同样第一次打开后留着（标签页、查询内容还在）；和浏览器同一个位置，打开一个就收起另一个
 const DbDrawer = defineAsyncComponent(() => import('./components/db/DbDrawer.vue'))
 const dbUsed = ref(false)

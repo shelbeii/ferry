@@ -133,7 +133,7 @@ onBeforeUnmount(() => tabs.forEach(drop))
     </div>
 
     <FilesDrawer v-model="filesOpen" :config="config" :target="conn.name" :title="conn.title" />
-    <el-drawer v-if="softwareOpen" v-model="softwareOpen" direction="rtl" size="94vw" append-to-body :title="`软件：${conn.title}`"><SoftwarePanel :config="config" :target="conn.name" :host="conn.host" :connected="live" /></el-drawer>
+    <el-drawer v-if="softwareOpen" v-model="softwareOpen" direction="rtl" size="94vw" append-to-body :title="`软件：${conn.title}`"><SoftwarePanel :config="config" :target="conn.name" :host="conn.host" :connected="live" @leave="softwareOpen = false" /></el-drawer>
     <el-drawer v-if="sshUsed" v-model="sshOpen" direction="rtl" size="64%" append-to-body :title="`登录用户：${conn.title}`" class="ssh-drawer" @open="sshPanel?.load()">
       <SshPanel ref="sshPanel" :config="config" :target="conn.name" :connected="tabs.some((t) => t.state === 'open')" bar />
     </el-drawer>

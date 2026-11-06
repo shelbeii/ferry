@@ -336,14 +336,28 @@ export async function appInfo(): Promise<{ name: string; version: string; tauri:
   return { name: await app.getName(), version: await app.getVersion(), tauri: await app.getTauriVersion() }
 }
 
-/** 用系统默认浏览器打开网址。 */
+/** 复制密码：Windows 上不进剪贴板历史（Win+V）、不同步到云剪贴板，30 秒后还在剪贴板里就清掉；其他系统普通复制。
+ *  返回 true = 用了不进历史、会自动清的复制 */
+export async function copySecret(text: string): Promise<boolean> {
+  if (isTauri) {
+    try {
+      await invoke('copy_secret', { text })
+      return true
+    } catch {
+      // 不是 Windows：下面普通复制
+    }
+  }
+  await navigator.clipboard.writeText(text)
+  return false
+}
+
+/** 用系统默认浏览器打开网址（http / https；经 Ferry 自己的命令，opener 插件的权限只给 GitHub）。 */
 export async function openUrl(url: string): Promise<void> {
   if (!isTauri) {
     window.open(url, '_blank', 'noopener')
     return
   }
-  const { openUrl } = await import('@tauri-apps/plugin-opener')
-  await openUrl(url)
+  await invoke('open_external', { url })
 }
 
 /** 退出 Ferry（更新时安装程序已经启动）；浏览器调试时什么也不做。 */

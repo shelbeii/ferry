@@ -113,6 +113,8 @@ const usage = `ferry —— 后端 / 前端部署工具
   port     check <目标> <端口>… [--timeout 3]   从本机连服务器的端口，看能不能连上
   port     enable <目标> [--allow 8080,443/tcp] [--restart-docker]   打开装了没开的防火墙（先放行 SSH 端口，连不上自动恢复）
   port     disable <目标> [--restart-docker]   关闭正在运行的防火墙（开机不再启动，规则留着）
+  forward  <目标> <端口> [--host 地址 | --container 名字]   这台电脑上开一个端口（127.0.0.1），经 SSH 转到服务器那边，
+                                服务器不用放行端口（打开控制台、管理面板用）；forward list | close [本机端口] | probe <目标> <端口>…
   who      <目标>               服务器上连着的 SSH：登录用户、来源 IP、连上的时间、在干什么
   server-info <目标>            服务器系统、CPU、内存、Swap、各挂载点容量与 inode、网卡地址（只读）
   who      kick <目标> <PID>…   断开这些 SSH 连接
@@ -168,7 +170,7 @@ type cli struct {
 
 var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": true, "limit": true, "offset": true, "tool": true, "client": true, "result": true, "since": true, "until": true, "q": true, "n": true, "expect": true, "key": true, "passphrase": true, "account": true,
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
-	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true,
+	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
 	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "keep-files": true}
 var boolFlags = map[string]bool{
 	"with-secrets": true,
@@ -176,7 +178,7 @@ var boolFlags = map[string]bool{
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
-	"ai": true, "restart": true,
+	"ai": true, "restart": true, "tls": true,
 }
 
 func parseArgs(argv []string) (*cli, error) {
@@ -371,6 +373,8 @@ func run(argv []string, cio *cliIO) int {
 		return connectionCmd(c, cio, js, con, fail)
 	case cmd == "db":
 		return dbCmd(c, cio, js, con, st, fail)
+	case cmd == "forward" && len(c.pos) > 0 && (c.pos[0] == "list" || c.pos[0] == "close" || c.pos[0] == "reach"):
+		return forwardCmd(c, cio, nil, js, con, fail)
 	case cmd == "ai-key":
 		return aiKeyCmd(c, cio, js, con, st, fail)
 	case cmd == "notify":
@@ -888,6 +892,9 @@ func run(argv []string, cio *cliIO) int {
 	case "port":
 		return portCmd(c, e, js, con, fail)
 
+	case "forward":
+		return forwardCmd(c, cio, e, js, con, fail)
+
 	case "who":
 		return whoCmd(c, e, js, con, fail)
 
@@ -925,7 +932,7 @@ const logsLoadedMark = "\x00ferry:loaded"
 
 // connCommands 对「新建连接」保存的服务器能用的命令（它们只登录，不装 agent）。
 var connCommands = map[string]bool{"software": true, "terminal": true, "files": true, "trust": true, "hostkey": true, "secret": true,
-	"pool": true, "disconnect": true, "validate": true, "inspect": true, "ai": true, "probe": true, "who": true, "server-info": true}
+	"pool": true, "disconnect": true, "validate": true, "inspect": true, "ai": true, "probe": true, "who": true, "server-info": true, "forward": true}
 
 // filesCmd ferry files ls|size|preview|save|mkdir|mv|rm|upload|download <目标> …
 func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail func(error) int) int {

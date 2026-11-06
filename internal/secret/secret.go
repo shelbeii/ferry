@@ -35,6 +35,7 @@ const (
 	KindDNS        = "dns"        // HTTPS 证书 DNS 验证用的 DNS 服务商密钥
 	KindAIInput    = "ai-input"   // 用户在 AI 助手的输入框里填、并选了记住的密码、账号
 	KindDB         = "db"         // 「数据库」里保存的数据库密码
+	KindWeb        = "web"        // 「打开网页」时记住的控制台、管理面板的账号密码
 )
 
 func service() string {

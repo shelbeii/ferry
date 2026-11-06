@@ -505,7 +505,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			if err != nil {
 				return "", err
 			}
-			return toJSON(r), nil
+			return toJSON(r.HidePanelEntrances()), nil
 		},
 	}, ai.Tool{
 		Name:        "app_releases",

@@ -9,7 +9,8 @@
 //! 安全：网页是远程地址，Tauri 不允许远程页面调用 Ferry 的命令；这里的命令也都只认主窗口。
 //! 标签页不能跳到 Ferry 界面的地址（tauri.localhost 等）和调试端口。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -48,6 +49,53 @@ const LINK_SCRIPT: &str = r#"(() => {
   addEventListener('auxclick', (e) => { if (e.button === 1) open(e, true); }, true);
 })();"#;
 
+/// 自动登录：在登录页里找到密码框和它前面的账号框，填好后点「登录」。单页网站的登录框常在加载完之后才画出来，最多等 20 秒。
+/// 同一个标签（同一个网站）只自动点一次登录（sessionStorage 记着），密码不对时不会反复提交，之后再加载只填不点。
+/// 填值用原生的 value 设置器再发 input / change 事件，React、Vue 的输入框才会认。
+const FILL_SCRIPT: &str = r#"((u, p) => {
+  const KEY = 'ferry.autologin';
+  let tried = false;
+  try { tried = sessionStorage.getItem(KEY) === '1'; } catch (e) {}
+  const shown = (el) => el && el.getClientRects().length > 0 && !el.disabled && !el.readOnly;
+  const put = (el, v) => {
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const find = () => {
+    const pw = [...document.querySelectorAll('input[type=password]')].find(shown);
+    if (!pw) return null;
+    const all = [...document.querySelectorAll('input')].filter(shown);
+    const user = all.slice(0, all.indexOf(pw)).reverse().find((el) => /^(text|email|tel|)$/i.test(el.getAttribute('type') || ''));
+    return { pw, user };
+  };
+  const submit = (pw) => {
+    const form = pw.form;
+    const scope = form || document;
+    const btns = [...scope.querySelectorAll('button, input[type=submit], [role=button]')].filter(shown);
+    const btn = btns.find((b) => /^(登\s*录|登\s*入|log\s*in|sign\s*in|login)$/i.test((b.textContent || b.value || '').trim()))
+      || btns.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'submit');
+    if (btn) btn.click();
+    else if (form && form.requestSubmit) form.requestSubmit();
+    else pw.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  };
+  const start = Date.now();
+  const tick = () => {
+    const f = find();
+    if (!f) {
+      if (Date.now() - start < 20000) setTimeout(tick, 300);
+      return;
+    }
+    if (f.user && u) put(f.user, u);
+    put(f.pw, p);
+    if (tried) return;
+    try { sessionStorage.setItem(KEY, '1'); } catch (e) {}
+    setTimeout(() => submit(f.pw), 400);
+  };
+  tick();
+})"#;
+
 /// 浏览器网页视图的数据目录（数据目录下的 browser）；None = 用系统默认位置（macOS）
 pub struct BrowserDir(pub Option<PathBuf>);
 
@@ -66,6 +114,75 @@ struct Tabs {
     devtools: Option<Bounds>,
     /// 藏起来、已经挂起 / 降低内存的网页视图（标签）
     parked: HashSet<String>,
+    /// 打开时要自动登录的标签（「软件」页「打开网页」选了账号）：网页加载完时填好、点登录
+    logins: HashMap<u32, Login>,
+    /// 用户同意了证书不受信任也打开的网站（origin）：Ferry 这次运行期间有效
+    cert_ok: HashSet<String>,
+    /// 已经问过用户的（同一个网站的几个请求只问一次）
+    cert_asked: HashSet<String>,
+}
+
+/// 界面传来的账号密码
+#[derive(Clone, Deserialize)]
+pub struct LoginIn {
+    user: String,
+    password: String,
+}
+
+/// 一个标签的自动登录：只在打开的那个网站（origin）上填，最多填 left 次、until 之前有效（之后从内存里删掉）
+struct Login {
+    origin: String,
+    user: String,
+    password: String,
+    left: u8,
+    until: Instant,
+}
+
+fn set_login(t: &mut Tabs, id: u32, url: &Url, login: Option<LoginIn>) {
+    match login {
+        Some(l) => {
+            t.logins.insert(
+                id,
+                Login {
+                    origin: url.origin().ascii_serialization(),
+                    user: l.user,
+                    password: l.password,
+                    left: 3,
+                    until: Instant::now() + Duration::from_secs(120),
+                },
+            );
+        }
+        None => {
+            t.logins.remove(&id);
+        }
+    }
+}
+
+/// 网页加载完：这个标签要自动登录、还是打开时的那个网站，就填账号密码
+fn autofill(app: &AppHandle, v: &Webview, url: &Url) {
+    let Some(id) = tab_id(v.label()) else { return };
+    let script = {
+        let mut t = lock(app);
+        let Some(l) = t.logins.get_mut(&id) else { return };
+        if Instant::now() > l.until {
+            t.logins.remove(&id);
+            return;
+        }
+        if url.origin().ascii_serialization() != l.origin {
+            return;
+        }
+        l.left = l.left.saturating_sub(1);
+        let js = format!(
+            "{FILL_SCRIPT}({}, {});",
+            serde_json::to_string(&l.user).unwrap_or_default(),
+            serde_json::to_string(&l.password).unwrap_or_default()
+        );
+        if l.left == 0 {
+            t.logins.remove(&id);
+        }
+        js
+    };
+    let _ = v.eval(&script);
 }
 
 #[derive(Clone, Serialize)]
@@ -146,7 +263,8 @@ fn allowed(url: &Url, port: Option<u16>) -> bool {
             ) {
                 return false;
             }
-            let local = matches!(host, "127.0.0.1" | "localhost" | "[::1]");
+            // xxx.localhost 浏览器也解析到本机（「打开网页」经服务器转发用这样的名字）
+            let local = matches!(host, "127.0.0.1" | "localhost" | "[::1]") || host.ends_with(".localhost");
             !(local && port.is_some() && url.port_or_known_default() == port)
         }
         "about" | "data" | "blob" => true,
@@ -321,6 +439,9 @@ fn create_view(app: &AppHandle, id: u32, url: Url) -> Result<(), String> {
         .on_page_load(move |v, p| {
             let url = p.url().to_string();
             let done = p.event() == PageLoadEvent::Finished;
+            if done {
+                autofill(&a2, &v, p.url());
+            }
             update(&a2, v.label(), |t| {
                 t.url = url;
                 t.loading = !done;
@@ -346,6 +467,7 @@ fn create_view(app: &AppHandle, id: u32, url: Url) -> Result<(), String> {
     let _ = v.hide();
     hook_keys(app, &v);
     hook_favicon(app, &v);
+    hook_cert(app, &v);
     Ok(())
 }
 
@@ -355,17 +477,20 @@ fn new_window(app: &AppHandle, u: Url) -> NewWindowResponse<tauri::Wry> {
     if allowed(&u, port) && matches!(u.scheme(), "http" | "https") {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = new_tab(&app, Some(u));
+            let _ = new_tab(&app, Some(u), None);
         });
     }
     NewWindowResponse::Deny
 }
 
-fn new_tab(app: &AppHandle, url: Option<Url>) -> Result<(), String> {
+fn new_tab(app: &AppHandle, url: Option<Url>, login: Option<LoginIn>) -> Result<(), String> {
     let id = {
         let mut t = lock(app);
         t.next += 1;
         let id = t.next;
+        if let Some(u) = &url {
+            set_login(&mut t, id, u, login);
+        }
         t.list.push(Tab {
             id,
             url: url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
@@ -654,6 +779,104 @@ fn hook_favicon(app: &AppHandle, v: &Webview) {
     });
 }
 
+/// 证书不受信任（自签名、过期、和域名对不上）：用户同意过的网站放行；没同意过的先不打开，问界面（browser-cert 事件），
+/// 用户同意后由 browser_allow_cert 放行并重新打开。WebView2 自己的错误页不能「继续访问」。
+#[cfg(windows)]
+fn hook_cert(app: &AppHandle, v: &Webview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_14, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW,
+        COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
+    };
+    use webview2_com::ServerCertificateErrorDetectedEventHandler;
+    use windows::core::{Interface, PWSTR};
+
+    let app = app.clone();
+    let label = v.label().to_string();
+    let _ = v.with_webview(move |pw| unsafe {
+        let Ok(core) = pw.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(core) = core.cast::<ICoreWebView2_14>() else {
+            return;
+        };
+        let handler = ServerCertificateErrorDetectedEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else { return Ok(()) };
+            let mut uri = PWSTR::null();
+            let url = if args.RequestUri(&mut uri).is_ok() && !uri.is_null() {
+                let s = uri.to_string().unwrap_or_default();
+                windows::Win32::System::Com::CoTaskMemFree(Some(uri.0 as _));
+                s
+            } else {
+                String::new()
+            };
+            let Ok(u) = Url::parse(&url) else {
+                let _ = args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL);
+                return Ok(());
+            };
+            let origin = u.origin().ascii_serialization();
+            let (ok, ask) = {
+                let mut t = lock(&app);
+                let ok = t.cert_ok.contains(&origin);
+                (ok, !ok && t.cert_asked.insert(origin.clone()))
+            };
+            if ok {
+                let _ = args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW);
+            } else {
+                let _ = args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL);
+                if ask {
+                    if let Some(id) = tab_id(&label) {
+                        let _ = app.emit_to(
+                            MAIN,
+                            "browser-cert",
+                            CertAsk { id, url, origin },
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }));
+        let mut token = Default::default();
+        let _ = core.add_ServerCertificateErrorDetected(&handler, &mut token);
+    });
+}
+
+#[cfg(not(windows))]
+fn hook_cert(_: &AppHandle, _: &Webview) {}
+
+#[derive(Clone, Serialize)]
+struct CertAsk {
+    id: u32,
+    url: String,
+    origin: String,
+}
+
+/// 用户同意了这个网站的证书不受信任也打开：放行（这次运行期间），标签重新打开那个网址
+#[tauri::command]
+pub async fn browser_allow_cert(
+    app: AppHandle,
+    webview: Webview,
+    id: u32,
+    origin: String,
+    url: String,
+    allow: bool,
+) -> Result<(), String> {
+    main_only(&webview)?;
+    if !allow {
+        lock(&app).cert_asked.remove(&origin); // 以后再打开时再问
+        return Ok(());
+    }
+    let port = lock(&app).port;
+    let u = parse(&url, port)?;
+    if u.origin().ascii_serialization() != origin {
+        return Err("网址和网站对不上".into());
+    }
+    lock(&app).cert_ok.insert(origin);
+    if let Some(v) = app.get_webview(&tab_label(id)) {
+        v.navigate(u).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// 把 COM 流读完（最多读 MAX_ICON 多一点，超过的不要）
 #[cfg(windows)]
 unsafe fn read_stream(s: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>> {
@@ -707,11 +930,12 @@ pub async fn browser_new_tab(
     app: AppHandle,
     webview: Webview,
     url: Option<String>,
+    login: Option<LoginIn>,
 ) -> Result<(), String> {
     main_only(&webview)?;
     let port = lock(&app).port;
     let url = url.as_deref().map(|u| parse(u, port)).transpose()?;
-    new_tab(&app, url)
+    new_tab(&app, url, login)
 }
 
 #[tauri::command]
@@ -731,6 +955,7 @@ pub async fn browser_close_tab(app: AppHandle, webview: Webview, id: u32) -> Res
             return Ok(());
         };
         t.list.remove(i);
+        t.logins.remove(&id);
         match t.list.len() {
             0 => 0,
             n if t.active == id => t.list[i.min(n - 1)].id,
@@ -754,10 +979,20 @@ pub async fn browser_close_tab(app: AppHandle, webview: Webview, id: u32) -> Res
 
 /// 当前标签打开网址（新标签页这时才建网页视图）
 #[tauri::command]
-pub async fn browser_navigate(app: AppHandle, webview: Webview, url: String) -> Result<(), String> {
+pub async fn browser_navigate(
+    app: AppHandle,
+    webview: Webview,
+    url: String,
+    login: Option<LoginIn>,
+) -> Result<(), String> {
     main_only(&webview)?;
     let port = lock(&app).port;
     let u = parse(&url, port)?;
+    {
+        let mut t = lock(&app);
+        let id = t.active;
+        set_login(&mut t, id, &u, login);
+    }
     if let Some(v) = active_view(&app) {
         v.navigate(u).map_err(|e| e.to_string())?;
         let _ = v.set_focus();
@@ -844,6 +1079,7 @@ pub async fn browser_release(app: AppHandle, webview: Webview) -> Result<(), Str
     {
         let mut t = lock(&app);
         t.parked.clear();
+        t.logins.clear();
         for tab in &mut t.list {
             tab.devtools = false;
             tab.loading = false;

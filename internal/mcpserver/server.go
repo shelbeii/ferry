@@ -160,7 +160,8 @@ func newServer(o Options) (*server, *mcp.Server) {
 		Annotations: readOnly},
 		logged(s, "server_software", func(ctx context.Context, in targetIn) (any, error) {
 			return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
-				return e.Software(t)
+				r, err := e.Software(t)
+				return r.HidePanelEntrances(), err
 			})
 		}))
 	addTool(s, m, &mcp.Tool{Name: "server_ports", Title: "服务器的端口和防火墙",

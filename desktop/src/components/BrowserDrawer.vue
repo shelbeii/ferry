@@ -6,8 +6,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { ArrowLeft, ArrowRight, RefreshRight, Close, Plus } from '@element-plus/icons-vue'
+import { ElMessageBox } from 'element-plus'
 import { isTauri } from '../platform'
-import { browserOpen, uiPref, setUiPref } from '../state'
+import { browserOpen, browserRequest, uiPref, setUiPref } from '../state'
 import { toUrl, history, addVisit, removeVisit, clearHistory, siteOf, visitTime } from '../browser/address'
 
 const props = defineProps<{ side: number }>()
@@ -79,6 +80,27 @@ const action = (a: Action) => call('browser_action', { action: a })
 const newTab = () => call('browser_new_tab')
 const closeTab = (id: number) => call('browser_close_tab', { id })
 const select = (id: number) => call('browser_select_tab', { id })
+
+// 别处要打开的网址（「软件」页「打开网页」）：开着同一个网址的标签就切过去，当前是新标签页就在它里面打开，否则开新标签
+const sameUrl = (a: string, b: string) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
+async function openRequested(): Promise<boolean> {
+  const req = browserRequest.value
+  if (!req) return false
+  browserRequest.value = null
+  const { url, login } = req
+  if (!isTauri) {
+    window.open(url, '_blank', 'noopener')
+    return true
+  }
+  error.value = ''
+  // 要登录时总是重新打开（开着的那个标签可能已经退出登录了）；不登录时切到开着同一个网址的标签
+  const same = !login && tabs.value.find((t) => t.url && sameUrl(t.url, url))
+  if (same) await select(same.id)
+  else if (current.value && !current.value.url) await call('browser_navigate', { url, login })
+  else await call('browser_new_tab', { url, login })
+  return true
+}
+watch(browserRequest, (v) => { if (v && browserOpen.value && mounted) void openRequested() })
 function focusAddress() {
   input.value?.focus()
   input.value?.select()
@@ -204,6 +226,7 @@ watch(browserOpen, async (open) => {
     return
   }
   startTimers()
+  if (await openRequested()) return
   // 第一次打开：开一个新标签页；网页释放过：重新打开当前标签
   if (isTauri && !tabs.value.length) await newTab()
   else if (current.value?.url) await select(active.value)
@@ -258,15 +281,42 @@ function stopTimers() {
   clearInterval(poll)
 }
 
+// 网站的证书不受信任（自签名、过期、和地址对不上）：Rust 那边先没打开，问用户；同意后这次运行期间放行这个网站
+interface CertAsk { id: number; url: string; origin: string }
+async function askCert(c: CertAsk) {
+  let allow = false
+  try {
+    await ElMessageBox.confirm(
+      `${c.origin} 的证书不受信任（多半是自签名的，或已过期、和地址对不上）。是你自己的服务器、确认地址没错的话可以继续打开；Ferry 这次运行期间不再问。`,
+      '证书不受信任',
+      { type: 'warning', confirmButtonText: '仍然打开', cancelButtonText: '不打开' },
+    )
+    allow = true
+  } catch {
+    allow = false
+  }
+  await invoke('browser_allow_cert', { id: c.id, origin: c.origin, url: c.url, allow }).catch((e) => {
+    error.value = String((e as Error)?.message ?? e)
+  })
+  if (!allow) error.value = `没有打开 ${c.origin}：证书不受信任`
+}
+
 const unlisten: UnlistenFn[] = []
+let mounted = false // 读到了已有的标签（之前处理别处要打开的网址会开重复的标签）
 onMounted(async () => {
   window.addEventListener('keydown', onKey, true)
   window.addEventListener('resize', place)
   if (browserOpen.value) startTimers()
-  if (!isTauri) return
+  if (!isTauri) {
+    mounted = true
+    return
+  }
   unlisten.push(await listen<Snapshot>('browser-tabs', (e) => apply(e.payload)))
   unlisten.push(await listen<string>('browser-key', (e) => onPageKey(e.payload)))
+  unlisten.push(await listen<CertAsk>('browser-cert', (e) => void askCert(e.payload)))
   apply(await invoke<Snapshot>('browser_tabs'))
+  mounted = true
+  if (browserOpen.value && (await openRequested())) return
   if (browserOpen.value && !tabs.value.length) await newTab()
 })
 onBeforeUnmount(() => {

@@ -219,6 +219,9 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 			it.Version = in.Version
 		}
 		it.Hosting, it.Account, it.Upgradable = in.Hosting, in.Account, in.Upgradable
+		if w := instanceWeb(in); w != nil {
+			it.Web = w // 按安装时的参数，比读配置可靠；停着的也知道端口
+		}
 		if it.Name == "" {
 			it.Name = in.Name
 		}
@@ -243,6 +246,10 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 			}
 			it.Listen = own
 		}
+	}
+
+	for i := range rep.Items {
+		markLocal(&rep.Items[i])
 	}
 
 	order := func(it proto.Software) int {
@@ -422,6 +429,7 @@ func (sc *swScan) fromProc(p *swProc) proto.Software {
 	if strings.HasPrefix(it.Path, "/www/server/") && it.Manager == "" {
 		it.Manager = "宝塔面板"
 	}
+	it.Web = sc.webOf(it.Kind, p, listen)
 	return it
 }
 
@@ -642,7 +650,11 @@ func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int
 		manager := containerManager(name, c.Labels)
 		running := c.State == "running" || (c.State == "" && strings.HasPrefix(c.Status, "Up"))
 		ports := dockerPorts(c.Ports)
+		portMap := dockerPortMap(c.Ports)
 		fill := func(it *proto.Software) {
+			if len(it.Inner) > 0 {
+				mapWeb(it.Web, portMap) // 容器自己的网络：网页的端口是容器里的
+			}
 			it.Via, it.Container, it.Image, it.Status = "docker", name, c.Image, c.Status
 			it.Locations = locations[c.ID]
 			if manager != "" {
@@ -676,11 +688,13 @@ func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int
 			it.State = "running"
 			if pid := top[c.ID]; pid > 0 {
 				it.PID, it.Since = pid, sc.startTime(pid)
-				if l := sc.listening(pid); sc.sameNet(pid) {
+				l := sc.listening(pid)
+				if sc.sameNet(pid) {
 					it.Listen = l
 				} else {
 					it.Inner = l
 				}
+				it.Web = sc.webOf(it.Kind, nil, l)
 			}
 		}
 		fill(&it)

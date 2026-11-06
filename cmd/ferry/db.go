@@ -16,7 +16,7 @@ import (
 
 // 「数据库」：保存的数据库连接，浏览、查询、改数据、建表改表、导出（桌面版左下角）。
 //
-//	ferry db list | save | remove <连接> | test | close [<连接>]
+//	ferry db list | save | remove <连接> | test | close [<连接>] | creds（从服务器上读数据库的账号密码）
 //	ferry db info|databases <连接>
 //	ferry db tables <连接> <库>
 //	ferry db table|rows|count|apply|design|op|exec|query|export|dump <连接> <库>
@@ -57,6 +57,9 @@ type dbReq struct {
 	File     string         `json:"file"`     // import-sql：SQL 文件
 	Continue bool           `json:"continue"` // import-sql：出错后接着执行
 	CSV      *dbx.CSVImport `json:"csv"`      // csv-preview、import-csv
+	// creds：从服务器上读数据库的账号密码（「软件」页连数据库时替用户填好）
+	Via  *dbx.Via            `json:"via"`
+	Cred *engine.DBCredQuery `json:"cred"`
 }
 
 func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Settings, fail func(error) int) int {
@@ -201,6 +204,19 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(err)
 		}
 		return out(map[string]any{"removed": args[0]})
+	case "creds":
+		if req.Via == nil || req.Cred == nil {
+			return fail(errors.New("FERRY_DB_REQ 里要有 via、cred"))
+		}
+		e, err := newEngine(req.Via)
+		if err != nil {
+			return fail(err)
+		}
+		cred, err := e.DBCredentials(req.Via.Target, *req.Cred)
+		if err != nil {
+			return fail(err)
+		}
+		return out(cred)
 	case "close":
 		if len(args) > 0 && req.Session != "" {
 			dbx.Default.CloseSession(args[0], req.Session)

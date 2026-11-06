@@ -2,6 +2,7 @@
 import { reactive, ref, watch, type Ref } from 'vue'
 import { call, ferry, FerryError, isSecretKind, sessionEnv, type ErrorDetail, type Software } from './ferry'
 import { secretRequest, trustRequest } from './state'
+import { dbEndpoint, type Endpoint } from './softwareWeb'
 
 export type DbKind = 'mysql' | 'postgres' | 'redis'
 
@@ -301,8 +302,42 @@ export const dbOpen = ref(false)
 export const dbConns = ref<DbConn[]>([])
 /** 打开着的连接（已经连上过） */
 export const dbOpened = reactive<Record<string, boolean>>({})
-/** 从「软件」页点「管理数据」：打开抽屉并新建（或选中已有的）连接 */
-export const dbRequest = ref<Partial<DbConn> | null>(null)
+/** 从「软件」页连数据库：哪个软件、在哪台服务器上 */
+export interface DbFrom {
+  sw: Software
+  via: DbVia
+  /** 服务器地址（直接连时用） */
+  host: string
+  endpoint: Endpoint
+}
+/** 从「软件」页点「连接数据库」：打开抽屉并新建（或选中已有的）连接 */
+export const dbRequest = ref<(Partial<DbConn> & { from?: DbFrom }) | null>(null)
+
+/** 「软件」页的一行 → 新建连接的请求：默认用服务器地址直接连（直接连不上的经服务器连），对话框里可以改 */
+export function dbRequestFromSoftware(sw: Software, via: DbVia, host: string): (Partial<DbConn> & { from: DbFrom }) | null {
+  const c = connFromSoftware(sw, via, via.title || via.target)
+  if (!c?.kind) return null
+  const endpoint = dbEndpoint(sw, defaultPort[c.kind])
+  return { ...c, from: { sw, via, host, endpoint } }
+}
+
+/** 从服务器上读到的数据库账号密码（engine.DBCred） */
+/** found：有可以填的密码；verified：经服务器登录试过，能登录 */
+export interface DbCred { user?: string; password?: string; found: boolean; verified?: boolean; from?: string; note?: string }
+
+/** 从服务器上读数据库的账号密码（容器的环境变量、redis.conf、~/.my.cnf……；Ferry 装的用安装时保存的） */
+export async function dbCreds(from: DbFrom): Promise<DbCred> {
+  const { sw, via, endpoint } = from
+  // 容器里的端口：试密码时直接连容器（端口映射到主机的也一样）
+  const inner = (sw.inner ?? []).map((l) => Number(l.slice(l.lastIndexOf(':') + 1))).filter((p) => p > 0)
+  const def = sw.kind ? defaultPort[sw.kind === 'postgresql' ? 'postgres' : sw.kind === 'redis' ? 'redis' : 'mysql'] : 0
+  // 不知道容器里的端口时（只读到了映射到主机的端口）按默认端口试：官方镜像都用默认端口
+  const innerPort = sw.via === 'docker' && sw.container ? (inner.includes(def) ? def : inner[0] ?? def) : undefined
+  const cred = { kind: sw.kind, container: sw.via === 'docker' ? sw.container : undefined, unit: sw.unit, pid: sw.pid,
+    port: endpoint.ssh.container ? undefined : endpoint.ssh.port, innerPort: innerPort ?? (endpoint.ssh.container ? endpoint.ssh.port : undefined),
+    instance: sw.instance, account: sw.account }
+  return call<DbCred>(['db', 'creds'], { FERRY_DB_REQ: JSON.stringify({ via: { config: via.config, target: via.target }, cred }) })
+}
 
 /** 要用户填数据库密码 */
 export const dbPasswordRequest = ref<{ conn: DbConn; rejected: boolean; resolve: (ok: boolean) => void } | null>(null)

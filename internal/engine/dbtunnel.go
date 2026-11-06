@@ -41,7 +41,7 @@ func (tn *Tunnel) Dial(ctx context.Context, addr string) (net.Conn, error) {
 		if errors.As(err, &oe) && oe.Reason == ssh.Prohibited {
 			return nil, fmt.Errorf("服务器 %s 不允许 SSH 端口转发（要在 /etc/ssh/sshd_config 里把 AllowTcpForwarding 设成 yes，再重启 sshd）：%w", tn.s.label, err)
 		}
-		return nil, fmt.Errorf("从服务器 %s 上连不上 %s（数据库没在运行，或地址、端口不对）：%w", tn.s.label, addr, err)
+		return nil, fmt.Errorf("从服务器 %s 上连不上 %s（程序没在运行，或地址、端口不对）：%w", tn.s.label, addr, err)
 	}
 	return c, nil
 }

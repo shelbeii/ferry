@@ -1,6 +1,7 @@
 //! Ferry 桌面版：界面在 WebView 里，所有部署操作交给 sidecar（ferry 命令行，--json 输出）。
 //! Rust 这边只负责窗口、插件，读写 ferry.yaml 的两个受限命令，以及内置浏览器（browser.rs）。
 
+mod secretclip;
 mod browser;
 mod uicache;
 
@@ -87,6 +88,21 @@ fn write_config(webview: tauri::Webview, path: String, content: String) -> Resul
     })
 }
 
+/// 用系统的浏览器打开网址（「软件」页「打开网页」、AI 助手回复里的链接）：只认 Ferry 自己的界面、只开 http / https。
+/// 不放宽 opener 插件的 open-url 权限：那个权限只给 GitHub（更新、项目主页）
+#[tauri::command]
+fn open_external(webview: tauri::Webview, app: tauri::AppHandle, url: String) -> Result<(), String> {
+    main_only(&webview)?;
+    let u = tauri::Url::parse(&url).map_err(|e| format!("网址不对：{e}"))?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err("只能打开 http / https 的网址".into());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(u.as_str(), None::<&str>)
+        .map_err(|e| format!("打不开系统的浏览器：{e}"))
+}
+
 /// 退出 Ferry（更新：安装程序已经启动，由它装好后重新打开）。不经过关闭窗口的确认。
 #[tauri::command]
 fn exit_app(webview: tauri::Webview, app: tauri::AppHandle) -> Result<(), String> {
@@ -117,6 +133,9 @@ pub fn run() {
             read_config,
             write_config,
             exit_app,
+            open_external,
+            secretclip::copy_secret,
+            browser::browser_allow_cert,
             browser::browser_tabs,
             browser::browser_new_tab,
             browser::browser_select_tab,

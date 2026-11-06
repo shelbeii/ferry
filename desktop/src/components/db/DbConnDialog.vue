@@ -1,14 +1,16 @@
 <script setup lang="ts">
 // 新建、修改数据库连接：这台电脑直接连，或经项目里的一台服务器（SSH 转发）连；经服务器时可以从那台服务器的「软件」里直接选数据库。
-import { computed, reactive, ref, watch } from 'vue'
+// 从「软件」页点「连接数据库」打开时（conn.from）：默认用服务器地址直接连，两种连法切换时地址、端口跟着换；
+// 先从服务器上读账号密码替用户填好，读不到的说明为什么、请用户填。
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Connection, Search } from '@element-plus/icons-vue'
 import GlassToggle from '../glass/GlassToggle.vue'
-import { call, type Inspect, type SoftwareReport, type Software } from '../../ferry'
+import { call, type Inspect, type PortProbe, type SoftwareReport, type Software } from '../../ferry'
 import { projects, connections, connectionsPath } from '../../state'
-import { saveDbConn, testDbConn, connFromSoftware, isDbSoftware, defaultPort, defaultUser, kindLabel, type DbConn, type DbKind } from '../../db'
+import { saveDbConn, testDbConn, connFromSoftware, isDbSoftware, defaultPort, defaultUser, kindLabel, dbCreds, type DbConn, type DbKind, type DbFrom } from '../../db'
 
-const props = defineProps<{ conn: Partial<DbConn> | null }>()
+const props = defineProps<{ conn: (Partial<DbConn> & { from?: DbFrom }) | null }>()
 const emit = defineEmits<{ close: []; saved: [conn: DbConn] }>()
 
 const editing = computed(() => !!props.conn?.id)
@@ -116,12 +118,133 @@ function fill(c: Partial<DbConn>) {
   f.software = c.software ?? ''
 }
 
+// ---------------------------------------------------------------- 从「软件」页来的
+
+const from = computed(() => (props.conn?.id ? undefined : props.conn?.from))
+const credLoading = ref(false)
+const credMsg = ref<{ ok: boolean; text: string } | null>(null)
+const pwInput = ref<{ focus: () => void }>()
+const userInput = ref<{ focus: () => void }>()
+let credSeq = 0
+
+/** 两种连法的地址、端口 */
+function applyMode() {
+  const fr = from.value
+  if (!fr) return
+  const e = fr.endpoint
+  if (f.via) {
+    f.server = `${fr.via.config}\n${fr.via.target}`
+    f.container = e.ssh.container ?? ''
+    f.host = e.ssh.container ? '' : e.ssh.host || '127.0.0.1'
+    f.port = e.ssh.port
+  } else {
+    f.container = ''
+    f.host = fr.host
+    f.port = e.direct ?? e.ssh.port
+  }
+  void probeDirect()
+}
+
+async function loadCreds(fr: DbFrom) {
+  const seq = ++credSeq
+  credLoading.value = true
+  credMsg.value = null
+  try {
+    const c = await dbCreds(fr)
+    if (seq !== credSeq) return
+    if (c.user && !isRedis.value) f.user = c.user
+    if (c.found) {
+      f.password = c.password ?? ''
+      const what = isRedis.value ? '密码' : '账号密码'
+      serverVerified = !!c.verified
+      credOkText = c.password ? `读到了${what}（${c.from}），已经填好` : `${c.from}：没有设密码，留空就行`
+      if (c.verified) credMsg.value = { ok: true, text: c.password ? `读到了${what}（${c.from}），从服务器上试过能登录，已经填好` : `${c.from}：没有设密码，留空就行（从服务器上试过能登录）` }
+      else credMsg.value = { ok: false, text: `已填好读到的${what}（${c.from}），但${c.note || '没能试对不对'}；连不上时请改成正确的密码` }
+      credFilled = true
+      void autoTest()
+    } else {
+      credMsg.value = { ok: false, text: c.note || '没读到账号密码：请填写' }
+      void nextTick(() => (isRedis.value || f.user ? pwInput.value : userInput.value)?.focus())
+    }
+  } catch (e) {
+    if (seq !== credSeq) return
+    credMsg.value = { ok: false, text: `没能从服务器上读账号密码（${(e as Error).message}）：请填写` }
+  } finally {
+    if (seq === credSeq) credLoading.value = false
+  }
+}
+
+// 填好读到的密码后，用选的连法真的连一次：读到的密码是从服务器上试的，直接连时数据库看到的来源不一样，
+// 可能不让这个账号从这台电脑登录（MySQL 的 root 只允许本机、PostgreSQL 的 pg_hba.conf）
+const auto = ref<{ state: 'testing' | 'ok' | 'rejected' | 'fail'; text: string } | null>(null)
+let autoSeq = 0
+let serverVerified = false
+let credFilled = false
+let credOkText = ''
+async function autoTest() {
+  const seq = ++autoSeq
+  auto.value = null
+  if (!from.value || !credFilled || check()) return
+  const how = f.via ? '经服务器' : '用服务器地址直接'
+  auto.value = { state: 'testing', text: `正在${how}连一次…` }
+  try {
+    const r = await testDbConn(payload(), f.password || undefined)
+    if (seq !== autoSeq) return
+    auto.value = { state: 'ok', text: `${how}连过，能连上（${r.version}）` }
+    // 从服务器上没试成，但这样连上了：密码是对的
+    if (credMsg.value && !credMsg.value.ok) credMsg.value = { ok: true, text: credOkText }
+  } catch (e) {
+    if (seq !== autoSeq) return
+    const msg = (e as Error).message
+    if (/^密码不对/.test(msg) && !f.via && serverVerified) {
+      auto.value = { state: 'rejected', text: '这个账号在服务器上能登录，但数据库不让它从这台电脑直接登录（账号限制了来源地址）：改成经服务器连就行' }
+    } else {
+      auto.value = { state: 'fail', text: `${how}没连上：${msg}` }
+    }
+  }
+}
+
+// 直接连：这台电脑连不连得上服务器的这个端口（防火墙、安全组）
+const probe = ref<{ state: 'checking' | 'ok' | 'fail'; text?: string } | null>(null)
+let probeSeq = 0
+async function probeDirect() {
+  const fr = from.value
+  const seq = ++probeSeq
+  probe.value = null
+  if (!fr || f.via || !fr.endpoint.direct) return
+  const port = Number(f.port)
+  probe.value = { state: 'checking' }
+  try {
+    const [r] = await call<PortProbe[]>(['forward', 'probe', fr.via.target, String(port), '-c', fr.via.config])
+    if (seq !== probeSeq) return
+    probe.value = r?.ok ? { state: 'ok' }
+      : { state: 'fail', text: r?.why === 'timeout' ? '没有回应，多半被防火墙或安全组挡住了' : r?.why === 'refused' ? '服务器回绝了（防火墙拒绝，或没在这个端口监听）' : r?.msg || '连不上' }
+  } catch {
+    if (seq === probeSeq) probe.value = null
+  }
+}
+
 watch(() => props.conn, (c) => {
   testMsg.value = null
+  credMsg.value = null
+  probe.value = null
+  auto.value = null
+  autoSeq++
+  credFilled = false
+  serverVerified = false
+  credSeq++
   f.password = ''
   nameTouched.value = !!c?.id
   Object.assign(f, blank())
   if (c) fill(c)
+  const fr = c && !c.id ? c.from : undefined
+  if (fr) {
+    // 默认直接连；直接连不上（只在服务器本机监听、端口只在容器里）的经服务器连
+    f.via = !fr.endpoint.direct
+    f.software = fr.sw.instance ?? ''
+    applyMode()
+    void loadCreds(fr)
+  }
   if (c?.via || !c?.id) void loadServers()
 }, { immediate: true })
 
@@ -136,7 +259,14 @@ watch(() => f.server, () => {
   swError.value = ''
   if (!editing.value && serverOpt.value?.production) f.readOnly = true
 })
-watch(() => f.via, (v) => { if (v && !groups.value.length) void loadServers() })
+watch(() => f.via, (v, old) => {
+  if (v && !groups.value.length) void loadServers()
+  if (from.value && v !== old) {
+    applyMode()
+    testMsg.value = null
+    void autoTest() // 换了连法：再连一次
+  }
+})
 
 const autoName = computed(() => {
   const where = f.container ? `容器 ${f.container}` : `${f.host || '127.0.0.1'}:${f.port}`
@@ -222,9 +352,22 @@ async function save() {
       </el-form-item>
       <el-form-item label="怎么连">
         <el-radio-group v-model="f.via">
-          <el-radio :value="false">这台电脑直接连</el-radio>
+          <el-tooltip :disabled="!from || !!from.endpoint.direct" :content="from?.endpoint.why" placement="top">
+            <el-radio :value="false" :disabled="!!from && !from.endpoint.direct">{{ from ? '用服务器地址直接连' : '这台电脑直接连' }}</el-radio>
+          </el-tooltip>
           <el-radio :value="true">经服务器（SSH 转发，不用开放数据库端口）</el-radio>
         </el-radio-group>
+        <div v-if="from" class="note">
+          <template v-if="!f.via">
+            连 {{ from.host }}:{{ f.port }}，要这台电脑能连上这个端口（服务器的防火墙放行了）。
+            <span v-if="probe?.state === 'checking'">正在试能不能连上…</span>
+            <span v-else-if="probe?.state === 'ok'" class="ok">这台电脑能连上。</span>
+            <span v-else-if="probe?.state === 'fail'" class="bad">这台电脑连不上：{{ probe.text }}。<el-button link type="primary" @click="f.via = true">改成经服务器连</el-button></span>
+          </template>
+          <template v-else>
+            经 {{ from.via.title || from.via.target }} 的 SSH 连接转过去，服务器不用放行数据库端口。<template v-if="from.endpoint.why">（{{ from.endpoint.why }}）</template>
+          </template>
+        </div>
       </el-form-item>
       <template v-if="f.via">
         <el-form-item label="服务器">
@@ -265,11 +408,21 @@ async function save() {
           <el-input-number v-model="f.port" :min="1" :max="65535" :controls="false" class="port" />
         </div>
       </el-form-item>
+      <el-form-item v-if="from" label="账号密码">
+        <div class="cred" :class="credLoading ? '' : credMsg?.ok ? 'ok' : 'bad'">
+          <template v-if="credLoading">正在从服务器上读账号密码…</template>
+          <template v-else-if="credMsg">{{ credMsg.text }}</template>
+        </div>
+        <div v-if="auto" class="cred" :class="auto.state === 'ok' ? 'ok' : auto.state === 'testing' ? '' : 'bad'">
+          {{ auto.text }}
+          <el-button v-if="auto.state !== 'ok' && auto.state !== 'testing' && !f.via" link type="primary" @click="f.via = true">改成经服务器连</el-button>
+        </div>
+      </el-form-item>
       <el-form-item label="用户名">
-        <el-input v-model="f.user" :placeholder="isRedis ? '一般不填（Redis 6 起设了 ACL 用户才填）' : ''" />
+        <el-input ref="userInput" v-model="f.user" :placeholder="isRedis ? '一般不填（Redis 6 起设了 ACL 用户才填）' : ''" />
       </el-form-item>
       <el-form-item label="密码">
-        <el-input v-model="f.password" type="password" show-password :placeholder="editing ? '不改就留空' : f.software ? '可以不填：用 Ferry 安装时保存的密码' : '没有密码就留空'" autocomplete="new-password" />
+        <el-input ref="pwInput" v-model="f.password" type="password" show-password :placeholder="editing ? '不改就留空' : f.software && f.via ? '可以不填：用 Ferry 安装时保存的密码' : '没有密码就留空'" autocomplete="new-password" />
         <GlassToggle v-model="f.savePassword" class="mt">记住密码（存在系统凭据库里）；不记住时每次打开 Ferry 后第一次连接要填</GlassToggle>
       </el-form-item>
       <el-form-item label="加密">
@@ -395,5 +548,19 @@ async function save() {
 }
 .msg {
   white-space: pre-wrap;
+}
+.cred {
+  width: 100%;
+  line-height: 1.5;
+  font-size: 12.5px;
+  color: var(--el-text-color-secondary);
+}
+.cred.ok,
+.note .ok {
+  color: var(--el-color-success);
+}
+.cred.bad,
+.note .bad {
+  color: var(--el-color-warning);
 }
 </style>

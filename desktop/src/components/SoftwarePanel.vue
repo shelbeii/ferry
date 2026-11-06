@@ -21,16 +21,19 @@ import SoftwareLogsDialog from './SoftwareLogsDialog.vue'
 import SoftwareConfigDialog from './SoftwareConfigDialog.vue'
 import RowActions from './RowActions.vue'
 import type { RowAction } from '../rowActions'
-import { connFromSoftware, dbRequest, isDbSoftware } from '../db'
+import { dbRequestFromSoftware, dbRequest, isDbSoftware } from '../db'
+import { webActionLabel } from '../softwareWeb'
 import { softwareLocations, type FileLocation } from '../fileLocations'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { useInteractionScope } from '../interactionScope'
 const FilesDrawer = defineAsyncComponent(() => import('./FilesDrawer.vue'))
+const SoftwareWebDialog = defineAsyncComponent(() => import('./SoftwareWebDialog.vue'))
 
 // mode：卡片还是列表（项目页工具栏上切换）
 const props = defineProps<{ config: string; target: string; host: string; connected: boolean }>()
 const mode = defineModel<'card' | 'list'>('mode', { default: 'card' })
-const emit = defineEmits<{ loaded: []; goPort: [port: number]; backup: [] }>()
+// leave：在内置浏览器里打开了网页（软件页在抽屉里时要收起，不然盖着浏览器）
+const emit = defineEmits<{ loaded: []; goPort: [port: number]; backup: []; leave: [] }>()
 
 const key = computed(() => `${props.config}|${props.target}`)
 const captureContext = useInteractionScope(() => key.value)
@@ -74,6 +77,8 @@ watch(trustedTick, () => errors[key.value] && load())
 // ---------------------------------------------------------------- 安装、启停、卸载（Ferry 装的软件）
 
 const installOpen = ref(false)
+const webOf = ref<Software | null>(null)
+watch(key, () => { webOf.value = null })
 const configOf = ref<Software>()
 watch(key, () => { configOf.value = undefined })
 const logsName = ref('')
@@ -101,10 +106,16 @@ function rowActions(row: Software): RowAction[] {
       title: locations.length ? locations[0].path : row.via === 'docker' ? '未识别到可浏览的主机目录：容器需提供 Compose 目录或持久化挂载' : '未识别到此软件的程序或安装位置' },
     { id: 'config', label: '配置', run: () => { configOf.value = row } },
   ]
+  if (row.web?.length) {
+    // 控制台、管理面板：选好连法（服务器地址 / 经服务器转发）和在哪打开（内置浏览器 / 系统浏览器）
+    const where = row.web.map((w) => w.label).join('、')
+    actions.unshift({ id: 'web', label: webActionLabel(row.web), disabled: row.state !== 'running',
+      title: row.state !== 'running' ? '没在运行' : `在浏览器里打开${where}`, run: () => { webOf.value = row } })
+  }
   if (isDbSoftware(row)) {
-    // 打开左下角的「数据库」，经这台服务器连它
-    actions.unshift({ id: 'db', label: '管理数据', disabled: row.state !== 'running', title: row.state !== 'running' ? '没在运行' : '在「数据库」里打开（经这台服务器连，不用开放端口）',
-      run: () => { dbRequest.value = connFromSoftware(row, { config: props.config, target: props.target, title: props.target }, props.target) } })
+    // 打开左下角的「数据库」：默认用服务器地址直接连，也可以经这台服务器连；账号密码先从服务器上读
+    actions.unshift({ id: 'db', label: '连接数据库', disabled: row.state !== 'running', title: row.state !== 'running' ? '没在运行' : '在左下角的「数据库」里打开（直接连或经这台服务器连）',
+      run: () => { dbRequest.value = dbRequestFromSoftware(row, { config: props.config, target: props.target, title: props.target }, props.host) } })
   }
   if (row.instance || controllable(row)) {
     actions.push({ id: 'logs', label: '日志', run: () => {
@@ -549,6 +560,7 @@ function listenTip(l: string): string {
 
     <FilesDrawer v-if="fileLocations.length" v-model="filesOpen" :config="config" :target="target" :title="filesTitle" :path="fileLocations[0].path" :locations="fileLocations" />
     <InstallSoftwareDialog v-if="installOpen" :config="config" :target="target" :report="report" :done="onInstalled" @close="installOpen = false" />
+    <SoftwareWebDialog v-if="webOf" :sw="webOf" :config="config" :target="target" :host="host" :title="target" @close="webOf = null" @opened="(w) => w === 'builtin' && emit('leave')" />
     <SoftwareConfigDialog v-if="configOf" :key="key" :config="config" :target="target" :software="configOf" @close="configOf = undefined" @changed="load()" />
     <SoftwareLogsDialog v-if="logsName" :config="config" :target="target" :name="logsName" @close="logsName = ''" />
     <SoftwareLogsDialog

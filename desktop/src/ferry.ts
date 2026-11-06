@@ -832,6 +832,25 @@ export interface Software {
   hosting?: {binary: string; config: string; prefix: string; sites: string}
   /** 容器在主机上的 Compose 目录、持久化挂载位置。 */
   locations?: { label: string; path: string }[]
+  /** 能在浏览器里打开的网页：控制台、管理面板、网站 */
+  web?: WebPanel[]
+}
+
+/** 软件的一个网页（proto.WebPanel） */
+export interface WebPanel {
+  label: string
+  scheme: 'http' | 'https'
+  /** 主机上的端口；没有 = 只在容器里监听（只能经服务器连容器的地址） */
+  port?: number
+  /** 容器里的端口（port 没有时用） */
+  inner?: number
+  /** 只在服务器本机监听（127.0.0.1）：这台电脑直接连不上 */
+  local?: boolean
+  path?: string
+  /** 默认账号、怎么登录 */
+  note?: string
+  /** 网站的域名（nginx 的 server_name）：同一个端口上有几个网站时按它分，打开时用它当地址 */
+  host?: string
 }
 
 export interface SoftwareConfigFile { id: string; label: string; path: string; source?: string; format?: string; readOnly?: string; apply?: 'reload' | 'restart'; backup: boolean; inPlace?: boolean }
