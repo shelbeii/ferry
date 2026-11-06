@@ -234,6 +234,17 @@ t "releases 标出当前版本" ok "*" -- F releases e2e-b api
 t "restart e2e-a" ok "restart 完成" -- F restart e2e-a
 stopstart() { F stop e2e-b api >/dev/null 2>&1 && F start e2e-b api; }
 t "stop + start" ok "start 完成" -- stopstart
+# 停止同时取消开机自启（服务器重启后不会自己起来）；启动后恢复；意外退出后自动重启、记下次数
+apiunit() { dx b 'echo $(systemctl is-active e2e-api.service) $(systemctl is-enabled e2e-api.service)'; }
+stopped() { F stop e2e-b api >/dev/null 2>&1; apiunit; }
+t "停止后开机不自启" ok "inactive disabled" -- stopped
+t "status：手动停止" ok '"autostart":false,"restart":"on-failure","restartSec":"5s","stopped":true' -- F status e2e-b api --json
+F start e2e-b api >/dev/null 2>&1
+t "启动后恢复开机自启" ok "active enabled" -- apiunit
+t "status：开机自启、重启方式" ok '"autostart":true,"restart":"on-failure","restartSec":"5s"}' -- F status e2e-b api --json
+killed() { dx b 'kill -9 $(systemctl show -p MainPID --value e2e-api.service); sleep 9'; F status e2e-b api --json; }
+t "kill -9 后 5 秒自动重启，记下次数" ok '"restarts":1' -- killed
+t "自动重启后正常提供服务" ok "UP v1" -- health b 18080
 t "全部应用重启时跳过没部署过的" ok "未通过 ferry 部署，跳过" -- F restart e2e-b
 t "status --json" ok '"active"' -- F status e2e-a --json
 t "status 显示实际监听的端口" ok '"listen":["127.0.0.1:18080"]' -- F status e2e-a api --json

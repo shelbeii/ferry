@@ -158,6 +158,8 @@ type AppSpec struct {
 	UnitText string   `json:"unitText,omitempty"` // 渲染好的单元文件内容
 	User     string   `json:"user,omitempty"`     // 运行用户：版本目录、shared 目录归它所有
 	Conflict []string `json:"conflicts,omitempty"`
+	// NoAutostart service.autostart: false：部署、启动后不设开机自启
+	NoAutostart bool `json:"noAutostart,omitempty"`
 
 	SharedDirs []string `json:"sharedDirs,omitempty"` // shared 下要创建的子目录（属主为 User）
 	// ArchiveLogs shared 下的日志目录：切换版本时随离开的版本归档，新的运行从空目录开始
@@ -622,6 +624,15 @@ type AppStatus struct {
 	Serving string `json:"serving,omitempty"`
 	// Busy 现在有人在这台服务器上部署、回滚、启停（这个项目的部署目录）
 	Busy *LockHolder `json:"busy,omitempty"`
+	// Autostart 开机自启（服务；不知道时为空）
+	Autostart *bool `json:"autostart,omitempty"`
+	// Restart 意外退出后的重启方式（on-failure / always / no）、RestartSec 等多久（如 5s）
+	Restart    string `json:"restart,omitempty"`
+	RestartSec string `json:"restartSec,omitempty"`
+	// Restarts 这次启动（部署、启动、重启）后自动重启过几次
+	Restarts int `json:"restarts,omitempty"`
+	// Stopped 在 Ferry 里手动停止的（开机也不会起来）
+	Stopped bool `json:"stopped,omitempty"`
 }
 
 // LockHolder 正拿着部署锁的操作：谁、在做什么。

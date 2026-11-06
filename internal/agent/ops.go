@@ -122,7 +122,8 @@ func (a *Agent) rollbackService(s *proto.AppSpec, to, cur string) error {
 		if err := a.installUnit(s.Name, s.Unit, text); err != nil {
 			return err
 		}
-		a.Sys.Systemctl("enable", s.Unit)
+		a.markStopped(s.Name, false)
+		a.autostart(s, s.Unit)
 		a.info(proto.EvStart, s.Name, "%s", s.Unit)
 		if err := a.Sys.Systemctl("restart", s.Unit); err != nil {
 			return err
@@ -249,6 +250,12 @@ func (a *Agent) control() int {
 			if err := a.Sys.Systemctl("stop", s.Unit); err != nil {
 				a.fail(proto.EvFail, s.Name, "%v", err)
 				res = "FAILED"
+			} else {
+				// 手动停的：开机不再自己起来，告警也不报它停了；「启动」、部署后恢复
+				a.markStopped(s.Name, true)
+				if err := a.Sys.Systemctl("disable", s.Unit); err != nil {
+					a.warn(proto.EvWarn, s.Name, "取消开机自启失败：%v", err)
+				}
 			}
 			a.addHistory(proto.HistoryEntry{Action: "stop", App: s.Name, Release: a.current(s.Name), Result: res})
 			out.Apps = append(out.Apps, proto.AppOutcome{App: s.Name, Result: res})
@@ -340,8 +347,10 @@ func (a *Agent) startOne(s *proto.AppSpec, action string) error {
 		a.fail(proto.EvFail, s.Name, "%v", err)
 		return err
 	}
+	a.markStopped(s.Name, false)
 	if action == "start" && isRunning(a.Sys.UnitProps(s.Unit)) {
 		a.info(proto.EvReady, s.Name, "已在运行")
+		a.autostart(s, s.Unit)
 		return nil
 	}
 	for _, c := range s.Conflict {
@@ -356,11 +365,39 @@ func (a *Agent) startOne(s *proto.AppSpec, action string) error {
 		a.diag(s, s.Unit)
 		return err
 	}
+	a.autostart(s, s.Unit) // 没起来也设：应用是要运行的，开机时再试
 	if err := a.waitReady(s, s.Unit); err != nil {
 		a.diag(s, s.Unit)
 		return err
 	}
 	return nil
+}
+
+// stoppedFile 手动停止的标记（.ferry/apps/<app>/stopped）：服务器告警不报这个应用停了；启动、部署、回滚后去掉。
+func stoppedFile(meta, app string) string { return filepath.Join(meta, "apps", app, "stopped") }
+
+func (a *Agent) markStopped(app string, on bool) {
+	p := stoppedFile(a.meta(), app)
+	if !on {
+		os.Remove(p)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err == nil {
+		writeFileAtomic(p, []byte(a.Sys.Now().Format(time.RFC3339)+"\n"), 0o644)
+	}
+}
+
+func (a *Agent) isStopped(app string) bool { return exists(stoppedFile(a.meta(), app)) }
+
+// autostart 部署、启动后按配置设开机自启：autostart: false 时关掉（以前设过的也关掉）。
+func (a *Agent) autostart(s *proto.AppSpec, unit string) {
+	if s.NoAutostart {
+		a.Sys.Systemctl("disable", unit)
+		return
+	}
+	if err := a.Sys.Systemctl("enable", unit); err != nil {
+		a.warn(proto.EvWarn, s.Name, "设置开机自启失败：%v", err)
+	}
 }
 
 // ---------------------------------------------------------------- status / releases
@@ -401,6 +438,16 @@ func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.
 	} else if isService(s) {
 		p := a.Sys.UnitProps(s.Unit)
 		st.Active, st.Sub, st.PID, st.Since = p.Active, p.Sub, p.PID, p.Since
+		st.Restart, st.RestartSec, st.Restarts = p.Restart, p.RestartSec, p.Restarts
+		switch p.Enabled {
+		case "enabled", "enabled-runtime":
+			on := true
+			st.Autostart = &on
+		case "disabled":
+			off := false
+			st.Autostart = &off
+		}
+		st.Stopped = st.Current != nil && a.isStopped(s.Name)
 		st.Port = healthPort(s.Health)
 		if st.Port == "" && servedStatic(s) {
 			_, port := splitSiteListen(s.SitePort)

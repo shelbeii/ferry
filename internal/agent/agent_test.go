@@ -145,7 +145,11 @@ func (f *fakeSys) UnitProps(unit string) UnitProps {
 	if _, err := os.Stat(filepath.Join(f.unitDir, unit)); err != nil {
 		load = "not-found"
 	}
-	return UnitProps{Load: load, Active: u.active, Sub: u.sub, PID: u.pid, Since: u.since}
+	enabled := "disabled"
+	if u.enabled {
+		enabled = "enabled"
+	}
+	return UnitProps{Load: load, Active: u.active, Sub: u.sub, PID: u.pid, Since: u.since, Enabled: enabled}
 }
 
 func (f *fakeSys) Journal(string, int, time.Time) []string {

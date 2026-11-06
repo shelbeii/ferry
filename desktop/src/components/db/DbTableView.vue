@@ -268,7 +268,7 @@ defineExpose({ hasChanges: () => changeCount.value > 0, reload: () => { info.val
         <span v-if="changeCount" class="changes">{{ changeCount }} 处改动没保存</span>
         <el-button size="small" type="primary" :icon="Check" :disabled="!changeCount" :loading="saving" @click="save">保存</el-button>
         <el-button size="small" :icon="RefreshLeft" :disabled="!changeCount" @click="resetChanges">撤销改动</el-button>
-        <span class="tip">双击格子修改，回车确认；右键可以设为 NULL</span>
+        <span class="tip">双击格子修改，回车确认；按住拖动选多行；右键可以设为 NULL</span>
       </div>
       <el-alert v-else-if="whyReadOnly && result" type="info" :closable="false" :title="whyReadOnly" class="ro" />
       <el-alert v-if="error" type="error" :closable="false" :title="error" class="err" />

@@ -95,10 +95,17 @@ func (e *Engine) notifyDeploy(reports []*DeployReport, err error) {
 		t, _ := e.File.Target(r.Target)
 		ev := e.baseEvent("deploy", t)
 		ev.OK = true
-		ev.Release, ev.Commit, ev.Branch, ev.Dirty = r.Release, strings.TrimSuffix(r.Git.Short(), "*"), r.Git.Branch, r.Git.Dirty // 有没提交的修改另外写
+		ev.Release = r.Release
+		if r.Git.Commit != "" { // 都是同一个提交：写一行；不一样时各应用写自己的（不在 git 里的不写）
+			ev.Commit, ev.Branch, ev.Dirty = strings.TrimSuffix(r.Git.Short(), "*"), r.Git.Branch, r.Git.Dirty // 有没提交的修改另外写
+		}
 		ev.ElapsedSec = int(r.Elapsed / time.Second)
 		for _, a := range r.Apps {
-			ev.Apps = append(ev.Apps, notify.App{Name: a.App, Result: a.Result, Msg: a.Msg})
+			na := notify.App{Name: a.App, Result: a.Result, Msg: a.Msg}
+			if g := r.AppGit[a.App]; ev.Commit == "" && g.Commit != "" {
+				na.Commit, na.Branch, na.Dirty = strings.TrimSuffix(g.Short(), "*"), g.Branch, g.Dirty
+			}
+			ev.Apps = append(ev.Apps, na)
 			ev.OK = ev.OK && a.Result == "OK"
 		}
 		// 出错的是最后一台（后面的没有切换）

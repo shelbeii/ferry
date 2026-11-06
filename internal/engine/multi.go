@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/captain/ferry/internal/gitinfo"
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/safe"
 )
@@ -23,7 +22,7 @@ type uploaded struct {
 
 // uploadAll 同时上传到各目标（每台用自己的连接）：网络慢、服务器多时省下的时间最多。
 // 只有一台时照常输出；多台时各台的输出前面带上服务器名，进度合成一个（各台加起来）。
-func (e *Engine) uploadAll(plans []*targetPlan, id string, git gitinfo.Info, tmp string, delta bool) []uploaded {
+func (e *Engine) uploadAll(plans []*targetPlan, id string, git DeployGit, tmp string, delta bool) []uploaded {
 	out := make([]uploaded, len(plans))
 	started := time.Now()
 	if len(plans) == 1 {

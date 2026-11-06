@@ -48,6 +48,21 @@ func TestMarkdown(t *testing.T) {
 			t.Errorf("缺 %q：\n%s", want, md)
 		}
 	}
+	// 各应用不是同一个提交：分开写；不在 git 里的（前端）不写提交
+	mixed := sample(true)
+	mixed.Commit, mixed.Branch = "", ""
+	mixed.Apps = []App{{Name: "api", Result: "OK", Commit: "abc1234", Branch: "main", Dirty: true}, {Name: "web", Result: "OK"}}
+	md = mixed.Markdown()
+	if !strings.Contains(md, "- api 的提交：abc1234 · main（有没提交的修改）") || strings.Contains(md, "web 的提交") || strings.Contains(md, "- 提交：") {
+		t.Errorf("分开写：\n%s", md)
+	}
+	// 只部署了不在 git 里的前端：没有提交这一行
+	web := sample(true)
+	web.Commit, web.Branch = "", ""
+	web.Apps = []App{{Name: "web", Result: "OK"}}
+	if md := web.Markdown(); strings.Contains(md, "提交") {
+		t.Errorf("前端不在 git 里：\n%s", md)
+	}
 	md = sample(false).Markdown()
 	for _, want := range []string{"❌ shop 部署失败", "- api：失败，已回滚到原来的版本（api 启动后退出）", "- web：没有部署（前面的应用失败了）", "- 原因："} {
 		if !strings.Contains(md, want) {

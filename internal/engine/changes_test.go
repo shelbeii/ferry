@@ -38,7 +38,8 @@ func TestChangesFrom(t *testing.T) {
 	rel := func(app, commit string) proto.AppReleases {
 		return proto.AppReleases{App: app, Releases: []proto.ReleaseInfo{{ReleaseMeta: proto.ReleaseMeta{ID: "20261025-100000-aaaa", Commit: commit}, Current: true}}}
 	}
-	cs := changesFrom(dir, git, []proto.AppReleases{
+	all := DeployGit{"api": git, "web": git, "job": git, "new": git, "plain": {}}
+	cs := changesFrom(all, []proto.AppReleases{
 		rel("api", hashes[0]),
 		rel("web", hashes[2]),
 		rel("job", strings.Repeat("ab", 20)),
@@ -57,10 +58,14 @@ func TestChangesFrom(t *testing.T) {
 	if cs[3].Note != "第一次部署" {
 		t.Fatalf("new：%+v", cs[3])
 	}
+	// 不在 git 仓库里的应用（如没有用 git 管理的前端）：不拿别的应用的仓库比
+	if p := changesFrom(all, []proto.AppReleases{rel("plain", hashes[0])}, nil)[0]; p.Note != "本地不是 git 仓库，看不到提交" || p.Local.Commit != "" {
+		t.Fatalf("plain：%+v", p)
+	}
 
 	// 本地退回到第二个提交：线上（第三个）有本地没有的提交，部署会把它去掉
 	run("checkout", "-q", hashes[1])
-	cs = changesFrom(dir, gitinfo.Read(dir), []proto.AppReleases{rel("api", hashes[2])}, nil)
+	cs = changesFrom(DeployGit{"api": gitinfo.Read(dir)}, []proto.AppReleases{rel("api", hashes[2])}, nil)
 	if c := cs[0]; !c.Warn || c.Behind != 1 || !strings.Contains(c.Note, "会把它们去掉") {
 		t.Fatalf("%+v", c)
 	}

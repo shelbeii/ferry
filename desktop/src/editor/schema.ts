@@ -150,6 +150,28 @@ const service = obj('服务', 'systemd 服务：怎样启动程序', {
   diagLogs: list('启动失败时看的日志', '启动失败时显示这些日志文件的末尾，如 ${logs}/error.log（相对路径为相对 data）', { appTypes: svc }),
   archiveLogs: list('随版本归档的日志目录', 'data 下的日志目录，切换版本时随离开的版本归档；写 [] 表示不归档', { appTypes: svc, default: 'sharedDirs 里的 logs（有的话）' }),
   health: { ...health(), appTypes: svc },
+  restart: {
+    ...obj(
+      '意外退出后重启',
+      '程序意外退出后怎么重启（用 Ferry 或 systemctl 停止的不会重启）。可以只写方式：restart: always',
+      {
+        when: pick(
+          '什么时候重启',
+          'on-failure：出错退出、被信号杀掉（含 kill -9、内存不够被系统杀掉）时重启；always：任何退出都重启（含正常退出、被普通 kill 结束）；no：不重启',
+          ['on-failure', 'always', 'no'],
+          { default: 'on-failure' },
+        ),
+        delay: dur('等多久再重启', '0～10m', { default: '5s' }),
+        max: num('最多重启几次', 'within 时间内最多重启几次（1～100），超过就不再重启：应用停着，服务器告警会报', { default: '不限，一直重启' }),
+        within: dur('多长时间内', '和 max 一起用', { default: '10m', needs: 'max' }),
+      },
+    ),
+    type: '字符串或对象',
+    appTypes: svc,
+    default: '出错退出时等 5 秒重启，一直重启',
+  },
+  autostart: bool('开机自启', '服务器重启后自动启动。在 Ferry 里手动「停止」的应用开机不会起来，「启动」后恢复', { appTypes: svc, default: 'true' }),
+  after: list('开机时先等这些服务', '开机时这些服务先启动、再启动应用（After=），如 mysqld、redis、docker（自动补 .service）；只管顺序，不会替你启动它们', { appTypes: svc }),
   zeroDowntime: obj(
     '不停机发布',
     '两个端口轮流用，新版本在空着的端口启动、就绪后再停旧的（失败时旧版本一直没停过）。${port} 是这次用的端口，程序还会拿到环境变量 SERVER_PORT、PORT；切换时两个版本同时运行，内存要够两份',

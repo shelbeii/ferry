@@ -670,9 +670,7 @@ func (a *Agent) switchService(s *proto.AppSpec, id, prev string) (string, string
 	if err := a.installUnit(s.Name, s.Unit, []byte(s.UnitText)); err != nil {
 		return fail(err.Error())
 	}
-	if err := a.Sys.Systemctl("enable", s.Unit); err != nil {
-		a.warn(proto.EvWarn, s.Name, "设置开机自启失败：%v", err)
-	}
+	a.autostart(s, s.Unit)
 	a.info(proto.EvStart, s.Name, "%s", s.Unit)
 	if err := a.Sys.Systemctl("restart", s.Unit); err != nil {
 		a.diag(s, s.Unit)
@@ -696,6 +694,7 @@ func (a *Agent) switchService(s *proto.AppSpec, id, prev string) (string, string
 			a.info(proto.EvInfo, s.Name, "已取消 %s 的开机自启", c)
 		}
 	}
+	a.markStopped(s.Name, false) // 部署上去就是要运行的
 	return "OK", ""
 }
 
@@ -757,6 +756,8 @@ func (a *Agent) restoreService(s *proto.AppSpec, failed, prev string, wasActive 
 		a.Sys.Systemctl("daemon-reload")
 	} else if err := a.installUnit(s.Name, s.Unit, before); err != nil {
 		return err
+	} else if a.isStopped(s.Name) {
+		a.Sys.Systemctl("disable", s.Unit) // 部署前是手动停着的：部署时打开的开机自启再关掉
 	}
 	if wasActive && before != nil {
 		if err := a.Sys.Systemctl("restart", s.Unit); err != nil {

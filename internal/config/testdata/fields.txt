@@ -42,8 +42,10 @@ apps.[].name
 apps.[].order
 apps.[].root
 apps.[].service
+apps.[].service.after
 apps.[].service.archiveLogs
 apps.[].service.args
+apps.[].service.autostart
 apps.[].service.conflicts
 apps.[].service.description
 apps.[].service.diagLogs
@@ -60,6 +62,11 @@ apps.[].service.health.tcp
 apps.[].service.health.timeout
 apps.[].service.java
 apps.[].service.jvmArgs
+apps.[].service.restart
+apps.[].service.restart.delay
+apps.[].service.restart.max
+apps.[].service.restart.when
+apps.[].service.restart.within
 apps.[].service.runtime
 apps.[].service.runtime.java
 apps.[].service.runtime.version

@@ -56,7 +56,7 @@ apps:
 | `apps` | 应用（列表） |
 | `backups` | 数据备份（列表）：数据库、目录、自己写的备份命令。见文末「数据备份」 |
 
-部署记录里的提交信息（提交号、分支、是否有未提交修改）默认取自配置文件所在目录的 git 仓库；那里不是 git 仓库时（如配置文件放在桌面上），依次看要部署的应用的构建目录（`workdir`）、产物所在目录，用找到的第一个仓库，并在部署输出里说明取自哪个仓库。`git.requireClean` 检查的也是这个仓库。
+部署记录、部署通知里的提交信息（提交号、分支、是否有未提交修改）按应用分别读：先看应用的构建目录（`workdir`），再看产物所在的目录，用它所在的 git 仓库；都不在 git 仓库里的应用（如没有用 git 管理的前端）不记提交。配置文件所在的仓库不算，所以配置文件放在后端仓库里时，前端不会记成后端的提交。一次部署里的应用来自不同的仓库时，通知里各写各的。`git.requireClean` 检查这次部署用到的每个仓库。
 
 ## builds.\<名字\>
 
@@ -280,6 +280,9 @@ apps:
 | `health.http` | | URL；`status`（默认 2xx/3xx）、`contains` |
 | `health.timeout` | 180s | |
 | `health.stable` | 无健康检查时 10s | 健康检查通过后还要稳定运行多久 |
+| `restart` | 出错退出时等 5 秒重启 | 意外退出后怎么重启，见下文「重启和开机自启」 |
+| `autostart` | `true` | 开机自启 |
+| `after` | | 开机时先等这些服务启动（如 `mysqld`、`redis`、`docker`，自动补 `.service`） |
 | `zeroDowntime` | | 不停机发布：新版本在另一个端口启动、就绪后再停旧的。见下文 |
 | `unitExtra.unit/service/install` | | 追加到单元文件各段末尾的原样行（systemd 中后出现的单值设置会覆盖前面的） |
 
@@ -288,6 +291,30 @@ apps:
 预检会以运行用户的身份（`runuser -u <用户> -- test …`，ACL 与安全模块的限制也算在内）检查单元里用到的路径：`ExecStartPre` / `ExecStart` / `ExecStartPost` 的程序要能执行（脚本还要能读），参数里已存在的文件要能读（可执行文件还要能执行）、目录要能进入和列出，`-Djava.io.tmpdir` 还要能写，`WorkingDirectory` 要存在且能进入；`ProtectHome=` 挡住 `/home` 下的路径也会指出。访问不了时说明卡在哪一级目录及其属主、权限。部署时默认**自动修正**这些权限（`--keep-perms` 或设置里关掉「部署时自动修正权限」则只报告）：要写入的交给运行用户（`chown`，不递归）；要读、进入、执行的只补缺的那一位——属主、同组用 `chmod u+ / g+`，其他用户优先 `setfacl` 只给运行用户开，文件系统不支持 ACL 时才 `chmod o+`；部署目录本身属主不是 root 或他人可写时改回 `root`、去掉组和其他用户的写权限。系统目录（/etc、/usr…）、一级目录（/home、/data 这类挂载点）、别人的家目录、部署目录的上级都不会自动修改；权限位允许却仍被拒绝（ACL、麒麟 KYSEC、SELinux）的也不自动改。运行用户不存在时，部署时同样会自动创建（`useradd -r -m -s /sbin/nologin <用户>`）。单独的 `ferry preflight` 只列出「部署时会自动修正」的内容，不修改；部署时在确认之后、构建之前修改，并在任务里逐条列出。修正不了的问题会在改动服务器之前阻止部署；带 `-` 前缀（失败可忽略）的命令只提示。
 
 Java 应用：预检读取 `service.java` 的版本，并找出服务器上常见位置（/usr/lib/jvm、/usr/java、/opt、/usr/local、/home/*/runtime…）已有的 JDK；构建之后、上传之前读取 jar 主类的 class 文件版本（61 = Java 17），服务器上的 java 不够新时直接停下（不上传、不动服务器），并列出可以改用的 JDK。本次部署的应用自己的目录、含变量或通配符的参数不检查，`EnvironmentFile` 由 systemd 以 root 读取，也不检查。
+
+### 重启和开机自启
+
+不写时：程序出错退出、被信号杀掉（`kill -9`、内存不够被系统杀掉）后等 5 秒重启，一直重启；部署后开机自启。
+
+```yaml
+apps:
+  - name: System
+    service:
+      restart:
+        when: always      # on-failure（默认）| always：任何退出都重启（含正常退出、被普通 kill 结束）| no：不重启
+        delay: 10s        # 等多久再重启，默认 5s
+        max: 5            # within 时间内最多重启几次，超过就不再重启（应用停着，服务器告警会报）；不写 = 一直重启
+        within: 10m
+      # restart: always   # 也可以只写方式
+      autostart: true     # 开机自启，默认 true
+      after: [mysqld, redis, docker]   # 开机时先等这些服务启动
+```
+
+- 用 Ferry、`systemctl stop` 停止的不会被重启。
+- 在 Ferry 里「停止」的应用同时取消开机自启：服务器重启后不会自己起来，服务器告警也不报它停了；「启动」、部署、回滚后恢复（`autostart: false` 的应用一直不开机自启）。
+- `after` 只管开机时的先后（`After=`），不会替你启动这些服务。Docker 里的数据库写 `docker`：只等到 Docker 起来，容器里的程序可能还没就绪，应用连不上时靠自动重启再连。
+- `max` 同时写成新旧两种 systemd 都认的写法（CentOS 7 的 systemd 219 也有效）。
+- 应用卡片上显示「自动重启过 N 次」（这次启动后被自动拉起的次数）、「手动停止」、「开机不自启」；悬停状态看重启方式。
 
 ### 不停机发布（zeroDowntime）
 

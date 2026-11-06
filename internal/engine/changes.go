@@ -117,10 +117,11 @@ func diffFiles(old, now map[string]string) (added, changed, removed []string) {
 
 const maxChangeCommits = 20
 
-// changesFrom 按各应用线上的版本算出改动。dir 是本地仓库的目录，local 是这次要部署的单元文件、附带文件（可以为 nil）。
-func changesFrom(dir string, git gitinfo.Info, rels []proto.AppReleases, local map[string]localApp) []AppChange {
+// changesFrom 按各应用线上的版本算出改动：每个应用和它自己代码所在的仓库比。local 是这次要部署的单元文件、附带文件（可以为 nil）。
+func changesFrom(gits DeployGit, rels []proto.AppReleases, local map[string]localApp) []AppChange {
 	var out []AppChange
 	for _, r := range rels {
+		git := gits[r.App]
 		c := AppChange{App: r.App, Local: git}
 		for _, x := range r.Releases {
 			if x.Current {
@@ -139,7 +140,7 @@ func changesFrom(dir string, git gitinfo.Info, rels []proto.AppReleases, local m
 			c.Note = "和线上是同一个提交"
 			c.Known = true
 		default:
-			c.Range = gitinfo.Between(dir, c.Online.Commit, git.Commit, maxChangeCommits)
+			c.Range = gitinfo.Between(git.Top, c.Online.Commit, git.Commit, maxChangeCommits)
 			switch {
 			case !c.Known:
 				c.Note = fmt.Sprintf("线上的提交 %s 不在本地仓库里（别的电脑上提交的？先 git pull 再部署）", short(c.Online.Commit))
@@ -307,11 +308,7 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir := git.Top
-	if dir == "" {
-		dir = e.File.Dir
-	}
-	cs := changesFrom(dir, git, rels, localApps(e.File, t, apps))
+	cs := changesFrom(git, rels, localApps(e.File, t, apps))
 	for i := range cs {
 		for _, ks := range keeps {
 			if ks.App != cs[i].App {

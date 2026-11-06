@@ -863,7 +863,35 @@ function stateTip(s: AppStatus): string {
   // 「从…起」只对在运行的说；停了的，这个时间是上次启动的时间
   parts.push(at ? (s.active === 'active' ? `${what}，${at} 起` : `${what}（上次启动于 ${at}）`) : what)
   if (notFerry(s)) parts.push('不是通过 Ferry 部署的，没有版本记录')
+  if (s.stopped && s.active !== 'active') parts.push(STOPPED_TIP)
+  else if (s.autostart !== undefined) parts.push(s.autostart ? '开机自启' : '开机不自启')
+  const r = restartText(s)
+  if (r) parts.push(r)
+  if (s.restarts) parts.push(`这次启动后自动重启过 ${s.restarts} 次`)
   return parts.join('；')
+}
+
+const STOPPED_TIP = '在 Ferry 里手动停止的：开机不会自己启动，服务器告警也不报；点「启动」恢复'
+// 意外退出后怎么重启（ferry.yaml 的 service.restart）；systemd 的时长写法如 5s、100ms、1min 30s
+function restartText(s: AppStatus): string {
+  const sec = (s.restartSec ?? '').replace(/(\d)min/g, '$1 分钟').replace(/(\d)ms/g, '$1 毫秒').replace(/(\d)s\b/g, '$1 秒')
+  const after = sec && sec !== '0' ? `等 ${sec}` : '马上'
+  switch (s.restart) {
+    case undefined:
+    case '':
+      return ''
+    case 'no':
+      return '意外退出后不自动重启'
+    case 'on-failure':
+      return `出错退出、被杀掉时${after}重启`
+    case 'always':
+      return `退出后都${after}重启（手动停止的除外）`
+    default:
+      return `重启方式 ${s.restart}`
+  }
+}
+function restartsTip(s: AppStatus): string {
+  return `这次启动（部署、启动、重启）后，程序意外退出、被自动拉起了 ${s.restarts} 次：可能是崩溃、内存不够被系统杀掉，看看日志找原因`
 }
 
 function afterTask() {
@@ -886,7 +914,8 @@ async function control(action: 'start' | 'stop' | 'restart') {
     if (!(await confirmProduction(`${label} ${what}`, targetName))) return
   } else if (action !== 'start') {
     try {
-      await ElMessageBox.confirm(`${label} ${targetName} 上的 ${what}？`, label, { type: 'warning' })
+      const note = action === 'stop' ? '停止后服务器重启也不会自己启动，点「启动」恢复。' : ''
+      await ElMessageBox.confirm(`${label} ${targetName} 上的 ${what}？${note}`, label, { type: 'warning' })
     } catch {
       return
     }
@@ -1317,6 +1346,15 @@ async function onSaved(deployment?: DeploymentRequest) {
                 <span class="chip warn mono clickable" @click.stop="goPort(e.addr)">{{ portOf(e.addr) }} 对外开放</span>
               </el-tooltip>
               <span v-if="row.healthy === false" class="chip bad">不健康</span>
+              <el-tooltip :show-after="HOVER_DELAY" v-if="row.restarts" :content="restartsTip(row)" placement="top">
+                <span class="chip warn">自动重启过 {{ row.restarts }} 次</span>
+              </el-tooltip>
+              <el-tooltip :show-after="HOVER_DELAY" v-if="row.stopped && row.active !== 'active'" :content="STOPPED_TIP" placement="top">
+                <span class="chip">手动停止</span>
+              </el-tooltip>
+              <el-tooltip :show-after="HOVER_DELAY" v-else-if="row.autostart === false && row.active === 'active'" content="服务器重启后不会自己启动（ferry.yaml 里 service.autostart: false，或者在服务器上关掉了）" placement="top">
+                <span class="chip">开机不自启</span>
+              </el-tooltip>
               <el-tooltip :show-after="HOVER_DELAY" v-if="shownProblem(row)" :content="shownProblem(row)" placement="top">
                 <span class="problem">{{ shownProblem(row) }}</span>
               </el-tooltip>
@@ -1352,6 +1390,9 @@ async function onSaved(deployment?: DeploymentRequest) {
               <template #default="{ row }">
                 <el-tooltip :show-after="HOVER_DELAY" :content="stateTip(row)" placement="top"><span class="state" :class="stateDot(row)"><span class="dot" />{{ stateText(row) }}</span></el-tooltip>
                 <span v-if="row.healthy === false" class="chip bad ml">不健康</span>
+                <el-tooltip :show-after="HOVER_DELAY" v-if="row.restarts" :content="restartsTip(row)" placement="top">
+                  <span class="chip warn ml">重启 {{ row.restarts }} 次</span>
+                </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column label="PID" width="80">
@@ -2047,6 +2088,10 @@ button.stat:hover {
 }
 .clickable:hover {
   text-decoration: underline;
+}
+.chip:not(.warn):not(.bad) {
+  background: var(--el-fill-color);
+  color: var(--el-text-color-secondary);
 }
 .chip.warn {
   background: var(--el-color-warning-light-9);

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/captain/ferry/internal/config"
@@ -24,63 +25,74 @@ func gitRepo(t *testing.T, dir string) {
 	}
 }
 
-func TestDeployGitFallsBackToBuildDir(t *testing.T) {
+func TestAppGits(t *testing.T) {
 	root := t.TempDir()
 	code := filepath.Join(root, "code")
 	gitRepo(t, code)
-	// 配置文件在代码仓库外面（如桌面），构建目录用变量指向仓库
-	conf := filepath.Join(root, "desktop", config.DefaultFileName)
-	os.MkdirAll(filepath.Dir(conf), 0o755)
-	os.WriteFile(conf, []byte(`
+	web := filepath.Join(root, "web", "dist") // 前端：不在 git 里
+	os.MkdirAll(web, 0o755)
+	load := func(conf string) *config.File {
+		t.Helper()
+		os.MkdirAll(filepath.Dir(conf), 0o755)
+		os.WriteFile(conf, []byte(`
 version: 1
 project: shop
-vars: {repo: `+filepath.ToSlash(code)+`}
+vars: {repo: `+filepath.ToSlash(code)+`, web: `+filepath.ToSlash(web)+`}
 targets:
   t1: {host: 10.0.0.1, root: /opt/shop, runAs: shop}
 builds:
   mvn: {workdir: "${repo}", command: mvn package}
 apps:
   - {name: api, type: binary, build: mvn, artifact: {path: "${repo}/target/api"}}
+  - {name: web, type: static, artifact: {path: "${web}"}, static: {link: /usr/share/nginx/html/web}}
 `), 0o644)
-	f, err := config.Load(conf)
-	if err != nil {
-		t.Fatal(err)
+		f, err := config.Load(conf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
 	}
-	tg, _ := f.Target("t1")
-	p := &targetPlan{t: tg, apps: []*config.App{f.App("api")}, items: []*item{{app: f.App("api"), local: filepath.Join(code, "target", "api")}}}
-	g, fallback := deployGit(f, []*targetPlan{p})
-	if g.Commit == "" || !fallback || g.Branch != "main" || !samePath(g.Top, code) {
-		t.Fatalf("%+v fallback=%v", g, fallback)
+	plan := func(f *config.File) []*targetPlan {
+		tg, _ := f.Target("t1")
+		return []*targetPlan{{t: tg, apps: []*config.App{f.App("api"), f.App("web")}, items: []*item{
+			{app: f.App("api"), local: filepath.Join(code, "target", "api")},
+			{app: f.App("web"), local: web},
+		}}}
 	}
 
-	// 配置文件就在仓库里：直接用，不算回退
-	inRepo := filepath.Join(code, config.DefaultFileName)
-	b, _ := os.ReadFile(conf)
-	os.WriteFile(inRepo, b, 0o644)
-	f2, err := config.Load(inRepo)
-	if err != nil {
-		t.Fatal(err)
+	// 配置文件放在后端仓库里：前端不在 git 里，不能记成后端的提交
+	f := load(filepath.Join(code, config.DefaultFileName))
+	g := appGits(f, plan(f))
+	if api := g["api"]; api.Commit == "" || api.Branch != "main" || !samePath(api.Top, code) {
+		t.Fatalf("api：%+v", api)
 	}
-	if g, fallback := deployGit(f2, []*targetPlan{p}); g.Commit == "" || fallback {
-		t.Fatalf("%+v fallback=%v", g, fallback)
+	if g["web"].Commit != "" {
+		t.Fatalf("web 不在 git 里：%+v", g["web"])
+	}
+	if _, ok := g.Common(); ok {
+		t.Fatal("两个应用不是同一个提交")
+	}
+	if s := g.Short(); !strings.HasPrefix(s, "api ") || !strings.HasSuffix(s, "web 不在 git 里") {
+		t.Fatalf("Short：%s", s)
+	}
+	if d := g.Describe(); len(d) != 2 || !strings.HasPrefix(d[0], "代码（api）：main 分支") || d[1] != "代码（web）：不在 git 仓库里，看不到提交" {
+		t.Fatalf("Describe：%v", d)
 	}
 
-	// 都不是仓库：空
-	plain := filepath.Join(root, "plain", config.DefaultFileName)
-	os.MkdirAll(filepath.Dir(plain), 0o755)
-	os.WriteFile(plain, []byte(`
-version: 1
-project: shop
-targets:
-  t1: {host: 10.0.0.1, root: /opt/shop, runAs: shop}
-apps:
-  - {name: api, type: binary, artifact: {path: out/api}}
-`), 0o644)
-	f3, _ := config.Load(plain)
-	tg3, _ := f3.Target("t1")
-	p3 := &targetPlan{t: tg3, apps: []*config.App{f3.App("api")}, items: []*item{{app: f3.App("api"), local: filepath.Join(root, "plain", "out", "api")}}}
-	if g, _ := deployGit(f3, []*targetPlan{p3}); g.Commit != "" {
-		t.Fatalf("%+v", g)
+	// 配置文件在仓库外面（如桌面）：后端照样从构建目录找到仓库
+	f2 := load(filepath.Join(root, "desktop", config.DefaultFileName))
+	if g2 := appGits(f2, plan(f2)); g2["api"].Commit == "" || g2["web"].Commit != "" {
+		t.Fatalf("%+v", g2)
+	}
+
+	// 只有后端：一个提交，写法和以前一样
+	only := DeployGit{"api": g["api"]}
+	if c, ok := only.Common(); !ok || only.Short() != c.Short() || !strings.HasPrefix(only.Describe()[0], "代码：main 分支，提交 ") {
+		t.Fatalf("%v %s %v", ok, only.Short(), only.Describe())
+	}
+	// 只有前端：看不到提交
+	if d := (DeployGit{"web": {}}).Describe(); len(d) != 1 || d[0] != "代码：不在 git 仓库里，看不到提交" || (DeployGit{"web": {}}).Short() != "-" {
+		t.Fatalf("%v", d)
 	}
 }
 

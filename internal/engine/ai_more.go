@@ -412,13 +412,7 @@ func (e *Engine) aiChangeTools(t *config.Target) []ai.Tool {
 			}
 			var d []string
 			if git, steps, err := e.DeployPreview(t.Name, a.Apps); err == nil {
-				if git.Commit != "" {
-					line := fmt.Sprintf("代码：%s 分支，提交 %s", orDefault(git.Branch, "-"), git.Short())
-					if git.Dirty {
-						line += fmt.Sprintf("，有 %d 个文件改了没提交", len(git.Files))
-					}
-					d = append(d, line)
-				}
+				d = append(d, git.Describe()...)
 				if a.SkipBuild {
 					d = append(d, "构建：跳过，用本机现有的产物")
 				} else {

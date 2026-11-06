@@ -216,7 +216,12 @@ func (a *Agent) appInfo() int {
 	service.path("服务文件", props["FragmentPath"])
 	service.add("服务覆盖配置", props["DropInPaths"])
 	service.add("环境变量文件", loadedProperty(props, "EnvironmentFiles", strings.Join(unitValues(unitText, "EnvironmentFile"), "\n"), "未设置"))
-	service.add("重启策略", props["Restart"])
+	service.add("开机自启", map[string]string{"enabled": "是", "enabled-runtime": "是（这次开机）", "disabled": "否", "masked": "否（已屏蔽）"}[unitState.Enabled])
+	restart := props["Restart"]
+	if restart != "" && restart != "no" && unitState.RestartSec != "" {
+		restart += "（等 " + unitState.RestartSec + " 再重启）"
+	}
+	service.add("重启策略", restart)
 	service.add("自动重启次数", props["NRestarts"])
 	if props["NeedDaemonReload"] == "yes" {
 		r.Notes = append(r.Notes, "服务文件已修改，systemd 尚未重新加载；这里的服务启动命令以 systemd 当前加载的配置为准。")

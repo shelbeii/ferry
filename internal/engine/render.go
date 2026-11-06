@@ -279,6 +279,7 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 	s.Unit = svc.Unit
 	s.User = appUser(t, a)
 	s.Conflict = svc.Conflicts
+	s.NoAutostart = !svc.AutostartOn()
 	if s.SharedDirs, err = sc.ExpandAll(svc.SharedDirs); err != nil {
 		return s, wrap("sharedDirs", err)
 	}
@@ -440,13 +441,26 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	line("%s — 由 ferry 生成，手工修改会在下次部署时被覆盖", agent.ManagedMarker)
-	line("# project=%s app=%s target=%s", f.Project, a.Name, t.Name)
+	if svc.AutostartOn() {
+		line("# project=%s app=%s target=%s", f.Project, a.Name, t.Name)
+	} else {
+		line("# project=%s app=%s target=%s autostart=no", f.Project, a.Name, t.Name) // 服务器告警：没开机自启也要在运行
+	}
 	line("[Unit]")
 	line("Description=%s", oneLine(desc))
-	line("After=network-online.target")
+	line("After=%s", strings.Join(append([]string{"network-online.target"}, svc.After...), " "))
 	line("Wants=network-online.target")
 	if len(svc.Conflicts) > 0 {
 		line("Conflicts=%s", strings.Join(svc.Conflicts, " "))
+	}
+	r := svc.Restart
+	restart := r.WhenOr()
+	if restart != config.RestartNo && r != nil && r.Max > 0 {
+		line("StartLimitIntervalSec=%s", sdSeconds(r.WithinOr()))
+		line("StartLimitBurst=%d", r.Max)
+	} else if restart != config.RestartNo && r.DelayOr() < 2*time.Second {
+		// systemd 默认 10 秒内启动超过 5 次就不再重启：等得很短时去掉这个限制，才是「一直重启」
+		line("StartLimitIntervalSec=0")
 	}
 	for _, l := range extra["unit"] {
 		line("%s", oneLine(l))
@@ -474,8 +488,17 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	if a.Type == proto.TypeJava {
 		line("SuccessExitStatus=143")
 	}
-	line("Restart=on-failure")
-	line("RestartSec=5")
+	line("Restart=%s", restart)
+	if restart != config.RestartNo {
+		line("RestartSec=%s", sdSeconds(r.DelayOr()))
+		if r != nil && r.Max > 0 {
+			// CentOS 7 这类老 systemd（< 230）只认 [Service] 里的写法；新的两种都认
+			line("StartLimitInterval=%s", sdSeconds(r.WithinOr()))
+			line("StartLimitBurst=%d", r.Max)
+		} else if r.DelayOr() < 2*time.Second {
+			line("StartLimitInterval=0")
+		}
+	}
 	line("TimeoutStopSec=45")
 	line("LimitNOFILE=65536")
 	for _, l := range extra["service"] {
@@ -488,6 +511,14 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 		line("%s", oneLine(l))
 	}
 	return b.String(), nil
+}
+
+// sdSeconds systemd 的时长：整秒写 5、600，不是整秒写 500ms。
+func sdSeconds(d time.Duration) string {
+	if d%time.Second == 0 {
+		return strconv.Itoa(int(d / time.Second))
+	}
+	return strconv.Itoa(int(d/time.Millisecond)) + "ms"
 }
 
 func oneLine(s string) string { return strings.ReplaceAll(strings.ReplaceAll(s, "\r", ""), "\n", " ") }

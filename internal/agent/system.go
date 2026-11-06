@@ -31,6 +31,11 @@ type UnitProps struct {
 	Sub    string // running / auto-restart / dead / exited ...
 	PID    int
 	Since  string
+	// Enabled 开机自启：enabled / disabled / static …（UnitFileState）
+	Enabled string
+	// Restart 重启方式（on-failure / always / no）、RestartSec 等多久（如 5s）、Restarts 这次启动后自动重启过几次（systemd 235 起才有）
+	Restart, RestartSec string
+	Restarts            int
 }
 
 // System 对操作系统的全部依赖。真实实现见 realSystem；测试用假实现。
@@ -181,7 +186,8 @@ func (realSystem) UserGroups(name string) (int, []int, error) {
 
 func (realSystem) UnitProps(unit string) UnitProps {
 	out, _ := exec.Command("systemctl", "show", unit,
-		"-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "ActiveEnterTimestamp").Output()
+		"-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "ActiveEnterTimestamp",
+		"-p", "UnitFileState", "-p", "Restart", "-p", "RestartUSec", "-p", "NRestarts").Output()
 	return parseProps(string(out))
 }
 
@@ -203,6 +209,14 @@ func parseProps(s string) UnitProps {
 			p.PID, _ = strconv.Atoi(v)
 		case "ActiveEnterTimestamp":
 			p.Since = v
+		case "UnitFileState":
+			p.Enabled = v
+		case "Restart":
+			p.Restart = v
+		case "RestartUSec":
+			p.RestartSec = v
+		case "NRestarts":
+			p.Restarts, _ = strconv.Atoi(v)
 		}
 	}
 	return p

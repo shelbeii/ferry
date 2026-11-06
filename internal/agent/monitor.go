@@ -251,6 +251,37 @@ type finding struct {
 	entry string // 属于哪个「项目 / 目标」；空 = 整台服务器的（发给所有开着的）
 }
 
+// unitNoAutostart 单元文件第二行带 autostart=no（service.autostart: false）。
+func unitNoAutostart(path string) bool {
+	b, _ := os.ReadFile(path)
+	for i, l := range strings.Split(string(b), "\n") {
+		if i > 3 {
+			break
+		}
+		if strings.HasPrefix(l, "# project=") && slices.Contains(strings.Fields(l), "autostart=no") {
+			return true
+		}
+	}
+	return false
+}
+
+// zdIdleSlot 不停机发布空着的槽位（不是 slot 文件里正在用的那个）。
+func zdIdleSlot(root, app, unit string) bool {
+	b, err := os.ReadFile(filepath.Join(root, dirMeta, "apps", app, "slot"))
+	if err != nil {
+		return false
+	}
+	var st zdState
+	if json.Unmarshal(b, &st) != nil || len(st.Units) != 2 {
+		return false
+	}
+	active := st.Units[0]
+	if st.Slot == "b" {
+		active = st.Units[1]
+	}
+	return unit != active && slices.Contains(st.Units, unit)
+}
+
 // managedUnits Ferry 生成的应用单元：单元 → 项目、应用、目标（单元文件第二行 # project=… app=… target=…）。
 func (a *Agent) managedUnits() map[string][3]string {
 	out := map[string][3]string{}
@@ -323,9 +354,12 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 		if !ok {
 			continue
 		}
+		if exists(stoppedFile(filepath.Join(e.Root, dirMeta), info[1])) || zdIdleSlot(e.Root, info[1], u) {
+			continue // 在 Ferry 里手动停的、不停机发布空着的槽位
+		}
 		enabled, _ := a.Sys.Shell("systemctl is-enabled "+shellQuote(u)+" 2>/dev/null", 10*time.Second)
-		if strings.TrimSpace(enabled) != "enabled" {
-			continue // 没设开机自启的（不停机发布停着的槽位、手动停的不算）
+		if strings.TrimSpace(enabled) != "enabled" && !unitNoAutostart(filepath.Join(a.Sys.UnitDir(), u)) {
+			continue // 没设开机自启的：在服务器上用 systemctl 停掉、关掉的（autostart: false 的应用除外，它也应该在运行）
 		}
 		p := a.Sys.UnitProps(u)
 		switch {

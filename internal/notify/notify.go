@@ -47,6 +47,10 @@ type App struct {
 	Name   string `json:"name"`
 	Result string `json:"result"`
 	Msg    string `json:"msg,omitempty"`
+	// Commit、Branch、Dirty 这个应用的提交：各应用不是同一个提交时才有（是同一个时写在 Event 上）
+	Commit string `json:"commit,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	Dirty  bool   `json:"dirty,omitempty"`
 }
 
 var resultText = map[string]string{
@@ -121,15 +125,24 @@ func (ev Event) lines() []string {
 		}
 		out = append(out, v)
 	}
+	commit := func(label, c, branch string, dirty bool) string {
+		l := label + "：" + c
+		if branch != "" {
+			l += " · " + branch
+		}
+		if dirty {
+			l += "（有没提交的修改）"
+		}
+		return l
+	}
 	if ev.Commit != "" {
-		c := "提交：" + ev.Commit
-		if ev.Branch != "" {
-			c += " · " + ev.Branch
+		out = append(out, commit("提交", ev.Commit, ev.Branch, ev.Dirty))
+	} else {
+		for _, a := range ev.Apps { // 各应用不是同一个提交：分开写；不在 git 仓库里的应用没有提交，不写
+			if a.Commit != "" {
+				out = append(out, commit(a.Name+" 的提交", a.Commit, a.Branch, a.Dirty))
+			}
 		}
-		if ev.Dirty {
-			c += "（有没提交的修改）"
-		}
-		out = append(out, c)
 	}
 	if ev.Error != "" && !ev.OK {
 		out = append(out, "原因："+cut(oneLine(ev.Error), 300))

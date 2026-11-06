@@ -207,9 +207,8 @@ func (a *Agent) zdSwitch(s *proto.AppSpec, id, prev string, hooks bool) (string,
 			a.info(proto.EvInfo, s.Name, "已取消 %s 的开机自启", c)
 		}
 	}
-	if err := a.Sys.Systemctl("enable", sl.Unit); err != nil {
-		a.warn(proto.EvWarn, s.Name, "设置开机自启失败：%v", err)
-	}
+	a.autostart(s, sl.Unit)
+	a.markStopped(s.Name, false)
 	if err := a.zdFinish(s, id, prev, sl.Name, started); err != nil {
 		a.warn(proto.EvWarn, s.Name, "%v", err)
 	}

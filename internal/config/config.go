@@ -266,9 +266,75 @@ type Service struct {
 	// ArchiveLogs shared 下的日志目录，切换版本时随离开的版本归档；不写时为 sharedDirs 里的 logs（有的话），[] 表示不归档
 	ArchiveLogs *[]string `yaml:"archiveLogs"`
 	Health      Health    `yaml:"health"`
-	UnitExtra   UnitExtra `yaml:"unitExtra"`
+	// Restart 意外退出后怎么重启；不写 = 出错退出时 5 秒后重启，一直重启
+	Restart *Restart `yaml:"restart"`
+	// Autostart 开机自启；不写 = 是。手动「停止」的应用开机不会自己起来，「启动」后恢复
+	Autostart *bool `yaml:"autostart"`
+	// After 开机时等这些服务先启动再启动应用（如 mysqld、redis、docker），自动补 .service
+	After     []string  `yaml:"after"`
+	UnitExtra UnitExtra `yaml:"unitExtra"`
 	// ZeroDowntime 不停机发布：新版本在另一个端口启动、就绪后再停旧的
 	ZeroDowntime *ZeroDowntime `yaml:"zeroDowntime"`
+}
+
+// AutostartOn 开机自启（不写时是）。
+func (s *Service) AutostartOn() bool { return s.Autostart == nil || *s.Autostart }
+
+// Restart 意外退出后的重启。也可以只写 when：restart: always。
+type Restart struct {
+	// When on-failure（默认）：出错退出、被信号杀掉（含 kill -9、内存不够被系统杀掉）时重启；
+	// always：任何退出都重启（含正常退出、被 kill 结束）；no：不重启。用 Ferry 或 systemctl 停止的都不会重启
+	When string `yaml:"when"`
+	// Delay 等多久再重启，默认 5s
+	Delay *Duration `yaml:"delay"`
+	// Max Within 时间内最多重启几次，超过就不再重启（应用停着，服务器告警会报）；0 / 不写 = 一直重启
+	Max int `yaml:"max"`
+	// Within 和 Max 一起用，默认 10m
+	Within *Duration `yaml:"within"`
+}
+
+// 重启方式
+const (
+	RestartOnFailure = "on-failure"
+	RestartAlways    = "always"
+	RestartNo        = "no"
+)
+
+// UnmarshalYAML restart: always 这样的简写，或完整的写法。
+func (r *Restart) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		r.When = strings.TrimSpace(n.Value)
+		if n.Tag == "!!bool" && r.When == "false" { // restart: no / false 被 YAML 当成布尔值
+			r.When = RestartNo
+		}
+		return nil
+	}
+	type plain Restart
+	return n.Decode((*plain)(r))
+}
+
+// WhenOr 重启方式（不写时 on-failure）。
+func (r *Restart) WhenOr() string {
+	if r == nil || r.When == "" {
+		return RestartOnFailure
+	}
+	return r.When
+}
+
+// DelayOr 重启前等的时间（不写时 5 秒）。
+func (r *Restart) DelayOr() time.Duration {
+	if r == nil || r.Delay == nil {
+		return 5 * time.Second
+	}
+	return r.Delay.Std()
+}
+
+// WithinOr 限制重启次数的时间段（不写时 10 分钟）。
+func (r *Restart) WithinOr() time.Duration {
+	if r == nil || r.Within == nil {
+		return 10 * time.Minute
+	}
+	return r.Within.Std()
 }
 
 // ZeroDowntime 不停机发布。两个端口轮流用；${port} 是这次启动用的端口，程序还会拿到环境变量 SERVER_PORT、PORT。

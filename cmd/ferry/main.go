@@ -88,7 +88,7 @@ const usage = `ferry —— 后端 / 前端部署工具
   preflight <目标> [应用…]       检查服务器环境
   deploy   <目标>[,<目标>…] [应用…]  构建、上传、逐个切换；失败自动回滚该应用并停止后续应用和目标
   status   <目标> [应用…]        查看状态
-  start | stop | restart <目标> [应用…]
+  start | stop | restart <目标> [应用…]   stop 同时取消开机自启，start、restart 后恢复
   app-info <目标> <应用>         查看实际运行环境、进程、服务配置与部署位置
   app-runtimes <目标> <应用>     列出服务器上可切换的运行环境
   releases <目标> [应用…]        列出各版本
@@ -690,7 +690,7 @@ func run(argv []string, cio *cliIO) int {
 				fmt.Fprintf(cio.stderr, "\n%s", r.Target)
 			}
 			printOutcome(con, r.Apps)
-			con.Info("版本 %s，提交 %s，上传 %s（全量 %s），用时 %s", r.Release, r.Git.Short(), human(r.Upload), human(r.Total), r.Elapsed.Round(time.Second))
+			con.Info("版本 %s，提交 %s，上传 %s（全量 %s），用时 %s", r.Release, r.AppGit.Short(), human(r.Upload), human(r.Total), r.Elapsed.Round(time.Second))
 		}
 		if err != nil {
 			return fail(err)

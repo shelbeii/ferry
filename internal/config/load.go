@@ -363,6 +363,18 @@ func (f *File) normalize() error {
 					}
 				}
 			}
+			for j, c := range s.After {
+				if !strings.HasSuffix(c, ".service") && !strings.Contains(c, ".") {
+					c += ".service"
+					s.After[j] = c
+				}
+				if !reUnit.MatchString(c) && !reUnitAny.MatchString(c) {
+					bad("%s：after 中的 %q 无效，写服务名，如 mysqld、redis、docker", where, c)
+				} else if c == s.Unit {
+					bad("%s：after 不能写应用自己（%s）", where, c)
+				}
+			}
+			checkRestart(s.Restart, where, bad)
 			normalizeHealth(&s.Health, where, bad)
 			if z := s.ZeroDowntime; z != nil {
 				checkZD(z, where, bad)
@@ -683,7 +695,39 @@ func hasServiceExtras(s *Service) bool {
 	return s.Workdir != "" || s.Java != "" || s.Runtime != nil || len(s.JvmArgs) > 0 || len(s.Args) > 0 || len(s.Exec) > 0 ||
 		len(s.Env) > 0 || len(s.EnvFile) > 0 || len(s.ExecStartPre) > 0 || len(s.Conflicts) > 0 || len(s.SharedDirs) > 0 ||
 		len(s.DiagLogs) > 0 || s.ArchiveLogs != nil || s.Health.TCP != "" || s.Health.HTTP != "" ||
-		len(s.UnitExtra.Unit)+len(s.UnitExtra.Service)+len(s.UnitExtra.Install) > 0 || s.ZeroDowntime != nil
+		len(s.UnitExtra.Unit)+len(s.UnitExtra.Service)+len(s.UnitExtra.Install) > 0 || s.ZeroDowntime != nil ||
+		s.Restart != nil || s.Autostart != nil || len(s.After) > 0
+}
+
+// reUnitAny after 里也可以写 .target、.socket、.mount 这类单元（如 docker.socket、remote-fs.target）。
+var reUnitAny = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]+\.(service|socket|target|mount|device|path|timer)$`)
+
+// checkRestart service.restart：方式只能是三种，等待最多 10 分钟，次数 1～100。
+func checkRestart(r *Restart, where string, bad func(string, ...any)) {
+	if r == nil {
+		return
+	}
+	at := where + "：service.restart"
+	switch r.When {
+	case "", RestartOnFailure, RestartAlways, RestartNo:
+	default:
+		bad("%s 写 on-failure（出错退出时重启，默认）、always（任何退出都重启）或 no（不重启），当前 %q", at, r.When)
+	}
+	if r.Delay != nil && (*r.Delay < 0 || r.Delay.Std() > 10*time.Minute) {
+		bad("%s.delay 写 0～10m（当前 %s）", at, r.Delay.Std())
+	}
+	if r.Max < 0 || r.Max > 100 {
+		bad("%s.max 写 1～100（当前 %d），不写 = 一直重启", at, r.Max)
+	}
+	if r.Within != nil && (r.Within.Std() < time.Second || r.Within.Std() > 24*time.Hour) {
+		bad("%s.within 写 1s～24h（当前 %s）", at, r.Within.Std())
+	}
+	if r.When == RestartNo && (r.Delay != nil || r.Max != 0 || r.Within != nil) {
+		bad("%s：when 是 no（不重启）时不用写 delay、max、within", at)
+	}
+	if r.Within != nil && r.Max == 0 {
+		bad("%s.within 要和 max 一起写（多长时间内最多重启几次）", at)
+	}
 }
 
 var reSeries = regexp.MustCompile(`^\d+\.\d+$`)

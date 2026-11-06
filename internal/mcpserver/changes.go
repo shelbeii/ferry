@@ -98,7 +98,7 @@ func (s *server) addChangeTools(m *mcp.Server) {
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "app_control", Title: "启动 / 停止 / 重启应用",
-		Description: "启动、停止或重启项目里的应用（等健康检查通过）。" + how,
+		Description: "启动、停止或重启项目里的应用（等健康检查通过）。停止同时取消开机自启（服务器重启后不会自己起来），启动、重启后恢复。" + how,
 		Annotations: change()},
 		loggedReq(s, "app_control", func(ctx context.Context, req *mcp.CallToolRequest, in controlIn) (any, error) {
 			if in.Action != "start" && in.Action != "stop" && in.Action != "restart" {
@@ -431,16 +431,7 @@ func preview(e *engine.Engine, target string, r approve.Request) []string {
 	var out []string
 	if r.Action == "deploy" {
 		git, steps, err := e.DeployPreview(target, r.Apps)
-		switch {
-		case git.Commit != "":
-			line := fmt.Sprintf("代码：%s 分支，提交 %s", orDash(git.Branch), git.Short())
-			if git.Dirty {
-				line += fmt.Sprintf("，有 %d 个文件改了没提交", len(git.Files))
-			}
-			out = append(out, line)
-		default:
-			out = append(out, "代码：不在 git 仓库里，看不到提交")
-		}
+		out = append(out, git.Describe()...)
 		if r.SkipBuild {
 			out = append(out, "构建：跳过，用本机现有的产物")
 		} else if err == nil {

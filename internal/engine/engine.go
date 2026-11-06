@@ -102,9 +102,12 @@ type DeployOptions struct {
 
 // DeployReport 部署结果。
 type DeployReport struct {
-	Target  string             `json:"target"`
-	Release string             `json:"release"`
-	Git     gitinfo.Info       `json:"git"`
+	Target  string `json:"target"`
+	Release string `json:"release"`
+	// Git 这台服务器上部署的应用都是同一个仓库的同一个提交时是它，否则为空（看 AppGit）
+	Git gitinfo.Info `json:"git"`
+	// AppGit 各应用的提交（不在 git 仓库里的应用 Commit 为空）
+	AppGit  DeployGit          `json:"appGit,omitempty"`
 	Apps    []proto.AppOutcome `json:"apps"`
 	Upload  int64              `json:"upload"`  // 实际上传字节
 	Total   int64              `json:"total"`   // 全量大小
@@ -208,15 +211,20 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 		}
 		plans = append(plans, p)
 	}
-	git, fallback := deployGit(f, plans)
-	if fallback {
-		e.Rep.Info("配置文件所在目录不是 git 仓库，提交信息取自 %s（%s %s）", git.Top, git.Branch, git.Short())
-	}
-	if git.Dirty {
-		if f.Git.RequireClean {
-			return nil, fmt.Errorf("工作区有未提交的修改（git.requireClean）：%s", strings.Join(git.Files, ", "))
+	git := appGits(f, plans)
+	repos, _ := git.Repos()
+	for _, r := range repos {
+		if !r.Dirty {
+			continue
 		}
-		e.Rep.Warn("工作区有未提交的修改，会记入部署记录（%s）", strings.Join(git.Files, ", "))
+		where := ""
+		if len(repos) > 1 {
+			where = "（" + strings.Join(r.Apps, "、") + " 的仓库 " + r.Top + "）"
+		}
+		if f.Git.RequireClean {
+			return nil, fmt.Errorf("工作区有未提交的修改%s（git.requireClean）：%s", where, strings.Join(r.Files, ", "))
+		}
+		e.Rep.Warn("工作区有未提交的修改%s，会记入部署记录（%s）", where, strings.Join(r.Files, ", "))
 	}
 	if note := localPathVarsNote(f, targets); note != "" {
 		e.Rep.Warn("%s", note)
@@ -250,10 +258,6 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 	}
 
 	// 要上线的改动：和线上运行的版本比（读不到不影响部署）
-	dir := git.Top
-	if dir == "" {
-		dir = f.Dir
-	}
 	for _, p := range plans {
 		specs := make([]proto.AppSpec, 0, len(p.items))
 		for _, it := range p.items {
@@ -274,7 +278,7 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 				}
 				local[it.app.Name] = la
 			}
-			e.ReportChanges(p.t.Name, changesFrom(dir, git, rels, local))
+			e.ReportChanges(p.t.Name, changesFrom(git, rels, local))
 		}
 	}
 
@@ -438,10 +442,14 @@ func (e *Engine) readyTarget(p *targetPlan, tmp string, o DeployOptions, built m
 }
 
 // switchTarget 一个目标上：让 agent 部署已上传的文件（切换版本、启动、等待就绪）；增量拼装或校验不过时全量上传重试一次。
-func (e *Engine) switchTarget(p *targetPlan, u uploaded, id string, git gitinfo.Info, tmp string, o DeployOptions) (*DeployReport, error) {
+func (e *Engine) switchTarget(p *targetPlan, u uploaded, id string, git DeployGit, tmp string, o DeployOptions) (*DeployReport, error) {
 	started := u.started
 	t, s, items := p.t, p.s, p.items
-	rep := &DeployReport{Target: t.Name, Release: id, Git: git}
+	rep := &DeployReport{Target: t.Name, Release: id, AppGit: DeployGit{}}
+	for _, it := range items {
+		rep.AppGit[it.app.Name] = git[it.app.Name]
+	}
+	rep.Git, _ = rep.AppGit.Common()
 	delta := u.delta
 	for attempt := 0; ; attempt++ {
 		req, up, total, err := u.req, u.up, u.total, error(nil)
@@ -908,7 +916,7 @@ func (e *Engine) runBuilds(t *config.Target, apps []*config.App, items []*item, 
 }
 
 // upload 准备上传目录并上传；delta 时 Java 应用只传服务器没有的依赖和其余字节。
-func (e *Engine) upload(s *session, items []*item, id string, git gitinfo.Info, tmp string, delta bool) (*proto.Request, int64, int64, error) {
+func (e *Engine) upload(s *session, items []*item, id string, gits DeployGit, tmp string, delta bool) (*proto.Request, int64, int64, error) {
 	specs := make([]proto.AppSpec, len(items))
 	hasJava, hasStatic := false, false
 	for i, it := range items {
@@ -939,6 +947,7 @@ func (e *Engine) upload(s *session, items []*item, id string, git gitinfo.Info, 
 	var upBytes, total int64
 	req := &proto.Request{Apps: specs, Stage: prep.Stage}
 	for _, it := range items {
+		git := gits[it.app.Name] // 这个应用自己的代码的提交；不在 git 仓库里的为空
 		rel := proto.ReleaseSpec{App: it.app.Name, ID: id, SHA256: it.sha, Size: it.size, Archive: it.app.Type == proto.TypeStatic || proto.DirService(it.app.Type),
 			Meta: proto.ReleaseMeta{Commit: git.Commit, Branch: git.Branch, Dirty: git.Dirty, DeployedBy: e.actor(), Source: it.local}}
 		if it.notBefore.IsZero() {
@@ -1236,7 +1245,7 @@ func (e *Engine) localHistory(r *DeployReport) {
 	for _, a := range r.Apps {
 		b, _ := json.Marshal(map[string]any{
 			"time": time.Now().Format(time.RFC3339), "target": r.Target, "app": a.App, "release": r.Release,
-			"result": a.Result, "commit": r.Git.Commit, "dirty": r.Git.Dirty, "actor": e.actor(), "msg": a.Msg,
+			"result": a.Result, "commit": r.AppGit[a.App].Commit, "dirty": r.AppGit[a.App].Dirty, "actor": e.actor(), "msg": a.Msg,
 		})
 		fh.Write(append(b, '\n'))
 	}

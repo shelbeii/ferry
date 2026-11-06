@@ -137,23 +137,83 @@ function display(v: DbCell | undefined): string {
   return v.cut.slice(0, 300) + '…'
 }
 
+// 选行：单击选一行，按住拖动选连续的多行（拖到上下边外会自动滚动），Shift 点击选到这一行，Ctrl 点击加选 / 取消，Ctrl 拖动加选一段
+let anchor = -1 // Shift 选一段时的起点
+let drag: { base: Set<number>; col: number; y: number; last: number; timer: number } | null = null
+function rangeRows(a: number, b: number, base?: Set<number>) {
+  const s = new Set(base)
+  for (let i = Math.min(a, b); i <= Math.max(a, b); i++) s.add(i)
+  return s
+}
+/** 鼠标所在的行（按行高算，没画出来的行也能算），超出时取第一行 / 最后一行 */
+function rowAt(clientY: number) {
+  const el = wrap.value!
+  const i = Math.floor((clientY - el.getBoundingClientRect().top + el.scrollTop - HEAD) / ROW)
+  return Math.max(0, Math.min(baseRows.value - 1, i))
+}
 function pick(row: number, col: number, added: boolean, e: MouseEvent) {
+  if (e.button !== 0 || (e.target as HTMLElement).closest('textarea')) return
+  e.preventDefault() // 拖动时不选中文字
+  wrap.value?.focus({ preventScroll: true }) // 也让正在改的格子失去焦点、保存
   sel.value = { row, col, added }
   if (added) return
-  if (e.ctrlKey || e.metaKey) {
+  let base = new Set<number>()
+  if (e.shiftKey && anchor >= 0 && anchor < baseRows.value) {
+    selRows.value = rangeRows(anchor, row)
+  } else if (e.ctrlKey || e.metaKey) {
     const s = new Set(selRows.value)
     if (s.has(row)) s.delete(row)
     else s.add(row)
+    base = new Set(s)
+    base.delete(row)
     selRows.value = s
-  } else if (e.shiftKey && selRows.value.size) {
-    const last = [...selRows.value].pop()!
-    const s = new Set<number>()
-    for (let i = Math.min(last, row); i <= Math.max(last, row); i++) s.add(i)
-    selRows.value = s
+    anchor = row
   } else {
     selRows.value = new Set([row])
+    anchor = row
   }
+  endDrag()
+  drag = { base, col, y: e.clientY, last: row, timer: 0 }
+  window.addEventListener('mousemove', dragMove)
+  window.addEventListener('mouseup', endDrag)
 }
+function dragTo(clientY: number) {
+  const d = drag
+  if (!d) return
+  const row = rowAt(clientY)
+  if (row === d.last) return
+  d.last = row
+  selRows.value = rangeRows(anchor, row, d.base)
+  sel.value = { row, col: d.col, added: false }
+}
+function dragMove(e: MouseEvent) {
+  if (!drag) return
+  drag.y = e.clientY
+  dragTo(e.clientY)
+  if (!drag.timer) drag.timer = requestAnimationFrame(autoScroll)
+}
+// 拖到表格上边（表头）或下边外面：一直滚动，离得越远滚得越快
+function autoScroll() {
+  const d = drag
+  const el = wrap.value
+  if (!d || !el) return
+  d.timer = 0
+  const r = el.getBoundingClientRect()
+  const over = d.y < r.top + HEAD ? d.y - (r.top + HEAD) : d.y > r.bottom ? d.y - r.bottom : 0
+  if (!over) return
+  el.scrollTop += Math.sign(over) * Math.min(40, 4 + Math.abs(over) / 3)
+  dragTo(d.y)
+  d.timer = requestAnimationFrame(autoScroll)
+}
+function endDrag() {
+  if (drag?.timer) cancelAnimationFrame(drag.timer)
+  drag = null
+  window.removeEventListener('mousemove', dragMove)
+  window.removeEventListener('mouseup', endDrag)
+}
+onBeforeUnmount(endDrag)
+// 换了一批数据：之前选的行号不再对应原来的行
+watch(() => props.rows, () => { anchor = -1; endDrag() })
 
 async function startEdit(row: number, col: number, added: boolean) {
   if (!canEdit(col, added, row)) {
@@ -284,7 +344,17 @@ function onKey(e: KeyboardEvent) {
     if (e.key === 'ArrowRight') col = Math.min(props.columns.length - 1, col + 1)
     sel.value = { row, col, added: s.added }
     reveal(row, s.added)
-    if (!s.added) selRows.value = new Set([row])
+    if (s.added) return
+    if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      if (anchor < 0 || anchor >= baseRows.value) anchor = s.row
+      selRows.value = rangeRows(anchor, row)
+    } else {
+      selRows.value = new Set([row])
+      anchor = row
+    }
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !s.added && baseRows.value) {
+    e.preventDefault()
+    selRows.value = rangeRows(0, baseRows.value - 1)
   }
 }
 
@@ -326,12 +396,12 @@ defineExpose({ selectedRows: () => [...selRows.value], clearSelection: () => { s
       <tbody>
         <tr v-if="padTop" class="pad" :style="{ height: padTop + 'px' }"><td :colspan="columns.length + 1" /></tr>
         <tr v-for="v in visible" :key="(v.added ? 'a' : 'r') + v.row" :class="v.added ? 'added' : { deleted: deleted?.has(v.row), picked: selRows.has(v.row) }">
-          <td class="num">{{ v.added ? '＋' : (offset ?? 0) + v.row + 1 }}</td>
+          <td class="num" @mousedown="pick(v.row, sel?.col ?? 0, v.added, $event)">{{ v.added ? '＋' : (offset ?? 0) + v.row + 1 }}</td>
           <td
             v-for="(_, ci) in columns"
             :key="ci"
             :class="cellClass(v.row, ci, v.added)"
-            @click="pick(v.row, ci, v.added, $event)"
+            @mousedown="pick(v.row, ci, v.added, $event)"
             @dblclick="startEdit(v.row, ci, v.added)"
             @contextmenu="openMenu($event, v.row, ci, v.added)"
           >
@@ -459,6 +529,10 @@ th.num {
 }
 td {
   cursor: default;
+}
+td.num {
+  cursor: pointer;
+  user-select: none;
 }
 td.null,
 td.dflt {

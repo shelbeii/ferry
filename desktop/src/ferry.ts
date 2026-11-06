@@ -493,6 +493,15 @@ export interface AppStatus {
   sites?: Site[]
   /** 静态站点没找到 nginx 站点时的原因 */
   serving?: string
+  /** 开机自启（服务；不知道时没有） */
+  autostart?: boolean
+  /** 意外退出后的重启方式：on-failure / always / no；restartSec 等多久（systemd 的写法，如 5s） */
+  restart?: string
+  restartSec?: string
+  /** 这次启动（部署、启动、重启）后自动重启过几次 */
+  restarts?: number
+  /** 在 Ferry 里手动停止的（开机也不会起来） */
+  stopped?: boolean
 }
 
 export interface AppInfoField { label: string; value: string; path?: boolean }
