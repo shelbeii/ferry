@@ -25,6 +25,7 @@ import { dbRequestFromSoftware, dbRequest, isDbSoftware } from '../db'
 import { webActionLabel } from '../softwareWeb'
 import { softwareLocations, type FileLocation } from '../fileLocations'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useManualRefresh } from '../manualRefresh'
 import { useInteractionScope } from '../interactionScope'
 const FilesDrawer = defineAsyncComponent(() => import('./FilesDrawer.vue'))
 const SoftwareWebDialog = defineAsyncComponent(() => import('./SoftwareWebDialog.vue'))
@@ -328,12 +329,24 @@ function goPort(p: number) {
 
 const softwareQuery = ref('')
 const allItems = computed<Software[]>(() => report.value?.items ?? [])
-const items = computed(() => allItems.value.filter((i) => JSON.stringify(i).toLowerCase().includes(softwareQuery.value.trim().toLowerCase())))
+// 项目页上方概览里点「运行中 / 已停止」：只看这些
+const swFilter = defineModel<'all' | 'up' | 'down'>('filter', { default: 'all' })
+const items = computed(() => allItems.value.filter((i) =>
+  (swFilter.value === 'all' || (i.state === 'running') === (swFilter.value === 'up'))
+  && JSON.stringify(i).toLowerCase().includes(softwareQuery.value.trim().toLowerCase())))
 const running = computed(() => allItems.value.filter((i) => i.state === 'running').length)
 // 项目页上方的概览用：还没读到时为 null
 const counts = computed(() => (report.value ? { total: allItems.value.length, running: running.value } : null))
 
-defineExpose({ load, loading, error, openInstall, counts })
+// 点刷新按钮：读取期间按钮转圈、内容变淡，读完提示（见 manualRefresh.ts）
+const manual = useManualRefresh(() => key.value)
+const refreshing = manual.refreshing
+const refresh = () => manual.run('软件', () => load(), () => !error.value)
+const shownCount = computed(() => items.value.length)
+const emptyText = computed(() => softwareQuery.value.trim() ? '没有匹配的软件，请调整搜索条件'
+  : swFilter.value !== 'all' && allItems.value.length ? `没有${swFilter.value === 'up' ? '运行中' : '已停止'}的软件`
+  : '没有找到认得的软件（数据库、缓存、Nacos、Nginx、Docker 容器等）')
+defineExpose({ load, refresh, refreshing, loading, error, openInstall, counts, shownCount })
 
 const dockerNote = computed(() => {
   const d = report.value?.docker
@@ -381,12 +394,12 @@ function listenTip(l: string): string {
 </script>
 
 <template>
-  <div class="sw">
+  <div class="sw" :class="{ refreshing }">
     <div class="software-toolbar" role="group" aria-label="软件操作">
       <GlassPane v-if="glass.enabled" class="cg-strip" :radius="14" :adaptive="false" aria-hidden="true" />
       <el-input v-model="softwareQuery" class="software-search" placeholder="搜索软件、版本或端口" clearable aria-label="搜索服务器软件" />
       <el-button type="primary" :icon="Plus" @click="openInstall">安装软件</el-button>
-      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load()" />
+      <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的软件" placement="bottom"><el-button :icon="Refresh" :loading="loading || refreshing" circle aria-label="刷新软件" @click="refresh()" /></el-tooltip>
       <el-radio-group v-model="mode" class="view-switch" aria-label="显示方式">
         <el-tooltip :show-after="HOVER_DELAY" content="卡片" placement="bottom"><el-radio-button value="card" aria-label="卡片"><el-icon><Grid /></el-icon></el-radio-button></el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="列表" placement="bottom"><el-radio-button value="list" aria-label="列表"><el-icon><List /></el-icon></el-radio-button></el-tooltip>
@@ -488,10 +501,10 @@ function listenTip(l: string): string {
             <el-tooltip :show-after="HOVER_DELAY" v-if="!row.instance && !controllable(row)" :content="readonlyWhy(row)" placement="top"><span class="muted small">只读</span></el-tooltip>
           </div>
         </article>
-        <el-empty v-if="!items.length" :description="softwareQuery.trim() ? '没有匹配的软件，请调整搜索条件' : '没有找到认得的软件（数据库、缓存、Nacos、Nginx、Docker 容器等）'" :image-size="60" class="cards-empty" />
+        <el-empty v-if="!items.length" :description="emptyText" :image-size="60" class="cards-empty" />
       </div>
       <div v-else class="table-box">
-      <el-table :data="items" empty-text="没有找到认得的软件（数据库、缓存、Nacos、Nginx、Docker 容器等）">
+      <el-table :data="items" :empty-text="emptyText">
         <el-table-column label="软件" min-width="150">
           <template #default="{ row }">
             <span class="name">{{ row.name }}</span>
@@ -665,6 +678,11 @@ function listenTip(l: string): string {
 </template>
 
 <style scoped>
+/* 点刷新时内容变淡（工具栏不变），读完恢复 */
+.sw.refreshing > :not(.software-toolbar) {
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
 :global(.el-dialog.software-info-dialog) {
   min-width: min(460px, calc(100vw - 40px));
   max-width: min(960px, calc(100vw - 40px));

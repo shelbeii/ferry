@@ -16,6 +16,7 @@ import { call, FerryError, type SSHSession } from '../ferry'
 import { secretRequest, trustRequest, trustedTick } from '../state'
 import LoadingBlock from './LoadingBlock.vue'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useManualRefresh } from '../manualRefresh'
 import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{
@@ -168,17 +169,21 @@ watch(key, () => { kicking.value = false })
 
 const kickSelected = () => kick(selected.value)
 
-defineExpose({ load, loading, error, counts, selected, kicking, kickSelected })
+// 点刷新按钮：读取期间按钮转圈、内容变淡，读完提示（见 manualRefresh.ts）
+const manual = useManualRefresh(() => key.value)
+const refreshing = manual.refreshing
+const refresh = () => manual.run('登录用户', () => load(), () => !error.value)
+defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kicking, kickSelected })
 </script>
 
 <template>
-  <div class="sp">
+  <div class="sp" :class="{ refreshing }">
     <div v-if="bar" class="sp-bar">
       <el-input v-model="sessionQuery" class="session-search" placeholder="搜索用户、来源 IP 或命令" clearable aria-label="搜索登录会话" />
       <el-button type="danger" plain :icon="SwitchButton" :disabled="!selected.length" :loading="kicking" @click="kickSelected">
         断开{{ selected.length ? `（${selected.length}）` : '所选' }}
       </el-button>
-      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load()" />
+      <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的登录用户" placement="bottom"><el-button :icon="Refresh" :loading="loading || refreshing" circle aria-label="刷新登录用户" @click="refresh()" /></el-tooltip>
       <span class="spacer" />
       <span v-if="counts" class="muted">{{ counts.total }} 个连接 · {{ counts.users }} 个用户 · {{ counts.ips }} 个来源 IP</span>
     </div>
@@ -274,6 +279,11 @@ defineExpose({ load, loading, error, counts, selected, kicking, kickSelected })
 </template>
 
 <style scoped>
+/* 点刷新时内容变淡（工具栏不变），读完恢复 */
+.sp.refreshing > :not(.sp-bar) {
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
 .sp {
   display: flex;
   flex-direction: column;

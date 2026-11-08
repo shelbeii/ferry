@@ -18,6 +18,7 @@ import LoadingBlock from './LoadingBlock.vue'
 import GlassPane from './glass/GlassPane.vue'
 import { glass } from '../glass/runtime'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useManualRefresh } from '../manualRefresh'
 import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{
@@ -372,16 +373,24 @@ function probeTip(p: PortInfo, r: PortProbe): string {
 
 // ---------------------------------------------------------------- 概览、定位
 
+// 概览的数字和点进去筛选用同一套判断
+const isOpen = (p: PortInfo) => !!p.listen?.length && ['open', 'docker', 'partial'].includes(reach(p))
+const isBlocked = (p: PortInfo) => !!p.listen?.length && (reach(p) === 'blocked' || reach(p) === 'guarded')
+const isRisky = (p: PortInfo) => isOpen(p) && !!props.risky?.[p.port]
+const isDockerOpen = (p: PortInfo) => isOpen(p) && !!p.docker
+const isIdle = (p: PortInfo) => !p.listen?.length && p.firewall === 'open'
+const needsAttention = (p: PortInfo) => isRisky(p) || isDockerOpen(p) || isIdle(p) || !!p.temp
+
 /** 项目页上方的概览用：还没读到时为 null */
 const counts = computed(() => {
   const r = report.value
   if (!r) return null
   const listening = ports.value.filter((p) => p.listen?.length)
-  const open = listening.filter((p) => ['open', 'docker', 'partial'].includes(reach(p)))
-  const blocked = listening.filter((p) => reach(p) === 'blocked' || reach(p) === 'guarded')
-  const risky = open.filter((p) => props.risky?.[p.port]).length
-  const docker = open.filter((p) => p.docker).length
-  const idle = ports.value.filter((p) => !p.listen?.length && p.firewall === 'open').length
+  const open = ports.value.filter(isOpen)
+  const blocked = ports.value.filter(isBlocked)
+  const risky = ports.value.filter(isRisky).length
+  const docker = ports.value.filter(isDockerOpen).length
+  const idle = ports.value.filter(isIdle).length
   const temp = ports.value.filter((p) => p.temp).length
   const why = [
     risky ? `${risky} 个不宜对外的端口开着` : '',
@@ -391,10 +400,28 @@ const counts = computed(() => {
   ]
     .filter(Boolean)
     .join('，')
-  return { fw: r.firewall, listening: listening.length, open: open.length, blocked: blocked.length, attention: risky + docker + idle + temp, why }
+  // 一个端口可能同时占几条（不宜对外又是 Docker 的）：数字按端口算，和点进去看到的行数一样
+  return { fw: r.firewall, listening: listening.length, open: open.length, blocked: blocked.length, attention: ports.value.filter(needsAttention).length, why }
 })
 
-defineExpose({ load, loading, error, counts, test: () => test(ports.value), testing })
+// 项目页上方概览里点「对外开放 / 已拦住 / 需要留意」：只看这些
+const portFilter = defineModel<'all' | 'open' | 'blocked' | 'attention'>('filter', { default: 'all' })
+const shownPorts = computed(() => {
+  const f = portFilter.value
+  if (f === 'open') return matchingPorts.value.filter(isOpen)
+  if (f === 'blocked') return matchingPorts.value.filter(isBlocked)
+  if (f === 'attention') return matchingPorts.value.filter(needsAttention)
+  return matchingPorts.value
+})
+const shownCount = computed(() => shownPorts.value.length)
+const filterName = { all: '', open: '对外开放', blocked: '已拦住', attention: '需要留意' }
+const emptyText = computed(() => portQuery.value.trim() || portFilter.value === 'all' ? '没有匹配的端口' : `没有${filterName[portFilter.value]}的端口`)
+
+// 点刷新按钮：读取期间按钮转圈、内容变淡，读完提示（见 manualRefresh.ts）
+const manual = useManualRefresh(() => key.value)
+const refreshing = manual.refreshing
+const refresh = () => manual.run('端口', () => load(), () => !error.value)
+defineExpose({ load, refresh, refreshing, loading, error, counts, shownCount, test: () => test(ports.value), testing })
 
 const focused = ref<number>()
 const box = ref<HTMLElement>()
@@ -418,7 +445,7 @@ const fwName = computed(() => {
 </script>
 
 <template>
-  <div ref="box" class="pp">
+  <div ref="box" class="pp" :class="{ refreshing }">
     <div class="fw-line" role="group" aria-label="端口操作">
       <GlassPane v-if="glass.enabled" class="cg-strip" :radius="14" :adaptive="false" aria-hidden="true" />
       <el-input v-model="portQuery" class="port-search" placeholder="搜索端口、进程或监听地址" clearable aria-label="搜索服务器端口" />
@@ -429,7 +456,7 @@ const fwName = computed(() => {
         <el-button v-if="fw.enable && !fw.active" type="primary" plain @click="openEnable">打开防火墙</el-button>
         <el-button v-if="fw.disable && fw.active" plain @click="openDisable">关闭防火墙</el-button>
       </template>
-      <el-button :icon="Refresh" :loading="loading" circle aria-label="重新查看" @click="load()" />
+      <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的端口" placement="bottom"><el-button :icon="Refresh" :loading="loading || refreshing" circle aria-label="刷新端口" @click="refresh()" /></el-tooltip>
       <span class="spacer" />
       <template v-if="report && fw">
         <span class="fw-state" :class="fw.active ? 'on' : 'off'"><span class="dot" />{{ fw.active ? '防火墙在运行' : '防火墙没开' }}</span>
@@ -464,7 +491,7 @@ const fwName = computed(() => {
       </div>
 
       <div class="table-box">
-        <el-table :data="matchingPorts" :row-class-name="rowClass" empty-text="没有匹配的端口">
+        <el-table :data="shownPorts" :row-class-name="rowClass" :empty-text="emptyText">
           <el-table-column label="端口" width="110">
             <template #default="{ row }">
               <span class="mono port-num">{{ row.port }}</span><span class="muted proto">/{{ row.proto }}</span>
@@ -630,6 +657,11 @@ const fwName = computed(() => {
 </template>
 
 <style scoped>
+/* 点刷新时内容变淡（工具栏不变），读完恢复 */
+.pp.refreshing > :not(.fw-line) {
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
 .pp {
   display: flex;
   flex-direction: column;

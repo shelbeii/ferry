@@ -11,6 +11,7 @@ import type { RowAction } from '../rowActions'
 import type { DeploymentRequest } from '../editor/appSetup'
 import { appLocation } from '../fileLocations'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useManualRefresh } from '../manualRefresh'
 import { useInteractionScope } from '../interactionScope'
 import PortPanel from './PortPanel.vue'
 import SshPanel from './SshPanel.vue'
@@ -71,12 +72,24 @@ function measureFloat() {
   const body = bodyEl.value
   const list = body?.querySelector<HTMLElement>(':scope > .list')
   const tabs = body?.querySelector<HTMLElement>(':scope > .workspace-tabs > .workspace-switch')
-  if (!body || !list || !tabs || !glass.enabled) { body?.style.removeProperty('--float-h'); body?.style.removeProperty('--float-cut'); return }
+  if (!body || !list || !tabs || !glass.enabled) { body?.style.removeProperty('--float-h'); body?.style.removeProperty('--float-cut'); measureBar(); return }
   // 列表已经往上挪了 --float-h：它原来的位置 = 现在的上沿 + 挪掉的距离（不用先清零再量，少一次布局、少写一次变量）
   const moved = parseFloat(body.style.getPropertyValue('--float-h')) || 0
   const height = Math.max(0, Math.round(list.getBoundingClientRect().top + moved - tabs.getBoundingClientRect().top))
   setVar(body, '--float-h', `${height}px`)
   measureCut()
+  measureBar()
+}
+// 列表的滚动条从盖在列表上面的工具栏下沿开始，不从功能切换那里开始、也不被工具栏挡住（见 .list::-webkit-scrollbar-track）。
+// 盖在上面的：液态玻璃时页面的工具栏（应用、登录用户、服务器信息）；端口、软件贴在列表顶上的工具栏（开不开液态玻璃都是）。
+// 工具栏在列表上方、没盖住时是 0
+function measureBar() {
+  const body = bodyEl.value
+  const list = body?.querySelector<HTMLElement>(':scope > .list')
+  if (!body || !list) return
+  const bar = body.querySelector<HTMLElement>(':scope > .toolbar') ?? list.querySelector<HTMLElement>('.fw-line, .software-toolbar')
+  const end = bar ? Math.round(bar.getBoundingClientRect().bottom - list.getBoundingClientRect().top) : 0
+  setVar(body, '--bar-end', `${Math.max(0, end)}px`)
 }
 // 列表内容滚过工具栏上沿就不再显示：从列表上沿（= 功能切换上沿）到工具栏上沿这段遮掉。
 // 应用、登录用户、服务器信息是页面的工具栏；端口、软件是面板自己贴在顶上的工具栏（停在 --float-h 往上 3px 处）。
@@ -99,9 +112,10 @@ function onListScroll() {
 function observeFloat() {
   floatResize?.disconnect()
   const body = bodyEl.value
-  if (!body || !glass.enabled) { measureFloat(); return }
+  if (!body) return
+  // 不开液态玻璃时也要量：滚动条从端口、软件的工具栏下面开始
   floatResize = new ResizeObserver(measureFloat)
-  for (const element of body.querySelectorAll(':scope > .workspace-tabs, :scope > .toolbar')) floatResize.observe(element)
+  for (const element of body.querySelectorAll(':scope > .workspace-tabs, :scope > .toolbar, :scope > .list .fw-line, :scope > .list .software-toolbar')) floatResize.observe(element)
   measureFloat()
 }
 
@@ -345,6 +359,7 @@ const serverPanel = ref<InstanceType<typeof ServerInfoPanel>>()
 const portFocus = ref<number>()
 function goPort(addr: string | number) {
   portFocus.value = undefined // 再点同一个端口也要定位
+  portFilter.value = 'all' // 筛掉了就定位不到
   view.value = 'ports'
   nextTick(() => (portFocus.value = typeof addr === 'number' ? addr : Number(portOf(addr))))
 }
@@ -488,6 +503,30 @@ async function refresh() {
   }
 }
 
+// 应用页工具栏上的刷新：只重新读这台服务器上各应用的状态（不重读配置）。
+// 和其他四页一样：读取期间按钮转圈、概览和应用列表变淡，读完提示
+const appsManual = useManualRefresh(() => `${props.project.path}|${activeTarget.value}`)
+const appsRefreshing = appsManual.refreshing
+function refreshApps() {
+  const t = activeTarget.value
+  if (!t || refreshing.value) return
+  return appsManual.run('应用状态', async () => {
+    statusReads.cancel(t) // 正在后台自动读取的那次可能不重连，换成这次
+    await loadStatus(false, t)
+  }, () => active && activeTarget.value === t && !statusError.value[t])
+}
+// 当前这一页正在点刷新：上面的四格概览跟着变淡
+const tabRefreshing = computed(() => {
+  switch (view.value) {
+    case 'apps': return appsRefreshing.value
+    case 'software': return !!swPanel.value?.refreshing
+    case 'ports': return !!portPanel.value?.refreshing
+    case 'ssh': return !!sshPanel.value?.refreshing
+    case 'server': return !!serverPanel.value?.refreshing
+  }
+  return false
+})
+
 // 到各目标的常驻连接（桌面版在操作之间复用连接，空闲后自动断开）
 const conns = ref<Record<string, ConnStatus>>({})
 const conn = computed(() => conns.value[activeTarget.value])
@@ -626,7 +665,7 @@ watch(activeTarget, (t, previous) => {
   filesOpen.value = false
   filesPath.value = ''
   selection.value = []
-  filter.value = 'all'
+  filter.value = swFilter.value = portFilter.value = 'all'
   if (t && !statuses.value[t]) loadStatus()
 })
 
@@ -700,7 +739,27 @@ const stats = computed(() => {
 
 // 「软件 / 端口 / 登录用户」上方的四格概览：第一次打开、还没读到时格子照样显示，
 // 正在查看时数字处是占位，读不到时是「—」。bare：只有标题的格子
-type StatCard = { label: string; num?: string | number; small?: string; cls?: string; sub?: string; title?: string; bare?: boolean }
+// filter：点这一格只看这些（软件、端口），再点一次恢复全部
+type StatCard = { label: string; num?: string | number; small?: string; cls?: string; sub?: string; title?: string; bare?: boolean; filter?: string }
+const swFilter = ref<'all' | 'up' | 'down'>('all')
+const portFilter = ref<'all' | 'open' | 'blocked' | 'attention'>('all')
+const panelFilter = computed<string>(() => view.value === 'software' ? swFilter.value : view.value === 'ports' ? portFilter.value : 'all')
+function setPanelFilter(f: string) {
+  if (view.value === 'software') swFilter.value = swFilter.value === f ? 'all' : f as typeof swFilter.value
+  else if (view.value === 'ports') portFilter.value = portFilter.value === f ? 'all' : f as typeof portFilter.value
+}
+// 功能切换旁边的「只看……（几个）」：点叉恢复全部
+const filterTag = computed(() => {
+  if (view.value === 'apps' && filter.value !== 'all') return { text: `只看${filterLabel[filter.value]}（${visibleRows.value.length}）`, clear: () => (filter.value = 'all') }
+  if (view.value === 'software' && swFilter.value !== 'all') {
+    return { text: `只看${swFilter.value === 'up' ? '运行中' : '已停止'}（${swPanel.value?.shownCount ?? 0}）`, clear: () => (swFilter.value = 'all') }
+  }
+  if (view.value === 'ports' && portFilter.value !== 'all') {
+    const name = { open: '对外开放', blocked: '已拦住', attention: '需要留意' }[portFilter.value]
+    return { text: `只看${name}（${portPanel.value?.shownCount ?? 0}）`, clear: () => (portFilter.value = 'all') }
+  }
+  return null
+})
 const panelStats = computed<{ ready: boolean; busy: boolean; cards: StatCard[] } | null>(() => {
   if (view.value === 'apps') return null
   const panel = view.value === 'software' ? swPanel.value : view.value === 'ports' ? portPanel.value : view.value === 'server' ? serverPanel.value : sshPanel.value
@@ -713,8 +772,8 @@ const panelStats = computed<{ ready: boolean; busy: boolean; cards: StatCard[] }
   if (view.value === 'software') {
     const c = swPanel.value?.counts
     cards = [
-      { label: '运行中', num: c?.running, small: ` / ${c?.total}`, cls: 'ok', sub: `共 ${c?.total} 个软件` },
-      { label: '已停止', num: c ? c.total - c.running : undefined, cls: 'off', sub: c && c.total > c.running ? '可以在下面启动' : '全部在运行' },
+      { label: '运行中', num: c?.running, small: ` / ${c?.total}`, cls: 'ok', sub: `共 ${c?.total} 个软件`, filter: 'up' },
+      { label: '已停止', num: c ? c.total - c.running : undefined, cls: 'off', sub: c && c.total > c.running ? '可以在下面启动' : '全部在运行', filter: 'down' },
     ]
     return { ready: !!c, busy, cards }
   }
@@ -727,9 +786,9 @@ const panelStats = computed<{ ready: boolean; busy: boolean; cards: StatCard[] }
         cls: c?.fw.active ? 'ok' : 'warn',
         sub: `${c?.fw.kind || '没有找到防火墙'}${c?.fw.active && !c.fw.manage ? ' · 只能查看' : ''}`,
       },
-      { label: '对外开放', num: c?.open, cls: c?.open ? 'warn' : 'off', sub: `共 ${c?.listening} 个端口在监听` },
-      { label: '已拦住', num: c?.blocked, cls: 'off', sub: '只有服务器本机能连' },
-      { label: '需要留意', num: c?.attention, cls: c?.attention ? 'warn' : 'off', sub: c?.why || '没有要处理的', title: c?.why },
+      { label: '对外开放', num: c?.open, cls: c?.open ? 'warn' : 'off', sub: `共 ${c?.listening} 个端口在监听`, filter: 'open' },
+      { label: '已拦住', num: c?.blocked, cls: 'off', sub: '只有服务器本机能连', filter: 'blocked' },
+      { label: '需要留意', num: c?.attention, cls: c?.attention ? 'warn' : 'off', sub: c?.why || '没有要处理的', title: c?.why, filter: 'attention' },
     ]
     return { ready: !!c, busy, cards }
   }
@@ -1025,7 +1084,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       <el-tooltip :show-after="HOVER_DELAY" content="编辑配置（ferry.yaml）" placement="bottom" :disabled="!compact">
         <GlassButton :icon="EditPen" aria-label="编辑配置" @click="openEditor()">编辑配置</GlassButton>
       </el-tooltip>
-      <el-tooltip :show-after="HOVER_DELAY" content="重新读取配置和状态" placement="bottom">
+      <el-tooltip :show-after="HOVER_DELAY" content="刷新整页：重新读配置、连接、应用状态和当前这一页（只刷新某一页用那一页工具栏上的刷新）" placement="bottom">
         <GlassButton :icon="Refresh" :loading="loadingStatus || refreshing" aria-label="刷新" @click="refresh" />
       </el-tooltip>
     </div>
@@ -1116,7 +1175,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       </el-alert>
 
       <!-- 概览和下面的列表：点「刷新」时盖一层「正在刷新」 -->
-      <div ref="bodyEl" v-loading="refreshing" element-loading-text="正在刷新…" class="body" :class="{ 'float-glass': glass.enabled }">
+      <div ref="bodyEl" v-loading="refreshing" element-loading-text="正在刷新…" class="body" :class="{ 'float-glass': glass.enabled, 'tab-refreshing': tabRefreshing && !refreshing, 'apps-refreshing': view === 'apps' && appsRefreshing && !refreshing }">
       <!-- 概览：点一下只看这些应用，再点一次恢复全部 -->
       <div v-if="view === 'apps' && statuses[activeTarget] !== undefined" class="stats">
         <button class="stat" :class="{ on: filter === 'up' }" :aria-pressed="filter === 'up'" @click="setFilter('up')">
@@ -1163,8 +1222,17 @@ async function onSaved(deployment?: DeploymentRequest) {
 
       <!-- 「软件 / 端口 / 登录用户」的四格：还没读到时照样显示，数字处是占位 -->
       <div v-else-if="panelStats" class="stats" :style="{ gridTemplateColumns: `repeat(${panelStats.cards.length}, minmax(0, 1fr))` }">
-        <div v-for="c in panelStats.cards" :key="c.label" class="stat static">
-          <span class="stat-label">{{ c.label }}</span>
+        <component
+          :is="c.filter && panelStats.ready ? 'button' : 'div'"
+          v-for="c in panelStats.cards"
+          :key="c.label"
+          class="stat"
+          :class="{ static: !(c.filter && panelStats.ready), on: !!c.filter && panelFilter === c.filter }"
+          :aria-pressed="c.filter && panelStats.ready ? panelFilter === c.filter : undefined"
+          @click="c.filter && panelStats.ready && setPanelFilter(c.filter)"
+        >
+          <span v-if="c.filter && panelStats.ready" class="stat-label stat-head">{{ c.label }}<span class="stat-hint">点击筛选查看</span></span>
+          <span v-else class="stat-label">{{ c.label }}</span>
           <template v-if="c.bare" />
           <template v-else-if="panelStats.ready">
             <span class="stat-num" :class="c.cls">{{ c.num }}<small v-if="c.small">{{ c.small }}</small></span>
@@ -1179,17 +1247,19 @@ async function onSaved(deployment?: DeploymentRequest) {
             <span class="stat-num off">—</span>
             <span class="stat-sub">&nbsp;</span>
           </template>
-        </div>
+        </component>
       </div>
 
       <nav class="workspace-tabs" aria-label="服务器功能">
         <GlassTabs v-model="view" :options="workspaceTabs" class="workspace-switch" label="切换服务器功能" />
-        <el-tag v-if="view === 'apps' && filter !== 'all'" closable class="filter-tag" @close="filter = 'all'">只看{{ filterLabel[filter] }}（{{ visibleRows.length }}）</el-tag>
+        <el-tag v-if="filterTag" closable class="filter-tag" @close="filterTag.clear()">{{ filterTag.text }}</el-tag>
       </nav>
       <div v-if="view !== 'software' && view !== 'ports'" class="toolbar">
         <GlassPane v-if="glass.enabled" class="cg-strip" :radius="14" :adaptive="false" aria-hidden="true" />
         <template v-if="view === 'server'">
-          <el-button :icon="Refresh" :loading="serverPanel?.loading" circle aria-label="刷新服务器信息" @click="serverPanel?.load()" />
+          <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的服务器信息" placement="bottom">
+            <el-button :icon="Refresh" :loading="serverPanel?.loading || serverPanel?.refreshing" circle aria-label="刷新服务器信息" @click="serverPanel?.refresh()" />
+          </el-tooltip>
           <span class="spacer" />
           <span class="muted small">{{ serverPanel?.readTime ? `上次采样 ${serverPanel.readTime} · ` : '' }}{{ serverPanel?.autoTip }}</span>
         </template>
@@ -1205,7 +1275,9 @@ async function onSaved(deployment?: DeploymentRequest) {
           >
             断开{{ sshPanel?.selected.length ? `（${sshPanel.selected.length}）` : '所选' }}
           </el-button>
-          <el-button :icon="Refresh" :loading="sshPanel?.loading" circle aria-label="重新查看" @click="sshPanel?.load()" />
+          <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的登录用户" placement="bottom">
+            <el-button :icon="Refresh" :loading="sshPanel?.loading || sshPanel?.refreshing" circle aria-label="刷新登录用户" @click="sshPanel?.refresh()" />
+          </el-tooltip>
         </template>
         <template v-else>
           <el-input v-model="appQuery" class="app-search" placeholder="搜索应用或端口" clearable aria-label="搜索应用或端口" />
@@ -1218,6 +1290,9 @@ async function onSaved(deployment?: DeploymentRequest) {
             <el-button :icon="VideoPause" :disabled="!selectedNames.length" aria-label="停止所选应用" title="停止所选应用" @click="control('stop')"><span class="action-label">停止</span></el-button>
           </el-button-group>
           <el-button class="history-btn" :icon="Clock" aria-label="部署历史" title="部署历史" @click="historyOpen = true"><span class="action-label">部署历史</span></el-button>
+          <el-tooltip :show-after="HOVER_DELAY" content="只重新读这台服务器上各应用的状态" placement="bottom">
+            <el-button :icon="Refresh" :loading="loadingStatus || appsRefreshing" circle aria-label="刷新应用状态" @click="refreshApps" />
+          </el-tooltip>
           <el-checkbox
             v-if="visibleRows.length"
             :model-value="allShownSelected"
@@ -1253,6 +1328,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       <SoftwarePanel
         v-else-if="view === 'software' && activeTarget"
         ref="swPanel"
+        v-model:filter="swFilter"
         :config="project.path"
         :target="activeTarget"
         :host="target?.host ?? ''"
@@ -1274,6 +1350,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       <PortPanel
         v-else-if="view === 'ports' && activeTarget"
         ref="portPanel"
+        v-model:filter="portFilter"
         :config="project.path"
         :target="activeTarget"
         :connected="!!conn?.connected"
@@ -1608,6 +1685,31 @@ async function onSaved(deployment?: DeploymentRequest) {
   margin: -3px;
   padding: 3px;
 }
+/* 列表的滚动条：和全局的细滚动条一个样子，但轨道从盖在列表上面的工具栏下沿开始（--bar-end 由 measureBar 量出）。
+   标准的 scrollbar-width / scrollbar-color 没法让轨道往下挪，这里换成 ::-webkit-scrollbar（设了前两个属性它就不起作用，所以先恢复成 auto） */
+.body > .list {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.body > .list::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.body > .list::-webkit-scrollbar-track {
+  background: transparent;
+  margin-top: var(--bar-end, 0px);
+}
+.body > .list::-webkit-scrollbar-thumb {
+  background: var(--el-border-color) padding-box;
+  border: 2px solid transparent;
+  border-radius: 5px;
+}
+.body > .list::-webkit-scrollbar-thumb:hover {
+  background-color: var(--el-border-color-darker);
+}
+.body > .list::-webkit-scrollbar-corner {
+  background: transparent;
+}
 /* 列表里的东西放不下时由列表滚动，不能被压扁（表格外框裁剪了溢出，会被压到列表那么高、下面的行看不到也滚不动） */
 .list > * {
   flex-shrink: 0;
@@ -1658,6 +1760,12 @@ async function onSaved(deployment?: DeploymentRequest) {
   border-radius: 14px;
   /* 实色底去掉：底下垫的是和应用页工具栏一样的玻璃条（面板里的 GlassPane .cg-strip，样式见 GlassPane.vue） */
   background: transparent;
+}
+/* 各页工具栏上的刷新：上面的四格概览和应用列表变淡（软件、端口等面板自己把内容变淡），读完恢复 */
+.body.tab-refreshing > .stats,
+.body.apps-refreshing > .list > * {
+  opacity: 0.4;
+  transition: opacity 0.2s;
 }
 /* 「正在刷新」那层盖在内容上 */
 .body {

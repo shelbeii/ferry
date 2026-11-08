@@ -241,7 +241,8 @@ watch(model, (value) => go(value))
   transition: color .2s;
 }
 .cg-tab > .el-icon { font-size: 16px; }
-.cg-tab[aria-checked="true"] { color: var(--el-color-primary); font-weight: 600; }
+/* 选中只换颜色、不加粗（和苹果的液态玻璃一样；加粗还会让文字变宽、标签跟着挪动） */
+.cg-tab[aria-checked="true"] { color: var(--el-color-primary); }
 .cg-tab:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
 .cg-tabs-pill, .cg.cg-tabs-drop { position: absolute; left: 0; top: 5px; height: 40px; border-radius: 20px; pointer-events: none; }
 .cg-tabs-pill { background: rgb(118 118 128 / .16); }

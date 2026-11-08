@@ -14,6 +14,7 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, 
 import { Key, Refresh } from '@element-plus/icons-vue'
 import { FerryError } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { useManualRefresh } from '../manualRefresh'
 import { appSettings, secretRequest, trustRequest, trustedTick } from '../state'
 import { capacity, percentText, serverInfoCards, uptimeText, usageClass, usagePercent, visibleMounts } from '../serverinfo'
 import LoadingBlock from './LoadingBlock.vue'
@@ -82,13 +83,17 @@ onBeforeUnmount(() => {
   clearInterval(timer)
   reads.cancelAll()
 })
-defineExpose({ load, loading, error, report, cards, readTime, autoTip })
+// 点刷新按钮：读取期间按钮转圈、内容变淡，读完提示（见 manualRefresh.ts）
+const manual = useManualRefresh(() => key.value)
+const refreshing = manual.refreshing
+const refresh = () => manual.run('服务器信息', () => load(), () => !error.value)
+defineExpose({ load, refresh, refreshing, loading, error, report, cards, readTime, autoTip })
 </script>
 
 <template>
-  <div class="server-info">
+  <div class="server-info" :class="{ refreshing }">
     <div v-if="bar" class="panel-bar">
-      <el-button :icon="Refresh" :loading="loading" circle aria-label="刷新服务器信息" @click="load()" />
+      <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的服务器信息" placement="bottom"><el-button :icon="Refresh" :loading="loading || refreshing" circle aria-label="刷新服务器信息" @click="refresh()" /></el-tooltip>
       <span class="muted small">{{ readTime ? `上次采样 ${readTime} · ` : '' }}{{ autoTip }}</span>
     </div>
     <el-alert v-if="error" type="error" :closable="false" show-icon>
@@ -193,6 +198,11 @@ defineExpose({ load, loading, error, report, cards, readTime, autoTip })
 </template>
 
 <style scoped>
+/* 点刷新时内容变淡（工具栏不变），读完恢复 */
+.server-info.refreshing > :not(.panel-bar) {
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
 .server-info { container-type: inline-size; display: flex; flex-direction: column; gap: 16px; padding-bottom: 16px; }
 .resource-charts, .memory-grid, .overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .system-details summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
