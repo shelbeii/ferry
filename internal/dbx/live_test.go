@@ -279,6 +279,30 @@ func live(t *testing.T, name, addr string) {
 	if !found {
 		t.Fatalf("表列表里没有 member：%+v", ts)
 	}
+	// 「对象」列表：多读的那些
+	dt, err := cl.TablesDetail(ctx, dbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range dt {
+		if x.Name != "member" || x.Schema != schema {
+			continue
+		}
+		if x.DataLen == nil || x.IndexLen == nil {
+			t.Fatalf("没有读到数据、索引大小：%+v", x)
+		}
+		if kind == MySQL && (x.AutoInc == nil || x.Created == "" || x.Collation == "") {
+			t.Fatalf("MySQL 没有读到自增值、建表时间、排序规则：%+v", x)
+		}
+		if kind == Postgres && x.Owner == "" {
+			t.Fatalf("PostgreSQL 没有读到所有者：%+v", x)
+		}
+	}
+	for _, x := range ts {
+		if x.AutoInc != nil || x.Created != "" || x.Owner != "" {
+			t.Fatalf("普通表列表（AI 看的）不该带对象列表的字段：%+v", x)
+		}
+	}
 	// 导出结构和数据，删掉表后再导回去
 	if kind == MySQL {
 		exec("CREATE VIEW " + TableName(kind, dbName, schema, "member_v") + " AS SELECT id, nick FROM " + TableName(kind, dbName, schema, "member"))

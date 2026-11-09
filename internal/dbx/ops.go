@@ -81,6 +81,25 @@ func OpSQL(kind, db, schema, op string, args []string) ([]string, error) {
 			return nil, err
 		}
 		return []string{"TRUNCATE TABLE " + TableName(kind, db, schema, args[0])}, nil
+	case "drop-function", "drop-procedure": // <名称> [参数（PostgreSQL 区分重载）]
+		if err := need(1); err != nil {
+			return nil, err
+		}
+		word := "FUNCTION"
+		if op == "drop-procedure" {
+			word = "PROCEDURE"
+		}
+		if kind == MySQL {
+			return []string{"DROP " + word + " " + TableName(kind, db, "", args[0])}, nil
+		}
+		params := ""
+		if len(args) > 1 {
+			params = args[1]
+		}
+		if strings.ContainsAny(params, ";") {
+			return nil, errors.New("参数不合法")
+		}
+		return []string{"DROP " + word + " " + TableName(kind, db, schema, args[0]) + "(" + params + ")"}, nil
 	}
 	return nil, fmt.Errorf("不认识的操作 %q", op)
 }

@@ -38,7 +38,71 @@ export interface DbConn {
 }
 
 export interface DbDatabase { name: string; system?: boolean; /** Redis：键的个数 */ keys?: number }
-export interface DbTable { schema?: string; name: string; type: 'table' | 'view'; rows?: number; size?: number; comment?: string; engine?: string }
+export interface DbTable {
+  schema?: string
+  name: string
+  type: 'table' | 'view'
+  rows?: number
+  size?: number
+  comment?: string
+  engine?: string
+  // 下面这些只有「对象」列表（tables 带 detail）才有
+  autoInc?: number
+  dataLen?: number
+  indexLen?: number
+  created?: string
+  updated?: string
+  collation?: string
+  owner?: string
+}
+/** 函数或存储过程 */
+export interface DbRoutine {
+  schema?: string
+  name: string
+  type: 'function' | 'procedure'
+  /** 参数：MySQL「IN a INT, OUT b VARCHAR(10)」；PostgreSQL 是区分重载用的参数表 */
+  args?: string
+  returns?: string
+  language?: string
+  created?: string
+  updated?: string
+  comment?: string
+  oid?: number
+}
+/** 这台电脑上保存的查询或备份文件 */
+export interface DbFileItem { name: string; path: string; size: number; modified: string; preview?: string }
+
+/** 「对象」列表显示什么：all = 库（模式）里的表和视图 */
+export type DbObjWhat = 'all' | 'table' | 'view' | 'func' | 'query' | 'backup'
+/** 「对象」列表里的一行 */
+export interface DbObjItem {
+  kind: 'table' | 'view' | 'func' | 'query' | 'backup'
+  key: string
+  name: string
+  t?: DbTable
+  r?: DbRoutine
+  f?: DbFileItem
+}
+
+/** 运行函数、存储过程的语句（在查询窗口里打开，参数让用户填） */
+export function routineCallSql(kind: string, r: DbRoutine): string {
+  const q = (s: string) => (kind === 'mysql' ? '`' + s.replace(/`/g, '``') + '`' : '"' + s.replace(/"/g, '""') + '"')
+  const name = kind === 'postgres' && r.schema && r.schema !== 'public' ? `${q(r.schema)}.${q(r.name)}` : q(r.name)
+  const hint = r.args ? `/* ${r.args.replace(/\*\//g, '* /')} */` : ''
+  if (r.type === 'procedure') return `CALL ${name}(${hint});\n`
+  const ret = (r.returns ?? '').toUpperCase()
+  if (kind === 'postgres' && (ret.startsWith('SETOF ') || ret.startsWith('TABLE('))) return `SELECT * FROM ${name}(${hint});\n`
+  return `SELECT ${name}(${hint});\n`
+}
+
+/** 从 CREATE FUNCTION / PROCEDURE 语句里取出类型、模式、名称 */
+export function parseRoutineHead(sql: string): { type: 'function' | 'procedure'; schema?: string; name: string } | null {
+  const m = /CREATE\s+(?:OR\s+REPLACE\s+)?(?:DEFINER\s*=\s*\S+\s+)?(FUNCTION|PROCEDURE)\s+((?:[`"][^`"]+[`"]|[\w$]+)(?:\s*\.\s*(?:[`"][^`"]+[`"]|[\w$]+))?)/i.exec(sql)
+  if (!m) return null
+  const parts = m[2].split(/\s*\.\s*/).map((x) => x.replace(/^[`"]|[`"]$/g, ''))
+  return { type: m[1].toLowerCase() as 'function' | 'procedure', schema: parts.length > 1 ? parts[0] : undefined, name: parts[parts.length - 1] }
+}
+
 export interface DbColumnInfo {
   name: string
   type: string
@@ -158,6 +222,14 @@ export interface DbReq {
   sorts?: DbSort[]
   tables?: string[]
   data?: boolean
+  /** tables：多读自增值、修改时间、数据和索引大小（「对象」列表） */
+  detail?: boolean
+  /** 函数、存储过程（routine、routine-save；新建时为空） */
+  routine?: { schema?: string; name: string; type: string; args?: string; oid?: number } | null
+  /** 保存的查询：名称、原来的名称、覆盖同名的；备份的名称 */
+  name?: string
+  old?: string
+  overwrite?: boolean
   offset?: number
   limit?: number
   session?: string
@@ -513,9 +585,10 @@ export async function sqlCheck(conn: DbConn, what: { sql?: string; stmts?: strin
 }
 
 /** 执行改动前给用户看要执行的语句 */
-export const sqlConfirm = ref<{ title: string; conn: DbConn; stmts: string[]; note?: string; okText?: string; resolve: (ok: boolean) => void } | null>(null)
+export const sqlConfirm = ref<{ title: string; conn: DbConn; stmts: string[]; note?: string; okText?: string; whole?: boolean; resolve: (ok: boolean) => void } | null>(null)
 
-export function confirmSql(conn: DbConn, title: string, stmts: string[], opts: { note?: string; okText?: string } = {}): Promise<boolean> {
+/** whole：每条都是完整的一条（建函数、存储过程，里面有分号），不再按分号拆开数、也不标危险 */
+export function confirmSql(conn: DbConn, title: string, stmts: string[], opts: { note?: string; okText?: string; whole?: boolean } = {}): Promise<boolean> {
   return new Promise((resolve) => { sqlConfirm.value = { title, conn, stmts, ...opts, resolve } })
 }
 

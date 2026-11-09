@@ -11,7 +11,7 @@ const count = ref(0) // 按语法拆开后几条（查询窗口把整段当一�
 watch(req, async (r) => {
   dangers.value = []
   count.value = r?.stmts.length ?? 0
-  if (!r) return
+  if (!r || r.whole) return
   try {
     const c = await sqlCheck(r.conn, { stmts: r.stmts })
     if (sqlConfirm.value === r) [dangers.value, count.value] = [c.dangers, c.count || count.value]

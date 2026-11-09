@@ -3,15 +3,22 @@
 // 同一个窗口里的语句用同一条连接（USE、SET、BEGIN … COMMIT 都有效）。
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretRight, VideoPlay, CircleClose, Clock, Download, Delete } from '@element-plus/icons-vue'
+import { CaretRight, VideoPlay, CircleClose, Clock, Download, Delete, DocumentChecked } from '@element-plus/icons-vue'
 import DbGrid from './DbGrid.vue'
 import { createSqlEditor, type SqlEditor } from '../../editor/sqlEditor'
 import { dbCall, dbRun, confirmSql, sqlDangers, closeDbSession, type DbConn, type DbResult, type DbDatabase, type DbTable } from '../../db'
 import { startTask } from '../../state'
 import { pickSaveFile, reveal } from '../../platform'
 
-const props = defineProps<{ conn: DbConn; db: string; sql: string; sid: string }>()
-const emit = defineEmits<{ 'update:sql': [sql: string]; 'update:db': [db: string] }>()
+const props = defineProps<{ conn: DbConn; db: string; sql: string; sid: string; /** 保存过的查询的名称 */ saved?: string; dirty?: boolean }>()
+const emit = defineEmits<{ 'update:sql': [sql: string]; 'update:db': [db: string]; /** 保存（Ctrl+S）：as 为 true 是「另存为」 */ save: [as: boolean] }>()
+
+function onKey(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+    e.preventDefault()
+    emit('save', e.shiftKey)
+  }
+}
 
 const host = ref<HTMLDivElement>()
 let editor: SqlEditor | null = null
@@ -190,7 +197,7 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
 </script>
 
 <template>
-  <div class="q">
+  <div class="q" @keydown.capture="onKey">
     <div class="bar">
       <el-select v-model="dbName" size="small" filterable class="dbsel" :placeholder="conn.kind === 'mysql' ? '选库' : '库'">
         <el-option v-if="dbName && !databases.some((d) => d.name === dbName)" :value="dbName" :label="dbName" />
@@ -202,6 +209,15 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
       <span class="keys">Ctrl+Enter 执行光标所在的一条（或选中的），F9 执行全部</span>
       <span class="grow" />
       <el-tag v-if="conn.readOnly" size="small" type="info">只读</el-tag>
+      <el-dropdown v-if="saved" split-button size="small" trigger="click" @click="emit('save', false)" @command="emit('save', true)">
+        <el-icon class="save-ic"><DocumentChecked /></el-icon>保存{{ dirty ? '' : '（没改）' }}
+        <template #dropdown>
+          <el-dropdown-menu><el-dropdown-item command="as">另存为…</el-dropdown-item></el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <el-tooltip v-else :show-after="HOVER_DELAY" content="存到这台电脑上，左边库下面的「查询」里能找到（Ctrl+S）" placement="bottom">
+        <el-button size="small" :icon="DocumentChecked" @click="emit('save', false)">保存</el-button>
+      </el-tooltip>
       <el-popover placement="bottom-end" :width="560" trigger="click">
         <template #reference>
           <el-button size="small" :icon="Clock">历史</el-button>
@@ -281,6 +297,10 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
 }
 .dbsel {
   width: 180px;
+}
+.save-ic {
+  margin-right: 4px;
+  vertical-align: -2px;
 }
 .keys {
   color: var(--el-text-color-secondary);

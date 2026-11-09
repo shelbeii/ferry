@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/dbx"
@@ -21,6 +23,8 @@ import (
 //	ferry db tables <连接> <库>
 //	ferry db table|rows|count|apply|design|op|exec|query|export|dump <连接> <库>
 //	ferry db redis-keys|redis-get|redis-edit|redis-cmd <连接> <库编号>（Redis）
+//	ferry db routines|routine|routine-save|backup <连接> <库>（函数、存储过程；备份整个库）
+//	ferry db queries|query-load|query-save|query-rename|query-delete|backups|backup-delete <连接> <库>（这台电脑上存的查询、备份）
 //
 // 其余参数（表名、条件、SQL、改动……）放在环境变量 FERRY_DB_REQ 里（JSON），连接本身（save、test）放在 FERRY_DB_CONN 里。
 // 新填的密码在 FERRY_DB_NEW_PASSWORD；已保存的连接没记住的密码在 FERRY_DB_PASSWORD_<连接 ID>。
@@ -33,6 +37,7 @@ type dbReq struct {
 	Sorts   []dbx.Sort   `json:"sorts"`
 	Tables  []string     `json:"tables"` // dump：导出哪些表（空 = 全部）
 	Data    bool         `json:"data"`   // dump：也导出数据
+	Detail  bool         `json:"detail"` // tables：多读自增值、修改时间等（「对象」列表）
 	Offset  int          `json:"offset"`
 	Limit   int          `json:"limit"`
 	Session string       `json:"session"`
@@ -60,6 +65,13 @@ type dbReq struct {
 	// creds：从服务器上读数据库的账号密码（「软件」页连数据库时替用户填好）
 	Via  *dbx.Via            `json:"via"`
 	Cred *engine.DBCredQuery `json:"cred"`
+
+	// 函数、存储过程
+	Routine *dbx.RoutineRef `json:"routine"`
+	// 保存的查询：名称、原来的名称（改名）、覆盖同名的
+	Name      string `json:"name"`
+	Old       string `json:"old"`
+	Overwrite bool   `json:"overwrite"`
 }
 
 func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Settings, fail func(error) int) int {
@@ -284,6 +296,54 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(err)
 		}
 		return out(p)
+	case "queries", "query-load", "query-save", "query-rename", "query-delete", "backups", "backup-delete": // 这台电脑上存的查询、备份（不连数据库）
+		cn, err := connArg()
+		if err != nil {
+			return fail(err)
+		}
+		db := dbArg()
+		switch sub {
+		case "queries":
+			items, err := dbx.ListQueries(cn.ID, db)
+			if err != nil {
+				return fail(err)
+			}
+			return out(map[string]any{"items": items, "dir": dbx.QueriesDir(cn.ID, db)})
+		case "query-load":
+			text, err := dbx.ReadQuery(cn.ID, db, req.Name)
+			if err != nil {
+				return fail(err)
+			}
+			return out(map[string]any{"name": req.Name, "sql": text})
+		case "query-save":
+			name, err := dbx.SaveQuery(cn.ID, db, req.Name, req.Old, req.SQL, req.Overwrite)
+			if err != nil {
+				return fail(err)
+			}
+			return out(map[string]any{"name": name})
+		case "query-rename":
+			name, err := dbx.RenameQuery(cn.ID, db, req.Old, req.Name)
+			if err != nil {
+				return fail(err)
+			}
+			return out(map[string]any{"name": name})
+		case "query-delete":
+			if err := dbx.DeleteQuery(cn.ID, db, req.Name); err != nil {
+				return fail(err)
+			}
+			return out(map[string]any{})
+		case "backups":
+			items, err := dbx.ListBackups(cn.ID, db)
+			if err != nil {
+				return fail(err)
+			}
+			return out(map[string]any{"items": items, "dir": dbx.BackupsDir(cn.ID, db)})
+		default: // backup-delete
+			if err := dbx.DeleteBackup(cn.ID, db, req.Name); err != nil {
+				return fail(err)
+			}
+			return out(map[string]any{})
+		}
 	case "danger": // 执行前看哪些语句危险（查询窗口、确认框用；不连数据库）
 		cn, err := connArg()
 		if err != nil {
@@ -353,7 +413,11 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		if err := needDB(); err != nil {
 			return fail(err)
 		}
-		ts, err := cl.Tables(ctx, db)
+		get := cl.Tables
+		if req.Detail {
+			get = cl.TablesDetail
+		}
+		ts, err := get(ctx, db)
 		if err != nil {
 			return fail(err)
 		}
@@ -578,6 +642,41 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		}
 		rep.Info("导入了 %d 行", r.Rows)
 		return out(r)
+	case "routines":
+		rs, err := cl.Routines(ctx, db)
+		if err != nil {
+			return fail(err)
+		}
+		return out(map[string]any{"routines": rs})
+	case "routine":
+		if req.Routine == nil {
+			return fail(errors.New("没有指定函数"))
+		}
+		def, err := cl.RoutineDef(ctx, db, *req.Routine)
+		if err != nil {
+			return fail(err)
+		}
+		return out(map[string]any{"sql": def})
+	case "routine-save": // routine 为空是新建
+		if err := cl.SaveRoutine(ctx, db, req.Routine, req.SQL); err != nil {
+			return fail(err)
+		}
+		return out(map[string]any{})
+	case "backup": // 备份整个库：导出结构和数据到这台电脑上的备份目录
+		if err := needDB(); err != nil {
+			return fail(err)
+		}
+		p, err := dbx.NewBackupPath(cn.ID, db, time.Now())
+		if err != nil {
+			return fail(err)
+		}
+		rep.Step("备份 %s / %s 到 %s", cn.Name, db, p)
+		r, err := cl.Dump(ctx, db, dbx.DumpOptions{Out: p, Data: true}, func(msg string) { rep.Info("%s", msg) })
+		if err != nil {
+			os.Remove(p) // 没备份完的不留
+			return fail(err)
+		}
+		return out(map[string]any{"path": p, "result": r})
 	case "dump": // 导出结构（Data 为 true 时连数据一起）成 SQL 文件
 		if strings.TrimSpace(req.Out) == "" {
 			return fail(errors.New("没有选保存到哪里"))

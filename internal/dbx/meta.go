@@ -98,23 +98,52 @@ type Table struct {
 	Size    *int64 `json:"size,omitempty"` // 字节
 	Comment string `json:"comment,omitempty"`
 	Engine  string `json:"engine,omitempty"`
+
+	// 下面这些只在「对象」列表里读（TablesDetail），AI 看的表列表里没有
+	AutoInc   *int64 `json:"autoInc,omitempty"`   // MySQL 下一个自增值
+	DataLen   *int64 `json:"dataLen,omitempty"`   // 数据占的字节
+	IndexLen  *int64 `json:"indexLen,omitempty"`  // 索引占的字节
+	Created   string `json:"created,omitempty"`   // 建表时间（MySQL）
+	Updated   string `json:"updated,omitempty"`   // 最后改数据的时间（MySQL，InnoDB 重启后会清空）
+	Collation string `json:"collation,omitempty"` // MySQL 排序规则
+	Owner     string `json:"owner,omitempty"`     // PostgreSQL 所有者
 }
 
 // Tables 列出库里的表和视图（PostgreSQL 是全部用户模式里的）。
 func (cl *Client) Tables(ctx context.Context, dbName string) ([]Table, error) {
+	return cl.tables(ctx, dbName, false)
+}
+
+// TablesDetail 和 Tables 一样，多读自增值、建表和修改时间、数据和索引大小等（「对象」列表用）。
+func (cl *Client) TablesDetail(ctx context.Context, dbName string) ([]Table, error) {
+	return cl.tables(ctx, dbName, true)
+}
+
+func (cl *Client) tables(ctx context.Context, dbName string, detail bool) ([]Table, error) {
 	db, err := cl.DB(ctx, dbName)
 	if err != nil {
 		return nil, err
 	}
+	extra := ", NULL, NULL, NULL, '', '', '', ''"
 	var rows *sql.Rows
 	if cl.Conn.Kind == MySQL {
-		rows, err = db.QueryContext(ctx, `SELECT '', TABLE_NAME, TABLE_TYPE, TABLE_ROWS, DATA_LENGTH + INDEX_LENGTH, IFNULL(TABLE_COMMENT, ''), IFNULL(ENGINE, '')
+		if detail {
+			extra = `, AUTO_INCREMENT, DATA_LENGTH, INDEX_LENGTH, IFNULL(DATE_FORMAT(CREATE_TIME, '%Y-%m-%d %H:%i:%s'), ''),
+				IFNULL(DATE_FORMAT(UPDATE_TIME, '%Y-%m-%d %H:%i:%s'), ''), IFNULL(TABLE_COLLATION, ''), ''`
+		}
+		rows, err = db.QueryContext(ctx, `SELECT '', TABLE_NAME, TABLE_TYPE, TABLE_ROWS, DATA_LENGTH + INDEX_LENGTH, IFNULL(TABLE_COMMENT, ''), IFNULL(ENGINE, '')`+extra+`
 			FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME`, dbName)
 	} else {
+		if detail {
+			extra = `, NULL,
+				CASE WHEN c.relkind IN ('r','p','m') THEN pg_table_size(c.oid) END,
+				CASE WHEN c.relkind IN ('r','p','m') THEN pg_indexes_size(c.oid) END,
+				'', '', '', pg_get_userbyid(c.relowner)`
+		}
 		rows, err = db.QueryContext(ctx, `SELECT n.nspname, c.relname, c.relkind::text,
 				CASE WHEN c.relkind IN ('r','p','m') THEN GREATEST(c.reltuples, 0)::bigint END,
 				CASE WHEN c.relkind IN ('r','p','m') THEN pg_total_relation_size(c.oid) END,
-				COALESCE(obj_description(c.oid, 'pg_class'), ''), ''
+				COALESCE(obj_description(c.oid, 'pg_class'), ''), ''`+extra+`
 			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 			WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 				AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%' AND NOT c.relispartition
@@ -128,8 +157,9 @@ func (cl *Client) Tables(ctx context.Context, dbName string) ([]Table, error) {
 	for rows.Next() {
 		var t Table
 		var typ string
-		var n, size sql.NullInt64
-		if err := rows.Scan(&t.Schema, &t.Name, &typ, &n, &size, &t.Comment, &t.Engine); err != nil {
+		var n, size, auto, dataLen, indexLen sql.NullInt64
+		if err := rows.Scan(&t.Schema, &t.Name, &typ, &n, &size, &t.Comment, &t.Engine,
+			&auto, &dataLen, &indexLen, &t.Created, &t.Updated, &t.Collation, &t.Owner); err != nil {
 			return nil, err
 		}
 		t.Type = "table"
@@ -137,11 +167,17 @@ func (cl *Client) Tables(ctx context.Context, dbName string) ([]Table, error) {
 		case "VIEW", "SYSTEM VIEW", "v", "m":
 			t.Type = "view"
 		}
-		if n.Valid {
-			t.Rows = &n.Int64
+		ptr := func(v sql.NullInt64) *int64 {
+			if !v.Valid {
+				return nil
+			}
+			x := v.Int64
+			return &x
 		}
-		if size.Valid {
-			t.Size = &size.Int64
+		t.Rows, t.Size = ptr(n), ptr(size)
+		t.AutoInc, t.DataLen, t.IndexLen = ptr(auto), ptr(dataLen), ptr(indexLen)
+		if t.Type == "view" && cl.Conn.Kind == MySQL {
+			t.Comment = "" // MySQL 视图的注释固定是 VIEW
 		}
 		out = append(out, t)
 	}
