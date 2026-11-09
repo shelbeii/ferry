@@ -32,6 +32,19 @@ describe('新增应用的运行配置', () => {
     expect(out.apps[0]).toEqual(parse(source).toJS().apps[0])
   })
 
+  it('只换服务器上已有站点的文件：写 siteDir，端口一样时检查首页', () => {
+    const doc = parse(source)
+    applyAppSetup(doc, setup({ serve: 'site', sites: { prod: '/opt/1panel/apps/openresty/openresty/www/sites/web/index' }, sitePort: '8000' }))
+    expect(doc.toJS().apps[1]).toEqual({ name: 'web', type: 'static', artifact: { path: 'dist' },
+      static: { siteDir: '/opt/1panel/apps/openresty/openresty/www/sites/web/index', health: { http: 'http://127.0.0.1:8000/' } } })
+    const two = parse(source)
+    applyAppSetup(two, setup({ serve: 'site', targets: ['prod', 'test'], sites: { prod: '/www/a/index', test: '/www/b/index' } }))
+    const out = two.toJS()
+    expect(out.apps[1].static).toEqual({ siteDir: '${siteDir_web}' })
+    expect(out.targets.test.vars.siteDir_web).toBe('/www/b/index')
+    expect(setupError(parse(source), setup({ serve: 'site', targets: ['prod', 'test'], sites: { prod: '/www/a/index' } }))).toContain('已有的站点')
+  })
+
   it('多服务器使用不同 nginx 时生成独立变量，避开已有变量', () => {
     const doc = parse(source)
     applyAppSetup(doc, setup({ targets: ['prod', 'test'] }))

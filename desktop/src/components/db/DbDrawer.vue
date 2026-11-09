@@ -2,7 +2,7 @@
 // 「数据库」抽屉：左边是连接 → 库 →（模式）→ 表 / 视图 / 函数 / 查询 / 备份 的树，右边是标签页（对象列表、表数据、查询、设计表、函数）。
 import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElCheckbox, ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Close, Search, Coin, Document, Grid, View, Folder, Connection, Lock, Key, Monitor, List, Box, EditPen } from '@element-plus/icons-vue'
+import { Plus, Refresh, Close, Search, Coin, Document, Grid, View, Folder, Connection, Lock, Key, Monitor, List, Box, EditPen, FolderOpened } from '@element-plus/icons-vue'
 import type Node from 'element-plus/es/components/tree/src/model/node'
 import DbTableView from './DbTableView.vue'
 import DbObjects from './DbObjects.vue'
@@ -15,7 +15,7 @@ import DbConnDialog from './DbConnDialog.vue'
 import DbSqlConfirm from './DbSqlConfirm.vue'
 import DbCsvImport from './DbCsvImport.vue'
 import {
-  dbOpen, dbConns, closeOnOutside, dbOpened, dbRequest, dbPasswordRequest, loadDbConns, dbCall, saveDbConn, removeDbConn, closeDbConn, confirmSql, passwordEnv,
+  dbOpen, dbConns, closeOnOutside, dbOpened, isDbOpened, markDbOpened, refreshDbOpened, dbRequest, dbPasswordRequest, loadDbConns, dbCall, saveDbConn, removeDbConn, closeDbConn, confirmSql, passwordEnv,
   humanSize, kindLabel, exportTo, routineCallSql, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult, type DbFrom,
   type DbRoutine, type DbFileItem, type DbObjItem, type DbObjWhat,
 } from '../../db'
@@ -103,6 +103,7 @@ async function loadNode(node: Node, resolve: (d: TreeData[]) => void, reject: ()
       if (d.conn.kind === 'postgres') {
         const r = await dbCall<{ tables: DbTable[] }>(d.conn, 'tables', d.db)
         const schemas = [...new Set(r.tables.map((t) => t.schema ?? 'public'))]
+        markDbOpened(d.conn.id, d.db!)
         if (schemas.length > 1 || (schemas.length === 1 && schemas[0] !== 'public')) {
           return resolve([
             ...schemas.map((s): TreeData => ({ id: `s:${d.conn.id}:${d.db}:${s}`, label: s, type: 'schema', conn: d.conn, db: d.db, schema: s })),
@@ -110,6 +111,7 @@ async function loadNode(node: Node, resolve: (d: TreeData[]) => void, reject: ()
           ])
         }
       }
+      markDbOpened(d.conn.id, d.db!)
       resolve((['tables', 'views', 'funcs', 'queries', 'backups'] as GroupKind[]).map((g) => groupNode(d.conn, d.db!, g)))
     } else if (d.type === 'schema') {
       resolve((['tables', 'views', 'funcs'] as GroupKind[]).map((g) => groupNode(d.conn, d.db!, g, d.schema)))
@@ -143,6 +145,14 @@ async function loadNode(node: Node, resolve: (d: TreeData[]) => void, reject: ()
 function reloadObjects() {
   const o = tabs.value.find((t) => t.kind === 'objects')
   if (o) refs[o.key]?.reload?.()
+}
+/** 收起来、忘掉读过的下一级（断开连接、关闭库）：下次展开重新读 */
+function resetNode(id: string) {
+  const n = tree.value?.getNode(id) as Node | undefined
+  if (!n) return
+  n.collapse()
+  n.loaded = false
+  n.childNodes = []
 }
 function refreshNode(id: string) {
   reloadObjects()
@@ -617,6 +627,7 @@ const menuItems = computed(() => {
     case 'db':
       return [
         { k: 'query', t: '新建查询' }, { k: 'new-table', t: '新建表…', off: ro }, ...(d.conn.kind === 'postgres' ? [{ k: 'create-schema', t: '新建模式…', off: ro }] : []), { k: 'refresh', t: '刷新' },
+        { k: 'close-db', t: '关闭库', off: !isDbOpened(d.conn.id, d.db!) },
         { k: 'export-struct', t: '导出全部表的结构', sep: true }, { k: 'export-dump', t: '导出全部表的结构和数据' }, { k: 'import-sql', t: '执行 SQL 文件…', off: ro },
         { k: 'backup', t: '新建备份（存在这台电脑上）', sep: true },
         { k: 'copy-name', t: '复制库名', sep: true }, { k: 'drop-db', t: '删除库…', danger: true, off: ro, sep: true },
@@ -776,7 +787,11 @@ async function doAction(d: TreeData, k: string) {
     case 'copy': return void (connDialog.value = { ...d.conn, id: '', name: d.conn.name + ' 副本' })
     case 'close':
       await closeDbConn(d.conn.id)
-      tree.value?.getNode(d.id)?.collapse()
+      resetNode(d.id)
+      return
+    case 'close-db':
+      markDbOpened(d.conn.id, d.db!, false)
+      resetNode(d.id)
       return
     case 'remove':
       try {
@@ -926,6 +941,36 @@ watch(dbRequest, async (r) => {
   }
 }, { immediate: true })
 
+// 连接 10 分钟没用会自动断开：抽屉开着时隔一会儿看一次，断开的连接收起来、图标变回灰色
+let pollTimer = 0
+watch(dbOpen, (open) => {
+  clearInterval(pollTimer)
+  if (open) {
+    void refreshDbOpened().catch(() => {})
+    pollTimer = window.setInterval(() => void refreshDbOpened().catch(() => {}), 20000)
+  }
+}, { immediate: true })
+onBeforeUnmount(() => clearInterval(pollTimer))
+watch(() => Object.keys(dbOpened).sort().join(','), (now, before) => {
+  const live = new Set(now.split(','))
+  for (const id of (before ?? '').split(',')) if (id && !live.has(id)) resetNode('c:' + id)
+})
+
+/** 树上节点的状态：连接连着、库打开着 */
+function isLive(d: TreeData) {
+  if (d.type === 'conn') return !!dbOpened[d.conn.id]
+  if (d.type === 'db') return isDbOpened(d.conn.id, d.db!)
+  return false
+}
+function nodeTitle(d: TreeData) {
+  if (d.type === 'conn') {
+    const where = `${kindLabel[d.conn.kind as 'mysql']} · ${d.conn.user ? d.conn.user + '@' : ''}${d.conn.container ? '容器 ' + d.conn.container : d.conn.host + ':' + d.conn.port}${d.conn.via ? ' · 经 ' + (d.conn.via.title || d.conn.via.target) : ''}`
+    return `${where}\n${dbOpened[d.conn.id] ? '已连接（10 分钟没用自动断开）' : '没有连接：展开时连接'}`
+  }
+  if (d.type === 'db') return isDbOpened(d.conn.id, d.db!) ? '已打开' : '没有打开：展开时打开'
+  return d.hint ?? ''
+}
+
 onMounted(async () => {
   try {
     await loadDbConns()
@@ -938,6 +983,7 @@ onMounted(async () => {
 
 function nodeIcon(d: TreeData) {
   if (d.type === 'grp') return { tables: Grid, views: View, funcs: Grid, queries: Document, backups: Box }[d.group!]
+  if (d.type === 'db' && isLive(d)) return FolderOpened
   return { conn: Coin, db: Folder, schema: Folder, grp: Folder, table: Grid, view: View, func: Grid, savedq: Document, backup: Box, rdb: Folder, none: Document }[d.type]
 }
 </script>
@@ -977,10 +1023,11 @@ function nodeIcon(d: TreeData) {
             @node-contextmenu="(e: MouseEvent, d: TreeData) => onContext(e, d)"
           >
             <template #default="{ data }">
-              <span class="node" :class="[data.type, { system: data.system }]" :title="data.hint || (data.type === 'conn' ? `${kindLabel[data.conn.kind as 'mysql']} · ${data.conn.user ? data.conn.user + '@' : ''}${data.conn.container ? '容器 ' + data.conn.container : data.conn.host + ':' + data.conn.port}${data.conn.via ? ' · 经 ' + (data.conn.via.title || data.conn.via.target) : ''}` : '')">
+              <span class="node" :class="[data.type, { system: data.system, live: isLive(data) }]" :title="nodeTitle(data)">
                 <span v-if="data.type === 'func' || (data.type === 'grp' && data.group === 'funcs')" class="ni fx">ƒ</span>
-                <el-icon v-else class="ni" :class="{ on: data.type === 'conn' && dbOpened[data.conn.id] }"><component :is="nodeIcon(data)" /></el-icon>
+                <el-icon v-else class="ni"><component :is="nodeIcon(data)" /></el-icon>
                 <span class="nl">{{ data.label }}</span>
+                <span v-if="data.type === 'conn' && dbOpened[data.conn.id]" class="dot" />
                 <span v-if="data.type === 'rdb' && !data.system" class="keys">{{ data.hint.replace(' 个键', '') }}</span>
                 <span v-if="data.type === 'conn' && data.conn.kind === 'redis'" class="kind-mark">Redis</span>
                 <el-icon v-if="data.type === 'conn' && data.conn.readOnly" class="ro" title="只读"><Lock /></el-icon>
@@ -1180,8 +1227,29 @@ html .db-drawer.el-drawer {
   color: var(--el-text-color-secondary);
   flex-shrink: 0;
 }
-.ni.on {
+/* 连着的连接、打开着的库：图标变绿、名称加深；连接后面还有一个绿点。没连的是灰的 */
+.node.conn .ni,
+.node.db .ni {
+  color: var(--el-text-color-placeholder);
+}
+.node.live .ni {
   color: var(--el-color-success);
+}
+.node.conn.live .nl {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.node.db.live .nl {
+  font-weight: 500;
+  color: var(--el-text-color-primary);
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--el-color-success);
+  box-shadow: 0 0 0 2px var(--el-color-success-light-8);
 }
 .node.view .ni {
   color: var(--el-color-warning);

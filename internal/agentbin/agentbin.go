@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 //go:embed all:bin
@@ -23,9 +24,13 @@ type Binary struct {
 // Get 取 linux/<arch> 的 agent。环境变量 FERRY_AGENT_DIR 指向目录时优先从那里读（开发调试用）。
 func Get(arch string) (*Binary, error) {
 	name := "ferry-agent-linux-" + arch
+	dir := os.Getenv("FERRY_AGENT_DIR")
+	if b, ok := cache.Load(name); ok && dir == "" {
+		return b.(*Binary), nil
+	}
 	var data []byte
 	var err error
-	if dir := os.Getenv("FERRY_AGENT_DIR"); dir != "" {
+	if dir != "" {
 		data, err = os.ReadFile(filepath.Join(dir, name))
 	} else {
 		data, err = bins.ReadFile("bin/" + name)
@@ -34,5 +39,12 @@ func Get(arch string) (*Binary, error) {
 		return nil, fmt.Errorf("没有 %s 的 agent（%s）：先运行 scripts/build.ps1 或 scripts/build.sh 构建 ferry", arch, name)
 	}
 	sum := sha256.Sum256(data)
-	return &Binary{Arch: arch, Data: data, SHA256: hex.EncodeToString(sum[:])}, nil
+	b := &Binary{Arch: arch, Data: data, SHA256: hex.EncodeToString(sum[:])}
+	if dir == "" {
+		cache.Store(name, b)
+	}
+	return b, nil
 }
+
+// cache 算过校验和的内嵌 agent（每次连接都要用，10 MB 的文件不用每次重算）；FERRY_AGENT_DIR 里的随时可能重新构建，不缓存。
+var cache sync.Map

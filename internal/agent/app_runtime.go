@@ -174,13 +174,20 @@ func (a *Agent) nginxRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoices
 			independent = true
 		}
 	}
-	if independent {
+	deployed := a.current(s.Name) != ""
+	switch {
+	case s.SiteDir != "":
+		independent = false
+		r.Current = "已有站点的网站目录 " + s.SiteDir
+	case independent && !deployed:
+		r.Current = "还没部署：按配置会由 Ferry 下载 Nginx，单独运行这个站点"
+	case independent:
 		r.Current = "项目独立 Nginx"
 	}
 	instances := a.instances()
 	if system, err := a.loadHostingInstance(proto.SystemNginxInstance); err == nil {
 		instances = append(instances, *system)
-	} else {
+	} else if !strings.Contains(err.Error(), "未找到 nginx.service") {
 		r.Notes = append(r.Notes, "系统 Nginx 暂不能接入："+err.Error())
 	}
 	for _, in := range instances {
@@ -198,8 +205,35 @@ func (a *Agent) nginxRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoices
 		}
 		r.Choices = append(r.Choices, choice)
 	}
-	if independent {
+	if independent && deployed {
 		r.Notes = append(r.Notes, "当前使用项目独立 Nginx；切换后会迁移到所选共享实例，仅重载本站点，不重启共享实例。")
+	}
+	// 服务器上已有的 nginx / OpenResty 里的站点（1Panel、宝塔、容器里的……）：选它就只换网站目录里的文件
+	sites, notes := DiscoverNginxSites(a.Sys.Shell)
+	r.Notes = append(r.Notes, notes...)
+	for i := range sites {
+		site := sites[i]
+		dir := site.Dir
+		if dir == "" {
+			dir = site.Root
+		}
+		desc := []string{site.Server}
+		if d := nginxSiteDesc(site); d != "" {
+			desc = append(desc, d)
+		}
+		if site.Root != site.Dir && site.Dir != "" {
+			desc = append(desc, "容器里是 "+site.Root)
+		}
+		if site.Conf != "" {
+			desc = append(desc, "配置："+site.Conf)
+		}
+		choice := proto.AppRuntimeChoice{ID: "static:site:" + dir, Path: dir, Version: strings.Join(desc, "\n"), Source: "已有站点", Current: s.SiteDir != "" && s.SiteDir == site.Dir, Disabled: site.Disabled, Site: &site}
+		if choice.Disabled == "" && site.Dir != "" {
+			if err := a.checkSiteDirSafe(&proto.AppSpec{Name: s.Name, SiteDir: site.Dir}); err != nil {
+				choice.Disabled = err.Error()
+			}
+		}
+		r.Choices = append(r.Choices, choice)
 	}
 	sort.SliceStable(r.Choices, func(i, j int) bool {
 		return fmt.Sprint(!r.Choices[i].Current, r.Choices[i].Path) < fmt.Sprint(!r.Choices[j].Current, r.Choices[j].Path)

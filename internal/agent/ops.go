@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/captain/ferry/internal/proto"
@@ -149,6 +150,10 @@ func (a *Agent) rollbackService(s *proto.AppSpec, to, cur string) error {
 }
 
 func (a *Agent) hasLegacy(s *proto.AppSpec) bool {
+	if s.Type == proto.TypeStatic && s.SiteDir != "" {
+		_, ok := a.readSiteDirRecord(s.Name)
+		return ok && a.current(s.Name) != ""
+	}
 	if !isService(s) {
 		return false
 	}
@@ -165,6 +170,16 @@ func (a *Agent) hasLegacy(s *proto.AppSpec) bool {
 
 // toLegacy 回到 ferry 接管前：还原原单元文件（或启用冲突的旧服务），删除 current。
 func (a *Agent) toLegacy(s *proto.AppSpec) error {
+	if s.Type == proto.TypeStatic && s.SiteDir != "" {
+		// 接管的已有站点：网站目录换回原来的文件
+		if !a.hasLegacy(s) {
+			return errors.New("没有接管前的网站文件可恢复")
+		}
+		if err := a.restoreSiteDir(s); err != nil {
+			return err
+		}
+		return a.deactivate(s.Name)
+	}
 	if !a.hasLegacy(s) {
 		return errors.New("没有接管前的服务可恢复")
 	}
@@ -493,24 +508,22 @@ func (a *Agent) bootEnabled(unit, unitState string) string {
 // ---------------------------------------------------------------- status / releases
 
 func (a *Agent) status() int {
-	var out []proto.AppStatus
 	busy := a.lockHolder()
-	// nginx 配置只读一次，多个静态站点共用
+	// 各应用共用一份进程表；nginx 配置只读一次，多个静态站点共用
+	defer a.shareProcs()()
 	var ngText string
 	var ngErr error
-	ngRead := false
+	var ngOnce sync.Once
 	nginx := func() (string, error) {
-		if !ngRead {
-			ngText, ngErr = a.Sys.NginxDump()
-			ngRead = true
-		}
+		ngOnce.Do(func() { ngText, ngErr = a.Sys.NginxDump() })
 		return ngText, ngErr
 	}
-	for i := range a.req.Apps {
-		st := a.appStatus(&a.req.Apps[i], nginx)
-		st.Busy = busy
-		out = append(out, st)
-	}
+	// 各应用互不相干（systemctl、健康检查、读文件）：同时查，应用多时不用一个个等
+	out := make([]proto.AppStatus, len(a.req.Apps))
+	eachParallel(len(a.req.Apps), 6, func(i int) {
+		out[i] = a.appStatus(&a.req.Apps[i], nginx)
+		out[i].Busy = busy
+	})
 	return a.result(proto.CodeOK, "", out)
 }
 
@@ -599,6 +612,9 @@ func (a *Agent) releases() int {
 		s := &a.req.Apps[i]
 		cur := a.current(s.Name)
 		ar := proto.AppReleases{App: s.Name, Legacy: a.hasLegacy(s)}
+		if ar.Legacy && s.SiteDir != "" {
+			ar.LegacyLabel = "接管前的网站文件"
+		}
 		if a.req.Detail && cur != "" {
 			if b, err := os.ReadFile(a.verFile(s.Name, cur, "unit.service")); err == nil {
 				ar.Unit = string(b)

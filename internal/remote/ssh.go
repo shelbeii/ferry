@@ -77,6 +77,20 @@ type Client struct {
 	dead   atomic.Bool  // 保活失败或已关闭
 	rtt    atomic.Int64 // 最近一次量的往返时间（纳秒），见 Latency
 	rttAt  atomic.Int64 // 量的时间（UnixNano）；0 = 还没量过
+	okAt   atomic.Int64 // 最近一次确认连接通的时间（UnixNano）：保活、量延迟、远程命令正常结束
+
+	opts    Options       // 建这条连接用的参数：会话数到了服务器的上限时，用它再建连接
+	extraMu sync.Mutex    // 保护 extra
+	extra   []*ssh.Client // 会话数到了上限后另建的连接（见 overflow.go）
+}
+
+// markOK 刚和服务器一来一回过：连接是通的。
+func (c *Client) markOK() { c.okAt.Store(time.Now().UnixNano()) }
+
+// OKWithin 最近 d 以内确认过连接是通的（复用前不用再专门确认一次）。
+func (c *Client) OKWithin(d time.Duration) bool {
+	at := c.okAt.Load()
+	return at != 0 && time.Since(time.Unix(0, at)) < d
 }
 
 // KnownHostsFile ferry 自己记录主机公钥的文件（同时也读 ~/.ssh/known_hosts）。
@@ -116,7 +130,9 @@ func Dial(o Options) (*Client, error) {
 		}
 		return nil, dialError("连接 "+o.User+"@"+addr+" 失败", err)
 	}
-	cl := &Client{ssh: c, Addr: addr}
+	cl := &Client{ssh: c, Addr: addr, opts: o}
+	cl.opts.OnNewHostKey = nil // 再建连接（会话数到了上限）时：主机公钥这次已经核对过
+	cl.markOK()
 	// 保活：长时间等待服务启动时不被中间设备断开；失败说明连接已断，标记后复用前会重连
 	safe.Go("保活", func() {
 		t := time.NewTicker(30 * time.Second)
@@ -126,6 +142,7 @@ func Dial(o Options) (*Client, error) {
 				cl.dead.Store(true)
 				return
 			}
+			cl.markOK()
 		}
 	})
 	safe.Go("连接监视", func() {
@@ -174,6 +191,8 @@ func (c *Client) Ping(timeout time.Duration) error {
 	case err := <-done:
 		if err != nil {
 			c.dead.Store(true)
+		} else {
+			c.markOK()
 		}
 		return err
 	case <-time.After(timeout):
@@ -220,6 +239,7 @@ func (c *Client) Latency(timeout, maxAge time.Duration) (time.Duration, error) {
 		}
 		c.rtt.Store(int64(r.d))
 		c.rttAt.Store(time.Now().UnixNano())
+		c.markOK()
 		return r.d, nil
 	case <-time.After(timeout):
 		return 0, ErrSlow
@@ -237,6 +257,7 @@ func (c *Client) Close() error {
 		c.sftp.Close()
 	}
 	c.sftpMu.Unlock()
+	c.closeExtra()
 	return c.ssh.Close()
 }
 
@@ -537,7 +558,7 @@ func (c *Client) Run(cmd string, stdin []byte, onLine func(string)) (RunResult, 
 
 // RunContext 同 Run；ctx 取消时关闭这个通道（不影响同一连接上的其他操作）。
 func (c *Client) RunContext(ctx context.Context, cmd string, stdin []byte, onLine func(string)) (RunResult, error) {
-	s, err := c.ssh.NewSession()
+	s, err := c.newSession()
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -571,7 +592,9 @@ func (c *Client) RunContext(ctx context.Context, cmd string, stdin []byte, onLin
 	var ee *ssh.ExitError
 	switch {
 	case err == nil:
+		c.markOK()
 	case errors.As(err, &ee):
+		c.markOK()
 		res.Code = ee.ExitStatus()
 	default:
 		var missing *ssh.ExitMissingError
@@ -589,6 +612,44 @@ func (c *Client) Output(cmd string) (string, RunResult, error) {
 	res, err := c.Run(cmd, nil, func(l string) { b.WriteString(l); b.WriteByte('\n') })
 	return b.String(), res, err
 }
+
+// Pipe 一直开着的远程命令：随时往 In 写、从 Out 读（常驻的 agent 用）。
+type Pipe struct {
+	s      *ssh.Session
+	In     io.WriteCloser
+	Out    io.Reader
+	stderr bytes.Buffer
+}
+
+// StartPipe 启动 cmd，不等它结束。用完 Close。
+func (c *Client) StartPipe(cmd string) (*Pipe, error) {
+	s, err := c.newSession()
+	if err != nil {
+		return nil, err
+	}
+	p := &Pipe{s: s}
+	s.Stderr = &limitedBuffer{buf: &p.stderr, max: 64 << 10}
+	if p.In, err = s.StdinPipe(); err == nil {
+		p.Out, err = s.StdoutPipe()
+	}
+	if err == nil {
+		err = s.Start(cmd)
+	}
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return p, nil
+}
+
+// Wait 等命令结束；返回后 Stderr 才完整。
+func (p *Pipe) Wait() error { return p.s.Wait() }
+
+// Stderr 命令的错误输出（Wait 返回后读）。
+func (p *Pipe) Stderr() string { return p.stderr.String() }
+
+// Close 关掉会话（远程命令的输入随之结束）。
+func (p *Pipe) Close() error { return p.s.Close() }
 
 type limitedBuffer struct {
 	buf *bytes.Buffer
@@ -614,7 +675,11 @@ func (c *Client) sftpClient() (*sftp.Client, error) {
 	if c.sftp != nil {
 		return c.sftp, nil
 	}
-	s, err := sftp.NewClient(c.ssh, sftp.UseConcurrentWrites(true), sftp.MaxConcurrentRequestsPerFile(64))
+	var s *sftp.Client
+	err := c.onSessionConn(func(conn *ssh.Client) (err error) {
+		s, err = sftp.NewClient(conn, sftp.UseConcurrentWrites(true), sftp.MaxConcurrentRequestsPerFile(64))
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("打开 SFTP：%w", err)
 	}
@@ -709,7 +774,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // Stream 执行命令，输出原样写到 out，直到命令结束或 stop 关闭。
 // pty 为 true 时申请伪终端：断开时远端进程收到 SIGHUP 退出（用于 journalctl -f、tail -F）。
 func (c *Client) Stream(cmd string, out io.Writer, pty bool, stop <-chan struct{}) error {
-	s, err := c.ssh.NewSession()
+	s, err := c.newSession()
 	if err != nil {
 		return err
 	}
@@ -752,7 +817,7 @@ type ShellOptions struct {
 
 // Shell 打开登录用户的交互式 shell（申请伪终端），直到 shell 退出、连接断开或 ctx 取消。返回 shell 的退出码。
 func (c *Client) Shell(ctx context.Context, o ShellOptions) (int, error) {
-	s, err := c.ssh.NewSession()
+	s, err := c.newSession()
 	if err != nil {
 		return -1, err
 	}

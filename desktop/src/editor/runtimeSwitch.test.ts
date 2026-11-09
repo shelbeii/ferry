@@ -35,6 +35,14 @@ describe('切换运行环境配置',()=>{
     const out=runtimeSwitchDraft(text,'prod','api','static',{id:'static:edge',path:'edge',source:'Ferry'},'8090')
     expect(parse(out).toJS().targets.prod.appRuntimes.api).toEqual({nginxInstance:'edge',port:'8090'})
   })
+  it('改成只换已有站点的文件：写 siteDir 和站点端口；同一端口多个站点时不写端口',()=>{
+    const text=source.replace('type: java','type: static').replace('    service: {runtime: {java: 17}}','    static: {port: 8000}')
+    const site={server:'OpenResty（容器 1Panel-openresty）',ports:[8000],root:'/www/sites/web/index',dir:'/opt/1panel/apps/openresty/openresty/www/sites/web/index'}
+    const pick:AppRuntimeChoice={id:'static:site:'+site.dir,path:site.dir,source:'已有站点',site}
+    expect(parse(runtimeSwitchDraft(text,'prod','api','static',pick)).toJS().targets.prod.appRuntimes.api).toEqual({siteDir:site.dir,port:'8000'})
+    expect(parse(runtimeSwitchDraft(text,'prod','api','static',{...pick,site:{...site,shared:true}})).toJS().targets.prod.appRuntimes.api).toEqual({siteDir:site.dir})
+    expect(()=>runtimeSwitchDraft(text,'prod','api','static',{...pick,path:'relative/dir'})).toThrow('绝对路径')
+  })
   it('拒绝禁用项、错误类型、错误端口和已变化的应用',()=>{
     expect(()=>runtimeSwitchDraft(source,'prod','api','java',{...choice,disabled:'不可执行'})).toThrow('不可执行')
     expect(()=>runtimeSwitchDraft(source,'prod','api','node',choice)).toThrow()

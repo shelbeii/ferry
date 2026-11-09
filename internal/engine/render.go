@@ -222,6 +222,14 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 		if s.Reload, err = sc.Expand(a.Static.Reload); err != nil {
 			return s, wrap("static.reload", err)
 		}
+		if s.SiteDir, err = sc.Expand(a.Static.SiteDir); err != nil {
+			return s, wrap("static.siteDir", err)
+		}
+		if s.SiteDir != "" {
+			if err := proto.CheckSiteDir(s.SiteDir); err != nil {
+				return s, wrap("static.siteDir", err)
+			}
+		}
 		if s.Health, err = health(sc, a.Static.Health); err != nil {
 			return s, wrap("static.health", err)
 		}

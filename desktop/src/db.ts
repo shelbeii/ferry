@@ -417,8 +417,34 @@ export const dbPasswordRequest = ref<{ conn: DbConn; rejected: boolean; resolve:
 export async function loadDbConns() {
   const r = await call<{ connections: DbConn[]; opened: string[] }>(['db', 'list'])
   dbConns.value = r.connections
-  for (const k of Object.keys(dbOpened)) delete dbOpened[k]
-  for (const id of r.opened) dbOpened[id] = true
+  setOpened(r.opened)
+}
+
+/** 只更新哪些连接连着（10 分钟没用会自动断开：抽屉开着时隔一会儿看一次） */
+export async function refreshDbOpened() {
+  const r = await call<{ opened: string[] }>(['db', 'list'])
+  setOpened(r.opened)
+}
+
+function setOpened(ids: string[]) {
+  const now = new Set(ids)
+  for (const k of Object.keys(dbOpened)) if (!now.has(k)) delete dbOpened[k]
+  for (const id of ids) dbOpened[id] = true
+  for (const k of Object.keys(dbOpenedDbs)) if (!now.has(k.split(DB_SEP)[0])) delete dbOpenedDbs[k]
+}
+
+/** 打开过的库（树上展开过）：「连接 ID + 库名」；连接断开时一起清掉 */
+export const dbOpenedDbs = reactive<Record<string, boolean>>({})
+const DB_SEP = '\u0001'
+export function markDbOpened(id: string, db: string, on = true) {
+  if (on) dbOpenedDbs[id + DB_SEP + db] = true
+  else delete dbOpenedDbs[id + DB_SEP + db]
+}
+export function isDbOpened(id: string, db: string) {
+  return !!dbOpened[id] && !!dbOpenedDbs[id + DB_SEP + db]
+}
+function forgetDbs(id: string) {
+  for (const k of Object.keys(dbOpenedDbs)) if (k.split(DB_SEP)[0] === id) delete dbOpenedDbs[k]
 }
 
 function reqEnv(req: DbReq, extra: Record<string, string> = {}): Record<string, string> {
@@ -519,6 +545,7 @@ export async function removeDbConn(id: string) {
 export async function closeDbConn(id: string) {
   await call(['db', 'close', id])
   delete dbOpened[id]
+  forgetDbs(id)
 }
 
 export function closeDbSession(id: string, session: string) {

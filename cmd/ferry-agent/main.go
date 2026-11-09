@@ -2,6 +2,7 @@
 //
 //	ferry-agent version                 输出版本（JSON）
 //	ferry-agent <命令> < request.json    preflight | prepare | deploy | rollback | control | status | releases | history
+//	ferry-agent serve                   常驻：一行行读只读查看的请求（见 proto/serve.go）
 package main
 
 import (
@@ -41,6 +42,11 @@ func main() {
 		v := map[string]any{"version": agent.Version, "proto": proto.Version, "arch": runtime.GOARCH, "sha256": selfSHA()}
 		json.NewEncoder(os.Stdout).Encode(v)
 		return
+	}
+	// ferry-agent serve：常驻，处理本机一行行发来的只读查看（协议见 proto/serve.go），本机关掉会话时退出
+	if cmd == "serve" {
+		signal.Ignore(syscall.SIGPIPE)
+		os.Exit(agent.Serve(agent.NewSystem(), os.Stdin, os.Stdout))
 	}
 	// 连接断开也要做完：本机取消、网络中断时 SSH 连接关掉，再往 stdout 写会收到 SIGPIPE，Go 默认因此退出，
 	// 部署可能停在「旧服务已停、新服务还没起来」。忽略它：写不出去的输出丢掉，照常做完（失败照常回滚），结果记在部署历史里。

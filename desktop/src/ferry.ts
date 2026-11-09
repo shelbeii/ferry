@@ -507,7 +507,11 @@ export interface AppStatus {
 }
 
 export interface AppInfoField { label: string; value: string; path?: boolean }
-export interface AppRuntimeChoice { id: string; path: string; version?: string; source: string; unit?: string; state?: string; current?: boolean; disabled?: string }
+export interface AppRuntimeChoice { id: string; path: string; version?: string; source: string; unit?: string; state?: string; current?: boolean; disabled?: string; site?: NginxSite }
+/** 服务器上已有的 nginx / OpenResty（容器里的也算）里的一个站点：选它部署时只换网站目录里的文件 */
+export interface NginxSite { server: string; container?: string; unit?: string; pid?: number; ports: number[] | null; ssl?: boolean; names?: string[] | null; root: string; dir?: string; owner?: string; conf?: string; shared?: boolean; disabled?: string }
+/** 部署前检查：要用的端口被别的程序占着 */
+export interface PortConflict { app: string; port: number; owner: string; sites?: NginxSite[] | null }
 export interface AppRuntimeChoices { app: string; type: string; canSwitch: boolean; reason?: string; port?: string; current?: string; choices: AppRuntimeChoice[]; notes?: string[] }
 export interface AppInfoSection { id: string; title: string; fields: AppInfoField[] }
 export interface AppInfo {
@@ -581,7 +585,7 @@ export interface ServerInfo {
   timezone: string
   now: number
   uptime: number
-  cpu: { model: string; cores: number; usage: number | null; load: number[] | null }
+  cpu: { model: string; cores: number; usage: number | null; window?: number; load: number[] | null }
   memory: { total: number; used: number; available: number; free: number; cached: number }
   swap: { total: number; used: number; free: number }
   mounts: ServerMount[]
@@ -845,6 +849,8 @@ export interface Software {
   locations?: { label: string; path: string }[]
   /** 能在浏览器里打开的网页：控制台、管理面板、网站 */
   web?: WebPanel[]
+  /** 运行中的程序文件在它启动后被换掉了：replaced（升级、重装，重启后生效）| deleted（删掉了） */
+  replaced?: 'replaced' | 'deleted'
 }
 
 /** 软件的一个网页（proto.WebPanel） */
@@ -894,6 +900,8 @@ export interface AppReleases {
   app: string
   releases: ReleaseInfo[] | null
   legacy: boolean
+  /** 接管前的是什么：空 = 服务；接管已有站点的是「接管前的网站文件」 */
+  legacyLabel?: string
 }
 
 export interface HistoryEntry {
@@ -939,6 +947,10 @@ export interface AppChange {
   filesRemoved?: string[] | null
   /** 部署时保留的在服务器上的情况和这次会怎么做 */
   keep?: KeepItemReport[] | null
+  /** 这次按什么运行（Ferry 自带的 Nginx、已有站点的网站目录、JDK……） */
+  runtime?: string
+  /** 要用的端口已经被别的程序占着 */
+  ports?: PortConflict[] | null
 }
 
 export interface DeployReport {

@@ -94,6 +94,7 @@ func (a *Agent) appInfo() int {
 	if len(a.req.Apps) != 1 {
 		return a.result(proto.CodeBadInput, "查看运行情况一次只能指定一个应用", nil)
 	}
+	defer a.shareProcs()() // 端口、命令行、进程详情共用一份进程表
 	s := a.req.Apps[0]
 	current := a.current(s.Name)
 	var savedUnit []byte

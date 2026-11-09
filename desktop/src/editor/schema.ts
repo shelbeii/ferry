@@ -287,6 +287,7 @@ const app: SchemaNode = obj('应用', '一个可部署的应用', {
     ),
     link: str('链接', '额外维护的符号链接，指向当前版本（例如 nginx 的 root）', { unless: 'port' }),
     reload: str('切换后执行', '用 sh -c 执行，失败则切回，如 nginx -t && nginx -s reload', { unless: 'port' }),
+    siteDir: str('已有站点的网站目录', '服务器上原来就有的 nginx / OpenResty（1Panel、宝塔、容器里的也行）在用的网站目录（服务器上的路径）：每次部署把这一版的文件换进去，不改 nginx 的配置；第一次部署前备份原来的文件，可以「回到接管前」。不能和 port、link 一起用', { unless: 'port' }),
     health: health(true),
   }, { appTypes: ['static'] }),
   hooks: obj('部署时执行的命令', '在服务器上执行（sh -c），过程显示在部署输出里；手动回滚时不执行。命令里可以用 $FERRY_RELEASE、$FERRY_PREVIOUS 等环境变量，java / binary 还能拿到服务的 env、envFile', {
@@ -325,8 +326,9 @@ const target: SchemaNode = obj('服务器', '一台要部署到的服务器', {
     python: str('Python 程序', '解释器绝对路径；项目虚拟环境会使用它重建'),
     node: str('Node 程序', 'Node 绝对路径；服务及安装依赖使用相同版本'),
     dotnet: str('.NET 主机', 'dotnet 绝对路径，适用于通过 dotnet 启动的应用'),
-    port: str('网站端口', '切换 Nginx 时可同时调整本站点端口'),
-  }, { oneOf: [['java','nginxInstance','python','node','dotnet']], oneOfRequired: true }) },
+    siteDir: str('已有站点的网站目录', '前端站点改成只换服务器上已有站点（nginx / OpenResty，容器里的也行）网站目录里的文件，不改 nginx 配置'),
+    port: str('网站端口', '切换 Nginx 时可同时调整本站点端口；用 siteDir 时是已有站点的端口（部署后检查首页能打开）'),
+  }, { oneOf: [['java','nginxInstance','siteDir','python','node','dotnet']], oneOfRequired: true }) },
 })
 
 const db = (name: string, tool: string, port: number, user: string): SchemaNode =>

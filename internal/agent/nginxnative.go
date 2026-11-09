@@ -21,7 +21,7 @@ func DiscoverSystemNginx(run func(string, time.Duration) (string, error)) (*prot
 	var execStart, masterUser string
 	for _, line := range strings.Split(show, "\n") {
 		if line == "LoadState=not-found" {
-			return nil, errors.New("未找到 nginx.service；旧项目专用或容器内的 nginx 需单独接入")
+			return nil, errors.New("未找到 nginx.service（其他方式运行的 nginx、容器里的 nginx 在「已有站点」里）")
 		}
 		if v, ok := strings.CutPrefix(line, "ExecStart="); ok {
 			execStart = v

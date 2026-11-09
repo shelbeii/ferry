@@ -13,6 +13,7 @@ const visible = ref(true)
 const loading = ref(true)
 const error = ref('')
 const data = ref<AppReleases>()
+const legacyLabel = computed(() => data.value?.legacyLabel || '接管前的服务')
 const reads = useReadRequests()
 
 async function load() {
@@ -79,8 +80,8 @@ function rowClass({ row }: { row: ReleaseInfo }) {
       <template v-else-if="data && !loading">
         <div class="toolbar">
           <el-input v-model="query" placeholder="搜索版本、提交或部署人" clearable aria-label="搜索版本" class="release-search" />
-          <el-button type="warning" plain :disabled="!previous && !data.legacy" @click="previous ? review(previous.id, previous.id, previous) : review('legacy', '接管前的服务')">回滚到上一个可用版本</el-button>
-          <el-button v-if="data.legacy && previous" plain @click="review('legacy', '接管前的服务')">回到接管前的服务</el-button>
+          <el-button type="warning" plain :disabled="!previous && !data.legacy" @click="previous ? review(previous.id, previous.id, previous) : review('legacy', legacyLabel)">回滚到上一个可用版本</el-button>
+          <el-button v-if="data.legacy && previous" plain @click="review('legacy', legacyLabel)">回到{{ legacyLabel }}</el-button>
         </div>
         <!-- 单元格不换行：版本号与标记在同一行，放不下的文字省略并在悬停时显示全文 -->
         <el-table :data="visibleReleases" size="small" border :row-class-name="rowClass" :empty-text="query.trim() ? '没有匹配的版本' : '还没有版本'" class="releases">

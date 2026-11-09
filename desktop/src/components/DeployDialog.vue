@@ -6,9 +6,16 @@ import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { appSettings, startTask } from '../state'
 import { deploymentTargets } from '../deploymentReview'
 import KeepPicker from './KeepPicker.vue'
+import { Loading } from '@element-plus/icons-vue'
 
 const props = defineProps<{ config: string; info: Inspect; target: string; apps: string[]; initialTargets?: string[] }>()
-const emit = defineEmits<{ close: []; started: [id: number]; finished: [] }>()
+const emit = defineEmits<{
+  close: []
+  started: [id: number]
+  finished: []
+  /** 去切换运行环境（prefer：先选中的已有站点的网站目录） */
+  switchRuntime: [app: string, target: string, prefer?: string]
+}>()
 
 const visible = ref(true)
 const targets = ref<string[]>(props.initialTargets?.length ? [...props.initialTargets] : [props.target])
@@ -75,6 +82,10 @@ const changeGroups = computed(() => {
   }
   return groups
 })
+// 按什么运行、端口被占着的（第一次部署时服务器上原来就有程序在用这个端口最常见）
+const runtimeRows = computed(() => (changes.value ?? []).filter((c) => c.runtime || c.ports?.length))
+const busyCount = computed(() => runtimeRows.value.reduce((n, c) => n + (c.ports?.length ?? 0), 0))
+const isStatic = (app: string) => props.info.apps.find((a) => a.name === app)?.type === 'static'
 const short = (h?: string) => (h ? h.slice(0, 8) : '-')
 const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
 
@@ -187,11 +198,28 @@ async function start() {
           <div v-if="conflicts.length" class="invalid small">请调整目标选择：所选应用必须在每台目标的允许列表中。</div>
         </div>
       </el-form-item>
+      <el-form-item v-if="runtimeRows.length" label="运行">
+        <div class="changes">
+          <div v-if="targets.length > 1" class="muted small">下面是 {{ reviewTarget }} 上的情况</div>
+          <div v-for="c in runtimeRows" :key="'r' + c.app" class="change">
+            <div><b>{{ c.app }}</b>：{{ c.runtime || '按配置运行' }} <el-button link type="primary" size="small" @click="emit('switchRuntime', c.app, reviewTarget)">切换运行环境</el-button></div>
+            <div v-for="p in c.ports ?? []" :key="p.port" class="port-busy">
+              <div class="warn small">{{ p.owner }}。照这样部署会在最后切换时失败（原来在用这个端口的程序不受影响）。</div>
+              <div v-for="s in p.sites ?? []" :key="s.root + s.conf" class="small">
+                {{ s.server }}在这个端口上已有站点<span v-if="s.names?.length">（{{ s.names.join(' ') }}）</span>，网站目录 <span class="mono">{{ s.dir || s.root }}</span>
+                <el-button v-if="!s.disabled && s.dir && isStatic(c.app)" link type="primary" size="small" @click="emit('switchRuntime', c.app, reviewTarget, s.dir)">改成只换这个站点的文件</el-button>
+                <span v-else-if="s.disabled" class="muted">（{{ s.disabled }}）</span>
+              </div>
+              <div class="muted small">{{ isStatic(c.app) ? '也可以在「切换运行环境」里换一个空闲的端口。' : '先停掉占着端口的程序，或在配置里换一个端口。' }}</div>
+            </div>
+          </div>
+        </div>
+      </el-form-item>
       <el-form-item label="改动">
         <div class="changes">
           <el-radio-group v-if="targets.length > 1" v-model="reviewTarget" size="small" class="compare-targets" aria-label="比较服务器"><el-radio-button v-for="name in targets" :key="name" :value="name">{{ name }}</el-radio-button></el-radio-group>
           <div v-if="!targets.length" class="muted small">先选择目标服务器</div>
-          <div v-else-if="changesLoading" class="muted small" role="status">正在和 {{ reviewTarget }} 上运行的版本比较…</div>
+          <div v-else-if="changesLoading" class="loading-line" role="status"><el-icon class="is-loading"><Loading /></el-icon>正在和 {{ reviewTarget }} 上运行的版本比较、检查端口…</div>
           <div v-else-if="changesError" class="small"><span class="muted">读不到 {{ reviewTarget }} 上运行的版本：{{ changesError }}。仍可部署，开始后会执行预检。</span> <el-button link type="primary" size="small" @click="loadChanges">重新比较</el-button></div>
           <div v-else-if="changes?.length === 0" class="muted small">{{ reviewTarget }} 暂无可比较的版本信息</div>
           <div v-for="g in changeGroups" :key="g.apps.join()" class="change">
@@ -243,7 +271,7 @@ async function start() {
               </el-tooltip>
               <span v-if="!r.on" class="muted small">这次用包里的</span>
               <span v-else-if="reportFor(a, r)" class="small" :class="reportFor(a, r)?.differs ? 'warn' : 'muted'">{{ reportFor(a, r)?.note }}</span>
-              <span v-else-if="keepReads.loading.value[a]" class="muted small">正在看服务器上的…</span>
+              <span v-else-if="keepReads.loading.value[a]" class="muted small"><el-icon class="is-loading"><Loading /></el-icon> 正在看服务器上的…</span>
               <el-button v-if="r.added" link size="small" @click="removeRow(a, r)">去掉</el-button>
             </div>
           </div>
@@ -275,6 +303,7 @@ async function start() {
       </el-form-item>
     </el-form>
     <template #footer>
+      <span v-if="busyCount" class="warn small busy-hint">{{ reviewTarget }} 上有 {{ busyCount }} 个端口被别的程序占着（见上面「运行」）</span>
       <el-button @click="visible = false">取消</el-button>
       <el-button :type="prodTargets.length ? 'danger' : 'primary'" :disabled="!canStart" :loading="starting" @click="start">部署到 {{ targets.length }} 台服务器</el-button>
     </template>
@@ -333,6 +362,18 @@ async function start() {
 }
 .warn {
   color: var(--el-color-warning);
+}
+.loading-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--el-color-primary);
+}
+.port-busy {
+  margin: 2px 0 0 12px;
+}
+.busy-hint {
+  margin-right: 12px;
 }
 .diff {
   margin: 2px 0 0;

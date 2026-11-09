@@ -180,6 +180,8 @@ type AppSpec struct {
 	NginxInstance string   `json:"nginxInstance,omitempty"`
 	SiteNames     []string `json:"siteNames,omitempty"`
 	SitePort      string   `json:"sitePort,omitempty"` // static.port：部署前检查端口有没有被别人占着
+	// SiteDir static.siteDir：服务器上已有站点的网站目录，每次部署把这一版的文件换进去（不碰 nginx 配置）
+	SiteDir string `json:"siteDir,omitempty"`
 
 	KeepReleases int `json:"keepReleases"`
 
@@ -734,6 +736,8 @@ type AppReleases struct {
 	App      string        `json:"app"`
 	Releases []ReleaseInfo `json:"releases"`
 	Legacy   bool          `json:"legacy"` // 有接管前的旧单元文件，可回到接管前
+	// LegacyLabel 接管前的是什么（给人看）：空 = 服务；接管已有站点的是「接管前的网站文件」
+	LegacyLabel string `json:"legacyLabel,omitempty"`
 	// Unit 运行中的版本保存的单元文件（请求里 Detail 时才有）：部署前比较配置改了什么
 	Unit string `json:"unit,omitempty"`
 }
@@ -799,6 +803,8 @@ type SoftwareReport struct {
 	// Kept 卸载时保留了数据的 Ferry 软件（可以恢复）；LastInstall 最近一次安装软件的结果
 	Kept        []KeptSoftware `json:"kept,omitempty"`
 	LastInstall *SwLastInstall `json:"lastInstall,omitempty"`
+	// Took 服务器上各步用了多少毫秒（刷新慢时看慢在哪）
+	Took map[string]int64 `json:"took,omitempty"`
 }
 
 // OSInfo 服务器的系统（/etc/os-release）。
@@ -1055,6 +1061,9 @@ type Software struct {
 	Locations  []SoftwareLocation `json:"locations,omitempty"` // 容器在主机上的位置
 	// Web 能在浏览器里打开的网页：控制台、管理面板、网站
 	Web []WebPanel `json:"web,omitempty"`
+	// Replaced 运行中的程序文件在它启动后被换掉了：replaced（升级、重装替换了，Version 是新文件的，重启后才生效）|
+	// deleted（程序文件已经删了）；没换为空
+	Replaced string `json:"replaced,omitempty"`
 }
 
 // HidePanelEntrances 去掉 1Panel、宝塔面板的安全入口（给 AI 看的时候：入口是防扫描的，不发给模型）。

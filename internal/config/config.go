@@ -405,8 +405,10 @@ type Static struct {
 	NginxInstance string   `yaml:"nginxInstance"` // 软件中预先安装的独立 nginx 实例。
 	Domains       []string `yaml:"domains"`       // 同一实例按域名托管多个站点；空为默认站点。
 	Link          string   `yaml:"link"`          // 可选：额外维护的链接（nginx root 指向它）
-	Reload        string   `yaml:"reload"`        // 可选：切换后执行，如 nginx -t && nginx -s reload
-	Health        Health   `yaml:"health"`
+	// SiteDir 服务器上已有站点（原来就有的 nginx / OpenResty，容器里的也行）的网站目录：每次部署把这一版的文件换进去，不改 nginx 配置
+	SiteDir string `yaml:"siteDir"`
+	Reload  string `yaml:"reload"` // 可选：切换后执行，如 nginx -t && nginx -s reload
+	Health  Health `yaml:"health"`
 
 	// Port 监听端口：8081，或 127.0.0.1:8081 只让本机访问
 	Port string `yaml:"port"`

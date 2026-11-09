@@ -401,6 +401,16 @@ func (f *File) normalize() error {
 					bad("%s：static.link %v", where, err)
 				}
 			}
+			if st.SiteDir != "" {
+				if st.Served() || st.Link != "" {
+					bad("%s：static.siteDir（换已有站点的文件）不能和 static.port、static.link 一起用", where)
+				}
+				if !strings.Contains(st.SiteDir, "${") {
+					if err := proto.CheckSiteDir(st.SiteDir); err != nil {
+						bad("%s：static.siteDir %v", where, err)
+					}
+				}
+			}
 			if st.Served() {
 				checkServedStatic(f, a, where, units, bad)
 			} else {

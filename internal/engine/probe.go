@@ -43,6 +43,7 @@ type ProbeResult struct {
 	Javas          []ProbeJava              `json:"javas"`
 	Nginx          string                   `json:"nginx"` // 服务器上已有的 nginx；空 = 没有
 	NginxInstances []proto.SoftwareInstance `json:"nginxInstances"`
+	Sites          []proto.NginxSite        `json:"sites,omitempty"` // 已有 nginx / OpenResty 里的站点
 	RunAsOK        bool                     `json:"runAsOK"`
 	Checks         []ProbeCheck             `json:"checks"`
 }
@@ -112,7 +113,7 @@ func (e *Engine) Probe(target string, r ProbeRequest) (*ProbeResult, error) {
 	}
 	p := parseProbe(t, r, lines)
 	if p.Priv == "root" || p.Priv == "sudo" {
-		addSystemNginx(p, func(cmd string, timeout time.Duration) (string, error) {
+		run := func(cmd string, timeout time.Duration) (string, error) {
 			if p.Priv == "sudo" {
 				cmd = "sudo -n sh -c " + shQuote(cmd)
 			}
@@ -127,7 +128,10 @@ func (e *Engine) Probe(target string, r ProbeRequest) (*ProbeResult, error) {
 				return "", fmt.Errorf("命令退出码 %d：%s", res.Code, strings.TrimSpace(res.Stderr))
 			}
 			return strings.Join(out, "\n") + "\n", nil
-		})
+		}
+		addSystemNginx(p, run)
+		// 已有的 nginx / OpenResty（容器里的也算）里的站点：前端可以只换它网站目录里的文件
+		p.Sites, _ = agent.DiscoverNginxSites(run)
 	}
 	return p, nil
 }

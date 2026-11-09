@@ -29,6 +29,10 @@ type AppChange struct {
 	FilesRemoved []string `json:"filesRemoved,omitempty"`
 	// Keep 部署时保留的（artifact.keep）在服务器上的情况和这次会怎么做
 	Keep []KeepItemReport `json:"keep,omitempty"`
+	// Runtime 这次按什么运行（给人看的）：Ferry 自带的 Nginx、共用的 Nginx、已有站点的网站目录、JDK……
+	Runtime string `json:"runtime,omitempty"`
+	// Ports 要用的端口已经被别的程序占着（部署会在切换时失败）
+	Ports []proto.PortConflict `json:"ports,omitempty"`
 }
 
 // localApp 一个应用这次要部署的：生成的单元文件、附带文件的 sha256。
@@ -287,7 +291,16 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 	}
 	var rels []proto.AppReleases
 	var keeps []proto.KeepScan
+	var busy []proto.PortConflict
+	specOf := map[string]proto.AppSpec{}
 	err = e.withSession(target, names, func(s *session, specs []proto.AppSpec) error {
+		for _, sp := range specs {
+			specOf[sp.Name] = sp
+		}
+		// 端口有没有被别的程序占着（读不到——服务器上的组件太旧等——不影响看改动）
+		if err := s.callData("portcheck", &proto.Request{Apps: specs}, &busy); err != nil {
+			busy = nil
+		}
 		if err := s.callData("releases", &proto.Request{Apps: specs, Detail: true}, &rels); err != nil {
 			return err
 		}
@@ -310,6 +323,14 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 	}
 	cs := changesFrom(git, rels, localApps(e.File, t, apps))
 	for i := range cs {
+		if sp, ok := specOf[cs[i].App]; ok {
+			cs[i].Runtime = runtimeDesc(sp)
+		}
+		for _, b := range busy {
+			if b.App == cs[i].App {
+				cs[i].Ports = append(cs[i].Ports, b)
+			}
+		}
 		for _, ks := range keeps {
 			if ks.App != cs[i].App {
 				continue
@@ -322,4 +343,46 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 		}
 	}
 	return cs, nil
+}
+
+// runtimeDesc 应用这次按什么运行（审阅部署时给人看）。原生程序没有可说的，返回空。
+func runtimeDesc(s proto.AppSpec) string {
+	switch s.Type {
+	case proto.TypeStatic:
+		switch {
+		case s.SiteDir != "":
+			return "只换服务器上已有站点网站目录里的文件：" + s.SiteDir + "（不改 nginx 配置）"
+		case s.NginxInstance == proto.SystemNginxInstance:
+			return "服务器上的系统 Nginx（nginx.service）托管，端口 " + s.SitePort
+		case s.NginxInstance != "":
+			return "共用的 Nginx 实例 " + s.NginxInstance + " 托管，端口 " + s.SitePort
+		case s.Unit != "":
+			v := "最新稳定版"
+			if m := regexp.MustCompile(`^nginx-(.+)$`).FindStringSubmatch(s.RuntimeNginx); m != nil {
+				v = m[1] + " 系列"
+			}
+			return fmt.Sprintf("Ferry 自带的 Nginx（%s，服务器上没有时先下载），单独运行这个站点（%s），端口 %s", v, s.Unit, s.SitePort)
+		case s.Link != "":
+			return "只放文件：" + s.Link + " 指向当前版本，由服务器上已有的 nginx 提供"
+		}
+		return "只放文件，由服务器上已有的 nginx 提供"
+	case proto.TypeJava:
+		switch {
+		case s.RuntimeVersion != "":
+			return "Ferry 提供的 JDK " + s.RuntimeVersion + "（服务器上没有时先下载）"
+		case s.RuntimeJava > 0:
+			return fmt.Sprintf("Ferry 提供的 JDK %d（服务器上没有时先下载）", s.RuntimeJava)
+		case s.Java != "":
+			return "服务器上的 Java：" + s.Java
+		}
+	case proto.TypePython, proto.TypeNode, proto.TypeDotnet:
+		for _, line := range strings.Split(s.UnitText, "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart="); ok {
+				if f := strings.Fields(strings.TrimLeft(v, "-@+!:")); len(f) > 0 {
+					return "服务器上的程序：" + f[0]
+				}
+			}
+		}
+	}
+	return ""
 }

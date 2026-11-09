@@ -817,6 +817,18 @@ func (a *Agent) switchStatic(s *proto.AppSpec, id, prev string) (string, string)
 				a.info(proto.EvSwitch, s.Name, "%s → %s", s.Link, want)
 			}
 		}
+		if s.SiteDir != "" {
+			if target != "" {
+				if err := a.publishSiteDir(s, a.runningDir(s.Name)); err != nil {
+					return err
+				}
+			} else if _, ok := a.readSiteDirRecord(s.Name); ok {
+				// 第一次部署失败：网站目录换回接管前的
+				if err := a.restoreSiteDir(s); err != nil {
+					return err
+				}
+			}
+		}
 		if s.Reload != "" {
 			out, err := a.Sys.Shell(s.Reload, 60*time.Second)
 			if err != nil {

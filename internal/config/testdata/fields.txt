@@ -108,6 +108,7 @@ apps.[].static.port
 apps.[].static.proxy
 apps.[].static.reload
 apps.[].static.server
+apps.[].static.siteDir
 apps.[].static.spa
 apps.[].type
 apps.[].vars
@@ -154,6 +155,7 @@ targets.*.appRuntimes.*.nginxInstance
 targets.*.appRuntimes.*.node
 targets.*.appRuntimes.*.port
 targets.*.appRuntimes.*.python
+targets.*.appRuntimes.*.siteDir
 targets.*.apps
 targets.*.arch
 targets.*.auth

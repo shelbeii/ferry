@@ -9,7 +9,8 @@ import { diffHunks } from '../editor/configDoc'
 import type { DeploymentRequest } from '../editor/appSetup'
 import LoadingBlock from './LoadingBlock.vue'
 
-const props=defineProps<{config:string;target:string;app:string}>()
+// prefer：打开时先选中的已有站点（网站目录），部署审阅里「改成更新这个站点的文件」用
+const props=defineProps<{config:string;target:string;app:string;prefer?:string}>()
 const emit=defineEmits<{close:[];saved:[deployment?:DeploymentRequest];versions:[]}>()
 const visible=ref(true)
 const loading=ref(true)
@@ -31,7 +32,8 @@ async function load() {
     const [config,choices]=await reads.run('choices',signal=>Promise.all([readConfig(props.config),readCall<AppRuntimeChoices>(['app-runtimes',props.target,props.app,'-c',props.config],signal)]))
     if(disposed||token!==seq)return
     original.value=config;data.value=choices
-    selected.value=choices.choices.find((choice)=>choice.current && !choice.disabled)?.id??''
+    const preferred=props.prefer?choices.choices.find((choice)=>choice.site&&choice.path===props.prefer&&!choice.disabled):undefined
+    selected.value=preferred?.id??choices.choices.find((choice)=>choice.current && !choice.disabled)?.id??''
     port.value=choices.port??''
   } catch(e) {if(!disposed&&token===seq)error.value=(e as Error).message}
   finally{if(!disposed&&token===seq)loading.value=false}
@@ -46,6 +48,10 @@ const draft=computed(()=>{
 const diff=computed(()=>draft.value.text?diffHunks(original.value.replace(/\r\n/g,'\n'),draft.value.text.replace(/\r\n/g,'\n')):[])
 const canSave=computed(()=>!!data.value?.canSwitch&&!!choice.value&&!choice.value.disabled&&!draft.value.error&&!!draft.value.text&&draft.value.text!==original.value&&!loading.value&&!saving.value)
 function label(item:AppRuntimeChoice){return item.version?.split('\n')[0]||item.path}
+/** 名称下面的说明：已有站点的第一行（是哪个 nginx）已经当名称了 */
+function detail(item:AppRuntimeChoice){return item.site?item.version?.split('\n').slice(1).join('\n')??'':item.version??''}
+const hasSites=computed(()=>!!data.value?.choices.some((item)=>item.site))
+const siteChosen=computed(()=>!!choice.value?.site)
 async function save(deploy:boolean) {
   if(!canSave.value)return
   saving.value=true;error.value=''
@@ -75,11 +81,16 @@ async function save(deploy:boolean) {
         <p v-for="(note,index) in data.notes??[]" :key="index" class="muted small">{{ note }}</p>
         <el-radio-group v-if="data.choices.length" v-model="selected" class="runtime-choices" :disabled="!data.canSwitch || saving">
           <el-radio v-for="item in data.choices" :key="item.id" :value="item.id" :disabled="!!item.disabled" class="runtime-choice">
-            <span class="choice-body"><span class="choice-heading"><strong>{{ label(item) }}</strong><el-tag v-if="item.current" size="small" type="success">当前</el-tag><el-tag size="small" type="info">{{ item.source }}</el-tag></span><span class="mono choice-path">{{ item.path }}</span><span v-if="item.unit" class="muted small">{{ item.unit }} · {{ item.state }}</span><span v-if="item.version" class="muted small choice-version">{{ item.version }}</span><span v-if="item.disabled" class="ev-warn small">{{ item.disabled }}</span></span>
+            <span class="choice-body"><span class="choice-heading"><strong>{{ label(item) }}</strong><el-tag v-if="item.current" size="small" type="success">当前</el-tag><el-tag size="small" type="info">{{ item.source }}</el-tag></span><span class="mono choice-path">{{ item.path }}</span><span v-if="item.unit" class="muted small">{{ item.unit }} · {{ item.state }}</span><span v-if="detail(item)" class="muted small choice-version">{{ detail(item) }}</span><span v-if="item.site?.owner" class="muted small">目录属主 {{ item.site.owner }}</span><span v-if="item.disabled" class="ev-warn small">{{ item.disabled }}</span></span>
           </el-radio>
         </el-radio-group>
         <el-empty v-else-if="data.canSwitch" description="没有检测到可用的运行环境" :image-size="60" />
-        <el-form v-if="data.canSwitch && data.type==='static'" label-width="100px" class="site-port"><el-form-item label="网站端口"><div class="full"><el-input v-model="port" placeholder="如 8081 或 127.0.0.1:8081" /><div class="muted small">不同 Nginx 实例不能同时占用相同地址和端口；原端口被其他站点共用时，请改用空闲端口。</div></div></el-form-item></el-form>
+        <p v-if="hasSites && !siteChosen" class="muted small">标着「已有站点」的是服务器上原来就有的 nginx / OpenResty（1Panel、宝塔、容器里的也算）里的站点：选它，部署时只把每一版的文件换进它的网站目录，不改它的配置。</p>
+        <el-alert v-if="siteChosen && choice?.site" type="info" :closable="false" show-icon class="site-port">
+          <template #title>部署时把每一版的文件换进 <span class="mono">{{ choice.path }}</span>，不改 {{ choice.site.server }}的配置，也不重启它。</template>
+          <div class="small">第一次部署前，目录里原来的文件会备份到服务器上 Ferry 的应用目录：部署失败自动换回去，以后也能在「版本」里「回到接管前」。<template v-if="choice.site.ports?.length && !choice.site.shared">部署后检查 {{ choice.site.ports[0] }} 端口的首页能打开。</template><template v-else-if="choice.site.shared">这个端口上还有别的站点（按域名区分），部署后不检查首页；需要时在配置里写 static.health。</template></div>
+        </el-alert>
+        <el-form v-if="data.canSwitch && data.type==='static' && !siteChosen" label-width="100px" class="site-port"><el-form-item label="网站端口"><div class="full"><el-input v-model="port" placeholder="如 8081 或 127.0.0.1:8081" /><div class="muted small">不同 Nginx 实例不能同时占用相同地址和端口；原端口被其他站点共用时，请改用空闲端口。</div></div></el-form-item></el-form>
         <p v-if="data.canSwitch" class="muted small">只修改 {{ target }} 上 {{ app }} 的运行环境。保存配置后，重新部署才会生效；“保存并部署”会打开部署审阅，并使用当前本地产物，保留健康检查与失败回滚。</p>
         <el-collapse v-if="diff.length" class="config-diff"><el-collapse-item title="查看配置修改" name="diff"><pre class="mono"><template v-for="(h,index) in diff" :key="index"><span v-for="(line,lineIndex) in h.lines" :key="lineIndex" :class="line.t==='+'?'added':line.t==='-'?'removed':''">{{ line.t }} {{ line.text }}{{ '\n' }}</span></template></pre></el-collapse-item></el-collapse>
       </template>

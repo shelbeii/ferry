@@ -32,9 +32,11 @@ type ServerInfo struct {
 type ServerCPU struct {
 	Model string `json:"model"`
 	Cores int    `json:"cores"` // 逻辑 CPU 数
-	// Usage 为两次 /proc/stat（间隔约一秒）的差值；nil 表示采样不可用。
-	Usage *float64  `json:"usage"`
-	Load  []float64 `json:"load"` // 1 / 5 / 15 分钟平均负载，不是百分比
+	// Usage 为两次 /proc/stat 的差值：第一次读时在服务器上间隔约一秒读两次；之后和上次读到的比（这段时间的平均）。nil 表示采样不可用。
+	Usage *float64 `json:"usage"`
+	// Window Usage 是多少秒内的平均
+	Window float64   `json:"window,omitempty"`
+	Load   []float64 `json:"load"` // 1 / 5 / 15 分钟平均负载，不是百分比
 }
 
 type ServerMemory struct {
@@ -86,7 +88,7 @@ printf 'virtualization\t'; systemd-detect-virt 2>/dev/null || true
 echo @@os
 cat /etc/os-release 2>/dev/null || cat /usr/lib/os-release 2>/dev/null
 echo @@cpuinfo
-cat /proc/cpuinfo 2>/dev/null
+grep -m 3 -E '^(model name|Hardware|Processor)[[:space:]]*:' /proc/cpuinfo 2>/dev/null
 echo @@cpumodel
 lscpu 2>/dev/null
 echo @@memory
@@ -95,9 +97,11 @@ echo @@load
 cat /proc/loadavg 2>/dev/null
 echo @@cpu1
 grep '^cpu' /proc/stat 2>/dev/null
+if [ "$FERRY_CPU_PREV" != 1 ]; then
 sleep 1
 echo @@cpu2
 grep '^cpu' /proc/stat 2>/dev/null
+fi
 echo @@disks
 if command -v timeout >/dev/null 2>&1; then timeout 8 df -a -P -T -k 2>/dev/null; else df -a -P -T -k 2>/dev/null; fi
 [ $? = 0 ] || echo '@@note 部分挂载点的容量无法读取（可能未挂载、无权限或网络文件系统超时）'
@@ -108,13 +112,24 @@ ip -o address show 2>/dev/null
 echo @@end
 `
 
+// cpuPrevMax 上次读到的 CPU 计数在这么久以内的，这次直接和它比，不用在服务器上等一秒再读一次。
+const cpuPrevMax = 10 * time.Minute
+
 func (e *Engine) ServerInfo(target string) (*ServerInfo, error) {
 	var out *ServerInfo
 	err := e.withConn(target, func(s *session) error {
 		ctx, cancel := context.WithTimeout(e.ctx(), 25*time.Second)
 		defer cancel()
+		prev, prevAt := s.cpuSample()
+		age := time.Since(prevAt)
+		cmd := "sh -s"
+		if prev == nil || age < time.Second || age > cpuPrevMax {
+			prev = nil
+		} else {
+			cmd = "FERRY_CPU_PREV=1 sh -s"
+		}
 		var lines []string
-		res, err := s.c.RunContext(ctx, "sh -s", []byte(serverInfoScript), func(line string) { lines = append(lines, line) })
+		res, err := s.c.RunContext(ctx, cmd, []byte(serverInfoScript), func(line string) { lines = append(lines, line) })
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return errors.New("读取服务器信息超时，请稍后刷新")
@@ -124,13 +139,24 @@ func (e *Engine) ServerInfo(target string) (*ServerInfo, error) {
 		if res.Code != 0 {
 			return fmt.Errorf("读取服务器信息失败：%s", strings.TrimSpace(res.Stderr))
 		}
-		out, err = parseServerInfo(lines)
+		var sample []string
+		out, sample, err = parseServerInfoWith(lines, prev, age)
+		if err == nil {
+			s.setCPUSample(sample)
+		}
 		return err
 	})
 	return out, err
 }
 
 func parseServerInfo(lines []string) (*ServerInfo, error) {
+	r, _, err := parseServerInfoWith(lines, nil, 0)
+	return r, err
+}
+
+// parseServerInfoWith 解析采样输出。prev 不为空时，这次只读了一次 CPU 计数（cpu1），和 prev（age 之前读的）比；
+// 返回这次最后读到的 CPU 计数，下次用。
+func parseServerInfoWith(lines []string, prev []string, age time.Duration) (*ServerInfo, []string, error) {
 	sections := map[string][]string{}
 	var section string
 	r := &ServerInfo{Mounts: []ServerMount{}, Addresses: []ServerAddr{}}
@@ -168,7 +194,7 @@ func parseServerInfo(lines []string) (*ServerInfo, error) {
 		}
 	}
 	if r.Kernel == "" || section != "end" {
-		return nil, errors.New("服务器信息不完整，请确认服务器是 Linux 并重新刷新")
+		return nil, nil, errors.New("服务器信息不完整，请确认服务器是 Linux 并重新刷新")
 	}
 	os := map[string]string{}
 	for _, line := range sections["os"] {
@@ -204,13 +230,19 @@ func parseServerInfo(lines []string) (*ServerInfo, error) {
 			}
 		}
 	}
-	for _, line := range sections["cpu2"] {
+	before, after, window := sections["cpu1"], sections["cpu2"], 1.0
+	if prev != nil {
+		before, after, window = prev, sections["cpu1"], math.Round(age.Seconds())
+	}
+	for _, line := range after {
 		f := strings.Fields(line)
 		if len(f) > 0 && len(f[0]) > 3 && strings.HasPrefix(f[0], "cpu") {
 			r.CPU.Cores++
 		}
 	}
-	r.CPU.Usage = serverCPUUsage(sections["cpu1"], sections["cpu2"])
+	if r.CPU.Usage = serverCPUUsage(before, after); r.CPU.Usage != nil {
+		r.CPU.Window = window
+	}
 	if r.CPU.Usage == nil {
 		r.Notes = append(r.Notes, "未能读取 CPU 使用率")
 	}
@@ -280,7 +312,7 @@ func parseServerInfo(lines []string) (*ServerInfo, error) {
 			r.Addresses = append(r.Addresses, ServerAddr{Interface: strings.TrimSuffix(f[1], ":"), Family: f[2], Address: f[3]})
 		}
 	}
-	return r, nil
+	return r, after, nil
 }
 
 func serverCPUUsage(before, after []string) *float64 {

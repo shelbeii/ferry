@@ -106,6 +106,8 @@ func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
 		return a.appInfo()
 	case "appruntimes":
 		return a.appRuntimes()
+	case "portcheck":
+		return a.portCheck()
 	case "releases":
 		return a.releases()
 	case "keepscan":
@@ -223,6 +225,14 @@ func validateApp(s *proto.AppSpec) error {
 		}
 		if s.Link != "" && !filepath.IsAbs(s.Link) {
 			return fmt.Errorf("%s：link 必须是绝对路径", s.Name)
+		}
+		if s.SiteDir != "" {
+			if s.Unit != "" || s.NginxInstance != "" || s.Link != "" {
+				return fmt.Errorf("%s：已有站点的网站目录（siteDir）不能和 port、nginxInstance、link 一起用", s.Name)
+			}
+			if err := proto.CheckSiteDir(s.SiteDir); err != nil {
+				return fmt.Errorf("%s：%v", s.Name, err)
+			}
 		}
 		if s.Unit != "" { // 由 Ferry 的 nginx 运行
 			if !strings.HasSuffix(s.Unit, ".service") || !reSafe.MatchString(s.Unit) {

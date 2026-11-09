@@ -375,6 +375,15 @@ function managerTip(m: string): string {
   return `由 ${m} 启动`
 }
 
+// 运行中的程序文件在它启动后被换掉了
+function replacedLabel(s: Software): string {
+  return s.replaced === 'deleted' ? '程序已删除' : '重启后生效'
+}
+function replacedTip(s: Software): string {
+  if (s.replaced === 'deleted') return '程序文件在它启动后被删掉了：正在运行的是删掉前的程序，停掉后就启动不了了'
+  return `程序文件在它启动后被换掉了（升级或重装）：${s.version ? `版本 ${s.version} 是新文件的，` : ''}正在运行的还是旧的，重启后才是新版本`
+}
+
 function stateTip(s: Software): string {
   const parts: string[] = []
   if (s.since) parts.push(`启动于 ${time(s.since)}`)
@@ -450,6 +459,9 @@ function listenTip(l: string): string {
               <el-tooltip :show-after="HOVER_DELAY" v-if="row.manager" :content="managerTip(row.manager)" placement="top">
                 <el-tag size="small" type="info" class="ml">{{ row.manager }}</el-tag>
               </el-tooltip>
+              <el-tooltip :show-after="HOVER_DELAY" v-if="row.replaced" :content="replacedTip(row)" placement="top">
+                <el-tag size="small" type="warning" class="ml">{{ replacedLabel(row) }}</el-tag>
+              </el-tooltip>
             </div>
             <el-tooltip :show-after="HOVER_DELAY" :content="stateTip(row)" placement="top">
               <span class="state" :class="row.state === 'running' ? 'ok' : 'off'"><span class="dot" />{{ row.state === 'running' ? '运行中' : '已停止' }}</span>
@@ -510,6 +522,9 @@ function listenTip(l: string): string {
             <span class="name">{{ row.name }}</span>
             <el-tooltip :show-after="HOVER_DELAY" v-if="row.manager" :content="managerTip(row.manager)" placement="top">
               <el-tag size="small" type="info" class="ml">{{ row.manager }}</el-tag>
+            </el-tooltip>
+            <el-tooltip :show-after="HOVER_DELAY" v-if="row.replaced" :content="replacedTip(row)" placement="top">
+              <el-tag size="small" type="warning" class="ml">{{ replacedLabel(row) }}</el-tag>
             </el-tooltip>
           </template>
         </el-table-column>

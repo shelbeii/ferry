@@ -22,13 +22,19 @@ export function visibleMounts(mounts: ServerMount[], temporary: boolean): Server
   return mounts.filter((m) => temporary || !m.temporary || m.path === '/')
 }
 
+// CPU 使用率是多久内的平均：第一次读约 1 秒，之后是和上次读的这段时间
+function cpuWindow(sec?: number): string {
+  if (!sec || sec <= 1) return '约 1 秒内平均'
+  return sec < 90 ? `近 ${Math.round(sec)} 秒平均` : `近 ${Math.round(sec / 60)} 分钟平均`
+}
+
 export function serverInfoCards(r?: ServerInfo) {
   const mem = r ? usagePercent(r.memory.used, r.memory.total) : undefined
   const swap = r ? usagePercent(r.swap.used, r.swap.total) : undefined
   const disks = r ? visibleMounts(r.mounts, false).filter((m) => m.usage != null) : []
   const highest = disks.reduce<ServerMount | undefined>((a, b) => !a || b.usage! > a.usage! ? b : a, undefined)
   return [
-    { label: 'CPU 使用率', num: percentText(r?.cpu.usage), cls: usageClass(r?.cpu.usage), sub: r?.cpu.cores ? `${r.cpu.cores} 个逻辑 CPU · 约 1 秒采样` : 'CPU 信息未读取' },
+    { label: 'CPU 使用率', num: percentText(r?.cpu.usage), cls: usageClass(r?.cpu.usage), sub: r?.cpu.cores ? `${r.cpu.cores} 个逻辑 CPU · ${cpuWindow(r.cpu.window)}` : 'CPU 信息未读取' },
     { label: '内存使用率', num: percentText(mem), cls: usageClass(mem), sub: r?.memory.total ? `${capacity(r.memory.used)} / ${capacity(r.memory.total)}` : '内存信息未读取' },
     { label: 'Swap 使用率', num: r?.memory.total && !r.swap.total ? '未启用' : percentText(swap), cls: usageClass(swap), sub: r?.swap.total ? `${capacity(r.swap.used)} / ${capacity(r.swap.total)}` : '交换空间' },
     { label: '磁盘最高使用率', num: percentText(highest?.usage), cls: usageClass(highest?.usage), sub: highest?.path ?? '挂载点信息未读取', title: highest?.path },

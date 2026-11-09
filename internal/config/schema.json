@@ -352,6 +352,7 @@
          [
           "java",
           "nginxInstance",
+          "siteDir",
           "python",
           "node",
           "dotnet"
@@ -395,9 +396,16 @@
           "type": "字符串"
          },
          {
+          "name": "siteDir",
+          "label": "已有站点的网站目录",
+          "doc": "前端站点改成只换服务器上已有站点（nginx / OpenResty，容器里的也行）网站目录里的文件，不改 nginx 配置",
+          "kind": "str",
+          "type": "字符串"
+         },
+         {
           "name": "port",
           "label": "网站端口",
-          "doc": "切换 Nginx 时可同时调整本站点端口",
+          "doc": "切换 Nginx 时可同时调整本站点端口；用 siteDir 时是已有站点的端口（部署后检查首页能打开）",
           "kind": "str",
           "type": "字符串"
          }
@@ -1421,6 +1429,14 @@
          "name": "reload",
          "label": "切换后执行",
          "doc": "用 sh -c 执行，失败则切回，如 nginx -t && nginx -s reload",
+         "kind": "str",
+         "type": "字符串",
+         "unless": "port"
+        },
+        {
+         "name": "siteDir",
+         "label": "已有站点的网站目录",
+         "doc": "服务器上原来就有的 nginx / OpenResty（1Panel、宝塔、容器里的也行）在用的网站目录（服务器上的路径）：每次部署把这一版的文件换进去，不改 nginx 的配置；第一次部署前备份原来的文件，可以「回到接管前」。不能和 port、link 一起用",
          "kind": "str",
          "type": "字符串",
          "unless": "port"

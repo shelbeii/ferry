@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -147,6 +148,7 @@ func TestSoftwareScan(t *testing.T) {
 		`{"ID":"` + appID + `","Names":"myapp","Image":"myapp:1.0","Status":"Up 2 hours","Ports":"","Labels":""}`,
 	}, "\n")
 	var ran []string
+	var ranMu sync.Mutex // 取版本、读容器、读系统服务同时进行
 	outputs := map[string]string{
 		"command -v docker":                             "/usr/bin/docker",
 		"docker ps -a --no-trunc --format '{{json .}}'": ps + "\n",
@@ -164,7 +166,9 @@ func TestSoftwareScan(t *testing.T) {
 		proc:    fp.dir,
 		unitDir: unitDir,
 		run: func(cmd string, _ time.Duration) (string, error) {
+			ranMu.Lock()
 			ran = append(ran, cmd)
+			ranMu.Unlock()
 			if strings.HasPrefix(cmd, "rpm -qf") {
 				if strings.Contains(cmd, "/usr/libexec/tomcat/server") {
 					return "9.0.62\n", nil

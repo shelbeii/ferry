@@ -15,9 +15,11 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -667,7 +669,11 @@ func listeningFromProc(proc string, pid int) []string {
 	if pid <= 0 {
 		return nil
 	}
-	pids := procTree(proc, pid)
+	return listeningOf(proc, pid, procTree(proc, pid))
+}
+
+// listeningOf pids（pid 及其子孙进程）的 socket 里处于监听状态的地址；按 pid 所在的网络查 net/tcp、tcp6。
+func listeningOf(proc string, pid int, pids map[int]bool) []string {
 	inodes := map[string]bool{}
 	for p := range pids {
 		fds, _ := os.ReadDir(filepath.Join(proc, strconv.Itoa(p), "fd"))
@@ -694,9 +700,14 @@ func (realSystem) ProcArgs(pid int) [][]string {
 	if pid <= 0 {
 		return nil
 	}
+	return procArgs("/proc", procTree("/proc", pid))
+}
+
+// procArgs 这些进程的命令行。
+func procArgs(proc string, pids map[int]bool) [][]string {
 	var out [][]string
-	for p := range procTree("/proc", pid) {
-		b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(p), "cmdline"))
+	for p := range pids {
+		b, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(p), "cmdline"))
 		if err == nil && len(b) > 0 {
 			out = append(out, strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"))
 		}
@@ -705,10 +716,14 @@ func (realSystem) ProcArgs(pid int) [][]string {
 }
 
 // procTree 进程 pid 及其子孙进程（包装脚本、fork 出的工作进程）。
+// 要把全部进程读一遍：同一次查看里要找多个进程的，用 procTable 共用一份。
 func procTree(proc string, pid int) map[int]bool {
-	pids := map[int]bool{pid: true}
-	// 子孙进程：按父进程号一层层找（包装脚本、fork 出的工作进程）
-	parent := map[int]int{}
+	return descendants(readChildren(proc), pid)
+}
+
+// readChildren 全部进程的子进程（父进程号 → 子进程号）。
+func readChildren(proc string) map[int][]int {
+	children := map[int][]int{}
 	ents, _ := os.ReadDir(proc)
 	for _, e := range ents {
 		n, err := strconv.Atoi(e.Name())
@@ -720,26 +735,104 @@ func procTree(proc string, pid int) map[int]bool {
 			continue
 		}
 		// stat：pid (comm) state ppid …；comm 里可能有空格和括号，取最后一个 ) 之后
-		rest := string(b)
-		if i := strings.LastIndexByte(rest, ')'); i >= 0 {
-			rest = rest[i+1:]
-		}
-		if f := strings.Fields(rest); len(f) >= 2 {
+		if f := statFields(string(b)); len(f) >= 2 {
 			if pp, err := strconv.Atoi(f[1]); err == nil {
-				parent[n] = pp
+				children[pp] = append(children[pp], n)
 			}
 		}
 	}
-	for changed := true; changed; {
-		changed = false
-		for c, pp := range parent {
-			if pids[pp] && !pids[c] {
+	return children
+}
+
+// descendants pid 及其子孙进程：按父进程号一层层往下找。
+func descendants(children map[int][]int, pid int) map[int]bool {
+	pids := map[int]bool{pid: true}
+	for stack := []int{pid}; len(stack) > 0; {
+		p := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, c := range children[p] {
+			if !pids[c] {
 				pids[c] = true
-				changed = true
+				stack = append(stack, c)
 			}
 		}
 	}
 	return pids
+}
+
+// procTable 同一次查看里共用的进程父子关系：第一次用到时把 /proc 读一遍，之后找子孙进程不再重读。
+// 进程很多的服务器（上万个没回收的僵尸进程）上，每找一个进程都读一遍全部进程要好几秒。
+type procTable struct {
+	proc     string
+	once     sync.Once
+	children map[int][]int
+}
+
+func (t *procTable) tree(pid int) map[int]bool {
+	t.once.Do(func() { t.children = readChildren(t.proc) })
+	return descendants(t.children, pid)
+}
+
+// snapSys 共用一份进程表的 System：只读的查看（应用状态）里，Listening、ProcArgs 不再每次读全部进程。
+type snapSys struct {
+	System
+	t *procTable
+}
+
+func (s snapSys) Listening(pid int) []string {
+	if pid <= 0 {
+		return nil
+	}
+	return listeningOf(s.t.proc, pid, s.t.tree(pid))
+}
+
+func (s snapSys) ProcArgs(pid int) [][]string {
+	if pid <= 0 {
+		return nil
+	}
+	return procArgs(s.t.proc, s.t.tree(pid))
+}
+
+// shareProcs 这次查看里共用一份进程表（只在真实系统上；测试的假系统不变）；返回恢复原样的函数。
+// 只用于只读的查看：部署、启停时进程在变，要读最新的。
+func (a *Agent) shareProcs() func() {
+	if _, ok := a.Sys.(realSystem); !ok {
+		return func() {}
+	}
+	saved := a.Sys
+	a.Sys = snapSys{System: saved, t: &procTable{proc: "/proc"}}
+	return func() { a.Sys = saved }
+}
+
+// eachParallel 同时做 n 件互不相干的事（最多 limit 件一起），都做完才返回。
+// 其中一件出现内部错误（panic）时，等其余的做完，再在调用方 panic，由 Run 统一处理。
+func eachParallel(n, limit int, fn func(i int)) {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failed any
+	sem := make(chan struct{}, limit)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					if failed == nil {
+						failed = fmt.Sprintf("%v\n%s", r, debug.Stack())
+					}
+					mu.Unlock()
+				}
+			}()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
+	if failed != nil {
+		panic(failed)
+	}
 }
 
 // listenAddrs 从 /proc/net/tcp、tcp6 的内容里找出属于这些 socket 的监听地址。

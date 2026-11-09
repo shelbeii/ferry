@@ -9,8 +9,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -64,16 +67,22 @@ func (c *Client) ListDir(dir string) (string, []FileEntry, error) {
 		return dir, nil, fileErr("打开目录", dir, err)
 	}
 	out := make([]FileEntry, 0, len(infos))
+	var links []int
 	for _, fi := range infos {
 		e := FileEntry{Name: fi.Name(), Size: fi.Size(), Mode: fi.Mode().String(), Dir: fi.IsDir(), MTime: fi.ModTime()}
 		if fi.Mode()&fs.ModeSymlink != 0 {
 			e.Link = true
-			if st, err := s.Stat(path.Join(dir, fi.Name())); err == nil {
-				e.Dir, e.Size = st.IsDir(), st.Size()
-			}
+			links = append(links, len(out))
 		}
 		out = append(out, e)
 	}
+	// 链接指向的是目录还是文件：每个都要问一次服务器，同时问（/usr/lib64 这样的目录有几百个链接，一个个问要几十秒）
+	eachLimit(len(links), 32, func(i int) {
+		e := &out[links[i]]
+		if st, err := s.Stat(path.Join(dir, e.Name)); err == nil {
+			e.Dir, e.Size = st.IsDir(), st.Size()
+		}
+	})
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Dir != out[j].Dir {
 			return out[i].Dir
@@ -125,13 +134,48 @@ func (c *Client) ExistsRemote(paths []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	found := make([]bool, len(paths))
+	eachLimit(len(paths), 32, func(i int) {
+		_, err := s.Lstat(paths[i])
+		found[i] = err == nil
+	})
 	var out []string
-	for _, p := range paths {
-		if _, err := s.Lstat(p); err == nil {
+	for i, p := range paths {
+		if found[i] {
 			out = append(out, p)
 		}
 	}
 	return out, nil
+}
+
+// eachLimit 同时做 n 件事（最多 limit 件一起），都做完才返回。
+// 其中一件 panic 时等其余做完，再在调用方 panic（新开的 goroutine 里 panic 会让整个 ferry serve 退出）。
+func eachLimit(n, limit int, fn func(i int)) {
+	if n == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	var once sync.Once
+	var failed any
+	sem := make(chan struct{}, limit)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					once.Do(func() { failed = fmt.Sprintf("%v\n%s", r, debug.Stack()) })
+				}
+			}()
+			fn(i)
+		}()
+	}
+	wg.Wait()
+	if failed != nil {
+		panic(failed)
+	}
 }
 
 // TransferProgress 传输进度：当前文件（相对路径）、全部已传字节、全部字节。
@@ -177,40 +221,95 @@ func (c *Client) UploadTree(ctx context.Context, locals []string, dir string, pr
 			return fmt.Errorf("读取 %s：%w", l, err)
 		}
 	}
-	var done int64
+	// 先按顺序建目录（上级在前），再同时传几个文件：小文件多时，一个个传每个都要等好几个来回
+	var files []item
 	for _, it := range items {
 		if ctx.Err() != nil {
 			return ErrCanceled
 		}
-		if it.dir {
-			if err := s.MkdirAll(it.remote); err != nil {
-				return fileErr("新建文件夹", it.remote, err)
-			}
+		if !it.dir {
+			files = append(files, it)
 			continue
+		}
+		if err := s.MkdirAll(it.remote); err != nil {
+			return fileErr("新建文件夹", it.remote, err)
+		}
+	}
+	tr := newTransfer(ctx, total, progress)
+	defer tr.cancel()
+	eachLimit(len(files), transferParallel, func(i int) {
+		it := files[i]
+		if tr.ctx.Err() != nil {
+			return
 		}
 		mode := os.FileMode(0o644)
 		if st, err := s.Stat(it.remote); err == nil {
 			mode = st.Mode().Perm() // 覆盖时保留原来的权限
 		}
 		name := strings.TrimPrefix(strings.TrimPrefix(it.remote, dir), "/")
-		start := done
-		err := c.UploadContext(ctx, it.local, it.remote, mode, func(d, _ int64) {
-			if progress != nil {
-				progress(name, start+d, total)
-			}
+		var sent int64
+		err := c.UploadContext(tr.ctx, it.local, it.remote, mode, func(d, _ int64) {
+			tr.add(name, d-sent)
+			sent = d
 		})
 		if err != nil {
-			if errors.Is(err, ErrCanceled) {
-				return err
+			if !errors.Is(err, ErrCanceled) {
+				err = fileErr("上传", it.remote, err)
 			}
-			return fileErr("上传", it.remote, err)
+			tr.fail(err)
+			return
 		}
-		done += it.size
-		if progress != nil {
-			progress(name, done, total)
-		}
+		tr.add(name, it.size-sent)
+	})
+	return tr.result(ctx)
+}
+
+// transferParallel 传文件夹时同时传几个文件。
+const transferParallel = 8
+
+// transfer 同时传几个文件时的总进度和第一个错误。
+type transfer struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	total    int64
+	done     atomic.Int64
+	progress TransferProgress
+	mu       sync.Mutex
+	err      error
+}
+
+func newTransfer(ctx context.Context, total int64, progress TransferProgress) *transfer {
+	t := &transfer{total: total, progress: progress}
+	t.ctx, t.cancel = context.WithCancel(ctx)
+	return t
+}
+
+// add 又传了 n 字节（file 是正在传的文件）。
+func (t *transfer) add(file string, n int64) {
+	d := t.done.Add(n)
+	if t.progress != nil {
+		t.mu.Lock()
+		t.progress(file, d, t.total)
+		t.mu.Unlock()
 	}
-	return nil
+}
+
+// fail 记下第一个错误，停下其余的。
+func (t *transfer) fail(err error) {
+	t.mu.Lock()
+	if t.err == nil {
+		t.err = err
+	}
+	t.mu.Unlock()
+	t.cancel()
+}
+
+// result 都结束后：外面取消了是 ErrCanceled，否则是第一个错误。
+func (t *transfer) result(parent context.Context) error {
+	if parent.Err() != nil {
+		return ErrCanceled
+	}
+	return t.err
 }
 
 // DownloadTree 把远程的文件、目录（整个）下载到本机目录 dir 下；同名的覆盖。先写 .part，完整后改名。
@@ -265,36 +364,41 @@ func (c *Client) DownloadTree(ctx context.Context, remotes []string, dir string,
 			items = append(items, it)
 		}
 	}
-	var done int64
+	// 先建好本机的目录，再同时下载几个文件
+	var files []item
 	for _, it := range items {
 		if ctx.Err() != nil {
 			return ErrCanceled
 		}
-		if it.dir {
-			if err := os.MkdirAll(it.local, 0o755); err != nil {
-				return err
-			}
-			continue
+		dir := it.local
+		if !it.dir {
+			files = append(files, it)
+			dir = filepath.Dir(it.local)
 		}
-		if err := os.MkdirAll(filepath.Dir(it.local), 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
-		}
-		name := strings.TrimPrefix(strings.TrimPrefix(it.remote, path.Dir(remotesBase(remotes, it.remote))), "/")
-		start := done
-		n, err := c.downloadFile(ctx, it.remote, it.local, func(d int64) {
-			if progress != nil {
-				progress(name, start+d, total)
-			}
-		})
-		if err != nil {
-			return err
-		}
-		done += n
-		if progress != nil {
-			progress(name, done, total)
 		}
 	}
-	return nil
+	tr := newTransfer(ctx, total, progress)
+	defer tr.cancel()
+	eachLimit(len(files), transferParallel, func(i int) {
+		it := files[i]
+		if tr.ctx.Err() != nil {
+			return
+		}
+		name := strings.TrimPrefix(strings.TrimPrefix(it.remote, path.Dir(remotesBase(remotes, it.remote))), "/")
+		var got int64
+		n, err := c.downloadFile(tr.ctx, it.remote, it.local, func(d int64) {
+			tr.add(name, d-got)
+			got = d
+		})
+		if err != nil {
+			tr.fail(err)
+			return
+		}
+		tr.add(name, n-got)
+	})
+	return tr.result(ctx)
 }
 
 // remotesBase it 属于 remotes 里的哪一个（显示相对路径用）。

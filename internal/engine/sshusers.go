@@ -67,7 +67,10 @@ const sshScript = `echo "@@self $$"
 echo "@@now $(date +%s)"
 P=$(ps -ww -eo pid=,ppid=,etimes=,tty=,args= 2>/dev/null) || P=$(ps -ww -eo pid=,ppid=,etime=,tty=,args= 2>/dev/null)
 echo "@@ps"
-echo "$P"
+# 只发回 sshd 的进程和它们的子孙进程：服务器上进程很多时（上万个没回收的僵尸进程），全部发回来有好几 MB
+echo "$P" | awk '{ id[NR] = $1; pp[NR] = $2; l[NR] = $0; if ($5 ~ /^sshd/) k[$1] = 1 }
+END { do { c = 0; for (i = 1; i <= NR; i++) if (!(id[i] in k) && (pp[i] in k)) { k[id[i]] = 1; c = 1 } } while (c)
+  for (i = 1; i <= NR; i++) if (id[i] in k) print l[i] }' 2>/dev/null || echo "$P"
 K=$(echo "$P" | awk '{ n[NR] = $1; p[NR] = $2; a[NR] = $5; if ($5 ~ /^sshd/) s[$1] = 1 } END { for (i = 1; i <= NR; i++) if ((p[i] in s) && a[i] !~ /^sshd/) print "/proc/" n[i] "/environ" }')
 echo "@@env"
 [ -n "$K" ] && grep -a -s -o -m1 -H 'SSH_CONNECTION=[0-9A-Fa-f.:% ]*' $K

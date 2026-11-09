@@ -40,8 +40,12 @@ type poolEntry struct {
 
 type poolRef struct{ config, target string }
 
-// reuseCheckAfter 空闲超过这么久的连接，复用前先确认还通（keepalive 30 秒一次，期间断了未必知道）。
+// reuseCheckAfter 空闲超过这么久、最近 recentOK 以内也没确认过的连接，复用前先确认还通（keepalive 30 秒一次，期间断了未必知道）。
+// 桌面版开着项目页时每 10 秒量一次延迟，那次就确认过了，点操作时通常不用再多等一个来回。
 const reuseCheckAfter = 10 * time.Second
+
+// recentOK 这么久以内确认过连接通的，复用前不再确认（桌面版每 10 秒量一次延迟，留点余量）。
+const recentOK = 15 * time.Second
 
 // NewPool 创建连接池；idle 为 0 表示不因空闲断开。
 func NewPool(idle time.Duration) *Pool {
@@ -112,7 +116,8 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 			idleFor := time.Since(ent.lastUsed)
 			p.mu.Unlock()
 			ok := ent.cn.c.Alive()
-			if ok && (ent.cn.broken.Load() || idleFor > reuseCheckAfter) {
+			// 空闲久了先确认还通；最近 15 秒内保活、量延迟或执行命令时已经确认过的不用再确认（省一个来回）
+			if ok && (ent.cn.broken.Load() || idleFor > reuseCheckAfter && !ent.cn.c.OKWithin(recentOK)) {
 				ok = ent.cn.c.Ping(5*time.Second) == nil
 			}
 			if !ok {

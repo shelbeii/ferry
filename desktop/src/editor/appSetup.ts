@@ -1,4 +1,5 @@
 import type { Document } from 'yaml'
+import type { NginxSite } from '../ferry'
 import { append, hasAlias, keysAt, listAt, nodeAt, scalarAt, setList, setScalar } from './configDoc'
 
 export type AppType = 'java' | 'binary' | 'static' | 'python' | 'node' | 'dotnet'
@@ -6,6 +7,8 @@ export interface DeploymentRequest { apps: string[]; targets: string[] }
 export interface RuntimeProbe {
   javas?: { path: string; version: string; major: number }[] | null
   nginxInstances?: { name: string; unit: string; version?: string; hosting?: { system?: boolean; sites: string } }[] | null
+  /** 服务器上已有的 nginx / OpenResty（容器里的也算）里的站点 */
+  sites?: NginxSite[] | null
   checks: { level: string; text: string }[]
 }
 export interface AppSetup {
@@ -25,11 +28,16 @@ export interface AppSetup {
   exec: string
   env: string
   port: string
-  serve: 'installed' | 'standalone' | 'files'
+  /** site：只换服务器上已有站点网站目录里的文件 */
+  serve: 'installed' | 'standalone' | 'files' | 'site'
   instances: Record<string, string>
   domains: string
   spa: boolean
   proxies: { path: string; to: string }[]
+  /** serve 为 site 时：各服务器上选的已有站点的网站目录 */
+  sites?: Record<string, string>
+  /** serve 为 site 时：已有站点的端口（部署后检查首页能打开；空 = 不检查） */
+  sitePort?: string
 }
 
 export const lines = (text: string) => text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
@@ -51,6 +59,10 @@ export function setupError(doc: Document, f: AppSetup): string {
   if (f.build === '@inline' && !f.buildCommand.trim()) return '请填写构建命令'
   if (f.build && f.build !== '@inline' && !keysAt(doc, ['builds']).includes(f.build)) return '选择的构建已不存在，请重新选择'
   if (f.type === 'static') {
+    if (f.serve === 'site') {
+      if (f.targets.some((t) => !f.sites?.[t]?.startsWith('/'))) return '请为每台目标服务器选择已有的站点'
+      return ''
+    }
     if (f.serve !== 'files' && !portOK(f.port.trim())) return '网站端口应为 1～65535，或 地址:端口'
     if (f.serve === 'installed' && f.targets.some((t) => !f.instances[t])) return '请为每台目标服务器选择已安装的 Nginx'
     if (f.serve !== 'files') {
@@ -98,7 +110,12 @@ export function applyAppSetup(doc: Document, f: AppSetup): number {
   }
 
   if (f.type === 'static') {
-    if (f.serve !== 'files') {
+    if (f.serve === 'site') {
+      app.static = {
+        siteDir: perTarget('siteDir', f.sites ?? {}),
+        ...(f.sitePort ? { health: { http: `http://127.0.0.1:${f.sitePort}/` } } : {}),
+      }
+    } else if (f.serve !== 'files') {
       app.static = {
         port: f.port.trim(), spa: f.spa,
         ...(f.serve === 'installed' ? { nginxInstance: perTarget('nginx', f.instances) } : {}),

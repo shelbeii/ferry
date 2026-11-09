@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/captain/ferry/internal/proto"
@@ -91,6 +92,7 @@ type swProc struct {
 	unit      string   // 所在的 systemd 单元
 	container string   // 所在的 Docker 容器 ID
 	rule      int      // 认出的软件（swRules 下标），-1 = 不认识
+	deleted   bool     // 程序文件在进程启动后被删除或替换了（exe 显示 (deleted)）
 }
 
 // swScan 一次查找。依赖的系统操作都是字段，测试时换成假的。
@@ -104,23 +106,41 @@ type swScan struct {
 	instances []proto.SoftwareInstance // Ferry 装的软件
 	appUnits  map[string][3]string     // Ferry 部署的应用的单元：里面的进程属于应用，不算软件
 
-	procs   map[int]*swProc
-	hostNet string            // /proc/1/ns/net：判断容器是不是用主机网络
-	vers    map[string]string // 程序路径 → 版本（同一个程序只运行一次）
+	// cache 存在服务器上的版本缓存（程序文件没变就不再运行它取版本）；nil = 不用（测试）
+	cache *verCache
+	// exists 程序文件还在不在（进程的程序被删除时，分辨是升级替换了还是删掉了）；nil = 当作在
+	exists func(string) bool
+
+	procs    map[int]*swProc
+	children map[int][]int // 父进程号 → 子进程号（找子孙进程的端口，不用再读一遍 /proc）
+	hostNet  string        // /proc/1/ns/net：判断容器是不是用主机网络
+
+	mu   sync.Mutex
+	memo map[string]*verMemo // 版本、软件包版本：同一个程序这次只取一次（几个地方同时要时等第一个取完）
+}
+
+// verMemo 一个程序这次查到的版本。
+type verMemo struct {
+	once   sync.Once
+	v, raw string
 }
 
 func (a *Agent) software() int {
+	start := time.Now()
 	sc := &swScan{
 		proc:      "/proc",
 		unitDir:   a.Sys.UnitDir(),
 		run:       a.Sys.Shell,
 		unitProps: a.Sys.UnitProps,
 		readlink:  os.Readlink,
-		listening: func(pid int) []string { return listeningFromProc("/proc", pid) },
 		instances: a.instances(),
 		appUnits:  a.managedUnits(),
+		cache:     loadVerCache(filepath.Join(a.ferryDir(), "cache", "versions.json")),
+		exists:    func(p string) bool { _, err := os.Stat(p); return err == nil },
 	}
+	// listening 不设：扫描时用读进程时记下的父子关系找端口
 	rep := sc.scan()
+	sc.cache.save()
 	// 安装软件时用：服务器架构、已有的 JDK、各目录的剩余空间、已占用的端口
 	rep.Arch = goruntime.GOARCH
 	rep.OS = osInfo("/etc/os-release")
@@ -152,17 +172,37 @@ func (a *Agent) software() int {
 	}
 	sort.Ints(rep.Ports)
 	sort.Ints(rep.UDPPorts)
+	rep.Took["合计"] = time.Since(start).Milliseconds()
 	return a.result(proto.CodeOK, "", rep)
 }
 
 func (sc *swScan) scan() *proto.SoftwareReport {
-	rep := &proto.SoftwareReport{Items: []proto.Software{}}
-	sc.vers = map[string]string{}
+	rep := &proto.SoftwareReport{Items: []proto.Software{}, Took: map[string]int64{}}
+	step := time.Now()
+	took := func(name string) {
+		rep.Took[name] = time.Since(step).Milliseconds()
+		step = time.Now()
+	}
+	sc.memo = map[string]*verMemo{}
 	sc.readProcs()
 	sc.hostNet, _ = sc.readlink(filepath.Join(sc.proc, "1", "ns", "net"))
+	if sc.listening == nil {
+		sc.listening = func(pid int) []string {
+			if pid <= 0 {
+				return nil
+			}
+			return listeningOf(sc.proc, pid, descendants(sc.children, pid))
+		}
+	}
+	instVer := map[string]string{} // Ferry 装的软件：单元 → 安装时记下的版本（不用再运行程序取）
+	for _, in := range sc.instances {
+		if in.Version != "" && in.Unit != "" {
+			instVer[in.Unit] = in.Version
+		}
+	}
 
 	// 1. 进程：每种软件只取最上层的进程（父进程是同一种软件的不算）
-	byContainer := map[string][]int{} // 容器 → 其中认出的软件（items 下标）
+	var found []*swProc
 	pids := make([]int, 0, len(sc.procs))
 	for pid := range sc.procs {
 		pids = append(pids, pid)
@@ -179,20 +219,44 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 		if _, ok := sc.appUnits[p.unit]; ok && p.unit != "" {
 			continue // 前端站点自带的 nginx 等：在「应用」里看
 		}
-		it := sc.fromProc(p)
+		found = append(found, p)
+	}
+	took("读进程")
+
+	// 2. 要运行命令的几件事互不相干，同时做：取各程序的版本、读容器列表、读系统服务列表
+	var dk dockerList
+	var unitFiles string
+	var unitErr error
+	tasks := []func(){
+		func() { dk = sc.dockerFetch() },
+		func() {
+			unitFiles, unitErr = sc.run("systemctl list-unit-files --type=service --no-legend --no-pager", 15*time.Second)
+		},
+	}
+	for _, p := range found {
+		if r := swRules[p.rule]; p.container == "" && len(r.java) == 0 && instVer[p.unit] == "" {
+			tasks = append(tasks, func() { sc.version(r, p.exe) })
+		}
+	}
+	eachParallel(len(tasks), 8, func(i int) { tasks[i]() })
+	took("取版本、读容器和系统服务")
+
+	byContainer := map[string][]int{} // 容器 → 其中认出的软件（items 下标）
+	for _, p := range found {
+		it := sc.fromProc(p, instVer[p.unit])
 		if p.container != "" {
 			byContainer[p.container] = append(byContainer[p.container], len(rep.Items))
 		}
 		rep.Items = append(rep.Items, it)
 	}
 
-	// 2. Docker 容器
-	rep.Docker = sc.docker(rep, byContainer)
+	// 3. Docker 容器
+	rep.Docker = sc.docker(rep, byContainer, dk)
 
-	// 3. 装了但没在运行（或进程没认出来）的系统服务
-	sc.units(rep)
+	// 4. 装了但没在运行（或进程没认出来）的系统服务
+	sc.units(rep, unitFiles, unitErr, instVer)
 
-	// 4. Ferry 装的软件：标上实例名（可以启停、卸载）；没在运行的也列出来
+	// 5. Ferry 装的软件：标上实例名（可以启停、卸载）；没在运行的也列出来
 	for _, in := range sc.instances {
 		i := -1
 		for j := range rep.Items {
@@ -273,12 +337,14 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 	if os.Geteuid() != 0 && sc.proc == "/proc" {
 		rep.Notes = append(rep.Notes, "agent 没有以 root 运行，其他用户的进程可能看不到")
 	}
+	took("整理")
 	return rep
 }
 
 // readProcs 读出全部进程，认出其中的软件。
 func (sc *swScan) readProcs() {
 	sc.procs = map[int]*swProc{}
+	sc.children = map[int][]int{}
 	ents, _ := os.ReadDir(sc.proc)
 	for _, e := range ents {
 		pid, err := strconv.Atoi(e.Name())
@@ -298,6 +364,7 @@ func (sc *swScan) readProcs() {
 		}
 		if exe, err := sc.readlink(filepath.Join(dir, "exe")); err == nil {
 			p.exe = strings.TrimSuffix(exe, " (deleted)")
+			p.deleted = p.exe != exe
 		} else {
 			p.exe = p.args[0]
 		}
@@ -306,6 +373,7 @@ func (sc *swScan) readProcs() {
 		}
 		p.rule = matchRule(p.exe, p.args)
 		sc.procs[pid] = p
+		sc.children[p.ppid] = append(sc.children[p.ppid], pid)
 	}
 }
 
@@ -391,8 +459,8 @@ func cgroupOwner(cg string) (unit, container string) {
 	return unit, container
 }
 
-// fromProc 一个认出的进程 → 软件。
-func (sc *swScan) fromProc(p *swProc) proto.Software {
+// fromProc 一个认出的进程 → 软件。known 是 Ferry 安装时记下的版本（有就不再运行程序取）。
+func (sc *swScan) fromProc(p *swProc, known string) proto.Software {
 	r := swRules[p.rule]
 	it := proto.Software{Kind: r.kind, Name: r.name, State: "running", PID: p.pid, Since: sc.startTime(p.pid)}
 	switch {
@@ -419,11 +487,22 @@ func (sc *swScan) fromProc(p *swProc) proto.Software {
 		}
 	} else {
 		it.Path = p.exe
-		if p.container == "" { // 容器里的程序在主机上运行不了，版本看镜像标签
+		switch {
+		case p.container != "": // 容器里的程序在主机上运行不了，版本看镜像标签
+		case known != "":
+			it.Version = known
+		default:
 			it.Version = sc.version(r, p.exe)
 		}
+		if p.deleted && p.container == "" {
+			// 运行中的程序文件被换掉了：版本是磁盘上的新文件的，进程还在用旧的
+			it.Replaced = "replaced"
+			if sc.exists != nil && !sc.exists(p.exe) {
+				it.Replaced = "deleted"
+			}
+		}
 	}
-	if it.Kind == "mysql" && strings.Contains(sc.vers[p.exe+"\x00raw"], "MariaDB") {
+	if it.Kind == "mysql" && strings.Contains(sc.versionRaw(r, p.exe), "MariaDB") {
 		it.Kind, it.Name = "mariadb", "MariaDB"
 	}
 	if strings.HasPrefix(it.Path, "/www/server/") && it.Manager == "" {
@@ -487,29 +566,43 @@ func (sc *swScan) version(r swRule, exe string) string {
 	if !strings.HasPrefix(exe, "/") {
 		return ""
 	}
-	if v, ok := sc.vers[exe]; ok {
-		return v
+	bin := exe
+	if path.Base(exe) == "1panel-agent" { // 没有 version 命令（运行它会再启动一个）
+		bin = path.Join(path.Dir(exe), "1panel-core")
 	}
-	v, out := "", ""
-	if r.verArg != "" {
-		bin := exe
-		if path.Base(exe) == "1panel-agent" { // 没有 version 命令（运行它会再启动一个）
-			bin = path.Join(path.Dir(exe), "1panel-core")
+	v, _ := sc.remember("ver\x00"+r.kind+"\x00"+exe, bin, func() (string, string) {
+		v, out := "", ""
+		if r.verArg != "" {
+			out, _ = sc.run(shellQuote(bin)+" "+r.verArg+" 2>&1", 5*time.Second)
+			re := r.verRe
+			if re == nil {
+				re = reVerNum
+			}
+			if m := re.FindStringSubmatch(out); m != nil {
+				v = m[1]
+			}
+			if len(out) > 512 { // 只用来认 MariaDB：留开头就够
+				out = out[:512]
+			}
 		}
-		out, _ = sc.run(shellQuote(bin)+" "+r.verArg+" 2>&1", 5*time.Second)
-		re := r.verRe
-		if re == nil {
-			re = reVerNum
+		if v == "" {
+			v = sc.pkgVersion(exe)
 		}
-		if m := re.FindStringSubmatch(out); m != nil {
-			v = m[1]
-		}
-	}
-	if v == "" {
-		v = sc.pkgVersion(exe)
-	}
-	sc.vers[exe], sc.vers[exe+"\x00raw"] = v, out
+		return v, out
+	})
 	return v
+}
+
+// versionRaw 取版本时程序输出的原文（认 MariaDB 用）；这次没有运行它取版本时为空。
+func (sc *swScan) versionRaw(r swRule, exe string) string {
+	sc.mu.Lock()
+	m := sc.memo["ver\x00"+r.kind+"\x00"+exe]
+	sc.mu.Unlock()
+	if m == nil {
+		return ""
+	}
+	m.once.Do(func() {}) // 正在取的等它取完
+	return m.raw
 }
 
 // pkgVersion 文件所属软件包的版本（rpm 或 dpkg）；不属于任何软件包为空。
@@ -517,23 +610,43 @@ func (sc *swScan) pkgVersion(file string) string {
 	if !strings.HasPrefix(file, "/") {
 		return ""
 	}
-	k := "\x00pkg" + file
-	if v, ok := sc.vers[k]; ok {
-		return v
-	}
-	q := shellQuote(file)
-	cmd := `rpm -qf --qf '%{VERSION}\n' ` + q + ` 2>/dev/null || { p=$(dpkg -S ` + q + ` 2>/dev/null | head -n 1 | sed 's/: .*//'); ` +
-		`[ -n "$p" ] && dpkg-query -W -f='${Version}\n' "$p"; }`
-	out, _ := sc.run(cmd, 5*time.Second)
-	v := ""
-	// 不属于软件包时 rpm 输出 file … is not owned by any package
-	if lines := splitLines(out); len(lines) > 0 && !strings.Contains(lines[0], " ") {
-		if m := reVerNum.FindStringSubmatch(lines[0]); m != nil {
-			v = m[1]
+	v, _ := sc.remember("pkg\x00"+file, file, func() (string, string) {
+		q := shellQuote(file)
+		cmd := `rpm -qf --qf '%{VERSION}\n' ` + q + ` 2>/dev/null || { p=$(dpkg -S ` + q + ` 2>/dev/null | head -n 1 | sed 's/: .*//'); ` +
+			`[ -n "$p" ] && dpkg-query -W -f='${Version}\n' "$p"; }`
+		out, _ := sc.run(cmd, 5*time.Second)
+		// 不属于软件包时 rpm 输出 file … is not owned by any package
+		if lines := splitLines(out); len(lines) > 0 && !strings.Contains(lines[0], " ") {
+			if m := reVerNum.FindStringSubmatch(lines[0]); m != nil {
+				return m[1], ""
+			}
 		}
-	}
-	sc.vers[k] = v
+		return "", ""
+	})
 	return v
+}
+
+// remember 取版本：这次已经取过（或正在取）的直接用；服务器上的缓存里有、并且 file 还是当时那个文件的也直接用；
+// 都没有才运行 get，结果记进缓存。同时要同一个的，等第一个取完。
+func (sc *swScan) remember(key, file string, get func() (v, raw string)) (string, string) {
+	sc.mu.Lock()
+	if sc.memo == nil {
+		sc.memo = map[string]*verMemo{}
+	}
+	m := sc.memo[key]
+	if m == nil {
+		m = &verMemo{}
+		sc.memo[key] = m
+	}
+	sc.mu.Unlock()
+	m.once.Do(func() {
+		var ok bool
+		if m.v, m.raw, ok = sc.cache.get(key, file); !ok {
+			m.v, m.raw = get()
+			sc.cache.put(key, file, m.v, m.raw)
+		}
+	})
+	return m.v, m.raw
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -604,24 +717,29 @@ type dockerPS struct {
 	ID, Names, Image, State, Status, Ports, Labels string
 }
 
-// docker 读容器列表：给进程认出的软件补上容器信息，再补上其他容器。返回 SoftwareReport.Docker。
-func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int) string {
+// dockerList 读到的容器列表。
+type dockerList struct {
+	noCmd      bool   // 服务器上没有 docker 命令
+	status     string // SoftwareReport.Docker：ok，或读取不了的原因
+	containers []dockerPS
+	locations  map[string][]proto.SoftwareLocation
+}
+
+// dockerFetch 运行 docker 命令读容器列表与各容器在主机上的位置（只运行命令，和其他读取同时做）。
+func (sc *swScan) dockerFetch() dockerList {
 	if _, err := sc.run("command -v docker", 5*time.Second); err != nil {
-		if len(byContainer) > 0 {
-			rep.Notes = append(rep.Notes, "有软件在容器里运行，但服务器上没有 docker 命令，读不到容器名与端口映射")
-		}
-		return ""
+		return dockerList{noCmd: true}
 	}
 	out, err := sc.run("docker ps -a --no-trunc --format '{{json .}}'", 15*time.Second)
 	if err != nil {
 		msg := strings.TrimSpace(out)
 		if strings.Contains(msg, "Cannot connect to the Docker daemon") || strings.Contains(msg, "Is the docker daemon running") {
-			return "Docker 没有运行"
+			return dockerList{status: "Docker 没有运行"}
 		}
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "读取容器列表失败：" + msg
+		return dockerList{status: "读取容器列表失败：" + msg}
 	}
 	var containers []dockerPS
 	for _, line := range splitLines(out) {
@@ -630,7 +748,21 @@ func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int
 			containers = append(containers, c)
 		}
 	}
-	locations := sc.dockerLocations(containers)
+	return dockerList{status: "ok", containers: containers, locations: sc.dockerLocations(containers)}
+}
+
+// docker 给进程认出的软件补上容器信息，再补上其他容器。返回 SoftwareReport.Docker。
+func (sc *swScan) docker(rep *proto.SoftwareReport, byContainer map[string][]int, dk dockerList) string {
+	if dk.noCmd {
+		if len(byContainer) > 0 {
+			rep.Notes = append(rep.Notes, "有软件在容器里运行，但服务器上没有 docker 命令，读不到容器名与端口映射")
+		}
+		return ""
+	}
+	if dk.status != "ok" {
+		return dk.status
+	}
+	containers, locations := dk.containers, dk.locations
 	// 容器的顶层进程：没认出软件的运行中容器也要 PID、端口、启动时间
 	top := map[string]int{}
 	for pid, p := range sc.procs {
@@ -834,9 +966,8 @@ func dockerPorts(s string) []string {
 
 // ---------------------------------------------------------------- systemd
 
-// units 补上装了、但进程里没找到的系统服务（停止的，或进程没认出来的）。
-func (sc *swScan) units(rep *proto.SoftwareReport) {
-	out, err := sc.run("systemctl list-unit-files --type=service --no-legend --no-pager", 15*time.Second)
+// units 补上装了、但进程里没找到的系统服务（停止的，或进程没认出来的）。out、err 是 systemctl list-unit-files 的结果。
+func (sc *swScan) units(rep *proto.SoftwareReport, out string, err error, instVer map[string]string) {
 	if err != nil {
 		return
 	}
@@ -846,6 +977,13 @@ func (sc *swScan) units(rep *proto.SoftwareReport) {
 		have[it.Unit] = true
 		pids[it.PID] = true
 	}
+	type cand struct {
+		unit string
+		rule int
+		p    UnitProps
+		exe  string
+	}
+	var cands []cand
 	for _, line := range splitLines(out) {
 		f := strings.Fields(line)
 		if len(f) == 0 || !strings.HasSuffix(f[0], ".service") || strings.Contains(f[0], "@") || have[f[0]] {
@@ -857,16 +995,28 @@ func (sc *swScan) units(rep *proto.SoftwareReport) {
 		if len(f) > 1 && (f[1] == "masked" || f[1] == "alias") {
 			continue
 		}
-		r := unitRule(strings.TrimSuffix(f[0], ".service"))
-		if r < 0 {
-			continue
+		if r := unitRule(strings.TrimSuffix(f[0], ".service")); r >= 0 {
+			have[f[0]] = true
+			cands = append(cands, cand{unit: f[0], rule: r})
 		}
-		p := sc.unitProps(f[0])
+	}
+	// 各单元的状态、程序、版本互不相干：同时读
+	eachParallel(len(cands), 8, func(i int) {
+		c := &cands[i]
+		if c.p = sc.unitProps(c.unit); c.p.Load == "not-found" {
+			return
+		}
+		if c.exe = sc.execStart(c.unit); c.exe != "" && instVer[c.unit] == "" {
+			sc.version(swRules[c.rule], c.exe)
+		}
+	})
+	for _, c := range cands {
+		p := c.p
 		if p.Load == "not-found" || (p.PID > 0 && pids[p.PID]) {
 			continue
 		}
-		it := proto.Software{Kind: swRules[r].kind, Name: swRules[r].name, State: "stopped", Via: "systemd", Unit: f[0]}
-		if sc.ferryUnit(f[0]) {
+		it := proto.Software{Kind: swRules[c.rule].kind, Name: swRules[c.rule].name, State: "stopped", Via: "systemd", Unit: c.unit}
+		if sc.ferryUnit(c.unit) {
 			it.Manager = "Ferry"
 		}
 		if p.Active == "active" || p.Active == "activating" || p.Active == "reloading" {
@@ -877,14 +1027,15 @@ func (sc *swScan) units(rep *proto.SoftwareReport) {
 			it.Listen = sc.listening(p.PID)
 			pids[p.PID] = true
 		}
-		if exe := sc.execStart(f[0]); exe != "" {
-			it.Path = exe
-			it.Version = sc.version(swRules[r], exe)
+		if c.exe != "" {
+			it.Path = c.exe
+			if it.Version = instVer[c.unit]; it.Version == "" {
+				it.Version = sc.version(swRules[c.rule], c.exe)
+			}
 		}
 		if strings.HasPrefix(it.Path, "/www/server/") && it.Manager == "" {
 			it.Manager = "宝塔面板"
 		}
-		have[f[0]] = true
 		rep.Items = append(rep.Items, it)
 	}
 }

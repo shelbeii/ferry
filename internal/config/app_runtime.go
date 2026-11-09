@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"path"
 	"strings"
+
+	"github.com/captain/ferry/internal/proto"
 )
 
 // AppRuntime 只覆盖一台服务器上的一个应用，不改变其他目标的运行环境。
@@ -15,7 +17,9 @@ type AppRuntime struct {
 	Python        string `yaml:"python"`
 	Node          string `yaml:"node"`
 	Dotnet        string `yaml:"dotnet"`
-	Port          string `yaml:"port"` // Nginx 切换时可同时更换此站点端口。
+	// SiteDir 前端站点改用服务器上已有站点的网站目录（只换文件，不改 nginx 配置）
+	SiteDir string `yaml:"siteDir"`
+	Port    string `yaml:"port"` // Nginx 切换时可同时更换此站点端口；用 siteDir 时是已有站点的端口（部署后检查首页能打开）
 }
 
 func (f *File) RuntimeApp(t *Target, app *App) (*App, error) {
@@ -26,10 +30,13 @@ func (f *File) RuntimeApp(t *Target, app *App) (*App, error) {
 	a := *app
 	a.Service.Exec = append([]string(nil), app.Service.Exec...)
 	kind, program, count := "", "", 0
-	for k, value := range map[string]string{"java": r.Java, "static": r.NginxInstance, "python": r.Python, "node": r.Node, "dotnet": r.Dotnet} {
+	for k, value := range map[string]string{"java": r.Java, "static": r.NginxInstance, "site": r.SiteDir, "python": r.Python, "node": r.Node, "dotnet": r.Dotnet} {
 		if value != "" {
 			kind, program, count = k, value, count+1
 		}
+	}
+	if kind == "site" && a.Type == "static" && count == 1 {
+		return f.siteDirApp(&a, r)
 	}
 	if count != 1 || kind != a.Type {
 		return nil, fmt.Errorf("运行环境必须且只能选择与 %s 类型一致的一项", a.Type)
@@ -124,4 +131,34 @@ func splitRuntimePort(value string) (string, string) {
 		return value[:i], value[i+1:]
 	}
 	return "", value
+}
+
+// siteDirApp 前端站点改成只换服务器上已有站点网站目录里的文件：Ferry 不运行 nginx，nginx 相关的设置都不要了。
+func (f *File) siteDirApp(a *App, r AppRuntime) (*App, error) {
+	if !strings.Contains(r.SiteDir, "${") {
+		if err := proto.CheckSiteDir(r.SiteDir); err != nil {
+			return nil, err
+		}
+	}
+	st := &a.Static
+	oldPort := st.Port
+	*st = Static{SiteDir: r.SiteDir, Health: st.Health}
+	a.Service.Unit, a.Service.User = "", ""
+	port := r.Port
+	if port == "" {
+		port = oldPort
+	}
+	_, p := splitRuntimePort(port)
+	_, prev := splitRuntimePort(oldPort)
+	h := &st.Health
+	switch {
+	case r.Port != "" && p != "":
+		// 检查已有站点的首页能打开（状态码 2xx、3xx 都算）
+		*h = Health{HTTP: "http://127.0.0.1:" + p + "/", Timeout: h.Timeout}
+	case prev != "" && (strings.Contains(h.HTTP, ":"+prev+"/") || strings.HasSuffix(h.HTTP, ":"+prev) || strings.HasSuffix(h.TCP, ":"+prev)):
+		// 原来按 Ferry 运行 nginx 的端口生成的默认检查：端口还是那个，状态码放宽
+		h.Status = nil
+	}
+	normalizeStaticHealth(h)
+	return a, nil
 }

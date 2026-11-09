@@ -468,7 +468,20 @@ static:
 | --- | --- |
 | `static.link` | 额外维护的符号链接，指向 `<appDir>/running`（例如 nginx 的 root）。该路径已存在且不是链接时报错。只放文件的静态站点没有服务可停，切换时用一次原子交换，访问不会中断 |
 | `static.reload` | 切换后执行（`sh -c`），失败则切回上一版本并再执行一次 |
+| `static.siteDir` | 服务器上已有站点的网站目录（服务器上的路径）：每次部署、回滚把那一版的文件换进去，不改 nginx 的配置、不重启它。不能和 `static.port`、`static.link` 一起用 |
 | `static.health` | 可选，切换后检查 |
+
+**只换已有站点的文件（`static.siteDir`）**：服务器上原来就有 nginx / OpenResty 在运行这个站点（1Panel、宝塔、手动启动的，Docker 容器里的也行）时用。
+
+```yaml
+static:
+  siteDir: /opt/1panel/apps/openresty/openresty/www/sites/web/index   # 容器里的 /www/sites/web/index 挂载到这里
+  health: {http: "http://127.0.0.1:8000/"}                            # 可选：部署后检查首页能打开
+```
+
+- 文件一个一个放（先写临时文件再改名），网页（`*.html`）最后放，放好后删掉这一版没有的；目录本身不换（容器挂载的目录照常有效），新文件的属主和目录一样。最上层的 `.well-known`、`.user.ini`、`.htaccess` 和 `artifact.keep` 里的不动。
+- 第一次部署前，目录里原来的文件整个复制到 `<appDir>/site-before-ferry/`：第一次部署失败时自动换回去，以后也能在「版本」里「回到接管前的网站文件」。
+- 不想改应用配置时，用「更多 → 切换运行环境」选「已有站点」：只写 `targets.<服务器>.appRuntimes.<应用>.siteDir`（和那个站点的端口，用来检查首页）。部署审阅里端口被已有的 nginx / OpenResty 占着时，也会直接给出「改成只换这个站点的文件」。
 
 静态目录打成 tar.gz 上传，服务器解压时拒绝绝对路径、`..`、链接和设备文件。版本目录对所有用户可读（nginx 通常不是运行用户）。
 

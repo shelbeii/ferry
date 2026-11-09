@@ -181,7 +181,7 @@ const deployOpen = ref(false)
 const editorDeployment = ref<DeploymentRequest>()
 const releasesApp = ref('')
 const appInfoRequest = ref<{ app: string; target: string }>()
-const runtimeSwitchRequest = ref<{ app: string; target: string }>()
+const runtimeSwitchRequest = ref<{ app: string; target: string; prefer?: string }>()
 const logsApp = ref('')
 const filesOpen = ref(false)
 const filesPath = ref('')
@@ -1555,6 +1555,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       @close="deployOpen = false; editorDeployment = undefined"
       @started="deployOpen = false; editorDeployment = undefined"
       @finished="afterTask"
+      @switch-runtime="(app: string, t: string, prefer?: string) => { deployOpen = false; editorDeployment = undefined; runtimeSwitchRequest = { app, target: t, prefer } }"
     />
     <AppInfoDialog
       v-if="appInfoRequest"
@@ -1573,6 +1574,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       :config="project.path"
       :target="runtimeSwitchRequest.target"
       :app="runtimeSwitchRequest.app"
+      :prefer="runtimeSwitchRequest.prefer"
       @close="runtimeSwitchRequest = undefined"
       @saved="onSaved"
       @versions="showAppReleases(runtimeSwitchRequest)"

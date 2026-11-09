@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { Delete, FolderOpened, Plus, Refresh } from '@element-plus/icons-vue'
-import { call, FerryError } from '../../ferry'
+import { call, FerryError, type NginxSite } from '../../ferry'
 import { pickDir, pickFile, readConfig } from '../../platform'
 import { secretRequest, trustRequest, trustedTick } from '../../state'
 import { appNames, setupError, type AppSetup, type AppType, type RuntimeProbe } from '../../editor/appSetup'
@@ -16,7 +16,7 @@ const builds = computed(() => keysAt(doc.value, ['builds']))
 const f = reactive<AppSetup>({
   name: '', type: 'java', path: '', targets: [targets.value.includes(props.target ?? '') ? props.target! : targets.value[0]].filter(Boolean),
   build: '', buildCommand: '', buildWorkdir: '', user: '', javaSource: 'ferry', javaMajor: 17, javaPaths: {},
-  jvmArgs: '', args: '', exec: '', env: '', port: '', serve: 'installed', instances: {}, domains: '', spa: true, proxies: [],
+  jvmArgs: '', args: '', exec: '', env: '', port: '', serve: 'installed', instances: {}, domains: '', spa: true, proxies: [], sites: {}, sitePort: '',
 })
 if (f.targets.some((t) => !scalarAt(doc.value, ['targets', t, 'runAs']))) f.user = 'ferry'
 const error = ref('')
@@ -27,7 +27,13 @@ const types: { value: AppType; label: string }[] = [
 ]
 const directory = computed(() => !['java', 'binary'].includes(f.type))
 const needsUser = computed(() => f.type !== 'static' || f.serve === 'standalone')
-const needsProbe = computed(() => f.type === 'static' && f.serve === 'installed' || f.type === 'java' && f.javaSource === 'server')
+const needsProbe = computed(() => f.type === 'static' && (f.serve === 'installed' || f.serve === 'site') || f.type === 'java' && f.javaSource === 'server')
+// 选了已有站点：各服务器选的站点端口一样（且那个端口上只有它）时，部署后检查它的首页
+function siteOf(t: string) { return currentProbe(t)?.result?.sites?.find((s) => s.dir === f.sites?.[t]) }
+watch(() => f.targets.map((t) => f.sites?.[t] ?? '').join('|'), () => {
+  const ports = f.targets.map((t) => { const s = siteOf(t); return s && !s.shared && s.ports?.length ? String(s.ports[0]) : '' })
+  f.sitePort = ports.length && ports.every((p) => p && p === ports[0]) ? ports[0] : ''
+})
 const defaults: Partial<Record<AppType, string>> = {
   python: '${running}/.venv/bin/uvicorn\nmain:app\n--host\n0.0.0.0\n--port\n8000',
   node: 'node\n${running}/dist/main.js', dotnet: 'dotnet\n${running}/MyApp.dll',
@@ -59,6 +65,12 @@ watch(trustRequest, (v) => { if (!v) retryTrust = undefined })
 function snapshot(target: string) {
   const value = doc.value.toJS()
   return JSON.stringify({ version: value.version, kind: value.kind, project: value.project, vars: value.vars, targets: { [target]: value.targets?.[target] } })
+}
+function siteLabel(s: NginxSite) {
+  const parts = [s.server]
+  if (s.ports?.length) parts.push(s.ports.join('、') + ' 端口')
+  if (s.names?.length) parts.push(s.names.join(' '))
+  return parts.join(' · ')
 }
 function currentProbe(target: string) {
   const p = probes[target]
@@ -110,7 +122,8 @@ function submit(deploy: boolean) {
       if (!result) { error.value = `${t}：请先检测运行环境`; break }
       const failure = result.checks.find((check) => check.level === 'error')
       if (failure) { error.value = `${t}：${failure.text}`; break }
-      if (f.type === 'static' && !result.nginxInstances?.some((n) => n.name === f.instances[t])) { error.value = `${t}：请选择检测到的 Nginx 实例`; break }
+      if (f.type === 'static' && f.serve === 'site' && !result.sites?.some((s) => !s.disabled && s.dir === f.sites?.[t])) { error.value = `${t}：请选择检测到的已有站点`; break }
+      if (f.type === 'static' && f.serve === 'installed' && !result.nginxInstances?.some((n) => n.name === f.instances[t])) { error.value = `${t}：请选择检测到的 Nginx 实例`; break }
       if (f.type === 'java' && !result.javas?.some((j) => j.path === f.javaPaths[t])) { error.value = `${t}：请选择检测到的 JDK`; break }
     }
   }
@@ -130,8 +143,9 @@ function submit(deploy: boolean) {
       <el-form-item label="部署前构建"><div class="full"><el-select v-model="f.build" placeholder="不构建，直接上传现有产物"><el-option label="不构建，直接上传现有产物" value="" /><el-option v-for="build in builds" :key="build" :value="build" :label="build" /><el-option label="填写构建命令" value="@inline" /></el-select><template v-if="f.build === '@inline'"><el-input v-model="f.buildCommand" class="gap" placeholder="如 npm run build、mvn package -DskipTests" /><el-input v-model="f.buildWorkdir" class="gap" placeholder="构建目录，留空为配置文件所在目录" /></template></div></el-form-item>
 
       <template v-if="f.type === 'static'">
-        <el-form-item label="运行方式"><el-select v-model="f.serve"><el-option label="使用已安装的 Nginx" value="installed" /><el-option label="由 Ferry 自动安装并独立运行 Nginx" value="standalone" /><el-option label="仅发布文件，手动接入网站" value="files" /></el-select></el-form-item>
-        <template v-if="f.serve !== 'files'">
+        <el-form-item label="运行方式"><el-select v-model="f.serve"><el-option label="使用已安装的 Nginx" value="installed" /><el-option label="由 Ferry 自动安装并独立运行 Nginx" value="standalone" /><el-option label="只换服务器上已有站点的文件（1Panel、宝塔、容器里的 OpenResty / Nginx）" value="site" /><el-option label="仅发布文件，手动接入网站" value="files" /></el-select></el-form-item>
+        <el-alert v-if="f.serve === 'site'" type="info" :closable="false" class="gap site-tip" title="服务器上原来就有 nginx / OpenResty 在运行这个站点时用：部署只把每一版的文件换进它的网站目录，不改它的配置、不重启它。第一次部署前会备份原来的文件，可以「回到接管前」。" />
+        <template v-if="f.serve !== 'files' && f.serve !== 'site'">
           <el-form-item label="网站端口" required><el-input v-model="f.port" placeholder="8081 或 127.0.0.1:8081" /></el-form-item>
           <el-form-item label="站点域名"><el-input v-model="f.domains" placeholder="多个域名用空格或逗号分开；留空为端口默认站点" /></el-form-item>
           <el-form-item label="前端路由"><el-checkbox v-model="f.spa">支持 history 路由，找不到的路径返回 index.html</el-checkbox></el-form-item>
@@ -148,7 +162,7 @@ function submit(deploy: boolean) {
             </div>
           </el-form-item>
         </template>
-        <el-alert v-else type="info" :closable="false" title="此方式只上传文件，需要自行配置 Web 服务器后才能访问。" class="gap" />
+        <el-alert v-else-if="f.serve === 'files'" type="info" :closable="false" title="此方式只上传文件，需要自行配置 Web 服务器后才能访问。" class="gap" />
       </template>
       <el-form-item v-if="needsUser" label="运行用户"><div class="full"><el-input v-model="f.user" placeholder="留空沿用各服务器的 runAs，如 ferry" /><div class="muted small">使用非 root 用户；不存在时部署会自动创建。</div></div></el-form-item>
       <template v-if="f.type === 'java'">
@@ -162,13 +176,21 @@ function submit(deploy: boolean) {
           <div class="inline"><b>{{ t }}</b><span class="muted small">{{ scalarAt(doc, ['targets', t, 'host']) }}</span><span class="spacer" /><el-button size="small" :icon="Refresh" :loading="currentProbe(t)?.loading" @click="probe(t)">检测运行环境</el-button></div>
           <div v-if="currentProbe(t)?.error" class="ev-error small gap">{{ currentProbe(t)?.error }}</div>
           <template v-if="currentProbe(t)?.result">
-            <el-select v-if="f.type === 'static'" v-model="f.instances[t]" class="gap" placeholder="选择已安装的 Nginx">
+            <template v-if="f.type === 'static' && f.serve === 'site'">
+              <el-select v-model="f.sites![t]" class="gap" placeholder="选择已有的站点">
+                <el-option v-for="s in currentProbe(t)?.result?.sites ?? []" :key="s.root + s.conf" :value="s.dir || s.root" :disabled="!!s.disabled" :label="siteLabel(s)" />
+              </el-select>
+              <div v-if="!currentProbe(t)?.result?.sites?.length" class="ev-warn small gap">没有找到正在运行的 nginx / OpenResty 站点（要用 root 或免密 sudo 登录才能看）。</div>
+              <div v-else-if="siteOf(t)" class="muted small gap">网站目录：<span class="mono">{{ siteOf(t)?.dir }}</span><template v-if="siteOf(t)?.dir !== siteOf(t)?.root">（容器里是 {{ siteOf(t)?.root }}）</template> · 配置 {{ siteOf(t)?.conf }}</div>
+              <div v-for="s in (currentProbe(t)?.result?.sites ?? []).filter((x) => x.disabled)" :key="'d' + s.root + s.conf" class="muted small gap">{{ siteLabel(s) }}：{{ s.disabled }}</div>
+            </template>
+            <el-select v-else-if="f.type === 'static'" v-model="f.instances[t]" class="gap" placeholder="选择已安装的 Nginx">
               <el-option v-for="n in currentProbe(t)?.result?.nginxInstances ?? []" :key="n.name" :value="n.name" :label="`${n.hosting?.system ? '系统 Nginx' : n.name}（${n.unit}${n.version ? ' · ' + n.version : ''}）`" />
             </el-select>
             <el-select v-else v-model="f.javaPaths[t]" class="gap" placeholder="选择已安装的 JDK"><el-option v-for="j in currentProbe(t)?.result?.javas ?? []" :key="j.path" :value="j.path" :label="`Java ${j.major} · ${j.path}`" /></el-select>
-            <div v-if="f.type === 'static' && !currentProbe(t)?.result?.nginxInstances?.length" class="ev-warn small gap">未找到可托管站点的 Nginx。可先在「软件」中安装后重新检测，或选择由 Ferry 自动安装并独立运行。</div>
+            <div v-if="f.type === 'static' && f.serve === 'installed' && !currentProbe(t)?.result?.nginxInstances?.length" class="ev-warn small gap">未找到可托管站点的 Nginx。可先在「软件」中安装后重新检测，或选择由 Ferry 自动安装并独立运行。</div>
             <div v-if="f.type === 'java' && !currentProbe(t)?.result?.javas?.length" class="ev-warn small gap">没有检测到 JDK，可以改用由 Ferry 自动提供。</div>
-            <div v-if="f.type === 'static' && f.instances[t]" class="muted small gap">站点目录：{{ currentProbe(t)?.result?.nginxInstances?.find((n) => n.name === f.instances[t])?.hosting?.sites }}</div>
+            <div v-if="f.type === 'static' && f.serve === 'installed' && f.instances[t]" class="muted small gap">站点目录：{{ currentProbe(t)?.result?.nginxInstances?.find((n) => n.name === f.instances[t])?.hosting?.sites }}</div>
             <div v-for="(check, i) in currentProbe(t)?.result?.checks.filter((c) => c.level !== 'ok') ?? []" :key="i" :class="check.level === 'error' ? 'ev-error' : 'ev-warn'" class="small gap">{{ check.text }}</div>
           </template>
         </div>

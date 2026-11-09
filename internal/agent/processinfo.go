@@ -24,8 +24,20 @@ func (realSystem) Processes(pid int) []ProcessSnapshot {
 	if pid <= 0 {
 		return nil
 	}
+	return processesOf(pid, procTree("/proc", pid))
+}
+
+func (s snapSys) Processes(pid int) []ProcessSnapshot {
+	if pid <= 0 {
+		return nil
+	}
+	return processesOf(pid, s.t.tree(pid))
+}
+
+// processesOf pid 和它的子孙进程（tree）的详情：pid 在最前，其余按进程号，最多 128 个。
+func processesOf(pid int, tree map[int]bool) []ProcessSnapshot {
 	var ids []int
-	for id := range procTree("/proc", pid) {
+	for id := range tree {
 		if id != pid {
 			ids = append(ids, id)
 		}

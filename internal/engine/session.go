@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,30 @@ type conn struct {
 	ferryDir string
 	// broken 上一次在它上面的操作因连接问题失败：下次复用前先确认还能用
 	broken atomic.Bool
+
+	// 常驻的 agent（见 agentserve.go）
+	srvMu       sync.Mutex
+	srv         *agentServer
+	srvFailedAt time.Time
+
+	// 「服务器信息」上次读到的 CPU 计数：下次和它比，不用在服务器上等一秒再读
+	cpuMu   sync.Mutex
+	cpuPrev []string
+	cpuAt   time.Time
+}
+
+func (c *conn) cpuSample() ([]string, time.Time) {
+	c.cpuMu.Lock()
+	defer c.cpuMu.Unlock()
+	return c.cpuPrev, c.cpuAt
+}
+
+func (c *conn) setCPUSample(lines []string) {
+	c.cpuMu.Lock()
+	defer c.cpuMu.Unlock()
+	if len(lines) > 0 {
+		c.cpuPrev, c.cpuAt = lines, time.Now()
+	}
 }
 
 // session 一次操作对一个目标的使用：连接（可能是复用的）+ 本次请求的引擎（输出、配置）。
@@ -144,21 +169,32 @@ func gzipAgent(arch string, data []byte) []byte {
 // ensureAgent 确认服务器上有这个版本的 agent，没有就上传。agent 内容不随应用版本变化（只在 agent 代码改了时才重新上传），
 // 上传压缩后的文件（约为原来的 40%，经 VPN 等慢速网络时差别明显），在服务器上解压。
 func (e *Engine) ensureAgent(s *conn) error {
-	// 一次往返：架构、有没有 gzip、ferry 组件目录及其上级是否归 root 且他人不可写（agent 以 root 运行，不能放在别人能替换的地方）
+	// 一次往返：架构、有没有 gzip、ferry 组件目录及其上级是否归 root 且他人不可写（agent 以 root 运行，不能放在别人能替换的地方），
+	// 以及这个版本的 agent 在不在、能不能运行（在的话不用再单独问一次）
+	paths := map[string]string{}
+	for _, arch := range []string{"amd64", "arm64"} {
+		if b, err := agentbin.Get(arch); err == nil {
+			paths[arch] = s.ferryDir + "/ferry-agent-" + b.SHA256[:12]
+		}
+	}
 	check := fmt.Sprintf(`uname -m; command -v gzip >/dev/null 2>&1 && echo has-gzip || echo no-gzip; `+
 		`d=%s; while [ -n "$d" ] && [ "$d" != / ]; do if [ -e "$d" ]; then u=$(stat -c %%u "$d"); m=$(stat -c %%a "$d"); `+
-		`if [ "$u" != 0 ] || [ $((0$m & 022)) -ne 0 ]; then echo "unsafe $d $u $m"; fi; fi; d=$(dirname "$d"); done`, shQuote(s.ferryDir))
+		`if [ "$u" != 0 ] || [ $((0$m & 022)) -ne 0 ]; then echo "unsafe $d $u $m"; fi; fi; d=$(dirname "$d"); done; `+
+		`case "$(uname -m)" in x86_64|amd64) a=%s;; aarch64|arm64) a=%s;; *) a=;; esac; `+
+		`if [ -n "$a" ] && [ -x "$a" ]; then t0=$(date +%%s%%N); echo @@agent; %s"$a" version 2>/dev/null; t1=$(date +%%s%%N); echo; echo "@@took $t0 $t1"; fi`,
+		shQuote(s.ferryDir), shQuote(paths["amd64"]), shQuote(paths["arm64"]), s.sudo)
 	out, res, err := s.c.Output(check)
 	if err != nil || res.Code != 0 {
 		return fmt.Errorf("读取服务器架构失败：%v %s", err, res.Stderr)
 	}
-	for _, l := range strings.Split(out, "\n") {
+	head, version, _ := strings.Cut(out, "@@agent\n")
+	for _, l := range strings.Split(head, "\n") {
 		if f := strings.Fields(l); len(f) == 4 && f[0] == "unsafe" {
 			return fmt.Errorf("服务器上存放 ferry 组件的目录不安全：%s 的属主 uid 是 %s、权限 %s。agent 以 root 运行，ferryDir（%s）及其上级必须归 root 且其他用户不可写\n"+
 				"修复：在服务器上执行 chown root:root %s && chmod go-w %s，或在配置里给这台服务器换一个 ferryDir", f[1], f[2], f[3], s.ferryDir, f[1], f[1])
 		}
 	}
-	lines := strings.Fields(out)
+	lines := strings.Fields(head)
 	if len(lines) == 0 {
 		return errors.New("读取服务器架构失败：没有输出")
 	}
@@ -176,8 +212,12 @@ func (e *Engine) ensureAgent(s *conn) error {
 		return err
 	}
 	s.agent = s.ferryDir + "/ferry-agent-" + bin.SHA256[:12]
-	if s.agentOK(bin.SHA256) {
-		return nil
+	if version != "" {
+		version, took, _ := strings.Cut(version, "@@took ")
+		e.warnSlowSudo(s, took)
+		if agentVersionOK(version, bin.SHA256) {
+			return nil
+		}
 	}
 	data, ext := bin.Data, ""
 	if hasGzip {
@@ -226,11 +266,40 @@ func (s *conn) agentOK(sha string) bool {
 	if err != nil || res.Code != 0 {
 		return false
 	}
+	return agentVersionOK(out, sha)
+}
+
+// agentVersionOK agent version 的输出是不是这个版本（校验和、协议版本都对上）。
+func agentVersionOK(out, sha string) bool {
 	var v struct {
 		SHA256 string `json:"sha256"`
 		Proto  int    `json:"proto"`
 	}
-	return json.Unmarshal([]byte(out), &v) == nil && v.SHA256 == sha && v.Proto == proto.Version
+	return json.Unmarshal([]byte(strings.TrimSpace(out)), &v) == nil && v.SHA256 == sha && v.Proto == proto.Version
+}
+
+// slowSudo 用 sudo 运行 agent 超过这么久就提示：每次操作都要等这么久。
+const slowSudo = time.Second
+
+// warnSlowSudo 不是 root 登录、每次要经 sudo 时，sudo 慢（多半是服务器的主机名解析不了）就提示怎么修。
+// took 是检查脚本里量的「开始 结束」纳秒数；量不到（date 不支持 %N）时不提示。
+func (e *Engine) warnSlowSudo(s *conn, took string) {
+	if s.sudo == "" {
+		return
+	}
+	f := strings.Fields(took)
+	if len(f) != 2 {
+		return
+	}
+	t0, err0 := strconv.ParseInt(f[0], 10, 64)
+	t1, err1 := strconv.ParseInt(f[1], 10, 64)
+	if err0 != nil || err1 != nil || t1 < t0 {
+		return
+	}
+	if d := time.Duration(t1 - t0); d >= slowSudo {
+		e.Rep.Warn("在 %s 上用 sudo 运行一次要 %.1f 秒，Ferry 的每次操作都要多等这么久。多半是服务器的主机名解析不了："+
+			"在服务器上执行 hostname 看主机名，把「127.0.0.1 主机名」加进 /etc/hosts 后再试", s.label, d.Seconds())
+	}
 }
 
 // call 调用 agent 命令：事件实时交给 Reporter，返回最后的结果。
@@ -246,7 +315,7 @@ func (s *session) call(cmd string, req *proto.Request) (*proto.Result, error) {
 		return nil, err
 	}
 	var result *proto.Result
-	res, err := s.c.RunContext(s.e.ctx(), s.sudo+s.agent+" "+cmd, body, func(line string) {
+	onLine := func(line string) {
 		var head struct {
 			T string `json:"t"`
 		}
@@ -266,7 +335,22 @@ func (s *session) call(cmd string, req *proto.Request) (*proto.Result, error) {
 				result = &r
 			}
 		}
-	})
+	}
+	// 只读的查看交给常驻的 agent：少几次网络往返；用不了时照原来的办法单独运行
+	if proto.ServeCmds[cmd] {
+		code, ok, err := s.callServe(cmd, req, onLine)
+		if ok {
+			if err != nil {
+				return nil, err
+			}
+			if result == nil {
+				return nil, fmt.Errorf("agent %s 没有返回结果：退出码 %d", cmd, code)
+			}
+			return result, nil
+		}
+		result = nil
+	}
+	res, err := s.c.RunContext(s.e.ctx(), s.sudo+s.agent+" "+cmd, body, onLine)
 	if err != nil {
 		if !errors.Is(err, remote.ErrCanceled) {
 			s.broken.Store(true)
