@@ -198,7 +198,7 @@ async function start() {
           <div v-if="conflicts.length" class="invalid small">请调整目标选择：所选应用必须在每台目标的允许列表中。</div>
         </div>
       </el-form-item>
-      <el-form-item v-if="runtimeRows.length" label="运行">
+      <el-form-item v-if="runtimeRows.length" label="运行环境">
         <div class="changes">
           <div v-if="targets.length > 1" class="muted small">下面是 {{ reviewTarget }} 上的情况</div>
           <div v-for="c in runtimeRows" :key="'r' + c.app" class="change">
@@ -303,7 +303,7 @@ async function start() {
       </el-form-item>
     </el-form>
     <template #footer>
-      <span v-if="busyCount" class="warn small busy-hint">{{ reviewTarget }} 上有 {{ busyCount }} 个端口被别的程序占着（见上面「运行」）</span>
+      <span v-if="busyCount" class="warn small busy-hint">{{ reviewTarget }} 上有 {{ busyCount }} 个端口被别的程序占着（见上面「运行环境」）</span>
       <el-button @click="visible = false">取消</el-button>
       <el-button :type="prodTargets.length ? 'danger' : 'primary'" :disabled="!canStart" :loading="starting" @click="start">部署到 {{ targets.length }} 台服务器</el-button>
     </template>

@@ -313,6 +313,16 @@ async function removeJdk(id: string) {
 const ngxSeries = ref('stable')
 const rt = computed(() => form.value?.runtime)
 const NGINX_SOURCE = 'https://jirutka.github.io/nginx-binaries'
+const JDK_SOURCE = 'https://api.adoptium.net'
+// 下载源：输入框里直接写着正在用的地址（没改过的就是默认的官方地址）。保存时默认地址存成空，以后默认地址变了跟着变
+const jdkSourceText = ref('')
+const nginxSourceText = ref('')
+watch(form, (f) => {
+  jdkSourceText.value = f?.runtime.source || JDK_SOURCE
+  nginxSourceText.value = f?.runtime.nginxSource || NGINX_SOURCE
+}, { immediate: true })
+watch(jdkSourceText, (v) => { if (form.value) form.value.runtime.source = !v.trim() || v.trim() === JDK_SOURCE ? '' : v.trim() })
+watch(nginxSourceText, (v) => { if (form.value) form.value.runtime.nginxSource = !v.trim() || v.trim() === NGINX_SOURCE ? '' : v.trim() })
 const ngxArch = ref<'x86_64' | 'aarch64'>('x86_64')
 const ngxBusy = ref(false)
 const isStable = (v: string) => Number(v.split('.')[1]) % 2 === 0
@@ -937,8 +947,11 @@ async function pickKeyDir() {
         <p class="muted small">应用配置了 <span class="mono">service.runtime: &#123;java: 17&#125;</span> 时用这里的 JDK，服务器上没有会自动上传。</p>
         <el-form v-if="form" label-width="110px">
           <el-form-item label="下载源">
-            <el-input v-model="form.runtime.source" class="mono" placeholder="https://api.adoptium.net（默认：Eclipse Temurin 官方）" />
+            <el-input v-model="jdkSourceText" class="mono" :placeholder="JDK_SOURCE" />
             <div class="muted small">
+              <template v-if="!form.runtime.source">默认：Eclipse Temurin 官方（Adoptium）。</template>
+              <template v-else><el-button link type="primary" size="small" @click="jdkSourceText = JDK_SOURCE">恢复默认（官方）</el-button></template>
+
               可以换成镜像，如 <span class="mono">https://mirrors.tuna.tsinghua.edu.cn/Adoptium/&#123;java&#125;/jdk/&#123;arch&#125;/linux/</span>
             </div>
           </el-form-item>
@@ -987,8 +1000,12 @@ async function pickKeyDir() {
         <p class="muted small">前端应用设置了 <span class="mono">static.port</span> 时用这里的 nginx 运行网站，不影响服务器上已有的 nginx。</p>
         <el-form v-if="rt" label-width="110px">
           <el-form-item label="下载源">
-            <el-input v-model="rt.nginxSource" class="mono" :placeholder="`${NGINX_SOURCE}（默认）`" />
-            <div class="muted small">可以换成内网镜像（nginx-binaries 格式的目录）</div>
+            <el-input v-model="nginxSourceText" class="mono" :placeholder="NGINX_SOURCE" />
+            <div class="muted small">
+              <template v-if="!rt.nginxSource">默认：nginx-binaries，用 nginx 官方源码编译的独立程序（nginx 官方只发源码和各发行版的安装包，不能直接放到任意 Linux 上运行）。</template>
+              <template v-else><el-button link type="primary" size="small" @click="nginxSourceText = NGINX_SOURCE">恢复默认</el-button></template>
+              可以换成内网镜像（nginx-binaries 格式的目录）。
+            </div>
           </el-form-item>
         </el-form>
         <div class="jdk-bar">

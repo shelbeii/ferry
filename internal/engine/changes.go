@@ -11,6 +11,8 @@ import (
 	"github.com/captain/ferry/internal/config"
 
 	"github.com/captain/ferry/internal/gitinfo"
+	"github.com/captain/ferry/internal/jdk"
+	"github.com/captain/ferry/internal/nginxrt"
 	"github.com/captain/ferry/internal/proto"
 )
 
@@ -291,15 +293,18 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 	}
 	var rels []proto.AppReleases
 	var keeps []proto.KeepScan
-	var busy []proto.PortConflict
+	var pc *proto.PortCheck
+	arch := ""
 	specOf := map[string]proto.AppSpec{}
 	err = e.withSession(target, names, func(s *session, specs []proto.AppSpec) error {
+		arch = s.arch
 		for _, sp := range specs {
 			specOf[sp.Name] = sp
 		}
-		// 端口有没有被别的程序占着（读不到——服务器上的组件太旧等——不影响看改动）
-		if err := s.callData("portcheck", &proto.Request{Apps: specs}, &busy); err != nil {
-			busy = nil
+		// 端口有没有被别的程序占着、服务器上已有哪些 JDK 和 nginx（读不到——服务器上的组件太旧等——不影响看改动）
+		var got proto.PortCheck
+		if err := s.callData("portcheck", &proto.Request{Apps: specs}, &got); err == nil {
+			pc = &got
 		}
 		if err := s.callData("releases", &proto.Request{Apps: specs, Detail: true}, &rels); err != nil {
 			return err
@@ -324,11 +329,13 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 	cs := changesFrom(git, rels, localApps(e.File, t, apps))
 	for i := range cs {
 		if sp, ok := specOf[cs[i].App]; ok {
-			cs[i].Runtime = runtimeDesc(sp)
+			cs[i].Runtime = e.runtimeDesc(sp, pc, arch)
 		}
-		for _, b := range busy {
-			if b.App == cs[i].App {
-				cs[i].Ports = append(cs[i].Ports, b)
+		if pc != nil {
+			for _, b := range pc.Ports {
+				if b.App == cs[i].App {
+					cs[i].Ports = append(cs[i].Ports, b)
+				}
 			}
 		}
 		for _, ks := range keeps {
@@ -345,8 +352,9 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 	return cs, nil
 }
 
-// runtimeDesc 应用这次按什么运行（审阅部署时给人看）。原生程序没有可说的，返回空。
-func runtimeDesc(s proto.AppSpec) string {
+// runtimeDesc 应用这次按什么运行（审阅部署时给人看）：用服务器上已有的，还是要上传本机的、先下载。
+// pc 是服务器上的情况（读不到时为 nil，只说按什么运行）。原生程序没有可说的，返回空。
+func (e *Engine) runtimeDesc(s proto.AppSpec, pc *proto.PortCheck, arch string) string {
 	switch s.Type {
 	case proto.TypeStatic:
 		switch {
@@ -357,21 +365,15 @@ func runtimeDesc(s proto.AppSpec) string {
 		case s.NginxInstance != "":
 			return "共用的 Nginx 实例 " + s.NginxInstance + " 托管，端口 " + s.SitePort
 		case s.Unit != "":
-			v := "最新稳定版"
-			if m := regexp.MustCompile(`^nginx-(.+)$`).FindStringSubmatch(s.RuntimeNginx); m != nil {
-				v = m[1] + " 系列"
-			}
-			return fmt.Sprintf("Ferry 自带的 Nginx（%s，服务器上没有时先下载），单独运行这个站点（%s），端口 %s", v, s.Unit, s.SitePort)
+			return e.nginxDesc(s, pc, arch) + "，单独运行在 " + s.SitePort + " 端口（服务 " + s.Unit + "）"
 		case s.Link != "":
 			return "只放文件：" + s.Link + " 指向当前版本，由服务器上已有的 nginx 提供"
 		}
 		return "只放文件，由服务器上已有的 nginx 提供"
 	case proto.TypeJava:
 		switch {
-		case s.RuntimeVersion != "":
-			return "Ferry 提供的 JDK " + s.RuntimeVersion + "（服务器上没有时先下载）"
-		case s.RuntimeJava > 0:
-			return fmt.Sprintf("Ferry 提供的 JDK %d（服务器上没有时先下载）", s.RuntimeJava)
+		case s.RuntimeVersion != "" || s.RuntimeJava > 0:
+			return e.jdkDesc(s, pc, arch)
 		case s.Java != "":
 			return "服务器上的 Java：" + s.Java
 		}
@@ -385,4 +387,59 @@ func runtimeDesc(s proto.AppSpec) string {
 		}
 	}
 	return ""
+}
+
+// nginxDesc Ferry 自带的 nginx：服务器上有了、本机有（上传）、要下载。
+func (e *Engine) nginxDesc(s proto.AppSpec, pc *proto.PortCheck, arch string) string {
+	series := strings.TrimPrefix(strings.TrimPrefix(s.RuntimeNginx, "nginx"), "-")
+	if pc == nil {
+		return "Ferry 自带的 Nginx " + orStable(series) + "（服务器上没有时先下载）"
+	}
+	if r, ok := pc.Nginx[s.RuntimeNginx]; ok {
+		return "用服务器上已有的 Nginx " + orText(r.Version, r.ID)
+	}
+	if m := nginxrt.Find(e.Settings.NginxDir(), series, nginxrt.ArchOf(arch)); m != nil {
+		return "将上传 Nginx " + m.Version + "（本机已有，服务器上还没有）"
+	}
+	return "将下载 Nginx " + orStable(series) + "（本机和服务器上都还没有）并上传"
+}
+
+// jdkDesc Ferry 提供的 JDK：服务器上有了、本机有（上传）、要下载。
+func (e *Engine) jdkDesc(s proto.AppSpec, pc *proto.PortCheck, arch string) string {
+	a := jdk.ArchOf(arch)
+	if v := s.RuntimeVersion; v != "" {
+		if pc == nil {
+			return "Ferry 提供的 JDK " + v + "（服务器上没有时先下载）"
+		}
+		if _, ok := pc.JavaPins[proto.JavaPinLink(v)]; ok {
+			return "用服务器上已有的 JDK " + v
+		}
+		for _, r := range pc.JDKs {
+			if jdk.MatchID(r.ID, v, a) {
+				return "用服务器上已有的 JDK " + v + "（装过，只建链接）"
+			}
+		}
+		if m := jdk.FindVersion(e.Settings.RuntimeDir(), v, a); m != nil {
+			return "将上传 JDK " + v + "（本机已有，服务器上还没有）"
+		}
+		return "将下载 JDK " + v + "（本机和服务器上都还没有）并上传"
+	}
+	n := s.RuntimeJava
+	if pc == nil {
+		return fmt.Sprintf("Ferry 提供的 JDK %d（服务器上没有时先下载）", n)
+	}
+	if r, ok := pc.Runtimes[n]; ok {
+		return fmt.Sprintf("用服务器上已有的 JDK %d（%s）", n, orText(r.Version, r.ID))
+	}
+	if m := jdk.Find(e.Settings.RuntimeDir(), n, a); m != nil {
+		return fmt.Sprintf("将上传 JDK %d（%s，本机已有，服务器上还没有）", n, m.Version)
+	}
+	return fmt.Sprintf("将下载 JDK %d 的最新版（本机和服务器上都还没有）并上传", n)
+}
+
+func orText(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

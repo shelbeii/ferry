@@ -165,7 +165,15 @@ func (a *Agent) portCheck() int {
 			out = append(out, c)
 		}
 	}
-	return a.result(proto.CodeOK, "", out)
+	pc := proto.PortCheck{Ports: out, Runtimes: a.installedRuntimes(), Nginx: a.installedNginx()}
+	var pinLinks []string
+	for _, s := range a.req.Apps {
+		if s.RuntimeVersion != "" {
+			pinLinks = append(pinLinks, proto.JavaPinLink(s.RuntimeVersion))
+		}
+	}
+	pc.JDKs, pc.JavaPins = a.installedJDKs(pinLinks)
+	return a.result(proto.CodeOK, "", pc)
 }
 
 // healthPorts 健康检查访问本机的端口（服务自己监听的）。

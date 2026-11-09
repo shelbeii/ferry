@@ -48,6 +48,16 @@ type NginxSite struct {
 	Disabled  string   `json:"disabled,omitempty"`
 }
 
+// PortCheck 部署前检查（portcheck）：端口有没有被别的程序占着，服务器上已有哪些 Ferry 提供的 JDK、nginx
+// （审阅部署时说清楚这次要不要下载、上传）。
+type PortCheck struct {
+	Ports    []PortConflict     `json:"ports"`
+	Runtimes map[int]Runtime    `json:"runtimes,omitempty"` // 大版本 → 当前装的 JDK
+	JDKs     []Runtime          `json:"jdks,omitempty"`
+	JavaPins map[string]string  `json:"javaPins,omitempty"`
+	Nginx    map[string]Runtime `json:"nginx,omitempty"` // 部署根目录 runtimes 下的链接名 → 当前指向的
+}
+
 // PortConflict 部署前检查：应用要用的端口已经被别的程序占着。
 type PortConflict struct {
 	App   string      `json:"app"`
