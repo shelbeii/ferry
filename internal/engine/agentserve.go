@@ -48,8 +48,13 @@ type serveCall struct {
 // errServeDown 常驻的 agent 用不了（没启动起来、已经退出）：改为单独运行。
 var errServeDown = errors.New("常驻的 agent 用不了")
 
+// serveStartTimeout 开常驻 agent 的会话最多等多久：等的时候拿着 srvMu，别的查看都在等它。
+const serveStartTimeout = 15 * time.Second
+
 func startAgentServer(c *remote.Client, cmd string) (*agentServer, error) {
-	p, err := c.StartPipe(cmd)
+	ctx, cancel := context.WithTimeout(context.Background(), serveStartTimeout)
+	defer cancel()
+	p, err := c.StartPipeContext(ctx, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -159,9 +164,20 @@ func (a *agentServer) call(ctx context.Context, cmd string, req *proto.Request, 
 		forget()
 		return 0, errServeDown
 	case <-ctx.Done():
-		forget() // 服务器上照常做完（只读的查看），输出丢掉
+		forget() // 输出丢掉；让服务器上也停下（还在排队的不做了，正在运行的命令杀掉）
+		a.cancel(id)
 		return 0, remote.ErrCanceled
 	}
+}
+
+// cancel 告诉常驻的 agent 不用做请求 id 了。不等它写完（连接卡住时写也会卡住）。
+func (a *agentServer) cancel(id string) {
+	b, _ := json.Marshal(proto.ServeRequest{ID: id, Cancel: true})
+	safe.Go("取消常驻 agent 的请求", func() {
+		a.wmu.Lock()
+		defer a.wmu.Unlock()
+		a.pipe.In.Write(append(b, '\n'))
+	})
 }
 
 // server 这条连接上常驻的 agent：还没有、已经退出的启动一个；最近启动失败过的返回 nil（单独运行）。

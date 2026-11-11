@@ -1,0 +1,13 @@
+{
+  "tool": "built-in image_gen",
+  "approvedSource": "ferry-approved.png",
+  "deliverables": [
+    "ferry-light.png",
+    "ferry-dark.png"
+  ],
+  "packaging": "统一导出为 1024px 母版、256px 界面图标，并裁切相同圆角；琥珀黄点缀保留。",
+  "prompts": {
+    "dark": "Use case: precise-object-edit. Asset type: production-ready square Ferry application icon, faithful color variant of approved final artwork.\nInput image 1 is the APPROVED EDIT TARGET. This is an exact artwork-preservation and palette-production task. Keep EXACTLY the same FE letter geometry, recognizable three-stroke E with thin raked front windshield, F, two r wave crests, y-shaped curved pointed bow, curved lower waterline, all tapering tail strokes, cabin proportions, relative positions, line widths, and small amber smokestack. Do not redesign, add strokes, simplify, re-interpret or change the mark in any way.\nPRODUCTION FRAMING: use the original rounded-square tile itself as the full square icon canvas. Remove the original outer cream presentation margin. Tile must extend edge-to-edge at left, right, top and bottom; only the four OUTSIDE ROUNDED CORNERS are fully transparent. No outer rectangular backdrop or presentation card. The emblem fills approximately 88% of the tile width, centered exactly as in the supplied design. Preserve the original rounded-corner radius, approximately 15% of width.\nOnly solid palette colors and antialiased edges, no gradients, no shadows, no texture, no extra borders, no letters beyond the approved integrated logo, no captions, no watermark. The entire boat silhouette and the tiny amber accent remain opaque. Output one clean square PNG with genuinely transparent pixels outside rounded corners.\nDARK THEME palette: rounded-square tile is deep ink navy #030B38; all boat/F/E/rry/windshield and wake strokes are warm ivory #FFF7ED; the tiny smokestack is amber #FFBF18. Interior glass and negative spaces are the same deep navy as the tile. Retain the approved source artwork as precisely as possible.",
+    "light": "Make an exact LIGHT THEME color variant of the supplied Ferry icon. Keep the boat design and placement unchanged. The boat, FE letters, rry wave and thin windshield are deep navy #030B38 instead of ivory. The small amber smokestack remains amber #FFBF18.\nThe background must be a completely SOLID OPAQUE warm ivory #FFF7ED square from edge to edge. No transparency anywhere, no corner cutouts, no gradients, no shading, no textures, no shadows, no vignette. Empty areas above and below the boat are perfectly flat ivory. No new text, no redesigned shapes, no resizing or repositioning. One square app icon asset."
+  }
+}

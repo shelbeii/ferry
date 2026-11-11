@@ -55,7 +55,24 @@ var binaryTypes = map[string]bool{
 // IsBinaryType 这种类型的值按二进制显示。
 func IsBinaryType(t string) bool { return binaryTypes[strings.ToUpper(t)] }
 
-// readRows 读出最多 max 行（max <= 0 不限）。
+// maxResultBytes 一次查询结果最多带回多少字节的单元格内容：每格有上限（MaxCell），但行数×列数×每格上限可以到几个 GB，
+// 大字段多的表 SELECT * 时界面会卡死。到了就像行数到了上限一样停下（more 为 true，查询会让数据库停下这条语句）。
+var maxResultBytes = 32 << 20
+
+// cellBytes 单元格大约占多少字节（只算内容）。
+func cellBytes(v any) int {
+	switch x := v.(type) {
+	case string:
+		return len(x)
+	case Cut:
+		return len(x.Text)
+	case Binary:
+		return len(x.Hex)
+	}
+	return 8
+}
+
+// readRows 读出最多 max 行（max <= 0 不限）；内容合计超过 maxResultBytes 时也停下。
 func readRows(rows *sql.Rows, max int) ([]Column, [][]any, bool, error) {
 	cts, err := rows.ColumnTypes()
 	if err != nil {
@@ -72,8 +89,9 @@ func readRows(rows *sql.Rows, max int) ([]Column, [][]any, bool, error) {
 	for i := range vals {
 		ptrs[i] = &vals[i]
 	}
+	size := 0
 	for rows.Next() {
-		if max > 0 && len(out) >= max {
+		if max > 0 && len(out) >= max || size >= maxResultBytes {
 			more = true
 			break
 		}
@@ -83,6 +101,7 @@ func readRows(rows *sql.Rows, max int) ([]Column, [][]any, bool, error) {
 		row := make([]any, len(cols))
 		for i, v := range vals {
 			row[i] = cell(v, cols[i].Type)
+			size += cellBytes(row[i])
 		}
 		out = append(out, row)
 	}
@@ -129,7 +148,7 @@ func text(s string) any {
 		for !utf8.ValidString(cut) {
 			cut = cut[:len(cut)-1]
 		}
-		return Cut{Text: cut, Size: len(s)}
+		return Cut{Text: strings.Clone(cut), Size: len(s)} // 复制一份：不留着整个大字符串
 	}
 	return s
 }

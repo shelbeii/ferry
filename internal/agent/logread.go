@@ -391,8 +391,14 @@ func (a *Agent) loggrep() int {
 	res := proto.LogSearch{Matches: []proto.LogMatch{}}
 	total := 0
 	err = src.each(files, func(name string, r io.Reader) error {
+		if a.canceled() {
+			return errCanceled
+		}
 		res.Files++
-		ms, more := grepReader(r, kw, a.req.GrepCase, ctx, limit-total)
+		ms, more := grepReader(a.cancelable(r), kw, a.req.GrepCase, ctx, limit-total)
+		if a.canceled() {
+			return errCanceled
+		}
 		for i := range ms {
 			ms[i].File = name
 		}

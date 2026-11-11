@@ -257,6 +257,21 @@ export function trackTone(element: HTMLElement): () => void {
 }
 export function retone() { queueProbe() }
 
+/**
+ * 切换深色 / 浅色主题后马上调用：背后的颜色整个换了，旧的明暗判断（滞后区间也是按旧颜色定的）全部作废。
+ * 以前要等上面 1.5 秒一次的检查，期间深色主题里还挂着浅色玻璃（白块、字看不清）。
+ * 先把所有玻璃（包括切走的页面里的）的判断去掉，按新主题的默认样子画；再当场重看一次，和主题在同一帧生效
+ */
+export function themeChanged() {
+  for (const element of document.querySelectorAll<HTMLElement>('.cg[data-tone]')) delete element.dataset.tone
+  clearTimeout(toneTimer)
+  scrolled = undefined
+  if (!toned.size) return
+  probe()
+  // 背后有带颜色过渡的元素（按钮、卡片 0.3 秒左右）时，上面读到的可能是过渡中间的颜色：过渡完再看一次
+  window.setTimeout(queueProbe, 400)
+}
+
 /** 写 CSS 变量，值没变就不写：拖动窗口时尺寸回调很频繁，WebView2 131 在频繁改 CSS 变量、同时重算样式时会崩溃 */
 export function setVar(element: HTMLElement, name: string, value: string) {
   if (element.style.getPropertyValue(name) !== value) element.style.setProperty(name, value)

@@ -6,15 +6,22 @@ import { ArrowRight, Back, Delete, Document, Download, EditPen, Folder, FolderAd
 import { bytes, call, ferry, FerryError, isSecretKind, type DirListing, type ErrorDetail, type FileEntry } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { validRemoteName } from '../fileNames'
-import FilePermissions from './FilePermissions.vue'
+import { filePermissions, type FilePermissionInfo } from '../filePermissions'
+import { useFileSizes } from '../fileSizes'
+import { useHoverTip } from '../hoverTip'
+import { useVirtualRows } from '../virtualRows'
+import FilePermissionDetails from './FilePermissionDetails.vue'
 import FilePreviewDialog from './FilePreviewDialog.vue'
 import FileSizeCell from './FileSizeCell.vue'
 import { onFileDrop, pickDir, pickMany, reveal } from '../platform'
 import { secretRequest, trustRequest, trustedTick } from '../state'
-import { glass, setVar } from '../glass/runtime'
+import { glass } from '../glass/runtime'
 
 const props = defineProps<{ config: string; target: string; initialPath?: string; initialFocus?: string; directoryOnly?: boolean }>()
 const emit = defineEmits<{ directoryChange: [path: string] }>()
+
+// 名称排序：每次比较都 localeCompare(…, 'zh-CN') 要现建排序规则，上千个文件要几十毫秒；共用一个
+const nameOrder = new Intl.Collator('zh-CN', { numeric: true })
 
 const path = ref('')
 const home = ref('')
@@ -22,17 +29,21 @@ const pathInput = ref('')
 const editingPath = ref(false)
 const breadcrumbs = computed(() => path.value.split('/').filter(Boolean).map((label, i, all) => ({ label, path: '/' + all.slice(0, i + 1).join('/') })))
 const entries = ref<FileEntry[]>([])
-const sizeVersion = ref(0)
+const sizes = useFileSizes()
 const loading = ref(false)
 const error = ref('')
-const selected = ref<FileEntry[]>([])
-const table = ref<{ clearSelection: () => void }>()
+/** 勾选的（按名字）；只算当前列表里有的 */
+const selectedNames = ref(new Set<string>())
+let selectAnchor: string | undefined
 const focusedName = ref<string>()
 const preview = ref<{ entry: FileEntry; dir: string }>()
 const query = ref('')
 const directoryEntries = computed(() => entries.value.filter((e) => !props.directoryOnly || e.dir))
-const shownEntries = computed(() => directoryEntries.value.filter((e) => e.name.toLowerCase().includes(query.value.trim().toLowerCase())).slice().sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true })))
-const selectedNames = computed(() => new Set(selected.value.map((row) => row.name)))
+const shownEntries = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  return (q ? directoryEntries.value.filter((e) => e.name.toLowerCase().includes(q)) : directoryEntries.value.slice()).sort((a, b) => Number(b.dir) - Number(a.dir) || nameOrder.compare(a.name, b.name))
+})
+const selected = computed(() => shownEntries.value.filter((row) => selectedNames.value.has(row.name)))
 const working = ref('')
 /** 正在删除的（完整路径）：删除在后台进行，别的文件夹照常能进、能操作 */
 const deleting = ref(new Set<string>())
@@ -69,29 +80,57 @@ watch(() => [props.config, props.target, props.initialPath, props.initialFocus, 
   deleting.value = new Set()
   preview.value = undefined
   path.value = ''; home.value = ''; entries.value = []; clearSelection(); query.value = ''; editingPath.value = false
+  sizes.clear()
   load(props.initialPath ?? '', props.initialFocus)
 }, { immediate: true })
 watch(trustedTick, () => {
   if (waitTrust) load(requestedPath, requestedFocus)
 })
 
-let unlisten: (() => void) | undefined
-// 液态玻璃：量出表头高度，文件列表顶部留出这么多，第一行不被浮着的表头挡住
-// 表格的表头比这里的 onMounted 晚出来：看整个面板的尺寸变化，表头出来后也看它
-let headResize: ResizeObserver | undefined
-let observedHead: HTMLElement | undefined
-function measureHead() {
-  const head = root.value?.querySelector<HTMLElement>('.el-table__header-wrapper')
-  if (!head) return
-  if (head !== observedHead) { observedHead = head; headResize?.observe(head) }
-  if (root.value) setVar(root.value, '--th-h', `${head.offsetHeight}px`)
+// ---- 文件列表：只画看得见的行（目录里几千个文件时，全画出来打开、勾选、删除都要卡好几秒，整个 Ferry 跟着不动）
+// 行高由权限摘要的行数决定（CSS 里 .file-row 的高度直接用这里的值）
+const ROW_PAD = 13 // 上下留白 12 + 底边线 1
+const PERM_LINE = 22
+const PERM_SPECIAL = 16
+function rowHeight(p: FilePermissionInfo): number {
+  return ROW_PAD + Math.max(24, p.summary.length * PERM_LINE + (p.special.length ? PERM_SPECIAL : 0))
 }
-onMounted(() => {
-  headResize = new ResizeObserver(measureHead)
-  if (root.value) headResize.observe(root.value)
-  requestAnimationFrame(measureHead)
+const rowPermissions = computed(() => shownEntries.value.map((e) => filePermissions(e)))
+const rowHeights = computed(() => rowPermissions.value.map(rowHeight))
+const scroller = ref<HTMLDivElement>()
+const head = ref<HTMLDivElement>()
+const virtual = useVirtualRows(scroller, head, rowHeights)
+const visibleRows = computed(() => {
+  const [start, end] = virtual.range.value
+  const list = shownEntries.value
+  const out = []
+  for (let i = start; i < end && i < list.length; i++) {
+    out.push({ row: list[i], index: i, top: virtual.offsets.value[i], height: rowHeights.value[i], permissions: rowPermissions.value[i] })
+  }
+  return out
 })
-onBeforeUnmount(() => headResize?.disconnect())
+const emptyText = computed(() => error.value ? '目录读取失败，请重试' : query.value.trim() ? (props.directoryOnly ? '没有匹配的子目录' : '没有匹配的文件') : props.directoryOnly ? '没有子目录，可以选择当前目录' : '空文件夹')
+function scrollToName(name: string) {
+  virtual.scrollToIndex(shownEntries.value.findIndex((entry) => entry.name === name))
+}
+
+// 列表共用一个悬停提示：权限详情、大小说明、名字太长时的全名
+const hoverTip = useHoverTip<{ entry: FileEntry; permissions: FilePermissionInfo }>((el) => {
+  const kind = el.dataset.tip
+  if (kind === 'size') return el.dataset.tipText ? { placement: 'left', effect: 'dark', text: el.dataset.tipText } : undefined
+  if (kind === 'name') return el.scrollWidth > el.clientWidth ? { placement: 'top', effect: 'dark', text: el.textContent ?? '' } : undefined
+  if (kind === 'perm') {
+    const name = el.closest<HTMLElement>('[data-name]')?.dataset.name
+    const entry = shownEntries.value.find((e) => e.name === name)
+    return entry ? { placement: 'left', effect: 'light', data: { entry, permissions: filePermissions(entry) } } : undefined
+  }
+})
+function onListScroll() {
+  virtual.onScroll()
+  hoverTip.hide()
+}
+
+let unlisten: (() => void) | undefined
 onMounted(async () => {
   if (props.directoryOnly) return
   unlisten = await onFileDrop(
@@ -110,6 +149,8 @@ onBeforeUnmount(() => {
   listingReads.cancelAll()
   unlisten?.()
   xfer.value?.kill()
+  sizes.clear()
+  hoverTip.hide()
 })
 
 /** 连接问题：没核对主机公钥、要密码时弹出对应的框，处理好后自动重试 */
@@ -125,9 +166,13 @@ function handle(e: unknown, retry: () => void): string {
   return msg
 }
 
-async function load(dir: string, initialFocus?: string) {
+/**
+ * 列出目录。soft：改名、删除、上传等操作后刷新同一个目录——留着勾选、焦点和已经统计的大小（条目变了的大小自动作废）；
+ * 否则（换目录、点刷新）全部重来。
+ */
+async function load(dir: string, initialFocus?: string, soft = false) {
   const seq = ++loadSeq
-  sizeVersion.value++
+  if (!soft) sizes.clear()
   listingReads.cancelAll()
   requestedPath = dir
   requestedFocus = initialFocus
@@ -137,20 +182,30 @@ async function load(dir: string, initialFocus?: string) {
     const r = await listingReads.run('listing', (s) => readCall<DirListing>(['files', 'ls', props.target, ...(dir ? [dir] : []), '-c', props.config], s))
     if (seq !== loadSeq) return
     if (!r) throw new Error('目录读取失败')
-    if (path.value !== r.path) query.value = ''
+    const samePath = path.value === r.path
+    if (!samePath) query.value = ''
     path.value = r.path
     pathInput.value = r.path
     home.value = r.home
     entries.value = r.entries
-    clearSelection()
+    if (soft && samePath) {
+      // 还在的留着勾选和焦点
+      const names = new Set(r.entries.map((e) => e.name))
+      const kept = [...selectedNames.value].filter((name) => names.has(name))
+      if (kept.length !== selectedNames.value.size) selectedNames.value = new Set(kept)
+      if (focusedName.value && !names.has(focusedName.value)) focusedName.value = undefined
+    } else {
+      if (soft) sizes.clear() // 操作后刷新时已经换了目录
+      clearSelection()
+      if (!samePath) virtual.scrollToTop()
+    }
     const focus = r.focus || initialFocus
     if (focus && shownEntries.value.some((entry) => entry.name === focus)) {
       focusedName.value = focus
       nextTick(() => {
         if (seq !== loadSeq) return
         focusList()
-        const position = shownEntries.value.findIndex((entry) => entry.name === focus)
-        root.value?.querySelectorAll<HTMLElement>('.el-table__body-wrapper tr.el-table__row')[position]?.scrollIntoView({ block: 'nearest' })
+        scrollToName(focus)
       })
     }
     error.value = ''
@@ -167,32 +222,61 @@ async function load(dir: string, initialFocus?: string) {
 watch(query, clearSelection)
 
 function clearSelection() {
-  selected.value = []
+  if (selectedNames.value.size) selectedNames.value = new Set()
+  selectAnchor = undefined
   focusedName.value = undefined
-  table.value?.clearSelection()
 }
 
 function focusList() {
-  root.value?.querySelector<HTMLElement>('.el-table')?.focus({ preventScroll: true })
+  scroller.value?.focus({ preventScroll: true })
+}
+
+const canSelect = (row: FileEntry) => !busy.value && !isDeleting(row)
+const selectableCount = computed(() => (busy.value ? 0 : shownEntries.value.reduce((n, row) => n + (isDeleting(row) ? 0 : 1), 0)))
+const allChecked = computed(() => selectableCount.value > 0 && selected.value.length >= selectableCount.value)
+
+/** 点复选框：勾上 / 取消；按住 Shift 时把上次点的那行到这行都设成一样 */
+function toggleRow(row: FileEntry, event: MouseEvent) {
+  if (!canSelect(row)) return
+  const next = new Set(selectedNames.value)
+  const on = !next.has(row.name)
+  const list = shownEntries.value
+  const from = event.shiftKey && selectAnchor ? list.findIndex((e) => e.name === selectAnchor) : -1
+  const to = list.indexOf(row)
+  if (from >= 0 && to >= 0) {
+    for (let i = Math.min(from, to); i <= Math.max(from, to); i++) {
+      if (!canSelect(list[i])) continue
+      if (on) next.add(list[i].name)
+      else next.delete(list[i].name)
+    }
+  } else if (on) next.add(row.name)
+  else next.delete(row.name)
+  selectedNames.value = next
+  selectAnchor = row.name
+  focusedName.value = row.name
+}
+
+function toggleAll() {
+  if (!selectableCount.value) return
+  if (allChecked.value) {
+    clearSelection()
+    return
+  }
+  const all = shownEntries.value.filter(canSelect)
+  selectedNames.value = new Set(all.map((row) => row.name))
+  selectAnchor = undefined
+  focusedName.value = all[0]?.name
 }
 
 // 行点击只定位，勾选由复选框处理；打开由 dblclick 单独处理。
-function rowClick(row: FileEntry, column: { type?: string } | null, event: MouseEvent) {
-  if (busy.value || column?.type === 'selection' || isDeleting(row) || event.detail > 1) return
+function rowClick(row: FileEntry, event: MouseEvent) {
+  if (busy.value || isDeleting(row) || event.detail > 1) return
   focusedName.value = row.name
   focusList()
 }
 
-function checkboxSelect(_selection: FileEntry[], row: FileEntry) {
-  focusedName.value = row.name
-}
-
-function selectAll(selection: FileEntry[]) {
-  focusedName.value = selection[0]?.name
-}
-
 function clearFocusOnBackground(event: MouseEvent) {
-  if (busy.value || !(event.target instanceof Element) || event.target.closest('tr, input, button, .el-checkbox, .el-scrollbar__bar')) return
+  if (busy.value || !(event.target instanceof Element) || event.target.closest('.file-row, .file-head, input, button, .el-checkbox')) return
   focusedName.value = undefined
   focusList()
 }
@@ -207,8 +291,8 @@ function openEntry(row: FileEntry) {
   else viewFile(row)
 }
 
-function rowDblclick(row: FileEntry, column: { type?: string } | null, event: MouseEvent) {
-  if (column?.type === 'selection' || event.ctrlKey || event.metaKey || event.shiftKey) return
+function rowDblclick(row: FileEntry, event: MouseEvent) {
+  if (event.ctrlKey || event.metaKey || event.shiftKey) return
   openEntry(row)
 }
 
@@ -245,11 +329,7 @@ function listKeydown(event: KeyboardEvent) {
     else index = Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)))
     const row = rows[index]
     focusedName.value = row.name
-    nextTick(() => {
-      if (focusedName.value !== row.name) return
-      const position = shownEntries.value.findIndex((item) => item.name === row.name)
-      root.value?.querySelectorAll<HTMLElement>('.el-table__body-wrapper tr.el-table__row')[position]?.scrollIntoView({ block: 'nearest' })
-    })
+    scrollToName(row.name)
   }
 }
 
@@ -269,7 +349,7 @@ async function run(args: string[], ok: string) {
   } finally {
     if (at === context) working.value = ''
   }
-  if (path.value === dir) load(dir)
+  if (path.value === dir) load(dir, undefined, true)
 }
 
 async function mkdir() {
@@ -331,6 +411,11 @@ async function remove() {
   try {
     await call(['files', 'rm', props.target, ...paths, '-c', props.config])
     if (at !== context) return
+    // 删掉了：直接从列表里去掉，不用等刷新
+    if (path.value === dir) {
+      const gone = new Set(rows.map((r) => r.name))
+      entries.value = entries.value.filter((e) => !gone.has(e.name))
+    }
     done()
     ElMessage.success(`已删除 ${what}`)
   } catch (e) {
@@ -338,8 +423,8 @@ async function remove() {
     done()
     ElMessage.error({ message: handle(e, () => {}), duration: 6000 })
   }
-  // 还在这个文件夹时刷新
-  if (path.value === dir && !loading.value) load(dir)
+  // 还在这个文件夹时在后台刷新一次（可能没删全、或者别人也改了）
+  if (path.value === dir && !loading.value) load(dir, undefined, true)
 }
 
 async function pickUpload(directory: boolean) {
@@ -357,7 +442,7 @@ function upload(locals: string[]) {
   const what = locals.length === 1 ? (locals[0].split(/[\\/]/).pop() ?? '') : `${locals.length} 项`
   transfer('upload', ['files', 'upload', props.target, '--dir', dir, ...locals], `上传 ${what} 到 ${dir}`, () => {
     ElMessage.success(`已上传 ${what}`)
-    if (path.value === dir) load(dir)
+    if (path.value === dir) load(dir, undefined, true)
   })
 }
 
@@ -473,47 +558,81 @@ function time(t: string): string {
 
     <div class="file-filter"><el-input v-model="query" size="small" :placeholder="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" clearable :aria-label="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" /><span class="muted small">{{ shownEntries.length }} / {{ directoryEntries.length }} 项<span v-if="selected.length"> · 已勾选 {{ selected.length }} 项</span></span><el-button v-if="selected.length" size="small" text @click="clearSelection">取消勾选</el-button></div>
     <el-alert v-if="error" type="error" :closable="false" show-icon class="err" :title="error"><el-button link type="primary" @click="load(requestedPath, requestedFocus)">重试</el-button></el-alert>
-    <el-table
-      ref="table"
-      v-loading="loading"
-      :data="shownEntries"
-      size="small"
-      height="100%"
-      class="list"
-      tabindex="0"
-      :aria-label="directoryOnly ? '服务器目录列表' : '服务器文件列表'"
-      row-key="name"
-      :empty-text="error ? '目录读取失败，请重试' : query.trim() ? (directoryOnly ? '没有匹配的子目录' : '没有匹配的文件') : directoryOnly ? '没有子目录，可以选择当前目录' : '空文件夹'"
-      @selection-change="(v: FileEntry[]) => (selected = v)"
-      @select="checkboxSelect"
-      @select-all="selectAll"
-      @row-click="rowClick"
-      @row-dblclick="rowDblclick"
-      @click="clearFocusOnBackground"
-      @keydown="listKeydown"
-      :row-class-name="({ row }: { row: FileEntry }) => [isDeleting(row) ? 'is-deleting' : '', selectedNames.has(row.name) ? 'file-selected' : '', focusedName === row.name ? 'file-focused' : ''].join(' ')"
-    >
-      <el-table-column v-if="!directoryOnly" type="selection" width="34" :selectable="(row: FileEntry) => !busy && !isDeleting(row)" />
-      <el-table-column label="名称" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span class="name" :class="{ dir: row.dir }">
-            <el-icon><Folder v-if="row.dir" /><Document v-else /></el-icon>
-            <span>{{ row.name }}</span>
-            <el-icon v-if="row.link" class="link"><Link /></el-icon>
-            <span v-if="isDeleting(row)" class="deleting">删除中…</span>
+    <div v-loading="loading" class="list-wrap">
+      <div
+        ref="scroller"
+        class="list"
+        tabindex="0"
+        role="table"
+        :aria-label="directoryOnly ? '服务器目录列表' : '服务器文件列表'"
+        :aria-rowcount="shownEntries.length + 1"
+        @scroll="onListScroll"
+        @click="clearFocusOnBackground"
+        @keydown="listKeydown"
+        @mouseover="hoverTip.over"
+        @focusin="hoverTip.over"
+        @mouseleave="hoverTip.hide"
+        @focusout="hoverTip.hide"
+      >
+        <div ref="head" class="file-head file-grid" role="row" aria-rowindex="1">
+          <span v-if="!directoryOnly" class="file-check" role="columnheader" @click.stop="toggleAll">
+            <el-checkbox :model-value="allChecked" :indeterminate="!allChecked && selected.length > 0" :disabled="!selectableCount" aria-label="全选" @click.prevent />
           </span>
-        </template>
-      </el-table-column>
-      <el-table-column v-if="!directoryOnly" label="大小" width="124" align="right">
-        <template #default="{ row }"><FileSizeCell :key="`${sizeVersion}:${row.name}`" :config="config" :target="target" :path="join(path, row.name)" :entry="row" :disabled="busy || isDeleting(row)" /></template>
-      </el-table-column>
-      <el-table-column label="修改时间" width="156">
-        <template #default="{ row }">{{ time(row.mtime) }}</template>
-      </el-table-column>
-      <el-table-column label="权限" width="270">
-        <template #default="{ row }"><FilePermissions :mode="row.mode" :dir="row.dir" :link="row.link" /></template>
-      </el-table-column>
-    </el-table>
+          <span role="columnheader">名称</span>
+          <span v-if="!directoryOnly" role="columnheader" class="file-size">大小</span>
+          <span role="columnheader">修改时间</span>
+          <span role="columnheader">权限</span>
+        </div>
+        <div class="file-body" :style="{ height: `${virtual.total.value}px` }">
+          <div
+            v-for="item in visibleRows"
+            :key="item.row.name"
+            class="file-row file-grid"
+            :class="{ 'is-deleting': isDeleting(item.row), 'file-selected': selectedNames.has(item.row.name), 'file-focused': focusedName === item.row.name }"
+            :style="{ transform: `translateY(${item.top}px)`, height: `${item.height}px` }"
+            role="row"
+            :aria-rowindex="item.index + 2"
+            :aria-selected="directoryOnly ? focusedName === item.row.name : selectedNames.has(item.row.name)"
+            :data-name="item.row.name"
+            @click="rowClick(item.row, $event)"
+            @dblclick="rowDblclick(item.row, $event)"
+          >
+            <span v-if="!directoryOnly" class="file-check" role="cell" @click.stop="toggleRow(item.row, $event)" @dblclick.stop>
+              <el-checkbox :model-value="selectedNames.has(item.row.name)" :disabled="!canSelect(item.row)" :aria-label="`勾选 ${item.row.name}`" @click.prevent />
+            </span>
+            <span class="name" :class="{ dir: item.row.dir }" role="cell">
+              <el-icon><Folder v-if="item.row.dir" /><Document v-else /></el-icon>
+              <span class="name-text" data-tip="name">{{ item.row.name }}</span>
+              <el-icon v-if="item.row.link" class="link"><Link /></el-icon>
+              <span v-if="isDeleting(item.row)" class="deleting">删除中…</span>
+            </span>
+            <span v-if="!directoryOnly" class="file-size" role="cell">
+              <FileSizeCell
+                :entry="item.row"
+                :state="sizes.get(join(path, item.row.name), item.row)"
+                :disabled="busy || isDeleting(item.row)"
+                @measure="sizes.measure(config, target, join(path, item.row.name), item.row)"
+                @cancel="sizes.cancel(join(path, item.row.name))"
+              />
+            </span>
+            <span role="cell">{{ time(item.row.mtime) }}</span>
+            <span role="cell">
+              <span class="permission-summary" data-tip="perm" tabindex="0" @click.stop @dblclick.stop>
+                <span v-for="line in item.permissions.summary" :key="line.role" class="permission-line"><span v-if="line.role" class="permission-role">{{ line.role }}</span><span>{{ line.text }}</span></span>
+                <span v-if="item.permissions.special.length" class="permission-special">含特殊权限</span>
+              </span>
+            </span>
+          </div>
+        </div>
+        <div v-if="!shownEntries.length && !loading" class="file-empty">{{ emptyText }}</div>
+      </div>
+    </div>
+    <el-tooltip :visible="!!hoverTip.tip.value" virtual-triggering :virtual-ref="hoverTip.tip.value?.el" :placement="hoverTip.tip.value?.placement ?? 'top'" :effect="hoverTip.tip.value?.effect ?? 'dark'">
+      <template #content>
+        <FilePermissionDetails v-if="hoverTip.tip.value?.data" :permissions="hoverTip.tip.value.data.permissions" :mode="hoverTip.tip.value.data.entry.mode" :dir="hoverTip.tip.value.data.entry.dir" />
+        <span v-else>{{ hoverTip.tip.value?.text }}</span>
+      </template>
+    </el-tooltip>
 
     <div v-if="xfer" class="xfer">
       <div class="xfer-head">
@@ -525,27 +644,18 @@ function time(t: string): string {
     </div>
     <div v-else class="muted small tip" role="status">{{ working || (directoryOnly ? '单击选中目录，双击进入；未选中子目录时使用当前目录' : deleting.size ? `正在删除 ${deleting.size} 项，可以继续浏览别的文件夹` : '双击打开文件或文件夹；勾选复选框后可下载、改名或删除；可拖入文件上传') }}</div>
     <div v-if="dropOver" class="drop">松开就上传到 {{ path }}</div>
-    <FilePreviewDialog v-if="preview" :config="config" :target="target" :path="join(preview.dir, preview.entry.name)" @close="preview = undefined" @download="download([preview!.entry], preview!.dir)" @saved="load(path)" />
+    <FilePreviewDialog v-if="preview" :config="config" :target="target" :path="join(preview.dir, preview.entry.name)" @close="preview = undefined" @download="download([preview!.entry], preview!.dir)" @saved="load(path, undefined, true)" />
   </div>
 </template>
 
 <style scoped>
-/* 液态玻璃：表头浮在文件列表上，文件行从它下面滚过，表头是磨砂玻璃（高度 --th-h 由 headResize 量出） */
-.glass-head :deep(.el-table__inner-wrapper) { position: relative; }
-.glass-head :deep(.el-table__header-wrapper) {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 3;
+/* 液态玻璃：表头吸顶，文件行从它下面滚过，表头是磨砂玻璃 */
+.glass-head .file-head {
   /* 深浅跟着设置里的「玻璃透明度」（--cg-k、--cg-blur-k，见 glass/runtime.ts） */
   background: color-mix(in srgb, var(--el-bg-color) min(100%, calc(55% * var(--cg-k, 1))), transparent);
   -webkit-backdrop-filter: blur(calc(14px * var(--cg-blur-k, 1))) saturate(1.3);
   backdrop-filter: blur(calc(14px * var(--cg-blur-k, 1))) saturate(1.3);
 }
-.glass-head :deep(.el-table__header-wrapper tr),
-.glass-head :deep(.el-table__header-wrapper th.el-table__cell) { background: transparent; }
-.glass-head :deep(.el-table__body-wrapper .el-scrollbar__view) { padding-top: var(--th-h, 0px); }
 .file-breadcrumbs { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 16px; line-height: 24px; }
 .file-breadcrumbs .file-crumb-separator { flex-shrink: 0; color: var(--el-text-color-placeholder); font-size: 12px; }
 .file-breadcrumbs button { flex-shrink: 0; border: 0; background: none; color: var(--el-text-color-regular); cursor: pointer; padding: 4px 7px; border-radius: 5px; font: inherit; }
@@ -591,26 +701,79 @@ function time(t: string): string {
 .err {
   padding: 4px 8px;
 }
-.list {
+.list-wrap {
+  position: relative;
   flex: 1;
   min-height: 0;
-  font-size: 15px;
+  display: flex;
 }
-.list :deep(th.el-table__cell) { font-size: 14px; }
-.list :deep(.cell) { line-height: 24px; }
-.list :deep(.permission-summary) { font-size: 15px; }
-.list :deep(.el-table__body) { user-select: none; -webkit-user-select: none; }
-.list :deep(.file-selected > td.el-table__cell) { background: var(--el-color-primary-light-9); }
-.directory-picker .list :deep(.file-focused > td.el-table__cell) { background: var(--el-color-primary-light-9); }
+.list {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  font-size: 15px;
+  color: var(--el-text-color-regular);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
 .list:focus { outline: none; }
-.list:focus :deep(.file-focused) { outline: 1px solid var(--el-color-primary-light-5); outline-offset: -1px; }
+/* 列宽和原来的表格一样；窄了左右滚动（表头在同一个滚动区里，跟着一起动） */
+.file-grid {
+  display: grid;
+  grid-template-columns: 34px minmax(160px, 1fr) 124px 156px 270px;
+  min-width: 744px;
+  align-items: center;
+}
+.directory-picker .file-grid { grid-template-columns: minmax(160px, 1fr) 156px 270px; min-width: 586px; }
+.file-grid > span { min-width: 0; padding: 0 10px; }
+.file-grid > .file-check { padding: 0 0 0 10px; display: flex; align-items: center; }
+.file-check .el-checkbox { height: auto; }
+.file-grid > .file-size { text-align: right; }
+.file-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 40px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
+  color: var(--el-text-color-secondary);
+  font-size: 14px;
+  font-weight: 500;
+}
+.file-body { position: relative; }
+/* 高度由脚本按权限摘要的行数给（rowHeight），这里不能让内容把行撑高 */
+.file-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  user-select: none;
+  -webkit-user-select: none;
+  line-height: 24px;
+}
+.file-row:hover { background: var(--el-fill-color-light); }
+.file-row.file-selected { background: var(--el-color-primary-light-9); }
+.directory-picker .file-row.file-focused { background: var(--el-color-primary-light-9); }
+.list:focus .file-row.file-focused { outline: 1px solid var(--el-color-primary-light-5); outline-offset: -1px; }
+.file-empty { padding: 40px 0; text-align: center; color: var(--el-text-color-secondary); font-size: 14px; }
 .name {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
+  color: var(--el-text-color-primary);
 }
-.deleting { margin-left: 8px; font-size: 12px; color: var(--el-color-danger); }
-.list :deep(.is-deleting) { opacity: .55; cursor: default; }
+.name > .el-icon { flex-shrink: 0; }
+.name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deleting { flex-shrink: 0; margin-left: 2px; font-size: 12px; color: var(--el-color-danger); }
+.file-row.is-deleting { opacity: .55; cursor: default; }
+.permission-summary { display: inline-flex; flex-direction: column; max-width: 100%; border-radius: 4px; cursor: help; }
+.permission-summary:focus-visible { outline-offset: 1px; }
+.permission-line { display: flex; flex-wrap: nowrap; column-gap: 8px; line-height: 22px; white-space: nowrap; }
+.permission-role { color: var(--el-text-color-secondary); }
+.permission-special { color: var(--el-text-color-secondary); font-size: 11px; line-height: 16px; }
 .name.dir {
   color: var(--el-color-primary);
   cursor: pointer;

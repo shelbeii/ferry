@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -35,6 +37,7 @@ type poolEntry struct {
 	lastUsed time.Time
 	refs     map[poolRef]bool // 用过它的「配置文件 + 目标」
 	dialing  chan struct{}    // 正在建立时不为空，建好或失败后关闭
+	dialErr  error            // 建立失败的原因（dialing 关闭后读）：等它的请求直接报这个错，不再一个接一个重新连
 	stale    bool             // 已失效（配置、凭据变了或手动断开）：没人用时关闭，不再分给新请求
 }
 
@@ -99,6 +102,9 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 			p.mu.Unlock()
 			select {
 			case <-ch:
+				if err := ent.dialErr; sharedDialErr(err) {
+					return nil, nil, err
+				}
 				continue
 			case <-e.ctx().Done():
 				return nil, nil, ErrCanceled
@@ -144,6 +150,7 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 		cn, err := e.dial(t)
 
 		p.mu.Lock()
+		ent.dialErr = err
 		close(ent.dialing)
 		ent.dialing = nil
 		if err != nil {
@@ -158,6 +165,20 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 		p.mu.Unlock()
 		return cn, p.releaser(ent, true), nil
 	}
+}
+
+// sharedDialErr 同时在等的请求能不能直接用这次建立连接失败的结果：连不上、超时这类网络原因可以
+// （服务器连不上时，几个同时打开的页面不用一个接一个各等一次超时）；
+// 和发起的那个请求自己有关的（取消了、要输入密码、主机公钥没核对、登录被拒）不行，等的请求自己再连一次。
+func sharedDialErr(err error) bool {
+	if err == nil || errors.Is(err, ErrCanceled) || errors.Is(err, remote.ErrCanceled) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var uh *remote.UnknownHostError
+	var af *remote.AuthFailedError
+	var pr *remote.PassphraseRejectedError
+	var detail interface{ JSONDetail() map[string]any }
+	return !errors.As(err, &uh) && !errors.As(err, &af) && !errors.As(err, &pr) && !errors.As(err, &detail)
 }
 
 // retarget 记下这个目标现在用的连接；它以前用的另一条连接（配置改了）失效。调用时持有锁。

@@ -4,6 +4,9 @@
 mod secretclip;
 mod browser;
 mod uicache;
+mod shellicon;
+#[cfg(windows)]
+mod windowchrome;
 
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
@@ -133,6 +136,7 @@ pub fn run() {
             read_config,
             write_config,
             exit_app,
+            shellicon::sync_shell_icon,
             open_external,
             secretclip::copy_secret,
             browser::browser_allow_cert,
@@ -168,6 +172,8 @@ pub fn run() {
                 w = w.data_directory(d.join("webview"));
             }
             let win = w.build()?;
+            #[cfg(windows)]
+            windowchrome::hide_branding(&win)?;
             {
                 use tauri::Manager;
                 // 内置浏览器的网页用单独的目录，能单独清理

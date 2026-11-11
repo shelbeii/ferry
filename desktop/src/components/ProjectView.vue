@@ -579,6 +579,7 @@ const startTimer = () => {
   clearInterval(connTimer)
   connTimer = setInterval(() => {
     now.value = Date.now()
+    if (document.hidden) return // 窗口最小化、在后台时不去量延迟（每次都要和服务器来回一趟）
     loadConns().then(autoRefresh)
   }, 10000)
 }
@@ -613,15 +614,19 @@ onMounted(async () => {
   startTimer()
   await loadInspect()
   if (!active) { mounted = true; return }
-  await loadConns() // 本机就能答复：先知道是不是已经连着，加载提示才说得准
+  await connsFirst() // 先知道是不是已经连着，加载提示才说得准
   if (active) await loadStatus()
   mounted = true
 })
+// connsFirst 读状态前先看连接：通常本机马上答复；网络慢、量延迟要等时最多等一小会儿，不拖着状态一起等
+function connsFirst() {
+  return Promise.race([loadConns(), new Promise((r) => setTimeout(r, 800))])
+}
 onActivated(async () => {
   active = true
   if (!mounted) return // 第一次显示时 onMounted 已经在加载
   startTimer()
-  await loadConns()
+  await connsFirst()
   if (!active) return
   await loadInspect() // 配置可能在别处改过
   if (active) await loadStatus()

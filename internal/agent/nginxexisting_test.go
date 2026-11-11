@@ -46,7 +46,7 @@ server { listen 8100; root /opt/x/apps/a/running; }
 	run := func(cmd string, _ time.Duration) (string, error) {
 		cmds = append(cmds, cmd)
 		switch {
-		case strings.HasPrefix(cmd, "for p in /proc/"):
+		case strings.Contains(cmd, "^nginx: master process"): // 找 nginx 主进程
 			return "M\t1234\tnginx: master process /usr/local/openresty/nginx/sbin/nginx -g daemon off; \t0::/system.slice/docker-" + ctr + ".scope|\n" +
 				"M\t99\tnginx: master process /opt/shop/runtimes/nginx/nginx -e stderr -p /opt/shop/apps/web/data/ -c /opt/shop/.ferry/apps/web/nginx.conf \t0::/system.slice/shop-web.service|\n", nil
 		case strings.HasPrefix(cmd, "docker inspect"):

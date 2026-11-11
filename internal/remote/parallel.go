@@ -33,6 +33,9 @@ const (
 	writeSize = 256 << 10
 )
 
+// writeAhead 每条连接同时在路上的写入数（8 × 256 KB = 2 MB）。变量：手动测量时改成 1 对比。
+var writeAhead = 8
+
 // stallTimeout 一次写入（256 KB）这么久都没写完：连接卡死了（隧道、VPN 断了却没有报错），关掉它，重新连接后接着传。
 var stallTimeout = 90 * time.Second
 
@@ -249,7 +252,12 @@ func UploadParallel(ctx context.Context, primary *Client, extra []*Client, items
 					h.Close()
 				}
 			}()
-			buf := make([]byte, writeSize)
+			// 每条连接同时有 writeAhead 次写入在路上：一次写完等服务器确认再写下一次时，
+			// 往返 60 毫秒的连接一条最多 256 KB / 0.06 秒 ≈ 4 MB/s，带宽再大也用不上
+			free := make(chan []byte, writeAhead)
+			for range writeAhead {
+				free <- make([]byte, writeSize)
+			}
 			for t := range queue {
 				if failed.Load() {
 					return
@@ -266,41 +274,74 @@ func UploadParallel(ctx context.Context, primary *Client, extra []*Client, items
 					}
 					handles[t.item] = h
 				}
-				var wrote int64
-				for off := t.offset; off < t.offset+t.length; {
-					n := int64(len(buf))
-					if rest := t.offset + t.length - off; rest < n {
-						n = rest
+				var (
+					wrote    atomic.Int64
+					chunkErr error
+					errMu    sync.Mutex
+					cwg      sync.WaitGroup
+				)
+				setErr := func(err error) {
+					errMu.Lock()
+					if chunkErr == nil {
+						chunkErr = err
 					}
+					errMu.Unlock()
+				}
+				bad := func() bool {
+					errMu.Lock()
+					defer errMu.Unlock()
+					return chunkErr != nil
+				}
+				for off := t.offset; off < t.offset+t.length && !bad(); {
+					n := min(int64(writeSize), t.offset+t.length-off)
+					buf := <-free // 在路上的写入满了时等一个写完
 					if _, err := locals[t.item].ReadAt(buf[:n], off); err != nil && !errors.Is(err, io.EOF) {
-						fail(err)
-						return
+						free <- buf
+						setErr(err)
+						break
 					}
-					// 卡住（连接没断，但数据过不去）时关掉这条连接，让写入报错，重新连接后接着传
-					var stalled atomic.Bool
-					timer := time.AfterFunc(stallTimeout, func() { stalled.Store(true); c.Close() })
-					_, err := h.WriteAt(buf[:n], off)
-					timer.Stop()
-					if err != nil {
-						if stalled.Load() {
-							err = fmt.Errorf("%w（%s 内 %s 没写完）", ErrStalled, stallTimeout, items[t.item].Remote)
+					cwg.Add(1)
+					go func(buf []byte, off, n int64) {
+						defer cwg.Done()
+						defer func() { free <- buf }()
+						var werr error
+						defer func() {
+							if werr != nil {
+								setErr(werr)
+							}
+						}()
+						defer safe.Recover("并行上传", &werr)
+						// 卡住（连接没断，但数据过不去）时关掉这条连接，让写入报错，重新连接后接着传
+						var stalled atomic.Bool
+						timer := time.AfterFunc(stallTimeout, func() { stalled.Store(true); c.Close() })
+						_, err := h.WriteAt(buf[:n], off)
+						timer.Stop()
+						if err != nil {
+							if stalled.Load() {
+								err = fmt.Errorf("%w（%s 内 %s 没写完）", ErrStalled, stallTimeout, items[t.item].Remote)
+							}
+							werr = fmt.Errorf("上传 %s：%w", items[t.item].Remote, err)
+							return
 						}
-						// 这一片没写完：进度退回去，下次重传整片
+						wrote.Add(n)
+						total := done.Add(n)
 						if progress != nil {
-							progress(done.Add(-wrote), items[t.item].Remote)
+							progress(total, items[t.item].Remote)
 						}
-						fail(fmt.Errorf("上传 %s：%w", items[t.item].Remote, err))
-						return
-					}
+						if testDropAfter > 0 && total >= testDropAfter && testDropped.CompareAndSwap(false, true) {
+							primary.Close()
+						}
+					}(buf, off, n)
 					off += n
-					wrote += n
-					total := done.Add(n)
+				}
+				cwg.Wait()
+				if chunkErr != nil {
+					// 这一片没写完：进度退回去，下次重传整片
 					if progress != nil {
-						progress(total, items[t.item].Remote)
+						progress(done.Add(-wrote.Load()), items[t.item].Remote)
 					}
-					if testDropAfter > 0 && total >= testDropAfter && testDropped.CompareAndSwap(false, true) {
-						primary.Close()
-					}
+					fail(chunkErr)
+					return
 				}
 				st.mark(t.item, t.offset, t.length)
 			}

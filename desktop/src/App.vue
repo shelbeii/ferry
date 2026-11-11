@@ -10,6 +10,7 @@ import { call, FerryError, type Connection, type Inspect } from './ferry'
 import { connectionsPath as connPath, CONN_PREFIX, pageTerminals, loadTaskHistory } from './state'
 import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, browserOpen, browserRequest, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, projectTraits, uiPref, setUiPref } from './state'
 import ProjectScene from './components/ProjectScene.vue'
+import FerryLogo from './components/FerryLogo.vue'
 import ProjectView from './components/ProjectView.vue'
 import TaskDrawer from './components/TaskDrawer.vue'
 import TrustDialog from './components/TrustDialog.vue'
@@ -264,7 +265,7 @@ async function moveConfig(path: string) {
   <el-container class="shell" :style="{ '--ferry-side': sideWidth + 'px' }">
     <!-- 最左边的图标栏：收起 / 展开项目列表、添加、数据库、浏览器、任务、设置 -->
     <nav class="rail" aria-label="主导航">
-      <img src="/logo.png" alt="Ferry" class="logo" />
+      <FerryLogo class="logo" />
       <el-tooltip :show-after="HOVER_DELAY" :content="listOpen ? '收起项目列表' : '展开项目列表'" placement="right">
         <button class="rail-btn" :class="{ on: listOpen }" :aria-label="listOpen ? '收起项目列表' : '展开项目列表'" @click="listOpen = !listOpen">
           <el-icon :size="18"><Fold v-if="listOpen" /><Expand v-else /></el-icon>
@@ -493,8 +494,8 @@ async function moveConfig(path: string) {
   box-sizing: border-box;
 }
 .logo {
-  width: 32px;
-  height: 32px;
+  width: 38px;
+  height: 38px;
   margin-bottom: 10px;
 }
 .rail-btn {

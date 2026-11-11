@@ -15,11 +15,19 @@ var ServeCmds = map[string]bool{
 	"portcheck": true, "keepscan": true, "swinfo": true,
 }
 
+// ServeHeavy 其中费时的扫描（读很多文件、运行很多命令）：和很快的查看分开排队，占满了也不耽误后者。
+var ServeHeavy = map[string]bool{
+	"loggrep": true, "logread": true, "software": true, "ports": true, "keepscan": true,
+}
+
 // ServeRequest 发给常驻 agent 的一个请求。
+// Cancel 为 true 时是取消请求号为 ID 的那个请求（本机不等了）：还在排队的不做了，正在做的停下正在运行的命令；
+// 它照常以「!end」结束。
 type ServeRequest struct {
-	ID  string   `json:"id"`
-	Cmd string   `json:"cmd"`
-	Req *Request `json:"req"`
+	ID     string   `json:"id"`
+	Cmd    string   `json:"cmd,omitempty"`
+	Req    *Request `json:"req,omitempty"`
+	Cancel bool     `json:"cancel,omitempty"`
 }
 
 // ServeEnd 请求做完的那一行里，请求号后面的标记。

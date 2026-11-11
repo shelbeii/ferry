@@ -34,8 +34,12 @@ const ngxDumpMark = "@@ferry-nginx-T@@"
 
 // DiscoverNginxSites 列出服务器上正在运行的 nginx / OpenResty 里的站点。notes 是读不出来的原因（给人看）。
 func DiscoverNginxSites(run func(string, time.Duration) (string, error)) (sites []proto.NginxSite, notes []string) {
-	out, _ := run(`for p in /proc/[0-9]*; do
-c=$(tr '\000' ' ' < "$p/cmdline" 2>/dev/null) || continue
+	// 先用一个 grep 找出 nginx 主进程，只对找到的几个再细看：每个进程都 fork 一次 tr 的话，
+	// 上万个进程（没回收的僵尸进程）的服务器上要十几秒，还会超时。xargs 分批，进程再多也不会超出命令行长度
+	out, _ := run(`ls -f /proc 2>/dev/null | grep -E '^[0-9]+$' | sed 's|.*|/proc/&/cmdline|' |
+xargs grep -s -a -l '^nginx: master process' 2>/dev/null | while read -r f; do
+p=${f%/cmdline}
+c=$(tr '\000' ' ' < "$f" 2>/dev/null) || continue
 case "$c" in "nginx: master process"*) ;; *) continue ;; esac
 printf 'M\t%s\t%s\t%s\n' "${p#/proc/}" "$c" "$(tr '\n' '|' < "$p/cgroup" 2>/dev/null)"
 done

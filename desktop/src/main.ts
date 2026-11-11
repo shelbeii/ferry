@@ -13,8 +13,10 @@ import { preloadLater } from './preload'
 import { installGlassMenus } from './glass/menus'
 import { installGlassSegments } from './glass/segments'
 import { installTextSelectionGuard } from './textSelection'
+import { syncAppIcon } from './appIcon'
 
 const app = createApp(App).use(ElementPlus, { locale: zhCn })
+const initialIconUpdate = syncAppIcon(document.documentElement.classList.contains('dark'))
 // 所有悬停说明（el-tooltip、表格里过长省略的单元格）都写 :show-after="HOVER_DELAY"
 app.config.globalProperties.HOVER_DELAY = HOVER_DELAY
 app.mount('#app')
@@ -29,7 +31,7 @@ installGlassSegments()
 if (isTauri) {
   const w = getCurrentWindow()
   const theme = uiPref('theme')
-  ;(theme === 'light' || theme === 'dark' ? w.setTheme(theme) : Promise.resolve())
+  ;Promise.all([initialIconUpdate, theme === 'light' || theme === 'dark' ? w.setTheme(theme) : Promise.resolve()])
     .catch(() => {})
     .finally(() => w.show().catch(() => {}))
 }

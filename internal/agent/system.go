@@ -276,7 +276,19 @@ func (realSystem) Lchown(path string, uid, gid int) error { return os.Lchown(pat
 const shellOutputMax = 8 << 20
 
 func (realSystem) Shell(cmd string, timeout time.Duration) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return shellContext(context.Background(), cmd, timeout)
+}
+
+// ShellContext 同 Shell；parent 取消时（常驻 agent 收到本机的取消）连子进程一起杀掉。
+func (realSystem) ShellContext(parent context.Context, cmd string, timeout time.Duration) (string, error) {
+	return shellContext(parent, cmd, timeout)
+}
+
+func shellContext(parent context.Context, cmd string, timeout time.Duration) (string, error) {
+	if parent.Err() != nil {
+		return "", errCanceled
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
 	out := &cappedBuffer{max: shellOutputMax}
@@ -285,6 +297,9 @@ func (realSystem) Shell(cmd string, timeout time.Duration) (string, error) {
 	setPgid(c)
 	c.WaitDelay = 5 * time.Second
 	err := c.Run()
+	if parent.Err() != nil {
+		return out.String(), errCanceled
+	}
 	if ctx.Err() != nil {
 		return out.String(), fmt.Errorf("超时（%s）", timeout)
 	}
@@ -358,6 +373,25 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 
 func (t *tailBuffer) String() string { return string(t.b) }
 
+// 健康检查在常驻 agent 中反复执行：共用连接池，避免每次新建 Transport 后留下无法复用的空闲连接。
+// 90 秒覆盖默认的一分钟状态刷新间隔；不再检查的地址会自动回收，并限制跨地址和每个地址的空闲连接数。
+var healthHTTPClient = newHealthHTTPClient()
+
+func newHealthHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			// 健康检查只访问本机，自签名证书很常见。
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+			Proxy:               nil,
+			MaxIdleConns:        64,
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 func (realSystem) Probe(h proto.Health) error {
 	if h.TCP != "" {
 		c, err := net.DialTimeout("tcp", h.TCP, 2*time.Second)
@@ -367,31 +401,30 @@ func (realSystem) Probe(h proto.Health) error {
 		c.Close()
 	}
 	if h.HTTP != "" {
-		client := &http.Client{
-			Timeout: 5 * time.Second,
-			// 健康检查只访问本机，自签名证书很常见
-			Transport:     &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, Proxy: nil},
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}
-		req, err := http.NewRequest(http.MethodGet, h.HTTP, nil)
-		if err != nil {
-			return err
-		}
-		if h.Host != "" {
-			req.Host = h.Host
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return fmt.Errorf("%s：%v", h.HTTP, shortErr(err))
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		resp.Body.Close()
-		if !statusOK(resp.StatusCode, h.Status) {
-			return fmt.Errorf("%s 返回 %d", h.HTTP, resp.StatusCode)
-		}
-		if h.Contains != "" && !bytes.Contains(body, []byte(h.Contains)) {
-			return fmt.Errorf("%s 响应中没有 %q", h.HTTP, h.Contains)
-		}
+		return probeHTTP(healthHTTPClient, h)
+	}
+	return nil
+}
+
+func probeHTTP(client *http.Client, h proto.Health) error {
+	req, err := http.NewRequest(http.MethodGet, h.HTTP, nil)
+	if err != nil {
+		return err
+	}
+	if h.Host != "" {
+		req.Host = h.Host
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s：%v", h.HTTP, shortErr(err))
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	if !statusOK(resp.StatusCode, h.Status) {
+		return fmt.Errorf("%s 返回 %d", h.HTTP, resp.StatusCode)
+	}
+	if h.Contains != "" && !bytes.Contains(body, []byte(h.Contains)) {
+		return fmt.Errorf("%s 响应中没有 %q", h.HTTP, h.Contains)
 	}
 	return nil
 }
@@ -796,12 +829,67 @@ func (s snapSys) ProcArgs(pid int) [][]string {
 // shareProcs 这次查看里共用一份进程表（只在真实系统上；测试的假系统不变）；返回恢复原样的函数。
 // 只用于只读的查看：部署、启停时进程在变，要读最新的。
 func (a *Agent) shareProcs() func() {
-	if _, ok := a.Sys.(realSystem); !ok {
+	saved := a.Sys
+	switch s := a.Sys.(type) {
+	case realSystem:
+		a.Sys = snapSys{System: s, t: &procTable{proc: "/proc"}}
+	case ctxSys: // 常驻 agent 里：取消照样生效
+		if _, ok := s.System.(realSystem); !ok {
+			return func() {}
+		}
+		a.Sys = ctxSys{System: snapSys{System: s.System, t: &procTable{proc: "/proc"}}, ctx: s.ctx}
+	default:
 		return func() {}
 	}
-	saved := a.Sys
-	a.Sys = snapSys{System: saved, t: &procTable{proc: "/proc"}}
 	return func() { a.Sys = saved }
+}
+
+// errCanceled 本机取消了这次查看（常驻 agent 收到取消）。
+var errCanceled = errors.New("已取消")
+
+// ctxSys 常驻 agent 里一个请求用的系统：本机取消时，正在运行的命令连子进程一起杀掉，之后的命令不再运行。
+type ctxSys struct {
+	System
+	ctx context.Context
+}
+
+func (s ctxSys) Shell(cmd string, timeout time.Duration) (string, error) {
+	if sc, ok := s.System.(interface {
+		ShellContext(context.Context, string, time.Duration) (string, error)
+	}); ok {
+		return sc.ShellContext(s.ctx, cmd, timeout)
+	}
+	if s.ctx.Err() != nil {
+		return "", errCanceled
+	}
+	return s.System.Shell(cmd, timeout)
+}
+
+// canceled 本机已经不要这次的结果了（常驻 agent 收到取消）：长时间的扫描在合适的地方停下。
+func (a *Agent) canceled() bool {
+	cs, ok := a.Sys.(ctxSys)
+	return ok && cs.ctx.Err() != nil
+}
+
+// ctxReader 读的时候发现取消了就报错（逐行扫描大文件时停下）。
+type ctxReader struct {
+	r   io.Reader
+	ctx context.Context
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if c.ctx.Err() != nil {
+		return 0, errCanceled
+	}
+	return c.r.Read(p)
+}
+
+// cancelable r 包一层：常驻 agent 里本机取消时停止读。
+func (a *Agent) cancelable(r io.Reader) io.Reader {
+	if cs, ok := a.Sys.(ctxSys); ok {
+		return ctxReader{r: r, ctx: cs.ctx}
+	}
+	return r
 }
 
 // eachParallel 同时做 n 件互不相干的事（最多 limit 件一起），都做完才返回。

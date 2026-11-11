@@ -672,3 +672,15 @@ export async function exportTo(conn: DbConn, db: string, what: { schema?: string
     }
   }, { FERRY_DB_REQ: JSON.stringify(req) })
 }
+
+/** 新建查询的标签名：「查询 1」「查询 2」……取开着的标签里没用到的最小编号（关掉「查询 1」再新建，还是「查询 1」）。 */
+export function nextQueryTitle(openTitles: readonly string[]): string {
+  const used = new Set<number>()
+  for (const title of openTitles) {
+    const m = /^查询 (\d+)$/.exec(title)
+    if (m) used.add(Number(m[1]))
+  }
+  let n = 1
+  while (used.has(n)) n++
+  return `查询 ${n}`
+}

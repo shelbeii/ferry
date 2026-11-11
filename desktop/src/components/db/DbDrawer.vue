@@ -16,7 +16,7 @@ import DbSqlConfirm from './DbSqlConfirm.vue'
 import DbCsvImport from './DbCsvImport.vue'
 import {
   dbOpen, dbConns, closeOnOutside, dbOpened, isDbOpened, markDbOpened, refreshDbOpened, dbRequest, dbPasswordRequest, loadDbConns, dbCall, saveDbConn, removeDbConn, closeDbConn, confirmSql, passwordEnv,
-  humanSize, kindLabel, exportTo, routineCallSql, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult, type DbFrom,
+  humanSize, kindLabel, exportTo, routineCallSql, nextQueryTitle, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult, type DbFrom,
   type DbRoutine, type DbFileItem, type DbObjItem, type DbObjWhat,
 } from '../../db'
 import { sessionEnv } from '../../ferry'
@@ -221,7 +221,7 @@ interface Tab {
 const tabs = ref<Tab[]>([])
 const active = ref('')
 const refs = reactive<Record<string, { hasChanges?: () => boolean; reload?: () => void; newKey?: () => void } | null>>({})
-let qn = 0
+let qn = 0 // 只用来让标签的 sid 不重复；查询的名字见 nextQueryTitle
 
 function openTable(d: { conn: DbConn; db?: string; schema?: string; name?: string; type: string }) {
   const key = `t:${d.conn.id}:${d.db}:${d.schema ?? ''}:${d.name}`
@@ -267,7 +267,7 @@ function openObjItem(o: Tab, it: DbObjItem) {
 function openQuery(conn: DbConn, db = '', sql = '') {
   const sid = `q${Date.now().toString(36)}${++qn}`
   const key = 'q:' + sid
-  tabs.value.push({ key, kind: 'query', title: `查询 ${qn}`, conn, db: db || conn.database || '', sql, sid })
+  tabs.value.push({ key, kind: 'query', title: nextQueryTitle(tabs.value.map((t) => t.title)), conn, db: db || conn.database || '', sql, sid })
   active.value = key
   saveTabs()
 }
@@ -494,6 +494,20 @@ async function closeTabs(keys: string[]) {
   saveTabs()
 }
 
+function onTabsWheel(e: WheelEvent) {
+  if (e.deltaX || !e.deltaY || e.shiftKey || e.ctrlKey || e.metaKey || !(e.target instanceof Element)) return
+  const header = e.target.closest('.el-tabs__header')
+  if (!header || header.parentElement !== e.currentTarget) return
+  const nav = header.querySelector('.el-tabs__nav-wrap.is-scrollable [role="tablist"]')
+  if (!nav) return
+
+  const scale = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+    : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? (nav.parentElement?.clientWidth ?? 1) : 1
+  // 复用 Element Plus 的横向滚动，让滚轮和两端箭头共用同一个偏移量。
+  const scrolled = !nav.dispatchEvent(new WheelEvent('wheel', { deltaX: e.deltaY * scale, cancelable: true }))
+  if (scrolled) e.preventDefault()
+}
+
 // 标签上的右键菜单
 const tabMenu = ref<{ x: number; y: number; key: string } | null>(null)
 const tabMenuEl = ref<HTMLElement>()
@@ -571,7 +585,7 @@ function restoreTabs() {
       const conn = dbConns.value.find((c) => c.id === q.conn)
       if (!conn) continue
       const sid = `q${Date.now().toString(36)}${++qn}`
-      tabs.value.push({ key: 'q:' + sid, kind: 'query', title: q.title || `查询 ${qn}`, conn, db: q.db, sql: q.sql, sid, saved: q.saved, savedDb: q.savedDb, savedSql: q.savedSql })
+      tabs.value.push({ key: 'q:' + sid, kind: 'query', title: q.title || nextQueryTitle(tabs.value.map((t) => t.title)), conn, db: q.db, sql: q.sql, sid, saved: q.saved, savedDb: q.savedDb, savedSql: q.savedSql })
     }
     if (tabs.value.length && !active.value) active.value = tabs.value[0].key
   } catch { /* 没有存过 */ }
@@ -1048,7 +1062,7 @@ function nodeIcon(d: TreeData) {
             <el-button v-if="dbConns.some((c) => c.kind !== 'redis')" @click="openQuery(dbConns.find((c) => c.kind !== 'redis')!)">打开查询窗口</el-button>
           </div>
         </div>
-        <el-tabs v-else v-model="active" type="card" closable class="tabs" @tab-remove="closeTab" @contextmenu="onTabsContext">
+        <el-tabs v-else v-model="active" type="card" closable class="tabs" @tab-remove="closeTab" @contextmenu="onTabsContext" @wheel="onTabsWheel">
           <el-tab-pane v-for="t in tabs" :key="t.key" :name="t.key" lazy>
             <template #label>
               <span :title="tabTip(t)" class="tl">

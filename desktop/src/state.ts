@@ -4,10 +4,11 @@ import { ElMessageBox } from 'element-plus'
 import { call, ferry, isSecretKind, type AppSettings, type BusyItem, type Connection, type ErrorDetail, type FerryLine, type SettingsResponse } from './ferry'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { isTauri, storeGet } from './platform'
-import { glass, GLASS_TRANSPARENCY_DEFAULT } from './glass/runtime'
+import { glass, GLASS_TRANSPARENCY_DEFAULT, themeChanged } from './glass/runtime'
 import { commandTarget } from './commandContext'
 import { mergeRetries, queuedRequest } from './requestQueue'
 import type { SettingsSecretChange } from './settingsSecrets'
+import { syncAppIcon } from './appIcon'
 
 // ---------------------------------------------------------------- 设置
 
@@ -64,7 +65,12 @@ export function applyTheme(theme: string) {
   media ??= window.matchMedia('(prefers-color-scheme: dark)')
   const set = () => {
     const dark = theme === 'dark' || (theme === 'system' && !!media?.matches)
-    document.documentElement.classList.toggle('dark', dark)
+    const root = document.documentElement
+    if (root.classList.contains('dark') !== dark) {
+      root.classList.toggle('dark', dark)
+      themeChanged()
+    }
+    void syncAppIcon(dark)
   }
   media.onchange = theme === 'system' ? set : null
   set()

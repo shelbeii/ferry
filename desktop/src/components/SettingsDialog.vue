@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import LoadingBlock from './LoadingBlock.vue'
+import FerryLogo from './FerryLogo.vue'
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, FolderOpened, Link, Plus, View } from '@element-plus/icons-vue'
@@ -1187,7 +1188,7 @@ async function pickKeyDir() {
       <!-- 关于 -->
       <el-tab-pane label="关于" name="about" lazy>
         <div class="about-head">
-          <img src="/logo.png" alt="" class="about-logo" />
+          <FerryLogo class="about-logo" />
           <div>
             <div class="about-name">Ferry</div>
             <div class="muted">后端与前端部署工具 · 桌面版 {{ app?.version ?? '…' }}</div>

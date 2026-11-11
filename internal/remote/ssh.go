@@ -79,6 +79,9 @@ type Client struct {
 	rttAt  atomic.Int64 // 量的时间（UnixNano）；0 = 还没量过
 	okAt   atomic.Int64 // 最近一次确认连接通的时间（UnixNano）：保活、量延迟、远程命令正常结束
 
+	probeMu sync.Mutex // 保护 probe
+	probe   *rttProbe  // 正在进行的测延迟（见 Latency）
+
 	opts    Options       // 建这条连接用的参数：会话数到了服务器的上限时，用它再建连接
 	extraMu sync.Mutex    // 保护 extra
 	extra   []*ssh.Client // 会话数到了上限后另建的连接（见 overflow.go）
@@ -105,7 +108,17 @@ func Dial(o Options) (*Client, error) {
 		o.Timeout = 15 * time.Second
 	}
 	addr := net.JoinHostPort(o.Host, strconv.Itoa(o.Port))
-	auth, err := authMethods(o)
+	// 握手（含登录）限时；等用户输入密码时不计时
+	hd := &handshakeDeadline{d: handshakeTimeout}
+	ao := o
+	if o.Password != nil {
+		ao.Password = func() (string, error) {
+			hd.pause()
+			defer hd.resume()
+			return o.Password()
+		}
+	}
+	auth, err := authMethods(ao)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +127,7 @@ func Dial(o Options) (*Client, error) {
 		return nil, err
 	}
 	cfg := &ssh.ClientConfig{User: o.User, Auth: auth, HostKeyCallback: hk, HostKeyAlgorithms: algos, Timeout: o.Timeout}
-	c, err := ssh.Dial("tcp", addr, cfg)
+	c, err := dialSSH(addr, cfg, hd)
 	if err != nil {
 		var uh *UnknownHostError
 		if errors.As(err, &uh) {
@@ -150,6 +163,67 @@ func Dial(o Options) (*Client, error) {
 		cl.dead.Store(true)
 	})
 	return cl, nil
+}
+
+// handshakeTimeout TCP 连上以后，SSH 握手和登录最多等多久。ssh.ClientConfig.Timeout 只管 TCP 连接：
+// 服务器接受了 TCP 却不回 SSH 的问候、握手到一半不动了（sshd 卡住、中间设备丢包）时，没有它会一直等下去，
+// 连接池里等这台服务器的请求也都跟着等。
+var handshakeTimeout = 30 * time.Second
+
+// handshakeDeadline 握手期间给 TCP 连接设的期限；等用户输入密码时暂停。
+type handshakeDeadline struct {
+	mu sync.Mutex
+	nc net.Conn
+	d  time.Duration
+}
+
+func (h *handshakeDeadline) start(nc net.Conn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nc = nc
+	nc.SetDeadline(time.Now().Add(h.d))
+}
+
+func (h *handshakeDeadline) pause() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.nc != nil {
+		h.nc.SetDeadline(time.Time{})
+	}
+}
+
+func (h *handshakeDeadline) resume() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.nc != nil {
+		h.nc.SetDeadline(time.Now().Add(h.d))
+	}
+}
+
+// done 握手完成：之后的读写不限时（长时间运行的命令、终端）。
+func (h *handshakeDeadline) done() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.nc != nil {
+		h.nc.SetDeadline(time.Time{})
+	}
+	h.nc = nil
+}
+
+// dialSSH 同 ssh.Dial，但握手和登录限时（见 handshakeTimeout）。
+func dialSSH(addr string, cfg *ssh.ClientConfig, hd *handshakeDeadline) (*ssh.Client, error) {
+	nc, err := net.DialTimeout("tcp", addr, cfg.Timeout)
+	if err != nil {
+		return nil, err
+	}
+	hd.start(nc)
+	sc, chans, reqs, err := ssh.NewClientConn(nc, addr, cfg)
+	if err != nil {
+		nc.Close()
+		return nil, err
+	}
+	hd.done()
+	return ssh.NewClient(sc, chans, reqs), nil
 }
 
 // Alive 连接是否还可用（已知断开时为 false）。
@@ -203,6 +277,7 @@ func (c *Client) Ping(timeout time.Duration) error {
 
 // Latency 到服务器的往返时间：发一个 SSH 保活请求，量一来一回（和打字回显经过同一条连接、同样的路）。
 // 超过 timeout 时返回 ErrSlow；网络慢不等于断了，不把连接标成断开。最近一次的结果记下来，maxAge 内不重新量。
+// 同一时间只量一次：正在量的时候再调用就等这一次的结果（网络卡住时不会每调用一次就多一个一直等着的请求）。
 func (c *Client) Latency(timeout, maxAge time.Duration) (time.Duration, error) {
 	if c.dead.Load() {
 		return 0, errors.New("连接已断开")
@@ -210,40 +285,52 @@ func (c *Client) Latency(timeout, maxAge time.Duration) (time.Duration, error) {
 	if at := c.rttAt.Load(); maxAge > 0 && at != 0 && time.Since(time.Unix(0, at)) < maxAge {
 		return time.Duration(c.rtt.Load()), nil
 	}
-	// 连着量两次取小的：服务器没有打开终端时（非交互连接）会把小包攒一下再发，
-	// 刚做完别的操作时第一次常常多出一个来回，第二次才是真正的往返时间
-	type res struct {
-		d   time.Duration
-		err error
+	c.probeMu.Lock()
+	p := c.probe
+	if p == nil {
+		p = &rttProbe{done: make(chan struct{})}
+		c.probe = p
+		safe.Go("测延迟", func() { c.runProbe(p) })
 	}
-	done := make(chan res, 1)
-	safe.Go("测延迟", func() {
-		best := time.Duration(0)
-		for range 2 {
-			start := time.Now()
-			if _, _, err := c.ssh.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				done <- res{err: err}
-				return
-			}
-			if d := time.Since(start); best == 0 || d < best {
-				best = d
-			}
-		}
-		done <- res{d: best}
-	})
+	c.probeMu.Unlock()
 	select {
-	case r := <-done:
-		if r.err != nil {
-			c.dead.Store(true)
-			return 0, r.err
-		}
-		c.rtt.Store(int64(r.d))
-		c.rttAt.Store(time.Now().UnixNano())
-		c.markOK()
-		return r.d, nil
+	case <-p.done:
+		return p.d, p.err
 	case <-time.After(timeout):
 		return 0, ErrSlow
 	}
+}
+
+// rttProbe 一次进行中的测延迟。done 关闭后 d、err 才有效。
+type rttProbe struct {
+	done chan struct{}
+	d    time.Duration
+	err  error
+}
+
+func (c *Client) runProbe(p *rttProbe) {
+	defer func() {
+		c.probeMu.Lock()
+		c.probe = nil
+		c.probeMu.Unlock()
+		close(p.done)
+	}()
+	// 连着量两次取小的：服务器没有打开终端时（非交互连接）会把小包攒一下再发，
+	// 刚做完别的操作时第一次常常多出一个来回，第二次才是真正的往返时间
+	for range 2 {
+		start := time.Now()
+		if _, _, err := c.ssh.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+			c.dead.Store(true)
+			p.d, p.err = 0, err
+			return
+		}
+		if d := time.Since(start); p.d == 0 || d < p.d {
+			p.d = d
+		}
+	}
+	c.rtt.Store(int64(p.d))
+	c.rttAt.Store(time.Now().UnixNano())
+	c.markOK()
 }
 
 // ErrSlow 量往返时间时超时（网络很慢或卡住了）。
@@ -498,7 +585,7 @@ func ScanHostKey(host string, port int) (ssh.PublicKey, error) {
 			return errors.New("scan")
 		},
 	}
-	_, err := ssh.Dial("tcp", addr, cfg)
+	_, err := dialSSH(addr, cfg, &handshakeDeadline{d: handshakeTimeout})
 	if got != nil {
 		return got, nil
 	}
@@ -558,7 +645,7 @@ func (c *Client) Run(cmd string, stdin []byte, onLine func(string)) (RunResult, 
 
 // RunContext 同 Run；ctx 取消时关闭这个通道（不影响同一连接上的其他操作）。
 func (c *Client) RunContext(ctx context.Context, cmd string, stdin []byte, onLine func(string)) (RunResult, error) {
-	s, err := c.newSession()
+	s, err := c.newSessionCtx(ctx)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -623,7 +710,12 @@ type Pipe struct {
 
 // StartPipe 启动 cmd，不等它结束。用完 Close。
 func (c *Client) StartPipe(cmd string) (*Pipe, error) {
-	s, err := c.newSession()
+	return c.StartPipeContext(context.Background(), cmd)
+}
+
+// StartPipeContext 同 StartPipe；ctx 结束时不再等会话打开。
+func (c *Client) StartPipeContext(ctx context.Context, cmd string) (*Pipe, error) {
+	s, err := c.newSessionCtx(ctx)
 	if err != nil {
 		return nil, err
 	}

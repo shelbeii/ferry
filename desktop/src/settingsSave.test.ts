@@ -3,10 +3,10 @@ import type { AppSettings, SettingsResponse } from './ferry'
 
 const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }))
 vi.mock('./ferry', async original => ({ ...await original<typeof import('./ferry')>(), call: rpc }))
-vi.mock('./glass/runtime', () => ({ glass: { enabled: true, transparency: 90 }, GLASS_TRANSPARENCY_DEFAULT: 90 }))
+vi.mock('./glass/runtime', () => ({ glass: { enabled: true, transparency: 90 }, GLASS_TRANSPARENCY_DEFAULT: 90, themeChanged: vi.fn() }))
 const { appSettings, settingsInfo, saveSettings, selectProject, projects, currentPath } = await import('./state')
 vi.stubGlobal('window', { matchMedia: () => ({ matches: false, onchange: null }) })
-vi.stubGlobal('document', { documentElement: { classList: { toggle: vi.fn() } } })
+vi.stubGlobal('document', { documentElement: { classList: { toggle: vi.fn(), contains: () => false } } })
 vi.stubGlobal('localStorage', { setItem: vi.fn() })
 
 function settings(): AppSettings {

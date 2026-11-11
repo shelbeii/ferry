@@ -25,6 +25,7 @@ import (
 	"github.com/captain/ferry/internal/nginxrt"
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/remote"
+	"github.com/captain/ferry/internal/safe"
 	"github.com/captain/ferry/internal/zipx"
 )
 
@@ -1169,25 +1170,68 @@ func (e *Engine) uploadItems(s *session, items []remote.UploadItem, upBytes, tot
 	}
 }
 
+// smallUploadParallel 小文件同时传几个。
+const smallUploadParallel = 8
+
+// eachUntilErr 对 0..n-1 调用 fn，最多 limit 个同时；有一个出错后不再开始新的，等手上的做完，返回第一个错误。
+func eachUntilErr(n, limit int, fn func(i int) error) error {
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		first error
+	)
+	sem := make(chan struct{}, limit)
+	for i := range n {
+		mu.Lock()
+		stop := first != nil
+		mu.Unlock()
+		if stop {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		safe.Go("同时上传", func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			var err error
+			func() {
+				defer safe.Recover("同时上传", &err)
+				err = fn(i)
+			}()
+			if err != nil {
+				mu.Lock()
+				if first == nil {
+					first = err
+				}
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	return first
+}
+
 // uploadOnce 上传一次：大文件用 UploadParallel（记在 state 里，可以接着传），小文件一个个传。
 func (e *Engine) uploadOnce(s *session, items []remote.UploadItem, upBytes, total int64, streams int, state *remote.UploadState, first bool) error {
 	if upBytes < parallelMin {
 		if first {
 			e.Rep.Step("上传 %d 个文件，共 %s（全量 %s）", len(items), humanBytes(upBytes), humanBytes(total))
 		}
-		var done int64
-		for _, it := range items {
+		// 小文件同时传几个：每个文件要建、写、关、改权限、改名，一来一回好几次，一个个传时文件多就慢在往返上
+		var mu sync.Mutex
+		per := make([]int64, len(items))
+		var sum int64
+		return eachUntilErr(len(items), smallUploadParallel, func(i int) error {
+			it := items[i]
 			label := path.Base(it.Remote)
-			base := done
-			err := s.c.UploadContext(e.ctx(), it.Local, it.Remote, it.Mode, func(d, _ int64) {
-				e.Rep.Progress(label, base+d, upBytes)
+			return s.c.UploadContext(e.ctx(), it.Local, it.Remote, it.Mode, func(d, _ int64) {
+				mu.Lock()
+				defer mu.Unlock()
+				sum += d - per[i]
+				per[i] = d
+				e.Rep.Progress(label, sum, upBytes)
 			})
-			if err != nil {
-				return err
-			}
-			done += it.Size
-		}
-		return nil
+		})
 	}
 	// 逐条建立额外连接（同时握手太多会被 sshd 的 MaxStartups 随机拒绝）；建不起来就用已有的
 	var extra []*remote.Client

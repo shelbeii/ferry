@@ -376,17 +376,42 @@ type pipeConn struct {
 func (p *pipeConn) LocalAddr() net.Addr  { return p.local }
 func (p *pipeConn) RemoteAddr() net.Addr { return p.remote }
 
+// 每个库分三个连接池，互不占用：
+//   - 普通的（浏览表、读结构、AI 查询……）：用完就还，最多 4 条；
+//   - 查询窗口的会话：一个窗口一直占一条（USE、SET、事务都留在上面），关掉窗口时这条连接也关掉，
+//     不还给别人用（不然别的请求会拿到切过库、改过会话变量的连接）；
+//   - 停止语句（KILL QUERY、pg_cancel_backend）：查询窗口、普通的池都占满时也要能马上停。
+type poolRole int
+
+const (
+	rolePlain poolRole = iota
+	roleSession
+	roleControl
+)
+
+// maxSessionsPerDB 一个库最多同时开着几个查询窗口的会话。
+const maxSessionsPerDB = 8
+
 // DB 某个库的连接池；name 为空时用连接的默认库。
 func (cl *Client) DB(ctx context.Context, name string) (*sql.DB, error) {
+	return cl.pool(name, rolePlain)
+}
+
+// pool 某个库某种用途的连接池（见 poolRole）。
+func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 	if name == "" {
 		name = cl.Conn.Database
+	}
+	key := name
+	if role != rolePlain {
+		key = name + "\x00" + strconv.Itoa(int(role))
 	}
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	if cl.closed {
 		return nil, errors.New("连接已关闭，请重试")
 	}
-	if db := cl.dbs[name]; db != nil {
+	if db := cl.dbs[key]; db != nil {
 		return db, nil
 	}
 	if cl.Conn.Kind == Redis {
@@ -454,10 +479,20 @@ func (cl *Client) DB(ctx context.Context, name string) (*sql.DB, error) {
 	default:
 		return nil, fmt.Errorf("不支持的数据库种类 %q", cl.Conn.Kind)
 	}
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
-	db.SetConnMaxIdleTime(5 * time.Minute)
-	cl.dbs[name] = db
+	switch role {
+	case roleSession:
+		db.SetMaxOpenConns(maxSessionsPerDB)
+		db.SetMaxIdleConns(0) // 会话关了连接就关
+	case roleControl:
+		db.SetMaxOpenConns(2)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxIdleTime(time.Minute)
+	default:
+		db.SetMaxOpenConns(4)
+		db.SetMaxIdleConns(2)
+		db.SetConnMaxIdleTime(5 * time.Minute)
+	}
+	cl.dbs[key] = db
 	return db, nil
 }
 
@@ -494,16 +529,38 @@ func (cl *Client) Session(ctx context.Context, sid, dbName string) (*sql.Conn, f
 		delete(cl.sessions, sid)
 		cl.mu.Unlock()
 	}
-	db, err := cl.DB(ctx, dbName)
+	cl.mu.Lock()
+	open := 0
+	for _, s := range cl.sessions {
+		if s.db == dbName {
+			open++
+		}
+	}
+	cl.mu.Unlock()
+	if open >= maxSessionsPerDB {
+		return nil, nil, fmt.Errorf("这个库已经有 %d 个查询窗口连着，关掉不用的查询窗口再试", open)
+	}
+	db, err := cl.pool(dbName, roleSession)
 	if err != nil {
 		return nil, nil, err
 	}
-	c, err := db.Conn(context.WithoutCancel(ctx))
+	// 等连接时可以取消（连接建好以后就和这次请求无关了，一直留给这个窗口）
+	c, err := db.Conn(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		return nil, nil, cl.explain(err)
 	}
 	id := cl.connID(ctx, c)
 	cl.mu.Lock()
+	if old := cl.sessions[sid]; old != nil && old.db == dbName { // 同一个窗口同时来了两个请求：留先建好的
+		cl.mu.Unlock()
+		c.Close()
+		return old.conn, func() {}, nil
+	} else if old != nil {
+		old.conn.Close()
+	}
 	cl.sessions[sid] = &session{db: dbName, conn: c, id: id, lastUsed: time.Now()}
 	cl.mu.Unlock()
 	return c, func() {}, nil
@@ -550,7 +607,7 @@ func (cl *Client) stopStmt(dbName, id string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	db, err := cl.DB(ctx, dbName)
+	db, err := cl.pool(dbName, roleControl)
 	if err != nil {
 		return
 	}

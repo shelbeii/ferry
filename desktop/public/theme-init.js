@@ -8,4 +8,6 @@
   } catch (e) {}
   var dark = theme === 'dark' || (theme !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
   if (dark) document.documentElement.classList.add('dark')
+  var favicon = document.getElementById('ferry-favicon')
+  if (favicon) favicon.href = '/branding/ferry-' + (dark ? 'dark' : 'light') + '.png'
 })()

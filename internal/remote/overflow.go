@@ -1,9 +1,12 @@
 package remote
 
 import (
+	"context"
 	"errors"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/captain/ferry/internal/safe"
 )
 
 // 服务器的 sshd 限制每条连接同时开的会话数（OpenSSH 的 MaxSessions，默认 10）。终端、文件、实时日志、
@@ -28,6 +31,37 @@ func (c *Client) newSession() (*ssh.Session, error) {
 		return err
 	})
 	return s, err
+}
+
+// newSessionCtx 同 newSession，ctx 取消时不再等：服务器不回应开会话的请求（卡住了）时，取消也能马上返回。
+// 取消以后才开好的会话随即关掉。
+func (c *Client) newSessionCtx(ctx context.Context) (*ssh.Session, error) {
+	if ctx.Done() == nil {
+		return c.newSession()
+	}
+	if ctx.Err() != nil {
+		return nil, ErrCanceled
+	}
+	type opened struct {
+		s   *ssh.Session
+		err error
+	}
+	ch := make(chan opened, 1)
+	safe.Go("开会话", func() {
+		s, err := c.newSession()
+		ch <- opened{s, err}
+	})
+	select {
+	case o := <-ch:
+		return o.s, o.err
+	case <-ctx.Done():
+		safe.Go("关掉取消后才开好的会话", func() {
+			if o := <-ch; o.s != nil {
+				o.s.Close()
+			}
+		})
+		return nil, ErrCanceled
+	}
 }
 
 // onSessionConn 用主连接执行 open（开会话、开 SFTP）；服务器因会话数上限拒绝时，换另建的连接（没有或都满了就再建一条）。

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connFromSoftware, formatReply, passwordEnv, ttlText } from './db'
+import { connFromSoftware, formatReply, nextQueryTitle, passwordEnv, ttlText } from './db'
 import { statementAt } from './editor/sqlEditor'
 import type { Software } from './ferry'
 
@@ -65,4 +65,17 @@ describe('statementAt', () => {
 
 it('passwordEnv matches dbx.PasswordEnv', () => {
   expect(passwordEnv('a1b2-c3')).toBe('FERRY_DB_PASSWORD_A1B2_C3')
+})
+
+describe('nextQueryTitle', () => {
+  it('从 1 开始，取没被占用的最小编号', () => {
+    expect(nextQueryTitle([])).toBe('查询 1')
+    expect(nextQueryTitle(['查询 1', '查询 2'])).toBe('查询 3')
+    // 关掉了「查询 1」
+    expect(nextQueryTitle(['查询 2'])).toBe('查询 1')
+    expect(nextQueryTitle(['查询 1', '查询 3'])).toBe('查询 2')
+  })
+  it('存过名字的、表、命令行不占编号', () => {
+    expect(nextQueryTitle(['users', '命令行', '查询 10 备份', '慢查询'])).toBe('查询 1')
+  })
 })
