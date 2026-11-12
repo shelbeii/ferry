@@ -123,6 +123,14 @@ func TestServeCancelAndQueues(t *testing.T) {
 		req(fmt.Sprint("p", i), "ports")
 		<-sys.started // 都在运行命令（卡着）
 	}
+	// ports 里读防火墙和 docker ps 同时跑：一个请求可能卡着两条命令，都收掉
+	for drained := false; !drained; {
+		select {
+		case <-sys.started:
+		case <-time.After(100 * time.Millisecond):
+			drained = true
+		}
+	}
 	req("queued", "ports") // 慢的满了：排队
 	req("h", "history")    // 很快的照常做完
 	waitEnd("h")

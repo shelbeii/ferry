@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -114,13 +115,94 @@ func TestFirewalld(t *testing.T) {
 	}
 
 	// 区域放行全部：不能改
-	sc.run = fakeRun(map[string]string{"firewall-cmd --state": "running", "--get-zone-of-interface": "trusted", "--list-all": "trusted (active)\n  target: ACCEPT\n"})
+	sc.run = fakeRun(map[string]string{"firewall-cmd --state": "running", "--list-all": "trusted (active)\n  target: ACCEPT\n  interfaces: eth0\n"})
 	st = sc.firewall()
-	if st.Manage || st.Why == "" {
+	if st.Manage || st.Why == "" || st.Zone != "trusted" {
 		t.Fatalf("%+v", st.Firewall)
 	}
 	if s, _ := st.decide(1234, "tcp"); s != "open" {
 		t.Error(s)
+	}
+}
+
+// 新的读法：运行时、永久配置的全部区域各读一次（同时），网卡所在的区域从 interfaces 里找；
+// 不再单独问区域、单独读这个区域。
+func TestFirewalldAllZones(t *testing.T) {
+	proc := t.TempDir()
+	os.MkdirAll(filepath.Join(proc, "net"), 0o755)
+	os.WriteFile(filepath.Join(proc, "net", "route"), []byte("Iface\tDestination\tGateway\neth0\t00000000\t0101A8C0\n"), 0o644)
+	docker := "docker (active)\n  target: ACCEPT\n  interfaces: br-851ce7f0d41d docker0\n  ports: \n\n"
+	block := "block\n  target: %%REJECT%%\n  interfaces: \n  ports: \n\n"
+	pub := zonePublic + "\n"
+	var calls []string
+	var mu sync.Mutex
+	runtime, perm := block+docker+pub, block+docker+strings.Replace(pub, " 8080/tcp", "", 1)
+	sc := &fwScan{proc: proc, root: t.TempDir(), run: func(cmd string, _ time.Duration) (string, error) {
+		mu.Lock()
+		calls = append(calls, cmd)
+		mu.Unlock()
+		switch {
+		case strings.Contains(cmd, "firewall-cmd --state"):
+			return "running\n", nil
+		case strings.Contains(cmd, "--permanent --list-all-zones"):
+			return perm, nil
+		case strings.Contains(cmd, "--list-all-zones"):
+			return runtime, nil
+		}
+		return "", errors.New("exit 1")
+	}}
+	st := sc.firewall()
+	if st.Kind != "firewalld" || !st.Active || !st.Manage || st.Zone != "public" {
+		t.Fatalf("%+v", st.Firewall)
+	}
+	fw := 0
+	for _, c := range calls {
+		if !strings.Contains(c, "--info-service") { // 这里没放服务定义文件，服务的端口要问 firewall-cmd
+			fw++
+		}
+	}
+	if fw != 3 {
+		t.Errorf("应只运行 3 条命令（状态 + 两次全部区域），实际：%q", calls)
+	}
+	if s, r := st.decide(8080, "tcp"); s != "open" || !r.temp {
+		t.Errorf("8080：%s %+v", s, r)
+	}
+	if s, r := st.decide(9050, "tcp"); s != "open" || r.temp {
+		t.Errorf("9050：%s %+v", s, r)
+	}
+	if s, _ := st.decide(6379, "tcp"); s != "blocked" {
+		t.Errorf("6379：%s", s)
+	}
+	if s, _ := st.decide(3306, "tcp"); s != "partial" {
+		t.Errorf("3306：%s", s)
+	}
+
+	// 网卡不在任何区域里：用默认区域
+	os.WriteFile(filepath.Join(proc, "net", "route"), []byte("Iface\tDestination\tGateway\nens3\t00000000\t0101A8C0\n"), 0o644)
+	calls = nil
+	base := sc.run
+	sc.run = func(cmd string, d time.Duration) (string, error) {
+		if strings.Contains(cmd, "--get-default-zone") {
+			return "public\n", nil
+		}
+		return base(cmd, d)
+	}
+	if st = sc.firewall(); st.Zone != "public" || !st.Manage {
+		t.Fatalf("%+v", st.Firewall)
+	}
+}
+
+func TestSplitZones(t *testing.T) {
+	z := splitZones("block\n  target: %%REJECT%%\n\npublic (active)\n  interfaces: eth0\n  rich rules: \n\trule port port=\"6379\" protocol=\"tcp\" reject\n\t\n")
+	if len(z) != 2 {
+		t.Fatalf("%q", z)
+	}
+	p := parseZone(z["public"])
+	if !contains(p.interfaces, "eth0") || len(p.rich) != 1 {
+		t.Errorf("%+v", p)
+	}
+	if strings.Contains(z["block"], "public") {
+		t.Errorf("%q", z["block"])
 	}
 }
 

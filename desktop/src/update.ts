@@ -1,7 +1,8 @@
 // 检查更新：GitHub 上发布了新版本时提示，点「更新」下载这台电脑用的安装包（校验 SHA256）并安装（ferry update）。
 // Windows：运行安装程序的更新模式，Ferry 关闭，装好后自动重新打开；macOS：打开 .dmg，拖进「应用程序」替换。
-import { reactive } from 'vue'
+import { h, reactive } from 'vue'
 import { ElNotification } from 'element-plus'
+import { appIconPath } from './appIcon'
 import { call, ferry, type Running } from './ferry'
 import { exitApp } from './platform'
 import { appSettings } from './state'
@@ -45,6 +46,13 @@ export function hasUpdate(): boolean {
 
 let notified = ''
 
+/** 提示左边的图标：Ferry 的小图标，跟着主题用浅色 / 深色那张（两张都放着，style.css 按 html.dark 显示一张，提示开着时切主题也跟着换） */
+const FerryNoteIcon = () =>
+  h('span', { class: 'ferry-note-icon' }, [
+    h('img', { class: 'light-only', src: appIconPath(false), alt: '' }),
+    h('img', { class: 'dark-only', src: appIconPath(true), alt: '' }),
+  ])
+
 /** 查一次。manual：用户点的（失败时抛出）；自动检查发现新版本时弹出提示（每个版本只提示一次）。 */
 export async function checkUpdate(manual = false): Promise<UpdateInfo | undefined> {
   if (updater.checking || updater.phase) return updater.info
@@ -59,7 +67,7 @@ export async function checkUpdate(manual = false): Promise<UpdateInfo | undefine
       const n = ElNotification({
         title: 'Ferry 有新版本',
         message: `${info.latest} 已发布（这台电脑上是 ${info.current.replace(/\+.*$/, '')}），点这里看更新了什么`,
-        type: 'info',
+        icon: FerryNoteIcon, // 不设 type：设了会用 Element 自带的 ⓘ 图标
         duration: 15000,
         position: 'bottom-right',
         onClick: () => {

@@ -26,7 +26,14 @@ for a in "$@"; do
   --state) echo running; exit 0 ;;
   --get-zone-of-interface=* | --get-default-zone) echo public; exit 0 ;;
   --list-all)
+    echo "$*" >> $D/calls
     printf 'public (active)\n  target: default\n  interfaces: eth0\n  services: %s\n  ports: %s\n  rich rules: \n' "$(cat $D/$mode/services)" "$(cat $D/$mode/ports)"
+    exit 0 ;;
+  --list-all-zones)
+    echo "$*" >> $D/calls
+    printf 'block\n  target: %%%%REJECT%%%%\n  interfaces: \n  services: \n  ports: \n  rich rules: \n\t\n\n'
+    printf 'docker (active)\n  target: ACCEPT\n  interfaces: docker0\n  services: \n  ports: \n  rich rules: \n\t\n\n'
+    printf 'public (active)\n  target: default\n  interfaces: eth0\n  services: %s\n  ports: %s\n  rich rules: \n\t\n\n' "$(cat $D/$mode/services)" "$(cat $D/$mode/ports)"
     exit 0 ;;
   --info-service=ssh) printf 'ssh\n  ports: 22/tcp\n'; exit 0 ;;
   --info-service=http) printf 'http\n  ports: 80/tcp\n'; exit 0 ;;

@@ -690,3 +690,9 @@ html.cg-on :is(.el-input.is-disabled .el-input__wrapper, .el-textarea.is-disable
   background-color: rgb(118 118 128 / .1);
   background-image: none;
 }
+
+/* 「有新版本」提示左边的 Ferry 小图标（update.ts）：跟着主题显示浅色 / 深色那张 */
+.ferry-note-icon { display: inline-flex; width: 24px; height: 24px; }
+.ferry-note-icon img { width: 24px; height: 24px; display: block; }
+.ferry-note-icon .dark-only, html.dark .ferry-note-icon .light-only { display: none; }
+html.dark .ferry-note-icon .dark-only { display: block; }

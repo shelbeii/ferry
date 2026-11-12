@@ -1702,6 +1702,7 @@ has "firewalld 在运行，看默认路由网卡的区域" '"kind":"firewalld","
 has "sshd 的端口：服务 ssh 放行，标为 SSH" '"process":"sshd","unit":"sshd.service","ssh":true,"firewall":"open","rule":"服务 ssh（22/tcp）"' "$pr"
 has "没放行的端口：程序、单元、拦着" '"process":"demoserver","unit":"porttest.service","firewall":"blocked"' "$pr"
 has "Ferry 部署的应用的端口标出来" '"ferry":true' "$pr"
+t "运行时、永久配置的全部区域各读一次，不再单独读区域" ok "[--list-all-zones|--permanent --list-all-zones]" -- dx a 'echo "[$(sort /var/lib/fakefw/calls | paste -sd "|")]"'
 t "放行端口" ok "放行 16500/tcp 完成" -- F port open e2e-a 16500 -y
 t "运行时和永久配置都加上了" ok "[16500/tcp|16500/tcp]" -- dx a 'echo "[$(cat /var/lib/fakefw/runtime/ports)|$(cat /var/lib/fakefw/permanent/ports)]"'
 t "放行后是 open" ok '"unit":"porttest.service","firewall":"open","rule":"16500/tcp"' -- F port e2e-a --json

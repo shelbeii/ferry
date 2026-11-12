@@ -137,6 +137,7 @@ pub fn run() {
             write_config,
             exit_app,
             shellicon::sync_shell_icon,
+            shellicon::refresh_shell_icon,
             open_external,
             secretclip::copy_secret,
             browser::browser_allow_cert,

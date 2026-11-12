@@ -101,21 +101,59 @@ const fwTimeout = 30 * time.Second
 // report 查看端口与防火墙。
 func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 	rep := &proto.PortReport{Ports: []proto.PortInfo{}}
-	st := sc.firewall()
-	rep.Firewall = st.Firewall
-
 	byKey := map[string]*proto.PortInfo{}
-	add := func(port int, pr string) *proto.PortInfo {
-		k := strconv.Itoa(port) + "/" + pr
-		if p := byKey[k]; p != nil {
-			return p
+	var st *fwState
+	var names map[string]string
+	var dockerNote string
+	// 读防火墙（要起 firewall-cmd，最慢）和读监听的端口、Docker 同时做：两边互不相干
+	eachParallel(2, 2, func(i int) {
+		if i == 0 {
+			st = sc.firewall()
+			return
 		}
-		p := &proto.PortInfo{Port: port, Proto: pr}
-		byKey[k] = p
+		sc.scanListen(byKey)
+		names, dockerNote = sc.docker(func(port int, pr string) *proto.PortInfo { return addPort(byKey, port, pr) })
+	})
+	rep.Firewall = st.Firewall
+	if dockerNote != "" {
+		rep.Notes = append(rep.Notes, dockerNote)
+	}
+	add := func(port int, pr string) *proto.PortInfo { return addPort(byKey, port, pr) }
+
+	// 2. 用主机网络的容器里的进程换成容器名
+	for _, p := range byKey {
+		if n := names[p.Container]; n != "" {
+			p.Container = n
+		}
+	}
+	sc.dockerGuard(rep, byKey, add)
+
+	// 3. 防火墙放行了的单个端口（没有程序在用的也列出来，可以关掉）
+	for _, r := range st.rules {
+		if r.allow && r.lo == r.hi && r.kind != "complex" {
+			pr := r.proto
+			if pr == "" {
+				pr = "tcp"
+			}
+			add(r.lo, pr)
+		}
+	}
+	return sc.finish(rep, st, byKey)
+}
+
+// addPort 端口 / 协议对应的那一项，没有时加上。
+func addPort(byKey map[string]*proto.PortInfo, port int, pr string) *proto.PortInfo {
+	k := strconv.Itoa(port) + "/" + pr
+	if p := byKey[k]; p != nil {
 		return p
 	}
+	p := &proto.PortInfo{Port: port, Proto: pr}
+	byKey[k] = p
+	return p
+}
 
-	// 1. 正在监听的
+// scanListen 1. 正在监听的 TCP 端口，和它的进程、systemd 单元、容器；记下 sshd 监听的端口。
+func (sc *fwScan) scanListen(byKey map[string]*proto.PortInfo) {
 	sc.ssh = map[int]bool{}
 	socks := readListen(sc.proc)
 	want := map[string]bool{}
@@ -124,7 +162,7 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 	}
 	owners := socketPIDs(sc.proc, want)
 	for _, s := range socks {
-		p := add(s.port, "tcp")
+		p := addPort(byKey, s.port, "tcp")
 		p.Listen = addHost(p.Listen, s.host)
 		pid := owners[s.inode]
 		if pid <= 0 || (p.PID > 0 && p.PID < pid) {
@@ -143,30 +181,10 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 			sc.ssh[s.port] = true
 		}
 	}
+}
 
-	// 2. Docker 映射到主机的；用主机网络的容器里的进程换成容器名
-	names, note := sc.docker(add)
-	if note != "" {
-		rep.Notes = append(rep.Notes, note)
-	}
-	for _, p := range byKey {
-		if n := names[p.Container]; n != "" {
-			p.Container = n
-		}
-	}
-	sc.dockerGuard(rep, byKey, add)
-
-	// 3. 防火墙放行了的单个端口（没有程序在用的也列出来，可以关掉）
-	for _, r := range st.rules {
-		if r.allow && r.lo == r.hi && r.kind != "complex" {
-			pr := r.proto
-			if pr == "" {
-				pr = "tcp"
-			}
-			add(r.lo, pr)
-		}
-	}
-
+// finish 给每个端口标上防火墙的状态，排好序。
+func (sc *fwScan) finish(rep *proto.PortReport, st *fwState, byKey map[string]*proto.PortInfo) (*proto.PortReport, *fwState) {
 	var ifaces map[string]string
 	if sc.ifaces != nil {
 		ifaces = sc.ifaces()
@@ -406,7 +424,10 @@ func dockerMaps(s string) []dockerMap {
 
 // firewall 看服务器用的是哪种防火墙，读出端口规则。
 func (sc *fwScan) firewall() *fwState {
-	fwd, _ := sc.run("if command -v firewall-cmd >/dev/null 2>&1; then LC_ALL=C firewall-cmd --state 2>&1; else echo none; fi", fwTimeout)
+	// firewall-cmd 每次都要启动 Python、连 D-Bus（CentOS 7 上一次约 0.65 秒）：在运行没有先问 systemd（几毫秒）
+	fwd, _ := sc.run("if ! command -v firewall-cmd >/dev/null 2>&1; then echo none; "+
+		"elif systemctl is-active --quiet firewalld 2>/dev/null; then echo running; "+
+		"else LC_ALL=C firewall-cmd --state 2>&1; fi", fwTimeout)
 	fwd = strings.TrimSpace(fwd)
 	if fwd == "running" {
 		return sc.firewalld()
@@ -471,10 +492,40 @@ func nftFiltering(out string) bool {
 
 func (sc *fwScan) firewalld() *fwState {
 	st := &fwState{Firewall: proto.Firewall{Kind: "firewalld", Active: true, Manage: true}, deflt: "blocked"}
+	ifc := defaultIface(sc.proc)
+	if !reSafe.MatchString(ifc) {
+		ifc = ""
+	}
+	// firewall-cmd 每次约 0.65 秒（CentOS 7）：运行时、永久配置的全部区域同时各读一次，
+	// 区域从运行时的 interfaces 里找，不再一条一条地问（原来要连着起 4 次）。
+	var all [2]string
+	var allErr [2]error
+	eachParallel(2, 2, func(i int) {
+		perm := ""
+		if i == 1 {
+			perm = " --permanent"
+		}
+		all[i], allErr[i] = sc.run("LC_ALL=C firewall-cmd"+perm+" --list-all-zones 2>&1", fwTimeout)
+	})
+	var zones, permZones map[string]string
+	if allErr[0] == nil {
+		zones = splitZones(all[0])
+	}
+	if allErr[1] == nil {
+		permZones = splitZones(all[1])
+	}
 	zone := ""
-	if ifc := defaultIface(sc.proc); ifc != "" && reSafe.MatchString(ifc) {
-		if out, err := sc.run("LC_ALL=C firewall-cmd --get-zone-of-interface="+ifc+" 2>/dev/null", fwTimeout); err == nil {
-			zone = strings.TrimSpace(out)
+	if ifc != "" {
+		for name, text := range zones {
+			if contains(parseZone(text).interfaces, ifc) {
+				zone = name
+				break
+			}
+		}
+		if zone == "" && zones == nil { // 读不了全部区域（很老的版本）：照旧问网卡在哪个区域
+			if out, err := sc.run("LC_ALL=C firewall-cmd --get-zone-of-interface="+ifc+" 2>/dev/null", fwTimeout); err == nil {
+				zone = strings.TrimSpace(out)
+			}
 		}
 	}
 	if zone == "" {
@@ -486,14 +537,20 @@ func (sc *fwScan) firewalld() *fwState {
 		return st
 	}
 	st.Zone = zone
-	out, err := sc.run("LC_ALL=C firewall-cmd --zone="+zone+" --list-all 2>&1", fwTimeout)
-	if err != nil {
-		st.Manage, st.deflt, st.Why = false, "", "读取 firewalld 的规则失败："+clipLine(strings.TrimSpace(out))
-		return st
+	text, ok := zones[zone]
+	if !ok {
+		out, err := sc.run("LC_ALL=C firewall-cmd --zone="+zone+" --list-all 2>&1", fwTimeout)
+		if err != nil {
+			st.Manage, st.deflt, st.Why = false, "", "读取 firewalld 的规则失败："+clipLine(strings.TrimSpace(out))
+			return st
+		}
+		text = out
 	}
-	z := parseZone(out)
+	z := parseZone(text)
 	var perm *fwZone // 永久配置：对比出只在运行时的规则
-	if out, err := sc.run("LC_ALL=C firewall-cmd --permanent --zone="+zone+" --list-all 2>&1", fwTimeout); err == nil {
+	if p, ok := permZones[zone]; ok {
+		perm = parseZone(p)
+	} else if out, err := sc.run("LC_ALL=C firewall-cmd --permanent --zone="+zone+" --list-all 2>&1", fwTimeout); err == nil {
 		perm = parseZone(out)
 	}
 	temp := func(list func(*fwZone) []string, v string) bool { return perm != nil && !contains(list(perm), v) }
@@ -554,8 +611,34 @@ func (sc *fwScan) firewalld() *fwState {
 
 // fwZone firewall-cmd --list-all 的内容。
 type fwZone struct {
-	target                string
-	services, ports, rich []string
+	target                            string
+	interfaces, services, ports, rich []string
+}
+
+// splitZones firewall-cmd --list-all-zones 的输出按区域分开：区域名 → 这个区域的 --list-all 内容。
+// 区域名那行顶格（public (active)），其余各行缩进。
+func splitZones(s string) map[string]string {
+	out := map[string]string{}
+	name := ""
+	var b strings.Builder
+	flush := func() {
+		if name != "" {
+			out[name] = b.String()
+		}
+		b.Reset()
+	}
+	for _, line := range strings.Split(s, "\n") {
+		if line != "" && line[0] != ' ' && line[0] != '\t' {
+			flush()
+			name = strings.Fields(line)[0]
+		}
+		if name != "" {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	flush()
+	return out
 }
 
 func parseZone(s string) *fwZone {
@@ -578,6 +661,8 @@ func parseZone(s string) *fwZone {
 		switch k {
 		case "target":
 			z.target = v
+		case "interfaces":
+			z.interfaces = strings.Fields(v)
 		case "services":
 			z.services = strings.Fields(v)
 		case "ports":

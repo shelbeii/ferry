@@ -8,23 +8,28 @@ import { glass, GLASS_TRANSPARENCY_DEFAULT, themeChanged } from './glass/runtime
 import { commandTarget } from './commandContext'
 import { mergeRetries, queuedRequest } from './requestQueue'
 import type { SettingsSecretChange } from './settingsSecrets'
-import { syncAppIcon } from './appIcon'
+import { syncAppIcon, waitForAppIcon } from './appIcon'
 
 // ---------------------------------------------------------------- 设置
 
 export const appSettings = ref<AppSettings | null>(null)
 export const settingsInfo = ref<SettingsResponse | null>(null)
 
-export async function loadSettings(): Promise<AppSettings> {
-  const r = await call<SettingsResponse>(['settings'])
-  acceptSettings(r)
-  return r.settings
+let settingsRead: Promise<AppSettings> | undefined
+export function loadSettings(): Promise<AppSettings> {
+  settingsRead ??= call<SettingsResponse>(['settings']).then(r => {
+    acceptSettings(r)
+    return r.settings
+  }).finally(() => { settingsRead = undefined })
+  return settingsRead
 }
 
 function acceptSettings(r: SettingsResponse) {
   r.settings.ui.glassTransparency ??= GLASS_TRANSPARENCY_DEFAULT // 旧版 ferry 没有这一项
   settingsInfo.value = r
   appSettings.value = r.settings
+  // 启动缓存只记录已保存的设置，设置窗口中的预览不写入。
+  setUiPref('theme', r.settings.ui.theme)
   applyTheme(r.settings.ui.theme)
   glass.enabled = r.settings.ui.glass !== false
   glass.transparency = r.settings.ui.glassTransparency
@@ -58,13 +63,14 @@ export function saveSettings(s: AppSettings, changes: SettingsSecretChange[] = [
 // ---------------------------------------------------------------- 主题
 
 let media: MediaQueryList | undefined
+let themeRevision = 0
+let nativeThemeUpdate = Promise.resolve()
 
 export function applyTheme(theme: string) {
-  // 记下来：下次启动时 public/theme-init.js 在界面画出来之前就按它切好
-  setUiPref('theme', theme)
+  const current = ++themeRevision
   media ??= window.matchMedia('(prefers-color-scheme: dark)')
-  const set = () => {
-    const dark = theme === 'dark' || (theme === 'system' && !!media?.matches)
+  const set = (dark: boolean) => {
+    if (current !== themeRevision) return
     const root = document.documentElement
     if (root.classList.contains('dark') !== dark) {
       root.classList.toggle('dark', dark)
@@ -72,14 +78,45 @@ export function applyTheme(theme: string) {
     }
     void syncAppIcon(dark)
   }
-  media.onchange = theme === 'system' ? set : null
-  set()
+  media.onchange = theme === 'system' ? () => set(!!media?.matches) : null
+  set(theme === 'dark' || (theme === 'system' && media.matches))
   // 窗口标题栏跟着 Ferry 的主题，不然会跟着 Windows 自己的深色 / 浅色设置走（浅色主题配深色标题栏）
   if (isTauri) {
-    getCurrentWindow()
-      .setTheme(theme === 'light' || theme === 'dark' ? theme : null)
-      .catch(() => {})
+    nativeThemeUpdate = nativeThemeUpdate.then(async () => {
+      if (current !== themeRevision) return
+      const window = getCurrentWindow()
+      await window.setTheme(theme === 'light' || theme === 'dark' ? theme : null)
+      // WebView2 的媒体查询会异步收到新主题；返回系统模式时先使用原生窗口的解析结果。
+      if (theme === 'system') set(await window.theme() === 'dark')
+    }).catch(error => console.warn('同步 Ferry 窗口主题失败', error))
   }
+}
+
+/**
+ * 启动时定主题；返回的 Promise 完成后就可以显示窗口（main.ts）。
+ * 上次保存的主题记在本机（theme-init.js 已经按它切好深浅色）：照它换好标题栏和图标就行，不等后台的 ferry 读设置。
+ * ferry 刚装好、刚开机时启动慢（实测冷启动近 3 秒），等它的话窗口要晚这么久才出来。
+ * 没记过（第一次打开、清过界面缓存）才等正式设置，免得先按系统的深浅色显示、读到设置又变。
+ * 设置照常读（和 App 的项目初始化共用这一次）；读到的主题和记着的一样时什么都不用再做。
+ */
+export function startTheme(): Promise<void> {
+  const cached = uiPref('theme')
+  const known = cached === 'light' || cached === 'dark' || cached === 'system'
+  if (known) applyTheme(cached)
+  const settings = loadSettings().then(() => undefined, error => {
+    console.warn('读取启动主题失败', error)
+    if (!known) applyTheme('system')
+  })
+  return (known ? Promise.resolve() : settings).then(waitForTheme)
+}
+
+export async function waitForTheme(): Promise<void> {
+  let pending: Promise<void>
+  do {
+    pending = nativeThemeUpdate
+    await pending
+    await waitForAppIcon()
+  } while (pending !== nativeThemeUpdate)
 }
 
 // ---------------------------------------------------------------- 项目
