@@ -31,17 +31,18 @@ function onTransition(e: Event) {
   running.delete(el)
   if (now === 'enter') {
     if (!particlesIn(el, AMOUNT)) return
+    // 只淡入、不缩放（缩放会让里面的字先变大再缩回，动画结束时还会跳一下）
     const a = el.animate([
-      { opacity: 0, scale: '1.04', offset: 0 },
+      { opacity: 0, offset: 0 },
       { opacity: 0, offset: .4 },
-      { opacity: 1, scale: '1', offset: 1 },
+      { opacity: 1, offset: 1 },
     ], { duration: OPEN_MS * AMOUNT.pace, easing: 'cubic-bezier(.25,.8,.3,1)', fill: 'backwards' })
     a.playbackRate = 1 / slow()
     running.set(el, a)
   } else {
     if (!particlesOut(el, AMOUNT)) return
     // 保持透明直到 Element Plus 把它隐藏；下次打开时上面会先取消
-    const a = el.animate([{ opacity: 1, scale: '1' }, { opacity: 0, scale: '1.02' }], { duration: CLOSE_MS, easing: 'ease-out', fill: 'forwards' })
+    const a = el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: CLOSE_MS, easing: 'ease-out', fill: 'forwards' })
     a.playbackRate = 1 / slow()
     running.set(el, a)
   }

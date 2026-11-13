@@ -2,7 +2,7 @@
 // 打开时，窗口形状的一团细尘（比窗口大一圈、稀疏）往里收缩，落到哪里就在哪里淡掉，窗口同时从略大缩到原大、显出来，像是粒子凝成了窗口；
 // 关闭时，窗口很快淡出，同时化成细尘往外散开、淡掉。
 // 用法：main.ts 里 app.use(ElementPlus, { dialog: { transition: dialogTransition } })，所有 el-dialog 都用它，不用一个个改组件。
-// 粒子画在一块全屏 canvas 上（不接收鼠标），只在有动画时显示；窗口本身只改 opacity、scale（Web Animations），
+// 粒子画在一块全屏 canvas 上（不接收鼠标），只在有动画时显示；窗口本身只改 opacity（Web Animations；不缩放，缩放会让里面的字变大再缩回），
 // 不改 CSS 变量（WebView2 131 频繁改 CSS 变量会崩溃，见 glass/runtime.ts 的 setVar）。
 // 设置里关掉「粒子特效」（ui.particles，见 setParticles）、系统设置了「减少动态效果」、或者拿不到 canvas（测试环境）时，退回简单的淡入淡出。
 import type { TransitionProps } from 'vue'
@@ -281,11 +281,12 @@ function onEnter(el: Element, done: () => void) {
   const fancy = !!dialog && !!rect && rect.width > 0 && particlesOn() && play('open', rect, radiusOf(dialog), dialog)
   if (dialog) {
     anims.push(fancy
-      // 跟着粒子一起从略大收到原大；前面四成全透明，等粒子先聚到字上，字再跟着显出来
+      // 只淡入、不缩放：前面四成全透明，等粒子先聚到字上，字再跟着显出来。
+      // 以前从 1.035 倍缩到原大，里面的字会先变大再缩回、动画结束时还从缩放的模糊状态跳回清晰，看起来字的大小和样式在变
       ? dialog.animate([
-        { opacity: 0, scale: '1.035', offset: 0 },
+        { opacity: 0, offset: 0 },
         { opacity: 0, offset: .4 },
-        { opacity: 1, scale: '1', offset: 1 },
+        { opacity: 1, offset: 1 },
       ], { duration: OPEN_MS, easing: 'cubic-bezier(.25,.8,.3,1)', fill: 'backwards' })
       : dialog.animate([{ opacity: 0, translate: '0 -16px' }, { opacity: 1, translate: '0 0' }], { duration: 220, easing: 'ease-out', fill: 'backwards' }))
   }
@@ -307,7 +308,7 @@ function onLeave(el: Element, done: () => void) {
   if (mask) anims.push(mask)
   if (dialog) {
     anims.push(fancy
-      ? dialog.animate([{ opacity: 1, scale: '1' }, { opacity: 0, scale: '1.02' }], { duration, easing: 'ease-out', fill: 'forwards' })
+      ? dialog.animate([{ opacity: 1 }, { opacity: 0 }], { duration, easing: 'ease-out', fill: 'forwards' })
       : dialog.animate([{ opacity: 1, translate: '0 0' }, { opacity: 0, translate: '0 -16px' }], { duration, easing: 'ease-in', fill: 'forwards' }))
   }
   for (const a of anims) a.playbackRate = 1 / slow()
