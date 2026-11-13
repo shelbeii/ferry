@@ -2,7 +2,7 @@
 //
 // 最新版本看 github.com/<仓库>/releases/latest 跳转到哪个标签（不用 API：同一出口 IP 每小时只能调 60 次）；
 // 发布说明尽量从 API 取，取不到就只给发布页地址。安装包可以经「GitHub 加速」（设置 → 运行环境）下载，
-// 校验和（Release 里的 SHA256SUMS.txt）先直接从 GitHub 取，取不到才经加速取。
+// 校验和（Release 里的 SHA256SUMS.txt）先直接从 GitHub 取，取不到才经加速取；校验和要用编进程序的公钥验过签名（sig.go）。
 package update
 
 import (
@@ -291,17 +291,19 @@ func Clean(dir, keep string) {
 	}
 }
 
-// Sums 某个版本的 SHA256SUMS.txt（文件名 → sha256）。先直接从 GitHub 取，不行再经加速取。
+// Sums 某个版本的 SHA256SUMS.txt（文件名 → sha256），用编进程序的公钥验过签名（SHA256SUMS.txt.sig）。
+// 先直接从 GitHub 取，不行再经加速取（验签挡住了加速被换内容）。没有签名、签名不对都不装。
 func Sums(ctx context.Context, s Source, version string) (map[string]string, error) {
-	u := s.download(version, "SHA256SUMS.txt")
-	b, err := getSmall(ctx, u)
+	b, err := s.small(ctx, version, "SHA256SUMS.txt")
 	if err != nil {
-		if m := s.mirrored(u); m != "" {
-			b, err = getSmall(ctx, m)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("取校验和失败：%w", err)
-		}
+		return nil, fmt.Errorf("取校验和失败：%w", err)
+	}
+	sig, err := s.small(ctx, version, SumsSigFile)
+	if err != nil {
+		return nil, fmt.Errorf("%w（取不到签名文件 %s：%v）", ErrBadSig, SumsSigFile, err)
+	}
+	if err := VerifyTrusted(b, sig); err != nil {
+		return nil, err
 	}
 	sums := map[string]string{}
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
@@ -315,6 +317,21 @@ func Sums(ctx context.Context, s Source, version string) (map[string]string, err
 		return nil, errors.New("取校验和失败：SHA256SUMS.txt 是空的")
 	}
 	return sums, nil
+}
+
+// small 取 Release 里的小文件：先直接从 GitHub，不行再经加速。
+func (s Source) small(ctx context.Context, version, file string) ([]byte, error) {
+	u := s.download(version, file)
+	b, err := getSmall(ctx, u)
+	if err != nil {
+		if m := s.mirrored(u); m != "" {
+			if b2, err2 := getSmall(ctx, m); err2 == nil {
+				return b2, nil
+			}
+		}
+		return nil, err
+	}
+	return b, nil
 }
 
 func getSmall(ctx context.Context, u string) ([]byte, error) {

@@ -42,7 +42,7 @@ type Event struct {
 	Lines []string `json:"lines,omitempty"`
 }
 
-// App 一个应用的结果。Result：OK | ROLLED_BACK | FAILED | ROLLBACK_FAILED | SKIPPED
+// App 一个应用的结果。Result：OK | ROLLED_BACK | FAILED | ROLLBACK_FAILED | SKIPPED | REVERTED
 type App struct {
 	Name   string `json:"name"`
 	Result string `json:"result"`
@@ -59,6 +59,7 @@ var resultText = map[string]string{
 	"FAILED":          "失败",
 	"ROLLBACK_FAILED": "失败，回滚也失败了，需要人工处理",
 	"SKIPPED":         "没有部署（前面的应用失败了）",
+	"REVERTED":        "部署成功后又回滚到部署前的版本（别的服务器失败了）",
 }
 
 // Title 一行标题：✅ shop 部署成功 · prod

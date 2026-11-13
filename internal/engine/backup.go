@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/proto"
@@ -20,7 +21,7 @@ type BackupOptions struct {
 }
 
 // Backup 数据备份：status 查看、on 打开（之后服务器上按时备份）、off 关闭、run 现在备份、list 列出备份文件、
-// restore 恢复（先自动备份一份现在的）、delete 删掉一份。
+// restore 恢复（先自动备份一份现在的）、delete 删掉一份、remote 列出传到异地的、fetch 把异地的一份取回服务器。
 func (e *Engine) Backup(target, action string, o BackupOptions) (proto.BackupStatus, error) {
 	var out proto.BackupStatus
 	t, err := e.File.Target(target)
@@ -83,6 +84,21 @@ func (e *Engine) backupItems(t *config.Target) ([]proto.BackupItem, error) {
 			it.EnvFiles = append(it.EnvFiles, ex(p))
 		}
 		it.Command, it.Restore = ex(b.Command), ex(b.Restore)
+		if u := b.Upload; u != nil && u.S3 != nil {
+			prefix := ex(u.S3.Prefix)
+			if prefix == "" {
+				prefix = "ferry/" + e.File.Project + "/" + t.Name + "/"
+			}
+			if !strings.HasSuffix(prefix, "/") {
+				prefix += "/"
+			}
+			keep := u.Keep
+			if keep <= 0 {
+				keep = b.KeepN()
+			}
+			it.Upload = &proto.BackupUpload{Endpoint: ex(u.S3.Endpoint), Bucket: ex(u.S3.Bucket), Region: u.S3.Region, Prefix: prefix,
+				PathStyle: u.S3.PathStyle, Encrypt: u.EncryptOn(), Keep: keep}
+		}
 		if len(errs) > 0 {
 			return nil, fmt.Errorf("backups.%s：%v", b.Name, errs[0])
 		}

@@ -63,7 +63,7 @@ func updateCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Set
 		if cio.ctx.Err() != nil {
 			return fail(engine.ErrCanceled)
 		}
-		if src.Mirror == "" {
+		if src.Mirror == "" && !errors.Is(err, update.ErrBadSig) {
 			err = fmt.Errorf("%w（下载慢或打不开时，可以在「设置 → 运行环境」填 GitHub 加速）", err)
 		}
 		return fail(err)

@@ -35,17 +35,19 @@ const resultLimit = 64 << 10
 
 const instructions = `Ferry 是把后端（Java、Go 等原生程序、Python、Node 服务端、.NET）和前端静态站点部署到 Linux 服务器（systemd）的工具。这里的工具用来查看 Ferry 管理的项目和服务器：
 - 先用 list_projects 看有哪些项目、每个项目的部署目标（服务器）和应用；其他工具的 project 参数填项目名或 ferry.yaml 的路径，target 填目标名。
-- 排查线上问题：app_status 看应用是否在运行、端口、健康检查；app_logs 看日志或按关键字搜索；app_releases 看各版本；deploy_history 看部署记录；server_software 看服务器上的数据库、缓存等软件；server_ports 看端口谁在用、防火墙放行了哪些；port_check 从这台电脑测端口实际能不能连上；ssh_sessions 看谁连着服务器（登录用户、来源 IP）；
+- 排查线上问题：app_status 看应用是否在运行、端口、健康检查；app_logs 看日志或按关键字搜索；app_releases 看各版本；deploy_history 看部署记录；audit_log 看审计记录（谁什么时候改了什么：终端、文件、数据库、软件、防火墙……）；server_software 看服务器上的数据库、缓存等软件；server_ports 看端口谁在用、防火墙放行了哪些；port_check 从这台电脑测端口实际能不能连上；ssh_sessions 看谁连着服务器（登录用户、来源 IP）；
   server_check 看能不能连上、网络延迟；preflight 部署前检查服务器环境；software_logs 看软件（MySQL、Redis……）的日志；
-  monitor_status 看服务器告警发现的问题（check 为 true 时现在检查一次）；backup_status 看数据备份开没开、上次备份成功没有、有哪些备份文件。
+  monitor_status 看服务器告警发现的问题（应用停了、健康检查不通、内存和负载太高、进程被 OOM 杀掉、磁盘、证书、定时任务失败……；check 为 true 时现在检查一次）；
+  backup_status 看数据备份开没开、上次备份成功没有、传到异地（S3）没有、有哪些备份文件（remote 为 true 时列出异地的）。
+  应用写了 job 的是定时任务（list_projects 里有 schedule）：不常驻，到点运行一次；app_status 的 job 里是下次运行时间和上次的结果。
   部署前用 deploy_changes 看这次会带上线的提交、单元文件和附带文件的变化；app_status 里的 busy 表示团队里有人正在部署、启停这台服务器上的应用。
   list_projects 里的 machine 是这台电脑上缺的东西（别的电脑上的私钥、源码目录），要用户在 Ferry 的「本机设置」里补上。
-- 改动服务器：deploy 部署（先在本机构建）、app_control 启动 / 停止 / 重启、rollback 回滚。用户在 Ferry 设置里打开了「允许编程软件请求改动」才能用，
+- 改动服务器：deploy 部署（先在本机构建；targets 一次部署到几台，可以分批、先发几台让用户确认、有一台失败就把已切换的回滚）、app_control 启动 / 停止 / 重启（定时任务的停止 = 关掉定时器、启动 = 打开）、rollback 回滚、run_job 现在运行一次定时任务。用户在 Ferry 设置里打开了「允许编程软件请求改动」才能用，
   每次都要用户确认（在 Ferry 桌面版弹窗，或者用户设置了在编程软件里确认时在这里），用户同意后由桌面版执行（最多等 5 分钟确认）；生产服务器不允许。用户拒绝后不要换个办法做同样的事，先问用户。
   run_change_command 执行改动服务器的命令，write_file 写文件（改配置文件用它，确认时显示差异、自动备份原文件），software_templates / software_install 用模板装软件，software_upgrade 升级、software_restore 恢复卸载时保留了数据的、software_backup 给装好的数据库设置数据备份（Ferry 装的软件），
   template_guide / save_software_template 写、存软件模板；要用户提供密码、账号时用 ask_secret（用户在 Ferry 里填，你只拿到代号 {{secret:名字}}，
   命令里用环境变量 "$FERRY_SECRET_<名字大写>"，写文件、装软件的参数里写代号），不要让用户在对话里发密码。
-  backup_run 现在备份一次（改数据库、数据目录前先备份）。打开 / 关闭告警和数据备份、恢复备份只能由用户在 Ferry 里做。
+  backup_run 现在备份一次（改数据库、数据目录前先备份），backup_fetch 把异地的一份备份取回服务器（服务器上的那份没了时；取回后恢复要用户在 Ferry 里做）。打开 / 关闭告警和数据备份、恢复备份只能由用户在 Ferry 里做。
   这几个工具最多等 40 秒：没结束时返回 id 和进展，用 task_status 接着查，直到结束。部署失败时看返回的构建输出、日志找原因。
   动手前先用查看的工具确认现状，reason 里写清楚为什么要做。
 - 数据库：db_connections 看用户允许 AI 查询的数据库连接（Ferry「数据库」里保存的 MySQL、MariaDB、PostgreSQL，经服务器的 SSH 转发连），
@@ -115,6 +117,7 @@ func newServer(o Options) (*server, *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "app_status", Title: "应用状态",
 		Description: "项目里的应用在某台服务器上的状态：是否运行、进程号、监听端口、健康检查、当前版本与部署时间、发现的问题；" +
+			"定时任务（job）不常驻，看 job：定时器开没开、下次什么时候运行、上次运行的结果（退出码、用了多久）；" +
 			"busy 是正在部署、回滚或启停它的人（团队里别人在操作时，等对方做完再动）。",
 		Annotations: readOnly},
 		logged(s, "app_status", func(ctx context.Context, in statusIn) (any, error) {
@@ -153,6 +156,17 @@ func newServer(o Options) (*server, *mcp.Server) {
 			}
 			return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
 				return e.History(t, in.Apps, in.Limit)
+			})
+		}))
+
+	addTool(s, m, &mcp.Tool{Name: "audit_log", Title: "审计记录",
+		Description: "某台服务器上的审计记录：谁、什么时候做了什么改动（部署、回滚、启停，打开终端，保存 / 删除 / 上传文件，数据库里执行的改动语句，" +
+			"软件的安装卸载启停、改配置，防火墙、端口，告警、数据备份的开关和恢复），成功还是失败，最近的在前。记录在服务器上，团队里每个人（包括经编程软件、AI 助手做的）都在。" +
+			"「昨天谁改了 nginx 配置」「谁删了这个文件」这类问题用它。终端只记开关不记敲的命令，文件不记内容，数据库不记查询结果。",
+		Annotations: readOnly},
+		logged(s, "audit_log", func(ctx context.Context, in auditIn) (any, error) {
+			return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
+				return e.AuditLog(t, in.query())
 			})
 		}))
 
@@ -217,6 +231,25 @@ type historyIn struct {
 	targetIn
 	Apps  []string `json:"apps,omitempty" jsonschema:"只看这些应用；不填 = 全部"`
 	Limit int      `json:"limit,omitempty" jsonschema:"最多多少条，默认 30"`
+}
+
+type auditIn struct {
+	targetIn
+	Kind       string `json:"kind,omitempty" jsonschema:"只看这种操作：deploy、rollback、control、terminal-open、file-save、file-remove、file-upload、file-rename、db-exec、redis-exec、software-install、software-config、port、firewall-on、monitor-on、backup-restore……；以 - 结尾按前缀（file- = 文件的各种操作，software- = 软件的）"`
+	Actor      string `json:"actor,omitempty" jsonschema:"操作人里含这几个字（名字或 用户@电脑）"`
+	SinceHours int    `json:"sinceHours,omitempty" jsonschema:"只看最近多少小时的；不填 = 不限"`
+	Limit      int    `json:"limit,omitempty" jsonschema:"最多多少条，默认 50，最多 500"`
+}
+
+func (in auditIn) query() proto.AuditQuery {
+	q := proto.AuditQuery{Kind: in.Kind, Actor: in.Actor, Limit: in.Limit}
+	if q.Limit <= 0 || q.Limit > 500 {
+		q.Limit = 50
+	}
+	if in.SinceHours > 0 {
+		q.Since = time.Now().Add(-time.Duration(in.SinceHours) * time.Hour)
+	}
+	return q
 }
 
 type logsIn struct {
@@ -288,6 +321,8 @@ type appInfo struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
 	Unit string `json:"unit,omitempty"`
+	// Schedule 定时任务（配置里写了 job）按这些时间运行（systemd 的 OnCalendar）；不常驻，用 run_job 现在运行一次
+	Schedule []string `json:"schedule,omitempty"`
 }
 
 // projects Ferry 桌面版里的项目，加上当前目录的（不在列表里时）。
@@ -363,6 +398,9 @@ func describe(name, path string) projectInfo {
 		ai := appInfo{Name: a.Name, Type: a.Type}
 		if a.Type != "static" {
 			ai.Unit = a.Service.Unit
+		}
+		if a.Job != nil {
+			ai.Schedule = a.Job.Schedule
 		}
 		p.Apps = append(p.Apps, ai)
 	}

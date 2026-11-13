@@ -47,6 +47,8 @@ type monitorState struct {
 	UnitSince map[string]string               `json:"unitSince"` // 单元 → 上次看到的启动时间和主进程号
 	Ports     []string                        `json:"ports"`     // 对外开放的端口（8080/tcp），第一次检查时记下
 	FwActive  *bool                           `json:"fwActive,omitempty"`
+	// PingErrors 上次访问各心跳地址的结果（地址 → 错误；成功的不记）
+	PingErrors map[string]string `json:"pingErrors,omitempty"`
 }
 
 func (a *Agent) monitorDir() string { return filepath.Join(a.ferryDir(), "monitor") }
@@ -103,11 +105,16 @@ func (a *Agent) monitor() int {
 		if len(m.Channels) == 0 {
 			return a.result(proto.CodeBadInput, "没有选告警发到哪（在设置 → 通知里添加）", nil)
 		}
+		if m.PingURL != "" && !validPingURL(m.PingURL) {
+			return a.result(proto.CodeBadInput, "心跳地址要以 http:// 或 https:// 开头", nil)
+		}
 		e := monitorEntry{MonitorSpec: *m, Root: a.req.Root}
 		e.Action = ""
 		e.IntervalMin = clamp(e.IntervalMin, 5, 1, 1440)
 		e.DiskPct = clamp(e.DiskPct, 90, 50, 99)
 		e.CertDays = clamp(e.CertDays, 14, 1, 60)
+		e.MemPct = clamp(e.MemPct, 90, 50, 99)
+		e.LoadX = clamp(e.LoadX, 2, 1, 100)
 		if idx >= 0 {
 			cfg.Entries[idx] = e
 		} else {
@@ -140,6 +147,9 @@ func (a *Agent) monitor() int {
 		e := monitorEntry{MonitorSpec: *m, Root: a.req.Root}
 		if idx >= 0 {
 			e = cfg.Entries[idx]
+			if len(m.Apps) > 0 {
+				e.Apps = m.Apps // 项目里最新的健康检查
+			}
 		}
 		e.DiskPct, e.CertDays = clamp(e.DiskPct, 90, 50, 99), clamp(e.CertDays, 14, 1, 60)
 		probs, _ := a.monitorCheck([]monitorEntry{e}, &monitorState{UnitSince: map[string]string{}})
@@ -181,6 +191,10 @@ func (a *Agent) monitorStatus(cfg monitorConfig, st monitorState, key string) pr
 	for _, e := range cfg.Entries {
 		if entryKey(e.Project, e.Target) == key {
 			out.On, out.IntervalMin, out.DiskPct, out.CertDays = true, e.IntervalMin, e.DiskPct, e.CertDays
+			out.MemPct, out.LoadX, out.PingURL = clamp(e.MemPct, 90, 50, 99), clamp(e.LoadX, 2, 1, 100), e.PingURL
+			if e.PingURL != "" {
+				out.PingError = st.PingErrors[e.PingURL]
+			}
 			for _, c := range e.Channels {
 				out.Channels = append(out.Channels, c.Name)
 			}
@@ -394,6 +408,10 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 		if exists(stoppedFile(filepath.Join(e.Root, dirMeta), info[1])) || zdIdleSlot(e.Root, info[1], u) {
 			continue // 在 Ferry 里手动停的、不停机发布空着的槽位
 		}
+		if unitIsJob(filepath.Join(a.Sys.UnitDir(), u)) {
+			out = append(out, a.jobFindings(u, info[1], ek)...) // 定时任务：平时就是停着的，看定时器和上次运行
+			continue
+		}
 		enabled, _ := a.Sys.Shell("systemctl is-enabled "+shellQuote(u)+" 2>/dev/null", 10*time.Second)
 		path := filepath.Join(a.Sys.UnitDir(), u)
 		delay := unitBootDelay(path)
@@ -425,6 +443,12 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 			if ok && old != cur && p.Since != "" && !plannedSince(e.Root, info[1], st.LastRun) {
 				out = append(out, finding{proto.MonitorProblem{Level: "warn", Text: fmt.Sprintf("应用 %s 重启过（%s 起），不是部署、启停引起的：可能崩溃后自动重启了，看看日志", info[1], sinceShort(p.Since))}, ek})
 			}
+			// 进程在，接口不通：假死（线程池满、Full GC、连不上数据库……）
+			if h, ok := healthOf(e, info[1], u); ok {
+				if err := a.probeAgain(h); err != nil {
+					out = append(out, finding{proto.MonitorProblem{Key: "health:" + u, Level: "bad", Text: fmt.Sprintf("应用 %s 在运行，但健康检查不通过：%v", info[1], err)}, ek})
+				}
+			}
 		}
 	}
 	// 1b. Ferry 装的软件
@@ -447,6 +471,8 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 			out = append(out, finding{proto.MonitorProblem{Key: "disk:" + mount, Level: "bad", Text: fmt.Sprintf("磁盘 %s 用了 %d%%，只剩 %s", mount, pct, sizeText(int64(free)))}, ""})
 		}
 	}
+	// 2b. 内存、负载、OOM
+	out = append(out, a.resourceFindings(entries, st.LastRun)...)
 	// 3. 证书
 	for _, e := range entries {
 		dirs, _ := filepath.Glob(filepath.Join(e.Root, ".ferry", "apps", "*", "tls"))
@@ -609,6 +635,17 @@ func (a *Agent) monitorRun(send func([]proto.MonitorChannel, notify.Event) map[s
 		}
 	}
 	st.Problems, st.UnitSince, st.LastRun = current, since, now
+	// 心跳：检查做完了，告诉外面的监控「我还活着」；服务器宕机、断网时那边收不到，由那边告警
+	st.PingErrors = nil
+	for u, err := range a.ping(cfg.Entries) {
+		if err != "" {
+			if st.PingErrors == nil {
+				st.PingErrors = map[string]string{}
+			}
+			st.PingErrors[u] = err
+			fmt.Fprintf(out, "心跳：%s\n", err)
+		}
+	}
 	if err := a.saveMonitor(nil, &st); err != nil {
 		fmt.Fprintln(out, err)
 		return 1

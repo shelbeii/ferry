@@ -28,6 +28,8 @@ type File struct {
 	Apps    []*App             `yaml:"apps"`
 	// Backups 数据备份（数据库、目录、自己写的命令），在服务器上打开后才按时执行，见 backup.go
 	Backups []*Backup `yaml:"backups"`
+	// Rollout 一次部署到多台时怎么切换（分批、先发几台、失败时回滚），见 rollout.go
+	Rollout *Rollout `yaml:"rollout"`
 
 	Path string `yaml:"-"` // 配置文件绝对路径
 	Dir  string `yaml:"-"` // 配置文件所在目录：相对路径都相对它
@@ -133,6 +135,8 @@ type App struct {
 	Root string `yaml:"root"`
 	// Hooks 部署时在服务器上执行的命令
 	Hooks Hooks `yaml:"hooks"`
+	// Job 定时任务：按时间表运行一次就结束（systemd 定时器启动），不常驻、不开机自启
+	Job *Job `yaml:"job"`
 
 	index int // 在配置中的位置，Order 相同时按它排序
 }
@@ -551,3 +555,26 @@ func checkKeys(n *yaml.Node, allowed ...string) error {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// Job 定时任务。程序照常构建、部署、回滚，只是不常驻：到点由 systemd 定时器启动，运行完就结束。
+type Job struct {
+	// Schedule 什么时候运行（可以写几个）：daily（每天 0 点）| hourly | weekly | minutely | systemd 的 OnCalendar，如 "*-*-* 02:30:00"、"Mon..Fri 09:00"
+	Schedule StringList `yaml:"schedule"`
+	// Timeout 一次最长运行多久，超过就停掉（算失败），默认 6h
+	Timeout *Duration `yaml:"timeout"`
+	// CatchUp 关机、停着的时候错过的那次，开机后补跑一次，默认 true
+	CatchUp *bool `yaml:"catchUp"`
+	// RunOnDeploy 部署、回滚后马上运行一次，成功才算部署成功（数据迁移这类）；默认 false
+	RunOnDeploy bool `yaml:"runOnDeploy"`
+}
+
+// TimeoutOr 一次最长运行多久。
+func (j *Job) TimeoutOr() time.Duration {
+	if j.Timeout == nil || j.Timeout.Std() <= 0 {
+		return 6 * time.Hour
+	}
+	return j.Timeout.Std()
+}
+
+// CatchUpOn 错过的要不要补跑。
+func (j *Job) CatchUpOn() bool { return j.CatchUp == nil || *j.CatchUp }

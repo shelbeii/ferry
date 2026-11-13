@@ -11,7 +11,7 @@ import (
 	"github.com/captain/ferry/internal/ui"
 )
 
-const backupUsage = "用法：ferry backup <目标> [status | on | off | run [名字] | list [名字] | restore <名字> <文件> [--force] | delete <名字> <文件> | download <名字> <文件> [本机目录]]"
+const backupUsage = "用法：ferry backup <目标> [status | on | off | run [名字] | list [名字] | restore <名字> <文件> [--force] | delete <名字> <文件> | download <名字> <文件> [本机目录] | remote <名字> | fetch <名字> <文件>]"
 
 // backupCmd 数据备份：配置里的 backups 在服务器上打开后按时备份；手动备份、恢复、下载到本机。
 func backupCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(error) int) int {
@@ -38,7 +38,11 @@ func backupCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func
 		if len(c.pos) > 3 {
 			return fail(errors.New(backupUsage))
 		}
-	case "restore", "delete":
+	case "remote":
+		if o.Name == "" || len(c.pos) > 3 {
+			return fail(errors.New(backupUsage))
+		}
+	case "restore", "delete", "fetch":
 		if o.Name == "" || o.File == "" || len(c.pos) > 4 {
 			return fail(errors.New(backupUsage))
 		}
@@ -72,7 +76,10 @@ func backupCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func
 	if js != nil {
 		return ok0(js, st)
 	}
-	if action == "list" || action == "delete" {
+	if action == "list" || action == "delete" || action == "remote" || action == "fetch" {
+		if action == "fetch" {
+			con.OK("已取回服务器：之后可以用 ferry backup <目标> restore %s <文件> 恢复", o.Name)
+		}
 		printBackupFiles(st.Files)
 		return 0
 	}
@@ -100,10 +107,18 @@ func printBackup(con *ui.Console, st proto.BackupStatus) {
 		if it.Next != "" && st.On {
 			fmt.Printf("  下次：%s\n", it.Next)
 		}
+		if it.Upload != nil {
+			fmt.Printf("  异地：s3://%s/%s%s/（%s，留 %d 份）\n", it.Upload.Bucket, it.Upload.Prefix, it.Name, map[bool]string{true: "加密", false: "不加密"}[it.Upload.Encrypt], it.Upload.Keep)
+		}
 		if it.Last != nil {
 			r := it.Last
 			if r.OK {
 				con.OK("上次（%s，%s）：%s，%s", r.Reason, r.Time.Local().Format("01-02 15:04"), r.File, human(r.Size))
+				if r.Uploaded != "" {
+					con.OK("  已传到异地：%s", r.Uploaded)
+				} else if r.UploadError != "" {
+					con.Warn("  没传到异地：%s", r.UploadError)
+				}
 			} else {
 				con.Error("上次（%s，%s）失败：%s", r.Reason, r.Time.Local().Format("01-02 15:04"), r.Error)
 			}
@@ -123,7 +138,14 @@ func printBackupFiles(fs []proto.BackupFile) {
 		return
 	}
 	for _, f := range fs {
-		fmt.Printf("%-10s %-44s %10s  %s\n", f.Item, f.Name, human(f.Size), f.Time.Local().Format("2006-01-02 15:04"))
+		where := ""
+		switch {
+		case f.Remote && f.Local:
+			where = "  异地（服务器上也有）"
+		case f.Remote:
+			where = "  异地"
+		}
+		fmt.Printf("%-10s %-48s %10s  %s%s\n", f.Item, f.Name, human(f.Size), f.Time.Local().Format("2006-01-02 15:04"), where)
 	}
 }
 

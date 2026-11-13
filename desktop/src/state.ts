@@ -5,6 +5,7 @@ import { call, ferry, isSecretKind, type AppSettings, type BusyItem, type Connec
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { isTauri, storeGet } from './platform'
 import { glass, GLASS_TRANSPARENCY_DEFAULT, themeChanged } from './glass/runtime'
+import { setParticles } from './fx/dialogParticles'
 import { commandTarget } from './commandContext'
 import { mergeRetries, queuedRequest } from './requestQueue'
 import type { SettingsSecretChange } from './settingsSecrets'
@@ -33,6 +34,7 @@ function acceptSettings(r: SettingsResponse) {
   applyTheme(r.settings.ui.theme)
   glass.enabled = r.settings.ui.glass !== false
   glass.transparency = r.settings.ui.glassTransparency
+  setParticles(r.settings.ui.particles !== false)
 }
 
 let settingsWrites: Promise<void> = Promise.resolve()
@@ -316,6 +318,14 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
         return
       }
       if (l.kind === 'result') return
+      if (l.kind === 'ask') {
+        // 部署中途问用户（先发的已上线，继续部署剩下的？）：弹窗，回答交回 ferry
+        pushLine(task, { ...l, kind: 'warn' })
+        task.step = { text: '等你确认：继续部署剩下的？', at: t }
+        notifyUser(`${title}：等你确认`, l.msg ?? '', true)
+        askContinue(l.msg ?? '').then((yes) => run.answer?.(yes))
+        return
+      }
       pushLine(task, l)
       if (l.kind === 'step') task.step = { text: l.msg ?? '', at: t }
       else if (l.kind === 'event' && l.code === 'WAIT') {
@@ -369,6 +379,23 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
     onDone?.(task)
   })
   return task
+}
+
+/** 部署中途问要不要继续（先发的已上线）：继续 / 停下 */
+export async function askContinue(msg: string): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(msg, '继续部署？', {
+      type: 'warning',
+      confirmButtonText: '继续部署',
+      cancelButtonText: '停下',
+      closeOnClickModal: false,
+      closeOnPressEscape: false,
+      distinguishCancelAndClose: false,
+    })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 从软件源装包会顺带升级、删除服务器上已装的包：列出来，问要不要继续 */

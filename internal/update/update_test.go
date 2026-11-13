@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -60,12 +61,23 @@ type fakeGitHub struct {
 	body      []byte
 	sum       string // SHA256SUMS.txt 里写的；空 = 按 body 算
 	downloads atomic.Int32
-	broken    bool // 下载安装包返回错误内容
+	broken    bool   // 下载安装包返回错误内容
+	seed      []byte // 签名用的私钥；nil = 不放签名文件
+	original  []byte // 不为 nil：签名签的是这份校验和（安装包和校验和被一起换掉了，签名还是原来的）
 	srv       *httptest.Server
 }
 
+// testKey 生成一把测试钥，这个测试里当作编进程序的公钥。
+func testKey(t *testing.T) []byte {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	old := trustedKeys
+	trustedKeys = []ed25519.PublicKey{pub}
+	t.Cleanup(func() { trustedKeys = old })
+	return priv.Seed()
+}
+
 func newFake(t *testing.T, latest string) *fakeGitHub {
-	f := &fakeGitHub{latest: latest, body: []byte("new ferry " + latest)}
+	f := &fakeGitHub{latest: latest, body: []byte("new ferry " + latest), seed: testKey(t)}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -82,12 +94,10 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	case p == "/repos/"+Repo+"/releases/tags/v"+f.latest:
 		fmt.Fprintf(w, `{"body":"## 新功能\n- 检查更新","published_at":"2026-11-05T00:00:00Z","assets":[{"name":%q,"size":%d}]}`, f.asset(), len(f.body))
 	case p == pre+"download/v"+f.latest+"/SHA256SUMS.txt":
-		sum := f.sum
-		if sum == "" {
-			h := sha256.Sum256(f.body)
-			sum = hex.EncodeToString(h[:])
-		}
-		fmt.Fprintf(w, "%s  %s\n%s  other-file\n", sum, f.asset(), strings.Repeat("0", 64))
+		w.Write(f.sums())
+	case p == pre+"download/v"+f.latest+"/"+SumsSigFile && f.seed != nil:
+		sig, _ := SignSums(f.seed, f.signed())
+		w.Write(sig)
 	case p == pre+"download/v"+f.latest+"/"+f.asset():
 		f.downloads.Add(1)
 		if f.broken {
@@ -98,6 +108,23 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (f *fakeGitHub) sums() []byte {
+	sum := f.sum
+	if sum == "" {
+		h := sha256.Sum256(f.body)
+		sum = hex.EncodeToString(h[:])
+	}
+	return []byte(fmt.Sprintf("%s  %s\n%s  other-file\n", sum, f.asset(), strings.Repeat("0", 64)))
+}
+
+// signed 签名时用的校验和：平时就是 sums()；swapped（攻击者把安装包和校验和一起换了）时是原来的
+func (f *fakeGitHub) signed() []byte {
+	if f.original != nil {
+		return f.original
+	}
+	return f.sums()
 }
 
 func (f *fakeGitHub) source() Source { return Source{Base: f.srv.URL, API: f.srv.URL} }

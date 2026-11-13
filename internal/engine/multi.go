@@ -80,7 +80,17 @@ func (r *targetReporter) Error(format string, args ...any) {
 	r.Reporter.Error("%s：%s", r.target, fmt.Sprintf(format, args...))
 }
 func (r *targetReporter) Progress(_ string, done, total int64) { r.prog.set(r.i, done, total) }
-func (r *targetReporter) BuildOutput() io.Writer               { return r.Reporter.BuildOutput() }
+
+// Event agent 报的事件：应用名后面带上服务器（hk@e2e-a），没有应用的写在说明前面。
+func (r *targetReporter) Event(target string, ev proto.Event) {
+	if ev.App != "" {
+		ev.App += "@" + r.target
+	} else {
+		ev.Msg = r.target + "：" + ev.Msg
+	}
+	r.Reporter.Event(target, ev)
+}
+func (r *targetReporter) BuildOutput() io.Writer { return r.Reporter.BuildOutput() }
 
 // mergedProgress 各台的上传进度加起来，作为一个进度输出（最多每 100 毫秒一次）。
 type mergedProgress struct {

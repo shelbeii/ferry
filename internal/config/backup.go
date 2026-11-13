@@ -26,7 +26,35 @@ type Backup struct {
 	BeforeDeploy bool `yaml:"beforeDeploy"`
 	// Targets 只在这些目标上；空 = 全部
 	Targets []string `yaml:"targets"`
+	// Upload 每次定时、手动备份完，再传一份到别处（服务器坏了、被删、被勒索加密时数据还在）
+	Upload *BackupUpload `yaml:"upload"`
 }
+
+// BackupUpload 异地备份：传到 S3 兼容的对象存储（阿里云 OSS、腾讯云 COS、MinIO、AWS S3……）。
+// 访问密钥写在 envFile 里（S3_ACCESS_KEY_ID、S3_SECRET_ACCESS_KEY）；加密的密码也写在那里（FERRY_BACKUP_PASSWORD）。
+type BackupUpload struct {
+	S3 *S3Upload `yaml:"s3"`
+	// Encrypt 上传前加密（age 格式，没有 Ferry 也能用 age -d 解开）；默认 true
+	Encrypt *bool `yaml:"encrypt"`
+	// Keep 那边留几份；默认和 keep 一样
+	Keep int `yaml:"keep"`
+}
+
+// S3Upload 对象存储的桶。
+type S3Upload struct {
+	// Endpoint 地址：https://oss-cn-hangzhou.aliyuncs.com、https://cos.ap-guangzhou.myqcloud.com、http://10.0.0.5:9000
+	Endpoint string `yaml:"endpoint"`
+	Bucket   string `yaml:"bucket"`
+	// Region 签名用的区域；不写按地址猜（OSS、COS、AWS 猜得出来），猜不到用 us-east-1
+	Region string `yaml:"region"`
+	// Prefix 放在桶里的哪个目录；默认 ferry/<项目>/<目标>/
+	Prefix string `yaml:"prefix"`
+	// PathStyle 用 http://地址/桶/文件 的形式（MinIO 常用）；默认 http://桶.地址/文件。地址是 IP 或带端口时自动用路径形式
+	PathStyle bool `yaml:"pathStyle"`
+}
+
+// EncryptOn 上传前要不要加密（默认要）。
+func (u *BackupUpload) EncryptOn() bool { return u.Encrypt == nil || *u.Encrypt }
 
 // DBBackup 数据库：连哪个库。密码放在 envFile 里（MYSQL_PWD / PGPASSWORD）。
 type DBBackup struct {
@@ -92,6 +120,10 @@ var (
 	reDBName     = regexp.MustCompile(`^[A-Za-z0-9_$-]+$`)
 	reDBHost     = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 	reCalendar   = regexp.MustCompile(`^[A-Za-z0-9*:/,. -]+$`)
+	reEndpoint   = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:\d+)?/?$`)
+	reBucket     = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	reS3Prefix   = regexp.MustCompile(`^[A-Za-z0-9._/${}-]*$`)
+	reRegion     = regexp.MustCompile(`^[a-z0-9-]*$`)
 )
 
 func checkBackups(f *File, bad func(string, ...any)) {
@@ -161,6 +193,27 @@ func checkBackups(f *File, bad func(string, ...any)) {
 		for _, t := range b.Targets {
 			if _, ok := f.Targets[t]; !ok {
 				bad("%s.targets：没有目标 %q", at, t)
+			}
+		}
+		if u := b.Upload; u != nil {
+			switch {
+			case u.S3 == nil:
+				bad("%s.upload：要写 s3（传到哪个对象存储）", at)
+			case !reEndpoint.MatchString(u.S3.Endpoint) && !strings.Contains(u.S3.Endpoint, "${"):
+				bad("%s.upload.s3.endpoint：写成 https://域名 或 http://地址:端口（当前 %q）", at, u.S3.Endpoint)
+			case !reBucket.MatchString(u.S3.Bucket) && !strings.Contains(u.S3.Bucket, "${"):
+				bad("%s.upload.s3.bucket：3～63 个小写字母、数字、点、横线（当前 %q）", at, u.S3.Bucket)
+			case !reS3Prefix.MatchString(u.S3.Prefix) || strings.Contains(u.S3.Prefix, "..") || strings.HasPrefix(u.S3.Prefix, "/"):
+				bad("%s.upload.s3.prefix：只能有字母、数字、. _ - /，不以 / 开头（当前 %q）", at, u.S3.Prefix)
+			case !reRegion.MatchString(u.S3.Region):
+				bad("%s.upload.s3.region 无效 %q", at, u.S3.Region)
+			}
+			if u.Keep < 0 || u.Keep > 1000 {
+				bad("%s.upload.keep：最多 1000", at)
+			}
+			if len(b.EnvFile) == 0 {
+				bad("%s.upload：要写 envFile（服务器上的文件，放对象存储的访问密钥 S3_ACCESS_KEY_ID、S3_SECRET_ACCESS_KEY%s）", at,
+					map[bool]string{true: "，和加密的密码 FERRY_BACKUP_PASSWORD", false: ""}[u.EncryptOn()])
 			}
 		}
 	}

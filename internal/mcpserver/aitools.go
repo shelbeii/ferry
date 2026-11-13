@@ -19,7 +19,8 @@ import (
 
 // aiActionTool 请求的操作 → 用服务器助手的哪个工具执行。
 var aiActionTool = map[string]string{"exec": "run_command", "write-file": "write_file", "install": "software_install", "tpl-save": "save_software_template",
-	"sw-upgrade": "software_upgrade", "sw-restore": "software_restore", "sw-backup": "software_backup"}
+	"sw-upgrade": "software_upgrade", "sw-restore": "software_restore", "sw-backup": "software_backup",
+	"run-job": "run_job", "backup-fetch": "backup_fetch"}
 
 type changeCmdIn struct {
 	targetIn

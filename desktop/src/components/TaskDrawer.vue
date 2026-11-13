@@ -209,7 +209,7 @@ const outcomes = computed<AppOutcome[]>(() => {
 function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
   if (r === 'OK') return 'success'
   if (r === 'FAILED' || r === 'ROLLBACK_FAILED') return 'danger'
-  if (r === 'ROLLED_BACK' || r === 'SKIPPED') return 'warning'
+  if (r === 'ROLLED_BACK' || r === 'SKIPPED' || r === 'REVERTED') return 'warning'
   return 'info'
 }
 
@@ -219,6 +219,7 @@ const resultText: Record<string, string> = {
   ROLLED_BACK: '新版本没有就绪，已切回上一版本',
   ROLLBACK_FAILED: '失败，切回上一版本也失败了：请查看上面的输出',
   SKIPPED: '跳过',
+  REVERTED: '部署成功后，因为别的服务器失败，已回滚到部署前的版本',
 }
 function explain(o: AppOutcome): string {
   if (o.msg) return o.msg
@@ -383,6 +384,8 @@ async function clearFinished() {
         <div v-for="r in reports" :key="r.target" class="result">
           <div class="muted">
             {{ r.target }} · 版本 {{ r.release }} · 上传 {{ bytes(r.upload) }}（全量 {{ bytes(r.total) }}）
+            <span v-if="r.error" class="bad">· 失败：{{ r.error }}</span>
+            <span v-else-if="r.reverted">· 已回滚到部署前的版本</span>
           </div>
           <el-table :data="r.apps ?? []" size="small" border>
             <el-table-column prop="app" label="应用" width="140" />
@@ -409,6 +412,7 @@ async function clearFinished() {
 </template>
 
 <style scoped>
+.result .bad { color: var(--el-color-danger); }
 .task-stages { display: flex; overflow-x: auto; border: 1px solid var(--ferry-stroke); border-radius: 9px; background: var(--el-fill-color-light); padding: 12px; gap: 12px; }
 .task-stages > div { display: flex; flex: 1; flex-direction: column; min-width: 90px; gap: 7px; color: var(--el-text-color-secondary); }
 .task-stages span { font-size: 10px; letter-spacing: 1px; }

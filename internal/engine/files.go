@@ -99,7 +99,7 @@ func (e *Engine) FileSize(target, p string) (*remote.FileSize, error) {
 // SaveFile 保存完整文本，保留原编码、权限，拒绝覆盖已变化的版本。
 func (e *Engine) SaveFile(target, p string, edit remote.FileEdit) (*remote.FilePreview, error) {
 	var out *remote.FilePreview
-	err := e.withClient(target, func(c *remote.Client) error {
+	err := e.withChange(target, "file-save", p, fmt.Sprintf("%d 字节", len(edit.Content)), func(c *remote.Client) error {
 		var err error
 		out, err = c.SaveFile(e.ctx(), p, edit)
 		return err
@@ -109,12 +109,12 @@ func (e *Engine) SaveFile(target, p string, edit remote.FileEdit) (*remote.FileP
 
 // MakeDir 新建文件夹。
 func (e *Engine) MakeDir(target, p string) error {
-	return e.withClient(target, func(c *remote.Client) error { return c.Mkdir(p) })
+	return e.withChange(target, "file-mkdir", p, "", func(c *remote.Client) error { return c.Mkdir(p) })
 }
 
 // RenameFile 改名或移动。
 func (e *Engine) RenameFile(target, from, to string) error {
-	return e.withClient(target, func(c *remote.Client) error { return c.Rename(from, to) })
+	return e.withChange(target, "file-rename", from, "改成 "+to, func(c *remote.Client) error { return c.Rename(from, to) })
 }
 
 // RemoveFiles 删除文件或整个目录。
@@ -126,7 +126,7 @@ func (e *Engine) RemoveFiles(target string, paths []string) error {
 		}
 		quoted = append(quoted, shQuote(p))
 	}
-	return e.withClient(target, func(c *remote.Client) error {
+	return e.withChange(target, "file-remove", strings.Join(paths, "、"), "", func(c *remote.Client) error {
 		// 先用一条 rm -rf 删：SFTP 每个文件、目录都要一次往返，几百个文件的文件夹（如 JDK）经过隧道要好几分钟
 		if _, res, err := c.Output("rm -rf -- " + strings.Join(quoted, " ")); err == nil && res.Code == 0 {
 			return nil
@@ -152,7 +152,7 @@ func (e *Engine) Upload(target string, locals []string, dir string, overwrite bo
 			return fmt.Errorf("本机没有 %s", l)
 		}
 	}
-	return e.withClient(target, func(c *remote.Client) error {
+	return e.withChange(target, "file-upload", dir, uploadDetail(locals, overwrite), func(c *remote.Client) error {
 		if !overwrite {
 			var names []string
 			for _, l := range locals {
@@ -201,4 +201,24 @@ func baseNames(ps []string) []string {
 		out[i] = path.Base(p)
 	}
 	return out
+}
+
+// uploadDetail 审计里记传了哪些（本机的文件名、总大小），不记内容。
+func uploadDetail(locals []string, overwrite bool) string {
+	var names []string
+	var size int64
+	for _, l := range locals {
+		names = append(names, filepath.Base(l))
+		filepath.Walk(l, func(_ string, fi os.FileInfo, err error) error {
+			if err == nil && !fi.IsDir() {
+				size += fi.Size()
+			}
+			return nil
+		})
+	}
+	d := strings.Join(names, "、") + "，共 " + humanBytes(size)
+	if overwrite {
+		d += "，覆盖同名的"
+	}
+	return d
 }

@@ -97,6 +97,8 @@ export interface FerryResult<T> {
 export interface Running<T> {
   done: Promise<FerryResult<T>>
   kill: () => Promise<void>
+  /** 回答中途的提问（输出里 kind=ask 的行，如「先发的已上线，继续部署剩下的？」） */
+  answer?: (yes: boolean) => void
 }
 
 /** 本次运行期间用户输入、但没有要求记住的密码（环境变量名 → 值），每次调用 ferry 都带上。 */
@@ -135,6 +137,7 @@ export function ferry<T = unknown>(args: string[], onLine?: (l: FerryLine) => vo
       killed = true
       await proc.kill()
     },
+    answer: (yes) => proc.post('input', { data: yes ? 'yes\n' : 'no\n' }),
   }
 }
 
@@ -441,6 +444,8 @@ export interface Inspect {
   localVars?: string[]
   /** 这台电脑上缺的东西 */
   problems?: MachineProblem[]
+  /** 部署到多台时怎么切换（ferry.yaml 的 rollout） */
+  rollout?: { batch?: number; canary?: number; observeSec?: number; onFailure?: '' | 'stop' | 'rollback' }
 }
 
 export interface ReleaseMeta {
@@ -504,6 +509,25 @@ export interface AppStatus {
   restarts?: number
   /** 在 Ferry 里手动停止的（开机也不会起来） */
   stopped?: boolean
+  /** 定时任务（配置里写了 job）：定时器开没开、下次运行、上次结果 */
+  job?: JobStatus
+}
+
+export interface JobRun {
+  start?: string
+  end?: string
+  sec?: number
+  /** systemd 的 Result：success、exit-code、timeout、signal…… */
+  result: string
+  exitCode: number
+  ok: boolean
+}
+export interface JobStatus {
+  schedule: string[]
+  timerActive: boolean
+  next?: string
+  running?: boolean
+  last?: JobRun
 }
 
 export interface AppInfoField { label: string; value: string; path?: boolean }
@@ -961,6 +985,10 @@ export interface DeployReport {
   upload: number
   total: number
   elapsed: number
+  /** 这台失败的原因（部署到多台时） */
+  error?: string
+  /** 别的服务器失败后，这台这次部署的已回滚到部署前的版本 */
+  reverted?: boolean
 }
 
 export interface KeyGenResult {
@@ -1133,7 +1161,7 @@ export interface AppSettings {
   logs: { buildLogDays: number }
   deploy: { skipBuild: boolean; full: boolean; keepPerms: boolean }
   runtime: { source: string; cacheDir: string; nginxSource: string; githubMirror: string; mysqlSource: string }
-  ui: { theme: 'light' | 'dark' | 'system'; taskKeep: number; taskKeepDays: number; taskMaxMB: number; confirmClose: boolean; notify: boolean; glass: boolean; glassTransparency: number; checkUpdate: boolean }
+  ui: { theme: 'light' | 'dark' | 'system'; taskKeep: number; taskKeepDays: number; taskMaxMB: number; confirmClose: boolean; notify: boolean; glass: boolean; glassTransparency: number; particles: boolean; checkUpdate: boolean }
   ai: { models: AiModel[]; default: string; keepDays: number; maxMB: number }
   /** targets：只允许这些目标（「项目/目标」）；空 = 全部非生产目标 */
   mcp: { allowChanges: boolean; targets: string[] | null; confirmIn?: string; logKeepDays: number; logMaxMB: number }
@@ -1227,4 +1255,49 @@ export interface LogSearch {
   matches: { file: string; line: number; text: string; before?: string[]; after?: string[] }[]
   files: number
   truncated: boolean
+}
+
+/** 审计记录（ferry audit）：谁、什么时候、在哪台服务器上做了什么改动。 */
+export interface AuditEntry {
+  time: string
+  actor: string
+  project?: string
+  target?: string
+  host?: string
+  /** Ferry 的会话：同一次打开的终端的开、关是同一个 */
+  session?: string
+  kind: string
+  object?: string
+  detail?: string
+  result: 'ok' | 'failed'
+  error?: string
+}
+
+/** 审计记录的类型，按组（筛选用）；和 internal/proto/audit.go 的 AuditKinds 一致 */
+export const AUDIT_GROUPS: { label: string; kinds: Record<string, string> }[] = [
+  { label: '部署、启停', kinds: { deploy: '部署', rollback: '回滚', control: '启停应用', runjob: '运行定时任务', runtime: '安装 JDK' } },
+  { label: '终端', kinds: { 'terminal-open': '打开终端', 'terminal-close': '关闭终端' } },
+  { label: '文件', kinds: { 'file-save': '保存文件', 'file-rename': '改名', 'file-remove': '删除文件', 'file-upload': '上传文件', 'file-mkdir': '新建文件夹' } },
+  { label: '数据库', kinds: { 'db-exec': '执行 SQL', 'redis-exec': '执行 Redis 命令' } },
+  {
+    label: '软件',
+    kinds: {
+      'software-install': '安装软件', 'software-remove': '卸载软件', 'software-upgrade': '升级软件', 'software-restore': '恢复软件',
+      'software-control': '启停软件', 'software-config': '改软件配置',
+    },
+  },
+  { label: '防火墙、端口', kinds: { port: '放行 / 关闭端口', 'firewall-on': '打开防火墙', 'firewall-off': '关闭防火墙' } },
+  {
+    label: '告警、备份',
+    kinds: {
+      'monitor-on': '打开告警', 'monitor-off': '关闭告警', 'backup-on': '打开数据备份', 'backup-off': '关闭数据备份', 'backup-run': '现在备份',
+      'backup-restore': '恢复备份', 'backup-fetch': '取回异地备份', 'backup-delete': '删除备份',
+    },
+  },
+]
+
+/** 审计记录类型的中文名 */
+export function auditKindText(kind: string): string {
+  for (const g of AUDIT_GROUPS) if (g.kinds[kind]) return g.kinds[kind]
+  return kind
 }

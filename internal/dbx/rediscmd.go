@@ -142,6 +142,8 @@ type RedisCmdResult struct {
 	DB      int         `json:"db"`
 	Ms      int64       `json:"ms"`
 	Confirm string      `json:"confirm,omitempty"`
+	// Write 执行了改动的命令（Redis 没标成只读的）：记审计用
+	Write bool `json:"-"`
 }
 
 // 命令行里不能用的：会一直占着连接、等推送
@@ -323,8 +325,9 @@ func (cl *Client) RedisCommand(ctx context.Context, sid string, db int, line str
 	for i, a := range args {
 		xs[i] = a
 	}
+	write := !cl.redisReadOnlyOK(cctx, r, args)
 	v, err := conn.Do(cctx, xs...).Result()
-	out := &RedisCmdResult{DB: db}
+	out := &RedisCmdResult{DB: db, Write: write}
 	var re redis.Error
 	switch {
 	case err == nil:

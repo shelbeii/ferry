@@ -191,6 +191,7 @@ func (a *Agent) zdSwitch(s *proto.AppSpec, id, prev string, hooks bool) (string,
 		a.info(proto.EvWait, s.Name, "新版本已接上，等 %d 秒再停旧版本（还在处理的请求做完、注册中心摘掉它）", zd.DrainSec)
 		a.Sys.Sleep(time.Duration(zd.DrainSec) * time.Second)
 	}
+	a.saveAppHealth(s.Name, sl.Unit, sl.Health) // 告警平时按它检查运行中的槽位
 	if oldUnit != "" {
 		a.info(proto.EvStop, s.Name, "%s（旧版本 %s）", oldUnit, orNone(prev))
 		if err := a.Sys.Systemctl("stop", oldUnit); err != nil {

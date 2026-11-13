@@ -7,7 +7,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } f
 import { ElMessage, type PopoverInstance } from 'element-plus'
 import { Promotion, VideoPause, Plus, Setting, CaretRight, CaretBottom, Loading, WarningFilled, Clock, Delete, Cpu, Opportunity, ArrowDown, EditPen, Download, Close, Picture, FullScreen, Lock } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
-import { call, ferry, isSecretKind, type FerryLine } from '../ferry'
+import { auditKindText, call, ferry, isSecretKind, type FerryLine } from '../ferry'
 import { onFileDrop, openUrl, pickSaveFile } from '../platform'
 import { appSettings, secretRequest, trustRequest, settingsRequest, noteConfigWritten } from '../state'
 import { defaultEffort, effortLabel, effortOptions, modelEffort, addUsage, zeroUsage, usageText, findModelByName, cost, money, tokens, type Usage } from '../ai'
@@ -766,6 +766,18 @@ function callTitle(c: Call): string {
       return `断开 SSH 连接（PID ${((c.input.pids as number[] | undefined) ?? []).join('、')}）`
     case 'backup_run':
       return `现在备份 ${i.name || '全部'}`
+    case 'backup_status':
+      return `查看数据备份${c.input.remote ? '（异地的）' : c.input.files ? '（备份文件）' : ''}`
+    case 'backup_fetch':
+      return `把异地的备份 ${i.file ?? ''} 取回服务器`
+    case 'run_job':
+      return `现在运行定时任务 ${i.app ?? ''}`
+    case 'server_problems':
+      return '检查服务器有没有问题'
+    case 'deploy_history':
+      return '查看部署记录'
+    case 'audit_log':
+      return `查看审计记录${i.kind ? `（${auditKindText(String(i.kind))}）` : ''}`
     case 'deploy':
       return `部署 ${((c.input.apps as string[] | undefined) ?? []).join('、')}`
     case 'ask_secret':

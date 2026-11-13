@@ -36,7 +36,7 @@ import (
 // DefaultFile 桌面版写端口和令牌、ferry mcp 读的文件（数据目录的 mcp/approver.json）。
 func DefaultFile() string { return filepath.Join(appdir.SubDir("mcp"), "approver.json") }
 
-// Request 一个待确认的改动。桌面版只按 Action、Config、Target、Apps、SkipBuild、To、Software、Port、Pids、Allow、RestartDocker、Backup、Spec、Tool、Input、Fields 执行；其余是给人看的。
+// Request 一个待确认的改动。桌面版只按 Action、Config、Target、Targets、Apps、SkipBuild、Batch、Canary、ObserveSec、OnFailure、To、Software、Port、Pids、Allow、RestartDocker、Backup、Spec、Tool、Input、Fields 执行；其余是给人看的。
 type Request struct {
 	ID        string    `json:"id"`
 	Time      time.Time `json:"time"`
@@ -49,9 +49,16 @@ type Request struct {
 	Host      string    `json:"host"`
 	Apps      []string  `json:"apps,omitempty"`
 	SkipBuild bool      `json:"skipBuild,omitempty"` // deploy：跳过构建
-	To        string    `json:"to,omitempty"`        // rollback：回滚到的版本（空 = 上一个）
-	Software  string    `json:"software,omitempty"`  // sw-*：Ferry 装的软件的名称
-	Port      string    `json:"port,omitempty"`      // port-*：防火墙放行 / 关闭的端口，如 8080/tcp
+	// deploy 到多台：Targets 是全部服务器（按切换的顺序，Target 是第一台）；Batch、Canary、ObserveSec、OnFailure 是切换方式
+	// （0 / 空 = 用 ferry.yaml 的 rollout；Canary 为空 = 用配置）
+	Targets    []string `json:"targets,omitempty"`
+	Batch      int      `json:"batch,omitempty"`
+	Canary     *int     `json:"canary,omitempty"`
+	ObserveSec int      `json:"observeSec,omitempty"`
+	OnFailure  string   `json:"onFailure,omitempty"`
+	To         string   `json:"to,omitempty"`       // rollback：回滚到的版本（空 = 上一个）
+	Software   string   `json:"software,omitempty"` // sw-*：Ferry 装的软件的名称
+	Port       string   `json:"port,omitempty"`     // port-*：防火墙放行 / 关闭的端口，如 8080/tcp
 	// fw-enable：打开防火墙前先放行的端口（8080/tcp……，SSH 端口自动放行）；RestartDocker 打开后重启 Docker
 	Allow         []string `json:"allow,omitempty"`
 	RestartDocker bool     `json:"restartDocker,omitempty"`

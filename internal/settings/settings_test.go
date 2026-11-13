@@ -16,7 +16,7 @@ func TestLoadSaveDefaults(t *testing.T) {
 	appdir.Reset()
 	t.Cleanup(appdir.Reset)
 	s, err := Load()
-	if err != nil || s.Connect.TimeoutSec != 15 || s.UI.Theme != "system" || !s.UI.ConfirmClose || !s.UI.Glass || s.Logs.BuildLogDays != 30 {
+	if err != nil || s.Connect.TimeoutSec != 15 || s.UI.Theme != "system" || !s.UI.ConfirmClose || !s.UI.Glass || !s.UI.Particles || s.Logs.BuildLogDays != 30 {
 		t.Fatalf("默认值：%+v %v", s, err)
 	}
 	if s.Connect.StatusMinutes != 1 {

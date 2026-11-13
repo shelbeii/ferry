@@ -101,7 +101,7 @@ func TestDeployExtraFilesVerify(t *testing.T) {
 	req := withFiles(t, f.stage(t, []proto.AppSpec{sys}, id1, map[string][]byte{"System": []byte("v1")}), map[string]string{"a.yml": "x"})
 	req.Releases[0].FilesSHA256 = strings.Repeat("0", 64)
 	r := exec1(t, f, "deploy", req)
-	if r.code != proto.CodeVerify || len(f.calls) != 0 || !strings.Contains(r.result.Msg, "附带文件") {
+	if r.code != proto.CodeVerify || len(nonAudit(f)) != 0 || !strings.Contains(r.result.Msg, "附带文件") {
 		t.Fatalf("附带文件校验失败不应改动：%v\n%s", f.calls, r.dump())
 	}
 }

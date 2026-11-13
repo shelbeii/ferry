@@ -294,6 +294,12 @@ const app: SchemaNode = obj('应用', '一个可部署的应用', {
     beforeSwitch: { ...list('切换前', '新版本放好之后、停止旧版本之前执行（工作目录是新版本的目录），如数据库迁移；失败时不切换，线上照旧'), kind: 'objList', item: hookItem() },
     afterSwitch: { ...list('切换后', '新版本就绪之后执行（工作目录是 running/），如预热、刷新缓存；失败时回滚（optional 的只提示）'), kind: 'objList', item: hookItem() },
   }),
+  job: obj('定时任务', '写了就是定时任务：到点由 systemd 定时器运行一次，运行完就结束（不常驻、不开机自启）；照常构建、部署、回滚，失败时服务器告警会报', {
+    schedule: { ...list('什么时候运行', 'daily（每天 0 点）、hourly、weekly、minutely，或 systemd 的 OnCalendar，如 *-*-* 02:30:00、Mon..Fri 09:00；可以写几个', { required: true }), values: ['daily', 'hourly', 'weekly', 'minutely'] },
+    timeout: dur('最长运行多久', '超过就停掉，算失败；1s～168h', { default: '6h' }),
+    catchUp: bool('补跑错过的', '关机、停着的时候错过的那次，开机后补跑一次', { default: 'true' }),
+    runOnDeploy: bool('部署后马上运行一次', '成功才算部署成功（数据迁移这类）'),
+  }, { appTypes: svc }),
   keepReleases: num('保留几个版本', '至少 2', { default: '服务器的设置（5）', min: 2, unit: '个' }),
   root: str('部署根目录', '应用自己的部署根目录（应用目录为 <root>/apps/<应用>），用于把它放到另一个分区；可以用 ${变量}（如各服务器 vars 里的数据盘路径）', { default: '服务器的 root' }),
   vars: strMap('变量', '应用自己的变量（优先于服务器、项目的变量）'),
@@ -348,7 +354,18 @@ const backup: SchemaNode = obj('数据备份', '一项数据备份：MySQL、Pos
   paths: list('目录或文件', '要打包的目录或文件（服务器上的绝对路径，可以用 ${变量}）'),
   command: str('备份命令', '输出就是备份内容的命令（以 root 执行），如 redis-cli --rdb -'),
   restore: str('恢复命令', '备份的内容从标准输入进来', { needs: 'command' }),
-  envFile: list('环境变量文件', '执行时读的环境变量文件（服务器上）：MYSQL_PWD=…、PGPASSWORD=…', { single: true }),
+  envFile: list('环境变量文件', '执行时读的环境变量文件（服务器上）：MYSQL_PWD=…、PGPASSWORD=…；传到异地时还有 S3_ACCESS_KEY_ID、S3_SECRET_ACCESS_KEY、FERRY_BACKUP_PASSWORD', { single: true }),
+  upload: obj('传到异地', '每次定时、手动备份完，再加密传一份到对象存储（服务器坏了、被删、被勒索加密时数据还在）；访问密钥、加密的密码写在 envFile 里', {
+    s3: obj('对象存储', 'S3 兼容的：阿里云 OSS、腾讯云 COS、MinIO、AWS S3……', {
+      endpoint: str('地址', 'https://oss-cn-hangzhou.aliyuncs.com、https://cos.ap-guangzhou.myqcloud.com、http://10.0.0.5:9000', { required: true }),
+      bucket: str('桶', '先在对象存储的控制台建好', { required: true }),
+      region: str('区域', '签名用；OSS、COS、AWS 能从地址猜出来', { default: '按地址猜，猜不到用 us-east-1' }),
+      prefix: str('目录', '放在桶里的哪个目录', { default: 'ferry/<项目>/<服务器>/' }),
+      pathStyle: bool('路径形式', '用 http://地址/桶/文件（MinIO 常用）；地址是 IP 或带端口时自动用'),
+    }, { required: true }),
+    encrypt: bool('加密', 'age 格式，密码是 envFile 里的 FERRY_BACKUP_PASSWORD（没有 Ferry 也能用 age -d 解开）；密码记在别处一份', { default: 'true' }),
+    keep: num('异地留几份', '1～1000', { default: '和 keep 一样', min: 1, max: 1000, unit: '份' }),
+  }),
   schedule: pick('什么时候备份', 'daily 每天 3 点、hourly 每小时、weekly 每周，或 systemd 的 OnCalendar（如 *-*-* 02:30:00）', ['daily', 'hourly', 'weekly'], { open: true, default: 'daily' }),
   keep: num('保留几份', '1～1000', { default: '7', min: 1, max: 1000, unit: '份' }),
   beforeDeploy: bool('部署前先备份', '失败就不部署'),
@@ -365,6 +382,12 @@ export const schema: SchemaNode = obj('ferry.yaml', 'ferry.yaml', {
   targets: { label: '服务器', doc: '要部署到的服务器（键是服务器名）', kind: 'objMap', type: '映射', map: target, required: true },
   apps: { label: '应用', doc: '要部署的应用', kind: 'objList', type: '列表', item: app, required: true },
   backups: { label: '数据备份', doc: '数据库、目录、自己写的命令：在「数据备份」里打开后服务器上按时备份，随时可以关', kind: 'objList', type: '列表', item: backup },
+  rollout: obj('部署到多台', '一次部署到几台服务器时怎么切换（命令行、部署对话框可以改）；不写 = 一台一台切换，一台失败就停', {
+    batch: num('一次切换几台', '同一批同时切换，一批做完再做下一批；1～50', { default: '1', min: 1, max: 50, unit: '台' }),
+    canary: num('先切换几台', '先切换的成功后暂停，确认了再部署其余的；0 = 不暂停', { default: '0', min: 0, max: 50, unit: '台' }),
+    observe: dur('先切换的观察多久', '这期间应用一直要在运行、健康检查一直要通过才继续；要同时写 canary；最长 1h', { default: '不观察' }),
+    onFailure: pick('有一台失败时', 'stop：停下，后面的不部署；rollback：再把这次已经切换的回滚到部署前的版本，让各台保持同一个版本', ['stop', 'rollback'], { default: 'stop' }),
+  }),
 })
 
 /** 内置变量（部署时按目标、应用计算）。 */

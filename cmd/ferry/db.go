@@ -380,6 +380,24 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	defer release()
 	ctx := cio.ctx
 	db := dbArg()
+	// auditDB 改动数据库：记审计（经服务器连的记到那台服务器上和这台电脑上，直接连的只记这台电脑上）
+	auditDB := func(detail string, err error) {
+		kind, obj := "db-exec", cn.Name
+		if cn.Kind == dbx.Redis {
+			kind = "redis-exec"
+		}
+		if db != "" {
+			obj += " / " + db
+		}
+		if cn.Via != nil {
+			if e, eerr := newEngine(cn.Via); eerr == nil {
+				e.Audit(cn.Via.Target, kind, obj, detail, err)
+				return
+			}
+		}
+		e := &engine.Engine{Settings: st, Getenv: cio.getenv}
+		engine.AuditLocal(e.Actor(), kind, obj, detail, err)
+	}
 	needRedis := func() error {
 		if cn.Kind != dbx.Redis {
 			return fmt.Errorf("db %s 只能用在 Redis 连接上", sub)
@@ -451,6 +469,9 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		return out(map[string]any{"count": n})
 	case "query":
 		rs, err := cl.Query(ctx, db, req.SQL, dbx.QueryOptions{Session: req.Session, Max: req.Max, Stop: req.Stop})
+		if writes := dbx.Writes(cn.Kind, req.SQL); len(writes) > 0 {
+			auditDB(strings.Join(writes, ";\n"), err)
+		}
 		if err != nil {
 			return fail(err)
 		}
@@ -475,6 +496,11 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return out(map[string]any{"sql": sqls})
 		}
 		r, err := cl.Apply(ctx, db, stmts)
+		sqls := []string{}
+		for _, s := range stmts {
+			sqls = append(sqls, s.Preview(cn.Kind))
+		}
+		auditDB(strings.Join(sqls, ";\n"), err)
 		if err != nil {
 			return fail(err)
 		}
@@ -511,6 +537,7 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(errors.New("没有要执行的语句"))
 		}
 		rs, err := cl.Exec(ctx, db, req.Stmts)
+		auditDB(strings.Join(req.Stmts, ";\n"), err)
 		if err != nil {
 			return fail(err)
 		}
@@ -531,11 +558,12 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		}
 		rep.Step("在 %s 执行 %d 条%s", cn.Name, len(req.Stmts), unit)
 		r, err := cl.AIExec(ctx, db, req.Stmts)
+		if err == nil && !r.OK {
+			err = engine.AIExecError(r)
+		}
+		auditDB(strings.Join(req.Stmts, ";\n"), err)
 		if err != nil {
 			return fail(err)
-		}
-		if !r.OK {
-			return fail(engine.AIExecError(r))
 		}
 		for i, x := range r.Results {
 			switch {
@@ -589,6 +617,9 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(errors.New("没有要做的改动"))
 		}
 		r, err := cl.RedisApply(ctx, db, *req.Edit)
+		if b, merr := json.Marshal(req.Edit); merr == nil {
+			auditDB(string(b), err)
+		}
 		if err != nil {
 			return fail(err)
 		}
@@ -605,6 +636,13 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			n, _ = dbx.ParseRedisDB(cn.Database)
 		}
 		r, err := cl.RedisCommand(ctx, req.Session, n, req.Line, req.Confirm)
+		if err == nil && r.Write {
+			var rerr error
+			if r.Reply != nil && r.Reply.T == "err" {
+				rerr = fmt.Errorf("%v", r.Reply.V)
+			}
+			auditDB(req.Line, rerr)
+		}
 		if err != nil {
 			return fail(err)
 		}
@@ -617,7 +655,11 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		r, err := cl.ImportSQL(ctx, db, dbx.ImportSQLOptions{File: req.File, Continue: req.Continue}, func(done, total, n int64) {
 			rep.Progress(fmt.Sprintf("已执行 %d 条语句", n), done, total)
 		})
-		if err != nil {
+		if err == nil && r.Stopped {
+			err = errors.New("中途出错停下了")
+		}
+		auditDB("执行 SQL 文件 "+req.File, err)
+		if err != nil && !(r != nil && r.Stopped) {
 			return fail(err)
 		}
 		for _, e := range r.Errors {
@@ -637,6 +679,7 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		r, err := cl.ImportCSV(ctx, db, *req.CSV, func(done, total, n int64) {
 			rep.Progress(fmt.Sprintf("已导入 %d 行", n), done, total)
 		})
+		auditDB(fmt.Sprintf("把 CSV %s 导进表 %s", req.CSV.File, req.CSV.Table), err)
 		if err != nil {
 			return fail(err)
 		}
@@ -658,7 +701,9 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		}
 		return out(map[string]any{"sql": def})
 	case "routine-save": // routine 为空是新建
-		if err := cl.SaveRoutine(ctx, db, req.Routine, req.SQL); err != nil {
+		err := cl.SaveRoutine(ctx, db, req.Routine, req.SQL)
+		auditDB(req.SQL, err)
+		if err != nil {
 			return fail(err)
 		}
 		return out(map[string]any{})

@@ -205,6 +205,17 @@ var readOnlyWords = map[string]bool{"SELECT": true, "SHOW": true, "DESC": true, 
 // IsReadOnly 只读连接能执行的语句（另外还放在只读事务里执行，WITH … DELETE 这类会被数据库拒绝）。
 func IsReadOnly(kind, stmt string) bool { return readOnlyWords[FirstWord(kind, stmt)] }
 
+// Writes src 里会改动数据库的语句（不是 SELECT、SHOW 这类只读开头的）：记审计用。
+func Writes(kind, src string) []string {
+	var out []string
+	for _, s := range Split(kind, src) {
+		if FirstWord(kind, s) != "" && !IsReadOnly(kind, s) {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	return out
+}
+
 // returnsRows 这种语句会返回结果集。
 func returnsRows(kind, stmt string) bool {
 	switch FirstWord(kind, stmt) {

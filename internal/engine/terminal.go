@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"io"
 	"time"
 
@@ -35,6 +36,11 @@ func (e *Engine) Terminal(target string, tio TermIO) (int, error) {
 		return -1, err
 	}
 	defer s.close()
+	// 审计：开、关各记一条（同一个会话号，关的时候带上用了多久）；不记录里面敲的命令
+	open := s.auditEntry("terminal-open", s.label, "", nil)
+	open.Session = fmt.Sprintf("%s-t%d", processSession, termSeq.Add(1))
+	s.audit(open)
+	opened := time.Now()
 	stop := make(chan struct{})
 	defer close(stop)
 	code, err := s.c.Shell(e.ctx(), remote.ShellOptions{
@@ -52,6 +58,12 @@ func (e *Engine) Terminal(target string, tio TermIO) (int, error) {
 	if err != nil && err != remote.ErrCanceled {
 		s.broken.Store(true)
 	}
+	closed := s.auditEntry("terminal-close", s.label, "用了 "+humanDuration(time.Since(opened).Round(time.Second)), nil)
+	closed.Session = open.Session
+	if err != nil && err != remote.ErrCanceled {
+		closed.Result, closed.Error = "failed", err.Error()
+	}
+	s.audit(closed)
 	return code, err
 }
 

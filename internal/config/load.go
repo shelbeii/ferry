@@ -384,7 +384,11 @@ func (f *File) normalize() error {
 					bad("%s：autostart 是 false（开机不自启）时不用写 service.autostartDelay", where)
 				}
 			}
-			normalizeHealth(&s.Health, where, bad)
+			if a.Job != nil {
+				checkJob(a, where, bad)
+			} else {
+				normalizeHealth(&s.Health, where, bad)
+			}
 			if z := s.ZeroDowntime; z != nil {
 				checkZD(z, where, bad)
 			}
@@ -396,6 +400,9 @@ func (f *File) normalize() error {
 			}
 		case "static":
 			st := &a.Static
+			if a.Job != nil {
+				bad("%s：静态站点不能是定时任务（job 只用于 java、binary、python、node、dotnet）", where)
+			}
 			if st.Link != "" {
 				if err := checkRoot(st.Link); err != nil {
 					bad("%s：static.link %v", where, err)
@@ -488,6 +495,7 @@ func (f *File) normalize() error {
 		}
 	}
 	checkBackups(f, bad)
+	checkRollout(f.Rollout, bad)
 	return errors.Join(errs...)
 }
 
@@ -706,6 +714,35 @@ func checkServedStatic(f *File, a *App, where string, units map[string]string, b
 				h.Status = []int{301} // http 都跳到 https：跳转说明 nginx 起来了（https 的证书这时可能还是临时的）
 			}
 		}
+	}
+}
+
+// reJobCalendar 定时任务的时间表（systemd OnCalendar 的字符）。
+var reJobCalendar = regexp.MustCompile(`^[A-Za-z0-9*:/,.~ -]+$`)
+
+// checkJob 定时任务：时间表、最长运行时间；常驻服务才有的设置不能写。
+func checkJob(a *App, where string, bad func(string, ...any)) {
+	j, s := a.Job, &a.Service
+	if len(j.Schedule) == 0 {
+		bad("%s：job.schedule 要写什么时候运行（daily、hourly、weekly，或 systemd 的 OnCalendar，如 \"*-*-* 02:30:00\"）", where)
+	}
+	for _, c := range j.Schedule {
+		if !reJobCalendar.MatchString(c) {
+			bad("%s：job.schedule %q 不对：写 daily、hourly、weekly、minutely，或 systemd 的 OnCalendar，如 \"*-*-* 02:30:00\"", where, c)
+		}
+	}
+	if j.Timeout != nil && (j.Timeout.Std() < time.Second || j.Timeout.Std() > 7*24*time.Hour) {
+		bad("%s：job.timeout 写 1s～168h（当前 %s）", where, j.Timeout.Std())
+	}
+	switch {
+	case s.ZeroDowntime != nil:
+		bad("%s：定时任务不用 service.zeroDowntime（不常驻，没有要切换的流量）", where)
+	case s.Health.TCP != "" || s.Health.HTTP != "":
+		bad("%s：定时任务不用 service.health（运行完就退出，没有接口可查）；成功与否看退出码", where)
+	case s.AutostartDelay != nil || s.Autostart != nil:
+		bad("%s：定时任务不用 service.autostart、autostartDelay（到点由定时器启动；关机时错过的用 job.catchUp 补跑）", where)
+	case s.Restart != nil:
+		bad("%s：定时任务不用 service.restart（失败了等下次运行，或在 Ferry 里「现在运行」）", where)
 	}
 }
 

@@ -37,6 +37,59 @@ type deployIn struct {
 	Apps      []string `json:"apps" jsonschema:"要部署的应用（必须写明，不会默认部署全部）"`
 	SkipBuild bool     `json:"skipBuild,omitempty" jsonschema:"跳过本机构建，直接用现有的产物（确认产物已经是最新的才用）"`
 	Reason    string   `json:"reason" jsonschema:"为什么要部署（显示在 Ferry 的确认框里）"`
+	// 一次部署到几台
+	Targets    []string `json:"targets,omitempty" jsonschema:"一次部署到几台服务器时写全（按切换的顺序；写了就不用 target）。构建一次，同时上传，再按切换方式切换"`
+	Batch      int      `json:"batch,omitempty" jsonschema:"部署到几台时：一次同时切换几台；不填 = 用 ferry.yaml 的 rollout（默认 1）"`
+	Canary     *int     `json:"canary,omitempty" jsonschema:"部署到几台时：先切换几台，成功后 Ferry 弹窗问用户要不要继续部署其余的；0 = 不暂停；不填 = 用 ferry.yaml 的 rollout"`
+	ObserveSec int      `json:"observeSec,omitempty" jsonschema:"先切换的那几台观察几秒（这期间应用一直要正常）再问用户；最多 3600"`
+	OnFailure  string   `json:"onFailure,omitempty" jsonschema:"部署到几台时有一台失败：stop 停下（后面的不部署）或 rollback（再把这次已经切换的回滚到部署前的版本）；不填 = 用 ferry.yaml 的 rollout"`
+}
+
+// rolloutOpts 请求里的切换方式。
+func rolloutOpts(r approve.Request) engine.RolloutOptions {
+	o := engine.RolloutOptions{Batch: r.Batch, Canary: r.Canary, OnFailure: r.OnFailure}
+	if r.ObserveSec > 0 {
+		d := time.Duration(r.ObserveSec) * time.Second
+		o.Observe = &d
+	}
+	return o
+}
+
+// checkTargets 部署到多台：每台都要允许改动、有这些应用。
+func checkTargets(st settings.Settings, f *config.File, r *approve.Request) error {
+	if len(r.Targets) == 0 {
+		return nil
+	}
+	if r.Action != "deploy" {
+		return errors.New("只有部署能一次写几台服务器")
+	}
+	if err := engine.CheckRollout(rolloutOpts(*r)); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for i, name := range r.Targets {
+		t, err := f.Target(name)
+		if err != nil {
+			return err
+		}
+		if seen[t.Name] {
+			return fmt.Errorf("服务器 %s 写了两次", t.Name)
+		}
+		seen[t.Name] = true
+		r.Targets[i] = t.Name
+		if err := ChangeAllowed(st, f, t); err != nil {
+			return err
+		}
+		for _, a := range r.Apps {
+			if f.App(a) == nil || !t.Allows(a) {
+				return fmt.Errorf("%s 上没有应用 %s（有：%s）", t.Name, a, strings.Join(appsOn(f, t), "、"))
+			}
+		}
+	}
+	if r.Targets[0] != r.Target {
+		return errors.New("targets 的第一台要和 target 一样")
+	}
+	return nil
 }
 
 type controlIn struct {
@@ -62,7 +115,8 @@ var actionNames = map[string]string{"deploy": "部署", "start": "启动", "stop
 	"sw-start": "启动软件", "sw-stop": "停止软件", "sw-restart": "重启软件", "port-open": "放行端口", "port-close": "关闭端口",
 	"fw-enable": "打开防火墙", "ssh-kick": "断开 SSH 连接", "backup-run": "现在备份", "create": "新建项目",
 	"exec": "执行命令", "write-file": "写文件", "install": "安装软件", "tpl-save": "保存软件模板", "secret": "填写密码",
-	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份", "db-exec": "改数据库", "config-edit": "改项目配置"}
+	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份", "db-exec": "改数据库", "config-edit": "改项目配置",
+	"run-job": "现在运行定时任务", "backup-fetch": "取回异地的备份"}
 
 // reSoftware Ferry 装的软件的名称（安装时的 --name）。
 var reSoftware = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -88,17 +142,34 @@ func (s *server) addChangeTools(m *mcp.Server) {
 		"最多等 40 秒：结束了直接返回结果，没结束返回 id 和当前进展，再用 task_status 查。"
 	addTool(s, m, &mcp.Tool{Name: "deploy", Title: "部署",
 		Description: "把项目里的应用部署到某台服务器：先在本机构建（skipBuild 时跳过），上传，逐个切换到新版本并等健康检查通过；失败自动回滚该应用。" +
+			"一次部署到几台时用 targets 写全：构建一次、同时上传，再按切换方式切换（batch 一次几台、canary 先发几台后让用户确认、onFailure: rollback 有一台失败就把已切换的回滚，" +
+			"不填用 ferry.yaml 的 rollout，用 config_get 看 rollout）。" +
 			how + "构建失败时结果里有构建输出的最后几十行。",
 		Annotations: change()},
 		loggedReq(s, "deploy", func(ctx context.Context, req *mcp.CallToolRequest, in deployIn) (any, error) {
 			if len(in.Apps) == 0 {
 				return nil, errors.New("要用 apps 写明部署哪些应用")
 			}
-			return s.change(ctx, req, in.targetIn, approve.Request{Action: "deploy", Apps: in.Apps, SkipBuild: in.SkipBuild, Reason: in.Reason})
+			r := approve.Request{Action: "deploy", Apps: in.Apps, SkipBuild: in.SkipBuild, Reason: in.Reason,
+				Batch: in.Batch, Canary: in.Canary, ObserveSec: in.ObserveSec, OnFailure: in.OnFailure}
+			if len(in.Targets) > 0 {
+				if in.Target != "" && in.Target != in.Targets[0] {
+					return nil, errors.New("写了 targets 就不用 target（或者让 target 是 targets 的第一台）")
+				}
+				in.Target = in.Targets[0]
+				if len(in.Targets) > 1 {
+					r.Targets = append([]string(nil), in.Targets...)
+				}
+			}
+			if err := engine.CheckRollout(rolloutOpts(r)); err != nil {
+				return nil, err
+			}
+			return s.change(ctx, req, in.targetIn, r)
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "app_control", Title: "启动 / 停止 / 重启应用",
-		Description: "启动、停止或重启项目里的应用（等健康检查通过）。停止同时取消开机自启（服务器重启后不会自己起来），启动、重启后恢复。" + how,
+		Description: "启动、停止或重启项目里的应用（等健康检查通过）。停止同时取消开机自启（服务器重启后不会自己起来），启动、重启后恢复。" +
+			"定时任务（写了 job 的）：停止 = 关掉定时器（到点不再运行），启动 = 打开定时器（不会马上运行；要马上运行用 run_job）。" + how,
 		Annotations: change()},
 		loggedReq(s, "app_control", func(ctx context.Context, req *mcp.CallToolRequest, in controlIn) (any, error) {
 			if in.Action != "start" && in.Action != "stop" && in.Action != "restart" {
@@ -121,7 +192,7 @@ func (s *server) addChangeTools(m *mcp.Server) {
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "task_status", Title: "改动的进展",
-		Description: "查 deploy、app_control、rollback 的进展和结果（它们没在 40 秒内结束时返回的 id）。最多等 wait 秒看它结束。",
+		Description: "查 deploy、app_control、rollback、run_job 等改动的进展和结果（它们没在 40 秒内结束时返回的 id）。最多等 wait 秒看它结束。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		loggedReq(s, "task_status", func(ctx context.Context, req *mcp.CallToolRequest, in statusTaskIn) (any, error) {
 			s.mu.Lock()
@@ -240,6 +311,9 @@ func PrepareRequest(r *approve.Request) error {
 	if len(r.Apps) == 0 {
 		return errors.New("没有写明应用")
 	}
+	if err := checkTargets(st, f, r); err != nil {
+		return err
+	}
 	if r.Action == "rollback" && len(r.Apps) != 1 {
 		return errors.New("回滚一次只能一个应用")
 	}
@@ -272,6 +346,12 @@ func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in target
 		r.ID = newID()
 		r.Session, r.Client = s.session, clientName(req)
 		r.Project, r.Config, r.Target, r.Host = e.File.Project, e.File.Path, t.Name, t.Host
+		if len(r.Targets) > 0 {
+			r.Targets[0] = t.Name
+		}
+		if err := checkTargets(e.Settings, e.File, &r); err != nil {
+			return nil, err
+		}
 		r.Reason = strings.TrimSpace(r.Reason)
 		if r.Tool != "" || r.Action == "secret" {
 			r.Detail, r.Danger = aiPreview(e, target, r)
@@ -432,6 +512,17 @@ func newID() string {
 // preview 确认框里给人看的：部署的代码提交和构建命令，线上现在的版本和状态，回滚到哪个版本。读不到的写原因，不影响提请求。
 func preview(e *engine.Engine, target string, r approve.Request) []string {
 	var out []string
+	if r.Action == "deploy" && len(r.Targets) > 1 {
+		out = append(out, fmt.Sprintf("部署到 %d 台：%s（构建一次、同时上传，再切换）", len(r.Targets), strings.Join(r.Targets, "、")))
+		how := e.RolloutText(rolloutOpts(r), len(r.Targets))
+		if how == "" {
+			how = "一台一台切换，有一台失败就停下"
+		}
+		out = append(out, "切换方式："+how)
+		if e.RolloutCanary(rolloutOpts(r), len(r.Targets)) {
+			out = append(out, "先部署的上线后，Ferry 会弹窗问你要不要继续部署其余的")
+		}
+	}
 	if r.Action == "deploy" {
 		git, steps, err := e.DeployPreview(target, r.Apps)
 		out = append(out, git.Describe()...)
@@ -748,6 +839,14 @@ func opTitle(r approve.Request) string {
 			labels[i] = f.Label
 		}
 		return actionNames[r.Action] + "：" + strings.Join(labels, "、") + "（" + r.Target + "）"
+	case r.Action == "run-job":
+		var in struct{ App string }
+		json.Unmarshal(r.Input, &in)
+		return actionNames[r.Action] + " " + in.App + "（" + r.Target + "）"
+	case r.Action == "backup-fetch":
+		var in struct{ File string }
+		json.Unmarshal(r.Input, &in)
+		return actionNames[r.Action] + " " + in.File + "（" + r.Target + "）"
 	case r.Action == "backup-run":
 		what := r.Backup
 		if what == "" {
@@ -761,7 +860,11 @@ func opTitle(r approve.Request) string {
 		}
 		return actionNames[r.Action] + " PID " + strings.Join(pids, "、") + "（" + r.Target + "）"
 	}
-	return actionNames[r.Action] + " " + strings.Join(r.Apps, "、") + "（" + r.Target + "）"
+	where := r.Target
+	if len(r.Targets) > 1 {
+		where = strings.Join(r.Targets, "、")
+	}
+	return actionNames[r.Action] + " " + strings.Join(r.Apps, "、") + "（" + where + "）"
 }
 
 func (o *op) addProgress(line string) {

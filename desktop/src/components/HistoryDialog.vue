@@ -3,6 +3,8 @@ import LoadingBlock from './LoadingBlock.vue'
 import { computed, onMounted, ref } from 'vue'
 import { shortCommit, time, type HistoryEntry } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
+import { PAGE_SIZES, usePager } from '../pager'
+import type { TableInstance } from 'element-plus'
 
 const props = defineProps<{ config: string; target: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -21,6 +23,9 @@ const actors = computed(() => uniq((r) => r.actor))
 const apps = computed(() => uniq((r) => r.app))
 const actions = computed(() => uniq((r) => r.action))
 const shown = computed(() => rows.value.filter((r) => (!who.value || r.actor === who.value) && (!app.value || r.app === app.value) && (!action.value || r.action === action.value)))
+// 一页 50 条：最多读 200 条，一次全生成成表格时打开窗口会卡一下
+const table = ref<TableInstance>()
+const { page, pageSize, total, paged } = usePager(shown, [rows, who, app, action], table)
 
 async function load() {
   loading.value = true
@@ -63,7 +68,7 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
         </el-select>
         <span class="muted small">记录在服务器上，团队里每个人的操作都在这里（{{ shown.length }} 条）</span>
       </div>
-      <el-table v-if="!loading" :data="shown" size="small" border height="56vh" empty-text="还没有记录">
+      <el-table v-if="!loading" ref="table" :data="paged" size="small" border height="52vh" empty-text="还没有记录">
         <el-table-column type="expand" width="36"><template #default="{ row }"><div class="history-detail"><p><span>完整版本</span><code>{{ row.release || '—' }}</code></p><p><span>提交</span><code>{{ row.commit || '—' }}</code></p><p><span>操作人</span>{{ row.actor || '—' }}</p><p v-if="row.msg"><span>说明</span>{{ row.msg }}</p></div></template></el-table-column>
         <el-table-column label="时间" width="165">
           <template #default="{ row }">{{ time(row.time) }}</template>
@@ -81,6 +86,17 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
         <el-table-column prop="actor" label="操作人" min-width="140" show-overflow-tooltip />
         <!-- 说明：只有失败原因、「从某版本回滚」这类才有，成功的部署、启停没有；整列都空时不显示 -->
       </el-table>
+      <el-pagination
+        v-if="!loading && total > PAGE_SIZES[0]"
+        v-model:current-page="page"
+        v-model:page-size="pageSize"
+        :page-sizes="PAGE_SIZES"
+        :total="total"
+        size="small"
+        background
+        layout="total, sizes, prev, pager, next"
+        class="pager"
+      />
     </div>
   </el-dialog>
 </template>
@@ -89,6 +105,7 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
 .history-detail { padding: 4px 24px 12px; font-size: 12px; }
 .history-detail p { display: flex; gap: 18px; overflow-wrap: anywhere; }
 .history-detail p > span { min-width: 60px; color: var(--el-text-color-secondary); }
+.pager { justify-content: flex-end; margin-top: 10px; }
 .filters {
   display: flex;
   align-items: center;

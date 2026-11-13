@@ -1,6 +1,6 @@
 [package]
 name = "ferry-desktop"
-version = "0.13.95"
+version = "0.14.4"
 description = "Ferry 部署工具桌面版"
 edition = "2021"
 

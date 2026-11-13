@@ -192,6 +192,31 @@ func (a *Agent) backup() int {
 		}
 	case "restore":
 		return a.backupRestore(root, cfg, b)
+	case "remote", "fetch":
+		i := findItem(b.Items, b.Name)
+		if i < 0 {
+			return a.result(proto.CodeBadInput, "配置里没有备份 "+b.Name, nil)
+		}
+		it := b.Items[i]
+		if b.Action == "fetch" {
+			unlock, err := lockBackup(a.Sys, root)
+			if err != nil {
+				return a.result(proto.CodeFailed, "等别的备份结束超时："+err.Error(), nil)
+			}
+			_, err = a.fetchBackup(root, it, b.File)
+			unlock()
+			if err != nil {
+				return a.result(proto.CodeFailed, "取回失败："+err.Error(), nil)
+			}
+		}
+		files, err := a.remoteFiles(root, it)
+		if err != nil {
+			return a.result(proto.CodeFailed, "读异地的备份失败："+err.Error(), nil)
+		}
+		if b.Action == "fetch" {
+			files = append(listBackupFiles(root, it.Name), files...) // 取回的那份在服务器上了
+		}
+		return a.result(proto.CodeOK, "", proto.BackupStatus{On: cfg.On, Dir: backupDir(root), Items: []proto.BackupItemStatus{}, Files: files})
 	case "delete":
 		p, err := backupFilePath(root, b.Name, b.File)
 		if err != nil {
@@ -329,7 +354,7 @@ func (a *Agent) backupStatus(root string, cfg backupConfig, st backupState, req 
 		}
 		if cfg.On {
 			if v, err := a.Sys.Shell("systemctl show -p NextElapseUSecRealtime --value "+backupUnitBase(root, it.Name)+".timer 2>/dev/null", 10*time.Second); err == nil {
-				s.Next = strings.TrimSpace(v)
+				s.Next = sdNext(v)
 			}
 			if i := findItem(req, it.Name); i < 0 {
 				s.Removed = len(req) > 0
@@ -470,6 +495,9 @@ func (a *Agent) runBackup(root string, it proto.BackupItem, reason, suffix, prot
 	r.OK, r.File = true, name
 	r.Sec = a.Sys.Now().Sub(start).Seconds()
 	pruneBackups(root, it.Name, max(it.Keep, 1), name, protect)
+	if uploadReasons[reason] {
+		a.uploadBackup(root, it, &r) // 传到异地（设了 upload 时）；没传上去不算备份失败
+	}
 	return r
 }
 
@@ -884,6 +912,9 @@ func BackupRun(sys System, out io.Writer, root, name string) int {
 		return 1
 	}
 	fmt.Fprintf(out, "已备份 %s：%s（%s，%.1f 秒）\n", name, r.File, sizeText(r.Size), r.Sec)
+	if r.UploadError != "" {
+		return 1 // 定时器记成失败，journalctl 里看得到；告警会提醒
+	}
 	return 0
 }
 
@@ -896,10 +927,16 @@ func backupProblems(root, project, target string) []proto.MonitorProblem {
 	var out []proto.MonitorProblem
 	for _, it := range cfg.Items {
 		runs := st.Runs[it.Name]
-		if len(runs) == 0 || runs[len(runs)-1].OK {
+		if len(runs) == 0 {
 			continue
 		}
 		r := runs[len(runs)-1]
+		if r.OK && r.UploadError != "" {
+			out = append(out, proto.MonitorProblem{Key: "backup-upload:" + it.Name, Level: "warn", Text: fmt.Sprintf("数据备份 %s 没传到异地（%s，%s）：%s", it.Name, r.Reason, r.Time.Local().Format("01-02 15:04"), firstLine(r.UploadError))})
+		}
+		if r.OK {
+			continue
+		}
 		out = append(out, proto.MonitorProblem{Key: "backup:" + it.Name, Level: "bad", Text: fmt.Sprintf("数据备份 %s 失败了（%s，%s）：%s", it.Name, r.Reason, r.Time.Local().Format("01-02 15:04"), firstLine(r.Error))})
 	}
 	return out

@@ -100,6 +100,12 @@ func (f *fakeSys) Systemctl(args ...string) error {
 	if len(args) < 2 {
 		return nil
 	}
+	if args[1] == "--no-block" && len(args) > 2 { // 不等它做完：假的本来就马上做完
+		f.calls = f.calls[:len(f.calls)-1]
+		err := f.Systemctl(append([]string{args[0]}, args[2:]...)...)
+		f.calls[len(f.calls)-1] = strings.Join(args, " ")
+		return err
+	}
 	if args[1] == "--now" && len(args) > 2 { // enable / disable --now 同时启动 / 停止
 		f.calls = f.calls[:len(f.calls)-1]
 		if err := f.Systemctl(args[0], args[2]); err != nil {
@@ -359,6 +365,9 @@ func exec1(t *testing.T, f *fakeSys, cmd string, req *proto.Request) run {
 	var out bytes.Buffer
 	a := &Agent{Sys: f, Out: &out}
 	req.Proto, req.Root, req.Actor = proto.Version, f.root, "tester@pc"
+	if req.FerryDir == "" {
+		req.FerryDir = filepath.Join(filepath.Dir(f.root), "ferry-lib") // 审计记录等写在这里，不写到测试程序旁边
+	}
 	code := a.Run(cmd, req)
 	r := run{code: code}
 	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
@@ -514,7 +523,7 @@ func TestVerifyFailureTouchesNothing(t *testing.T) {
 	req := f.stage(t, []proto.AppSpec{sys}, id1, map[string][]byte{"System": []byte("v1")})
 	req.Releases[0].SHA256 = strings.Repeat("0", 64)
 	r := exec1(t, f, "deploy", req)
-	if r.code != proto.CodeVerify || len(f.calls) != 0 {
+	if r.code != proto.CodeVerify || len(nonAudit(f)) != 0 {
 		t.Fatalf("校验失败不应调用 systemctl：%v\n%s", f.calls, r.dump())
 	}
 }
@@ -913,4 +922,15 @@ func TestFailedDeployReseedsLibs(t *testing.T) {
 			t.Fatal(r.dump())
 		}
 	}
+}
+
+// nonAudit 除了写审计记录（logger -t ferry-audit）以外执行过的命令。
+func nonAudit(f *fakeSys) []string {
+	var out []string
+	for _, c := range f.calls {
+		if !strings.Contains(c, "logger -t ferry-audit") {
+			out = append(out, c)
+		}
+	}
+	return out
 }

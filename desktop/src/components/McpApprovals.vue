@@ -22,12 +22,19 @@ interface McpRequest {
   action:
     | 'deploy' | 'start' | 'stop' | 'restart' | 'rollback' | 'sw-start' | 'sw-stop' | 'sw-restart' | 'port-open' | 'port-close' | 'fw-enable' | 'ssh-kick' | 'backup-run' | 'create'
     | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret' | 'sw-upgrade' | 'sw-restore' | 'sw-backup' | 'db-exec' | 'config-edit'
+    | 'run-job' | 'backup-fetch'
   project: string
   config: string
   target: string
   host: string
   apps?: string[]
   skipBuild?: boolean
+  /** deploy 到多台：全部服务器（按切换的顺序）和切换方式（不填 = 用 ferry.yaml 的 rollout） */
+  targets?: string[]
+  batch?: number
+  canary?: number
+  observeSec?: number
+  onFailure?: string
   to?: string
   software?: string
   /** port-*：放行 / 关闭的端口，如 8080/tcp */
@@ -90,9 +97,11 @@ const VERBS: Record<string, string> = {
   'sw-backup': '设置数据备份',
   'db-exec': '改数据库',
   'config-edit': '改项目配置',
+  'run-job': '现在运行定时任务',
+  'backup-fetch': '取回异地的备份',
 }
 // 用服务器助手的工具执行的操作：确认内容按命令、差异整块显示，每次都要确认
-const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save', 'sw-upgrade', 'sw-restore', 'sw-backup']
+const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save', 'sw-upgrade', 'sw-restore', 'sw-backup', 'run-job', 'backup-fetch']
 const isAI = (r: McpRequest) => AI_ACTIONS.includes(r.action)
 const isDB = (r: McpRequest) => r.action === 'db-exec'
 const isCfg = (r: McpRequest) => r.action === 'config-edit'
@@ -142,7 +151,7 @@ const rejected = new Map<string, number>() // 拒绝的时间
 const blocked = new Set<string>() // 不再接受请求的连接
 const watchers = new Map<number, () => void>() // 执行中的任务：步骤变了就报给编程软件
 const keyOf = (r: McpRequest) =>
-  [r.session, r.config, r.target, r.action, (r.apps ?? []).join(','), r.software, r.port, (r.allow ?? []).join(','), (r.pids ?? []).join(','), r.backup].join('|')
+  [r.session, r.config, r.target, r.action, (r.apps ?? []).join(','), r.software, r.port, (r.allow ?? []).join(','), (r.pids ?? []).join(','), r.backup, String(r.input?.app ?? r.input?.file ?? '')].join('|')
 const grantKey = (r: McpRequest) => [r.session, r.config, r.target, r.action].join('|')
 const clientOf = (r: McpRequest) => r.client || '编程软件'
 // 改防火墙、断开别人的连接、新建项目每次都问：不给「不再询问」
@@ -158,6 +167,8 @@ const titleOf = (r: McpRequest) => {
   if (r.action === 'ssh-kick') return `${VERBS[r.action]}（PID ${(r.pids ?? []).join('、')}）`
   if (r.action === 'backup-run') return `${VERBS[r.action]} ${r.backup || '全部'}`
   if (r.action === 'write-file') return `${VERBS[r.action]} ${String(r.input?.path ?? '')}`
+  if (r.action === 'run-job') return `${VERBS[r.action]} ${String(r.input?.app ?? '')}`
+  if (r.action === 'backup-fetch') return `${VERBS[r.action]} ${String(r.input?.file ?? '')}`
   if (r.action === 'install') return `${VERBS[r.action]} ${String(r.input?.template || '（自定义模板）')}`
   if (r.action === 'secret') return `${VERBS[r.action]}：${(r.fields ?? []).map((f) => f.label).join('、')}`
   if (isAI(r)) return VERBS[r.action]
@@ -331,7 +342,11 @@ function execute(r: McpRequest) {
       args = ['backup', r.target, 'run', ...(r.backup ? [r.backup] : []), '-c', r.config]
       break
     case 'deploy':
-      args = ['deploy', r.target, apps.join(','), '-c', r.config, '--yes', ...(r.skipBuild ? ['--skip-build'] : [])]
+      args = ['deploy', (r.targets?.length ? r.targets : [r.target]).join(','), apps.join(','), '-c', r.config, '--yes', ...(r.skipBuild ? ['--skip-build'] : [])]
+      if (r.batch) args.push('--batch', String(r.batch))
+      if (r.canary !== undefined && r.canary !== null) args.push('--canary', String(r.canary))
+      if (r.observeSec) args.push('--observe', `${r.observeSec}s`)
+      if (r.onFailure) args.push('--on-failure', r.onFailure)
       break
     case 'rollback':
       args = ['rollback', r.target, apps[0], '-c', r.config, '--yes', ...(r.to ? ['--to', r.to] : [])]
@@ -438,7 +453,7 @@ const detailLines = (d: string[]) => d.slice(1).join('\n').split('\n')
 const actionType = (a: string) =>
   ['stop', 'rollback', 'sw-stop', 'port-close', 'port-open', 'fw-enable', 'ssh-kick'].includes(a)
     ? 'danger'
-    : a === 'create' || a === 'backup-run' || a === 'secret'
+    : a === 'create' || a === 'backup-run' || a === 'backup-fetch' || a === 'secret'
       ? 'primary'
       : 'warning'
 </script>

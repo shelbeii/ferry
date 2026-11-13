@@ -443,6 +443,17 @@ func statusOK(code int, want []int) bool {
 
 func shortErr(err error) string {
 	s := err.Error()
+	var ne net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout() || strings.Contains(s, "Client.Timeout exceeded"):
+		return "超时，没有响应"
+	case strings.Contains(s, "connection refused"):
+		return "连不上（没有程序在监听这个端口）"
+	case strings.Contains(s, "connection reset"):
+		return "连接被对方断开"
+	case strings.Contains(s, "no such host"):
+		return "域名解析不了"
+	}
 	if i := strings.LastIndex(s, ": "); i >= 0 {
 		return s[i+2:]
 	}

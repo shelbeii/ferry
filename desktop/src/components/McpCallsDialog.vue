@@ -32,6 +32,7 @@ const TOOL_NAMES: Record<string, string> = {
   app_logs: '应用日志',
   app_releases: '应用版本',
   deploy_history: '部署记录',
+  audit_log: '审计记录',
   server_software: '服务器软件',
   server_ports: '端口和防火墙',
   ssh_sessions: 'SSH 连接',
@@ -64,6 +65,8 @@ const TOOL_NAMES: Record<string, string> = {
   firewall_enable: '请求打开防火墙',
   ssh_disconnect: '请求断开 SSH',
   backup_run: '请求现在备份',
+  backup_fetch: '请求取回异地的备份',
+  run_job: '请求现在运行定时任务',
   create_project: '请求新建项目',
   [RESULT_TOOL]: '改动的结果',
 }

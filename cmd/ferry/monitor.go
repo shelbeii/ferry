@@ -11,7 +11,7 @@ import (
 	"github.com/captain/ferry/internal/ui"
 )
 
-const monitorUsage = "用法：ferry monitor <目标> [status | on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14] | off | check | test]"
+const monitorUsage = "用法：ferry monitor <目标> [status | on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14] [--mem 90] [--load 2] [--ping URL] | off | check | test]"
 
 // monitorCmd 服务器监控：服务器上每隔几分钟检查应用、磁盘、证书、端口，有问题时发到设置 → 通知里的地方。
 func monitorCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(error) int) int {
@@ -35,7 +35,8 @@ func monitorCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail fun
 	if v := strings.TrimSpace(c.flags["notify"]); v != "" {
 		chans = strings.Split(v, ",")
 	}
-	st, err := e.Monitor(c.pos[0], action, engine.MonitorOptions{Channels: chans, IntervalMin: num("interval"), DiskPct: num("disk"), CertDays: num("cert-days")})
+	st, err := e.Monitor(c.pos[0], action, engine.MonitorOptions{Channels: chans, IntervalMin: num("interval"), DiskPct: num("disk"), CertDays: num("cert-days"),
+		MemPct: num("mem"), LoadX: num("load"), PingURL: c.flags["ping"]})
 	if err != nil {
 		return fail(err)
 	}

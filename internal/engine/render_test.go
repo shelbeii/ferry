@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/captain/ferry/internal/artifact"
 	"github.com/captain/ferry/internal/config"
@@ -137,3 +138,43 @@ func (r *recRep) Progress(string, int64, int64) {}
 func (r *recRep) BuildOutput() io.Writer        { return io.Discard }
 func (r *recRep) Confirm(string) bool           { return true }
 func (r *recRep) Secret(string) (string, bool)  { return "", false }
+
+func TestJobSpec(t *testing.T) {
+	f := &config.File{Project: "p", Dir: "."}
+	tg := &config.Target{Name: "prod", Root: "/opt/p", RunAs: "u", KeepReleases: 5}
+	off := false
+	timeout := config.Duration(90 * time.Minute)
+	a := &config.App{Name: "report", Type: "java", Artifact: config.Artifact{Path: "report.jar"},
+		Service: config.Service{Unit: "p-report.service", Java: "/usr/bin/java"},
+		Job:     &config.Job{Schedule: config.StringList{"*-*-* 02:30:00", "Mon..Fri 12:00"}, Timeout: &timeout, CatchUp: &off}}
+	s, err := Spec(f, tg, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := s.UnitText
+	for _, want := range []string{"job=yes", "Type=oneshot", "TimeoutStartSec=5400", "ExecStart=/usr/bin/java -jar /opt/p/apps/report/running/report.jar"} {
+		if !strings.Contains(u, want) {
+			t.Errorf("单元缺少 %q：\n%s", want, u)
+		}
+	}
+	for _, bad := range []string{"[Install]", "Restart=", "Type=simple", "StartLimit"} {
+		if strings.Contains(u, bad) {
+			t.Errorf("定时任务的单元不该有 %q：\n%s", bad, u)
+		}
+	}
+	j := s.Job
+	if j == nil || j.Timer != "p-report-schedule.timer" || j.TimeoutSec != 5400 || len(j.Schedule) != 2 {
+		t.Fatalf("%+v", j)
+	}
+	for _, want := range []string{"OnCalendar=*-*-* 02:30:00\n", "OnCalendar=Mon..Fri 12:00\n", "Persistent=false", "Unit=p-report.service", "WantedBy=timers.target", "job=yes"} {
+		if !strings.Contains(j.TimerText, want) {
+			t.Errorf("定时器缺少 %q：\n%s", want, j.TimerText)
+		}
+	}
+	// 默认：补跑、6 小时
+	a.Job = &config.Job{Schedule: config.StringList{"daily"}}
+	s, _ = Spec(f, tg, a)
+	if !strings.Contains(s.Job.TimerText, "Persistent=true") || s.Job.TimeoutSec != 6*3600 {
+		t.Fatalf("%+v", s.Job)
+	}
+}

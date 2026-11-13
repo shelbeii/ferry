@@ -133,6 +133,10 @@ type Request struct {
 	// fwenable：打开防火墙前先放行这些端口（8080/tcp……；SSH 端口 agent 自己加上）；RestartDocker 打开（fwdisable：关闭）后重启 Docker
 	Allow         []string `json:"allow,omitempty"`
 	RestartDocker bool     `json:"restartDocker,omitempty"`
+
+	// audit：Audit 不为空时追加这一条审计记录；否则按 AuditQuery 读（见 audit.go）
+	Audit      *AuditEntry `json:"audit,omitempty"`
+	AuditQuery *AuditQuery `json:"auditQuery,omitempty"`
 }
 
 // AppSpec 应用在某个目标上的完整描述。所有模板变量都已由引擎展开。
@@ -198,6 +202,8 @@ type AppSpec struct {
 	ZD *ZeroDowntime `json:"zd,omitempty"`
 	// TLS 由 Ferry 的 nginx 运行的站点：自动申请、续期 HTTPS 证书
 	TLS *TLSSpec `json:"tls,omitempty"`
+	// Job 定时任务：Unit 是 oneshot 的服务（不开机自启），由 Job.Timer 这个定时器按时启动
+	Job *JobSpec `json:"job,omitempty"`
 }
 
 // TLSSpec 自动申请 HTTPS 证书（ACME，默认 Let's Encrypt）。证书放在 .ferry/apps/<app>/tls/，nginx 配置里写这个位置；
@@ -216,14 +222,27 @@ type TLSSpec struct {
 // MonitorSpec 服务器监控（monitor 命令）：服务器上的定时器每隔几分钟检查一次，有问题时发通知。
 // 一台服务器上可以有几个项目各自开着（各自的通知），按「项目 / 目标」区分。
 type MonitorSpec struct {
-	Action      string           `json:"action"` // on | off | status | check（只检查、不发通知）| test（发一条测试告警）
-	Project     string           `json:"project"`
-	Target      string           `json:"target"`
-	Host        string           `json:"host,omitempty"`
-	IntervalMin int              `json:"intervalMin,omitempty"` // 默认 5
-	DiskPct     int              `json:"diskPct,omitempty"`     // 磁盘用到百分之几告警，默认 90
-	CertDays    int              `json:"certDays,omitempty"`    // HTTPS 证书还剩几天告警，默认 14
-	Channels    []MonitorChannel `json:"channels,omitempty"`
+	Action      string `json:"action"` // on | off | status | check（只检查、不发通知）| test（发一条测试告警）
+	Project     string `json:"project"`
+	Target      string `json:"target"`
+	Host        string `json:"host,omitempty"`
+	IntervalMin int    `json:"intervalMin,omitempty"` // 默认 5
+	DiskPct     int    `json:"diskPct,omitempty"`     // 磁盘用到百分之几告警，默认 90
+	CertDays    int    `json:"certDays,omitempty"`    // HTTPS 证书还剩几天告警，默认 14
+	MemPct      int    `json:"memPct,omitempty"`      // 内存用到百分之几告警，默认 90
+	LoadX       int    `json:"loadX,omitempty"`       // 负载（15 分钟平均）超过 CPU 核数的几倍告警，默认 2
+	// PingURL 每次检查完访问一下的地址（Healthchecks.io、Uptime Kuma 的 Push 监控）：服务器宕机、断网时那边收不到，由那边告警
+	PingURL  string           `json:"pingUrl,omitempty"`
+	Channels []MonitorChannel `json:"channels,omitempty"`
+	// Apps 项目里各应用单元的健康检查（部署时服务器上也会记下最新的；这里给没重新部署过的应用用）
+	Apps []MonitorApp `json:"apps,omitempty"`
+}
+
+// MonitorApp 一个应用单元平时也要通过的健康检查。
+type MonitorApp struct {
+	App    string `json:"app"`
+	Unit   string `json:"unit"`
+	Health Health `json:"health"`
 }
 
 // MonitorChannel 告警发到哪（地址、加签密钥存在服务器上，只有 root 能读）。
@@ -240,7 +259,11 @@ type MonitorStatus struct {
 	IntervalMin int              `json:"intervalMin,omitempty"`
 	DiskPct     int              `json:"diskPct,omitempty"`
 	CertDays    int              `json:"certDays,omitempty"`
-	Channels    []string         `json:"channels,omitempty"` // 发到哪（只有名字）
+	MemPct      int              `json:"memPct,omitempty"`
+	LoadX       int              `json:"loadX,omitempty"`
+	PingURL     string           `json:"pingUrl,omitempty"`
+	PingError   string           `json:"pingError,omitempty"` // 上次访问 PingURL 失败的原因
+	Channels    []string         `json:"channels,omitempty"`  // 发到哪（只有名字）
 	LastRun     time.Time        `json:"lastRun,omitzero"`
 	Problems    []MonitorProblem `json:"problems"`
 	// Sent test：发出去的通知（名字 → 错误；空 = 成功）
@@ -265,6 +288,8 @@ type MonitorProblem struct {
 //	list    列出备份文件（Name 空 = 全部）
 //	restore 用 File 恢复 Name（先自动备份一份现在的）
 //	delete  删掉 Name 的备份文件 File
+//	remote  列出 Name 传到异地（upload）的备份
+//	fetch   把异地的 File 取回服务器（解密），之后就能用它恢复
 type BackupSpec struct {
 	Action  string       `json:"action"`
 	Project string       `json:"project"`
@@ -294,6 +319,19 @@ type BackupItem struct {
 	OnCalendar   string   `json:"onCalendar"`
 	Keep         int      `json:"keep"`
 	BeforeDeploy bool     `json:"beforeDeploy,omitempty"`
+	// Upload 定时、手动备份完再传一份到对象存储；nil = 不传
+	Upload *BackupUpload `json:"upload,omitempty"`
+}
+
+// BackupUpload 异地备份的位置（变量已展开）。访问密钥、加密的密码在 envFile 里，不经过这里。
+type BackupUpload struct {
+	Endpoint  string `json:"endpoint"`
+	Bucket    string `json:"bucket"`
+	Region    string `json:"region,omitempty"`
+	Prefix    string `json:"prefix"` // 以 / 结尾，如 ferry/shop/prod/
+	PathStyle bool   `json:"pathStyle,omitempty"`
+	Encrypt   bool   `json:"encrypt"`
+	Keep      int    `json:"keep"`
 }
 
 // BackupStatus status / on / off / run 的结果。
@@ -325,15 +363,21 @@ type BackupRun struct {
 	Size   int64     `json:"size,omitempty"`
 	Sec    float64   `json:"sec"`
 	Reason string    `json:"reason"`
+	// Uploaded 传到了异地的哪里（s3://桶/文件）；UploadError 没传上去的原因（本机的备份是好的）
+	Uploaded    string `json:"uploaded,omitempty"`
+	UploadError string `json:"uploadError,omitempty"`
 }
 
 // BackupFile 服务器上的一个备份文件。
 type BackupFile struct {
 	Item string    `json:"item"`
 	Name string    `json:"name"`
-	Path string    `json:"path"`
+	Path string    `json:"path"` // 服务器上的路径；异地的是 s3://桶/文件
 	Size int64     `json:"size"`
 	Time time.Time `json:"time"`
+	// Remote 在异地（remote 列出的）；Local 服务器上已经有同一份了（不用取回）
+	Remote bool `json:"remote,omitempty"`
+	Local  bool `json:"local,omitempty"`
 }
 
 // DefaultCA Let's Encrypt 的 ACME 目录。
@@ -639,6 +683,37 @@ type AppStatus struct {
 	Restarts int `json:"restarts,omitempty"`
 	// Stopped 在 Ferry 里手动停止的（开机也不会起来）
 	Stopped bool `json:"stopped,omitempty"`
+	// Job 定时任务的下次运行、上次结果（定时任务才有）
+	Job *JobStatus `json:"job,omitempty"`
+}
+
+// JobSpec 定时任务（配置里的 job）。
+type JobSpec struct {
+	Timer     string   `json:"timer"`     // 定时器单元名：<服务名去掉 .service>-schedule.timer
+	TimerText string   `json:"timerText"` // 渲染好的定时器单元
+	Schedule  []string `json:"schedule"`  // OnCalendar（给人看）
+	// RunOnDeploy 部署、回滚后马上运行一次，成功才算部署成功
+	RunOnDeploy bool `json:"runOnDeploy,omitempty"`
+	TimeoutSec  int  `json:"timeoutSec"` // 最长运行多久
+}
+
+// JobStatus 定时任务的情况。
+type JobStatus struct {
+	Schedule    []string `json:"schedule"`
+	TimerActive bool     `json:"timerActive"`    // 定时器开着
+	Next        string   `json:"next,omitempty"` // 下次运行（systemd 的时间）
+	Running     bool     `json:"running,omitempty"`
+	Last        *JobRun  `json:"last,omitempty"` // 上次运行；从没运行过为空
+}
+
+// JobRun 一次运行的结果。Result：systemd 的 Result（success、exit-code、timeout、signal……）。
+type JobRun struct {
+	Start    string  `json:"start,omitempty"`
+	End      string  `json:"end,omitempty"`
+	Sec      float64 `json:"sec,omitempty"`
+	Result   string  `json:"result"`
+	ExitCode int     `json:"exitCode"`
+	OK       bool    `json:"ok"`
 }
 
 // LockHolder 正拿着部署锁的操作：谁、在做什么。
@@ -751,7 +826,7 @@ type DeployOutcome struct {
 type AppOutcome struct {
 	App     string `json:"app"`
 	Release string `json:"release,omitempty"`
-	Result  string `json:"result"` // OK | FAILED | ROLLED_BACK | ROLLBACK_FAILED | SKIPPED
+	Result  string `json:"result"` // OK | FAILED | ROLLED_BACK | ROLLBACK_FAILED | SKIPPED | REVERTED（多台部署时别的服务器失败，已回滚到部署前的版本）
 	Msg     string `json:"msg,omitempty"`
 	// ReadySec 从启动到就绪用了几秒；PrevReadySec 上一次成功部署时用了几秒（0 = 没有记录）
 	ReadySec     int `json:"readySec,omitempty"`

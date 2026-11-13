@@ -225,23 +225,53 @@ func lastLine(n *yaml.Node) int {
 	return l
 }
 
-// SetAppKeep 改写应用的 artifact.keep（部署时保留服务器上的）：写成一行，空 = 去掉。
-// 和 SetAppRuntime 一样按行修改、保留注释；artifact 不是单独的块格式书写时不自动改。改完重新校验，不通过则恢复。
-func SetAppKeep(path, app string, keep []*KeepItem) error {
-	orig, err := os.ReadFile(path)
+// hasAliasOrAnchor 节点（含下面的）用了 YAML 锚点或引用。
+func hasAliasOrAnchor(n *yaml.Node) bool {
+	if n.Kind == yaml.AliasNode || n.Anchor != "" {
+		return true
+	}
+	for _, c := range n.Content {
+		if hasAliasOrAnchor(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// flowText 把节点写成一行（对象、列表用花括号、方括号）；写不成一行时 ok 为 false。
+func flowText(n *yaml.Node) (string, bool) {
+	var cp func(*yaml.Node) *yaml.Node
+	cp = func(n *yaml.Node) *yaml.Node {
+		c := *n
+		c.HeadComment, c.LineComment, c.FootComment = "", "", ""
+		if c.Kind == yaml.MappingNode || c.Kind == yaml.SequenceNode {
+			c.Style |= yaml.FlowStyle
+		}
+		c.Content = nil
+		for _, x := range n.Content {
+			c.Content = append(c.Content, cp(x))
+		}
+		return &c
+	}
+	b, err := yaml.Marshal(cp(n))
 	if err != nil {
-		return err
+		return "", false
 	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(orig, &root); err != nil {
-		return err
+	s := strings.TrimSuffix(string(b), "\n")
+	if strings.Contains(s, "\n") {
+		return "", false
 	}
+	return s, true
+}
+
+// findApp 在 apps 里按名字找应用。
+func findApp(root *yaml.Node, path, app string) (*yaml.Node, error) {
 	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("%s 不是 YAML 对象", path)
+		return nil, fmt.Errorf("%s 不是 YAML 对象", path)
 	}
 	apps := mapValue(root.Content[0], "apps")
 	if apps == nil || apps.Kind != yaml.SequenceNode {
-		return fmt.Errorf("%s 里没有 apps", path)
+		return nil, fmt.Errorf("%s 里没有 apps", path)
 	}
 	var a *yaml.Node
 	for _, n := range apps.Content {
@@ -252,10 +282,97 @@ func SetAppKeep(path, app string, keep []*KeepItem) error {
 		}
 	}
 	if a == nil {
-		return fmt.Errorf("没有应用 %s", app)
+		return nil, fmt.Errorf("没有应用 %s", app)
 	}
-	manual := fmt.Errorf("应用 %s 的 artifact 不是单独的块格式书写，无法自动修改：请手工在它的 artifact 下写 keep: %s", app, keepFlow(keep))
+	return a, nil
+}
+
+// artifactToBlock 应用的 artifact 写成一行的（artifact: {path: dist}）改成分行写，便于加 keep。
+// 返回改好的文本；ok 为 false 表示没法自动改（多行的花括号写法、锚点等）。
+func artifactToBlock(text string, a *yaml.Node) (string, bool) {
+	lines := strings.Split(text, "\n")
+	var key, art *yaml.Node
+	for i := 0; i+1 < len(a.Content); i += 2 {
+		if a.Content[i].Value == "artifact" {
+			key, art = a.Content[i], a.Content[i+1]
+		}
+	}
+	if art == nil || art.Kind != yaml.MappingNode || hasAliasOrAnchor(art) || key.Line != art.Line || lastLine(art) != art.Line {
+		return "", false
+	}
+	line := lines[key.Line-1]
+	prefix := []rune(line)
+	if key.Column-1 > len(prefix) {
+		return "", false
+	}
+	head := string(prefix[:key.Column-1])
+	if strings.TrimLeft(head, " -") != "" { // 同一行前面还有别的内容
+		return "", false
+	}
+	comment := key.LineComment
+	if comment == "" {
+		comment = art.LineComment
+	}
+	if comment == "" && len(art.Content) > 0 {
+		last := art.Content[len(art.Content)-1]
+		comment = last.LineComment
+	}
+	first := head + key.Value + ":"
+	if comment != "" {
+		first += "   " + comment
+	}
+	repl := []string{first}
+	sub := strings.Repeat(" ", key.Column+1)
+	for i := 0; i+1 < len(art.Content); i += 2 {
+		k, ok1 := flowText(art.Content[i])
+		v, ok2 := flowText(art.Content[i+1])
+		if !ok1 || !ok2 {
+			return "", false
+		}
+		repl = append(repl, sub+k+": "+v)
+	}
+	lines = append(lines[:key.Line-1], append(repl, lines[key.Line:]...)...)
+	return strings.Join(lines, "\n"), true
+}
+
+// SetAppKeep 改写应用的 artifact.keep（部署时保留服务器上的）：写成一行，空 = 去掉。
+// 和 SetAppRuntime 一样按行修改、保留注释；artifact 写成一行（{path: dist}）时先改成分行写；
+// 用了锚点、合并等没法自动改的给出手工写法。改完重新校验，不通过则恢复。
+func SetAppKeep(path, app string, keep []*KeepItem) error {
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	crlf := bytes.Contains(orig, []byte("\r\n"))
+	text := strings.ReplaceAll(string(orig), "\r\n", "\n")
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(text), &root); err != nil {
+		return err
+	}
+	a, err := findApp(&root, path, app)
+	if err != nil {
+		return err
+	}
+	manual := fmt.Errorf("应用 %s 的 artifact 用了 YAML 锚点或合并等写法，无法自动修改：请手工在它的 artifact 下写 keep: %s", app, keepFlow(keep))
 	art := mapValue(a, "artifact")
+	if art != nil && art.Kind == yaml.MappingNode && art.Style&yaml.FlowStyle != 0 {
+		if len(keep) == 0 && mapValue(art, "keep") == nil {
+			return nil // 本来就没有
+		}
+		t, ok := artifactToBlock(text, a)
+		if !ok {
+			return manual
+		}
+		text = t
+		root = yaml.Node{}
+		if err := yaml.Unmarshal([]byte(text), &root); err != nil {
+			return manual
+		}
+		if a, err = findApp(&root, path, app); err != nil {
+			return err
+		}
+		art = mapValue(a, "artifact")
+	}
 	if art == nil || art.Kind != yaml.MappingNode || art.Style&yaml.FlowStyle != 0 || art.Anchor != "" || len(art.Content) == 0 {
 		return manual
 	}
@@ -264,8 +381,7 @@ func SetAppKeep(path, app string, keep []*KeepItem) error {
 			return manual
 		}
 	}
-	crlf := bytes.Contains(orig, []byte("\r\n"))
-	lines := strings.Split(strings.ReplaceAll(string(orig), "\r\n", "\n"), "\n")
+	lines := strings.Split(text, "\n")
 	indent := strings.Repeat(" ", art.Content[0].Column-1)
 	newLine := indent + "keep: " + keepFlow(keep) + "   # 部署时保留服务器上的（不用包里的）"
 	from, to := 0, -1 // 原来的 keep 占的行（1 起），没有为 0
@@ -284,11 +400,15 @@ func SetAppKeep(path, app string, keep []*KeepItem) error {
 		at := lastLine(art) // 加在 artifact 的最后
 		lines = append(lines[:at], append(repl, lines[at:]...)...)
 	}
-	out := strings.Join(lines, "\n")
+	return writeKeep(path, orig, strings.Join(lines, "\n"), crlf)
+}
+
+// writeKeep 写回改好的文本（没变就不写），重新校验，不通过则恢复原文件。
+func writeKeep(path string, orig []byte, out string, crlf bool) error {
 	if crlf {
 		out = strings.ReplaceAll(out, "\n", "\r\n")
 	}
-	if out == strings.ReplaceAll(string(orig), "\r\n", "\n") || (crlf && out == string(orig)) {
+	if out == string(orig) {
 		return nil
 	}
 	if err := writeAtomic(path, []byte(out)); err != nil {

@@ -26,6 +26,10 @@ interface Status {
   intervalMin?: number
   diskPct?: number
   certDays?: number
+  memPct?: number
+  loadX?: number
+  pingUrl?: string
+  pingError?: string
   channels?: string[]
   lastRun?: string
   problems: Problem[]
@@ -36,7 +40,7 @@ const status = ref<Status>()
 const error = ref('')
 const busy = ref('')
 const checked = ref<Problem[]>()
-const form = reactive({ channels: [] as string[], interval: 5, disk: 90, certDays: 14 })
+const form = reactive({ channels: [] as string[], interval: 5, disk: 90, certDays: 14, mem: 90, load: 2, ping: '' })
 const channels = computed(() => (appSettings.value?.notify?.channels ?? []).filter((c) => !c.off))
 
 function setChannel(id: string, enabled: boolean) {
@@ -67,6 +71,9 @@ async function load() {
     form.interval = s.intervalMin ?? 5
     form.disk = s.diskPct ?? 90
     form.certDays = s.certDays ?? 14
+    form.mem = s.memPct ?? 90
+    form.load = s.loadX ?? 2
+    form.ping = s.pingUrl ?? ''
     form.channels = channels.value.filter((c) => s.channels?.includes(c.name)).map((c) => c.id)
   } else {
     form.channels = channels.value.map((c) => c.id)
@@ -79,7 +86,13 @@ async function turnOn() {
     ElMessage.warning('选一个告警发到的地方')
     return
   }
-  const s = await run<Status>('on', ['--notify', form.channels.join(','), '--interval', String(form.interval), '--disk', String(form.disk), '--cert-days', String(form.certDays)])
+  const ping = form.ping.trim()
+  if (ping && !/^https?:\/\/\S+$/.test(ping)) {
+    ElMessage.warning('心跳地址要以 http:// 或 https:// 开头')
+    return
+  }
+  const s = await run<Status>('on', ['--notify', form.channels.join(','), '--interval', String(form.interval), '--disk', String(form.disk), '--cert-days', String(form.certDays),
+    '--mem', String(form.mem), '--load', String(form.load), '--ping', ping])
   if (s) {
     ElMessage.success(status.value?.on ? '设置已保存' : '告警已打开')
     await load()
@@ -115,7 +128,8 @@ const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="block" />
     <template v-if="status">
       <p class="muted small">
-        服务器上的 Ferry 每隔几分钟检查一次：应用停了或反复重启、不是部署引起的重启、磁盘快满、HTTPS 证书快到期、防火墙被关、新出现对外开放的端口。
+        服务器上的 Ferry 每隔几分钟检查一次：应用停了或反复重启、应用在运行但健康检查不通（假死）、不是部署引起的重启、
+        内存快用完、负载太高、内存不够系统杀了进程、磁盘快满、HTTPS 证书快到期、防火墙被关、新出现对外开放的端口。
         问题出现时、恢复时各发一次通知；这台电脑不用开着。
       </p>
       <div class="state">
@@ -123,6 +137,7 @@ const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '
         <span v-if="status.on" class="muted small">每 {{ status.intervalMin }} 分钟检查一次，发到 {{ status.channels?.join('、') }}</span>
         <span v-if="status.lastRun" class="muted small">· 上次检查 {{ when(status.lastRun) }}</span>
       </div>
+      <el-alert v-if="status.on && status.pingError" type="warning" :closable="false" show-icon class="block" :title="`上次心跳没发出去：${status.pingError}`" />
       <div v-if="status.on" class="problems">
         <div v-if="!status.problems.length" class="ok small">现在没有问题</div>
         <div v-for="p in status.problems" :key="p.key" class="small" :class="p.level">{{ p.text }}<span class="muted">（{{ when(p.since) }} 起）</span></div>
@@ -151,6 +166,21 @@ const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '
           <el-input-number v-model="form.certDays" :min="1" :max="60" size="small" class="num" />
           <span class="muted small ml">天，剩这么多天到期时告警</span>
         </el-form-item>
+        <el-form-item label="内存">
+          <el-input-number v-model="form.mem" :min="50" :max="99" size="small" class="num" />
+          <span class="muted small ml">%，用到这么多时告警</span>
+        </el-form-item>
+        <el-form-item label="负载">
+          <el-input-number v-model="form.load" :min="1" :max="100" size="small" class="num" />
+          <span class="muted small ml">倍，15 分钟平均负载超过 CPU 核数的这么多倍时告警</span>
+        </el-form-item>
+        <el-form-item label="心跳地址">
+          <el-input v-model="form.ping" size="small" clearable placeholder="可以不填" />
+          <div class="muted small hint">
+            服务器整台宕机、断网时，它自己发不出告警。在 Healthchecks.io 或 Uptime Kuma（Push 类型）建一个检查，把它给的地址填在这里：
+            每次检查完 Ferry 访问一下这个地址，那边超过间隔没收到就由那边告警。那边的「周期」设成比检查间隔长一些。
+          </div>
+        </el-form-item>
       </el-form>
       <div v-if="checked" class="problems">
         <div class="small muted">现在检查的结果：</div>
@@ -176,6 +206,10 @@ const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '
 }
 .num {
   width: 130px;
+}
+.hint {
+  line-height: 1.6;
+  margin-top: 4px;
 }
 .channel-list {
   display: flex;

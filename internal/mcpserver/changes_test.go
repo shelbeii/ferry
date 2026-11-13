@@ -119,3 +119,69 @@ func TestChanges(t *testing.T) {
 		t.Errorf("调用记录：\n%s", log)
 	}
 }
+
+// 一次部署到几台：每台都检查，切换方式写进确认内容，交给桌面版的请求带着全部服务器
+func TestDeployTargets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FERRY_HOME", home)
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+	file := filepath.Join(t.TempDir(), "approver.json")
+	oldFile, oldCap := approverFile, waitCap
+	approverFile = func() string { return file }
+	t.Cleanup(func() { approverFile, waitCap = oldFile, oldCap })
+
+	yaml := strings.Replace(shopYAML, "  test:\n", "  test2:\n    host: 127.0.0.2\n    port: 1\n    root: /opt/shop\n    runAs: shop\n    apps: [web]\n  test3:\n    host: 127.0.0.3\n    port: 1\n    root: /opt/shop\n    runAs: shop\n  test:\n", 1) +
+		"  - name: web\n    type: static\n    artifact: {path: dist}\nrollout: {onFailure: rollback}\n"
+	shop := writeProject(t, filepath.Join(t.TempDir(), "shop"), yaml)
+	st := settings.Defaults()
+	st.Desktop.Projects = []settings.Project{{Path: shop, Name: "商城"}}
+	st.MCP.AllowChanges = true
+	settings.Save(st)
+	cs := connect(t, t.TempDir())
+	expectErr := func(args map[string]any, want string) {
+		t.Helper()
+		if text, isErr := callText(t, cs, "deploy", args); !isErr || !strings.Contains(text, want) {
+			t.Fatalf("应该报「%s」：%v %s", want, isErr, text)
+		}
+	}
+	apps := []string{"api"}
+	expectErr(map[string]any{"targets": []string{"test", "prod"}, "apps": apps, "reason": "x"}, "生产服务器")
+	expectErr(map[string]any{"targets": []string{"test", "test2"}, "apps": apps, "reason": "x"}, "test2 上没有应用 api")
+	expectErr(map[string]any{"targets": []string{"test", "test"}, "apps": apps, "reason": "x"}, "写了两次")
+	expectErr(map[string]any{"target": "test3", "targets": []string{"test", "test3"}, "apps": apps, "reason": "x"}, "就不用 target")
+	expectErr(map[string]any{"targets": []string{"test", "test3"}, "apps": apps, "onFailure": "retry", "reason": "x"}, "stop 或 rollback")
+	expectErr(map[string]any{"targets": []string{"test", "nope"}, "apps": apps, "reason": "x"}, "nope")
+
+	hub := approve.NewHub(file)
+	hub.Prepare = PrepareRequest
+	reqs := make(chan approve.Request, 1)
+	unsub, err := hub.Subscribe(func(kind string, v any) {
+		if kind == "request" {
+			reqs <- v.(approve.Request)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsub()
+	waitCap = 200 * time.Millisecond
+	callText(t, cs, "deploy", map[string]any{"targets": []string{"test", "test3"}, "apps": apps, "canary": 1, "observeSec": 120, "skipBuild": true, "reason": "上线"})
+	r := <-reqs
+	d := strings.Join(r.Detail, "\n")
+	if strings.Join(r.Targets, ",") != "test,test3" || r.Target != "test" || r.Canary == nil || *r.Canary != 1 || r.ObserveSec != 120 ||
+		!strings.Contains(d, "部署到 2 台：test、test3") || !strings.Contains(d, "先切换 1 台，观察 2 分钟，确认后再部署其余的；有一台失败时把这次已经切换的回滚") ||
+		!strings.Contains(d, "Ferry 会弹窗问你") {
+		t.Fatalf("请求：%+v\n%s", r, d)
+	}
+	if got := opTitle(r); got != "部署 api（test、test3）" {
+		t.Errorf("标题：%s", got)
+	}
+	hub.Decide(r.ID, approve.Decision{Note: "不了"})
+	// 桌面版那边再检查一遍：每台都要允许改动
+	bad := r
+	bad.Targets = []string{"test", "prod"}
+	if err := PrepareRequest(&bad); err == nil || !strings.Contains(err.Error(), "生产服务器") {
+		t.Errorf("桌面版检查：%v", err)
+	}
+}

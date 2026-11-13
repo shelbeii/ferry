@@ -25,6 +25,8 @@ interface Run {
   size?: number
   sec: number
   reason: string
+  uploaded?: string
+  uploadError?: string
 }
 interface Item {
   name: string
@@ -42,6 +44,7 @@ interface Item {
   bytes: number
   changed?: boolean
   removed?: boolean
+  upload?: { endpoint: string; bucket: string; prefix: string; encrypt: boolean; keep: number }
 }
 interface BFile {
   item: string
@@ -49,6 +52,8 @@ interface BFile {
   path: string
   size: number
   time: string
+  remote?: boolean
+  local?: boolean
 }
 interface Status {
   on: boolean
@@ -66,6 +71,36 @@ const progress = ref<{ label: string; pct: number }>()
 const filter = ref('')
 
 const shown = computed(() => files.value.filter((f) => !filter.value || f.item === filter.value))
+
+// 异地（upload 传到对象存储）的备份：列出来，取回服务器后就能用来恢复
+const uploadItems = computed(() => (status.value?.items ?? []).filter((it) => it.upload))
+const remoteItem = ref('')
+const remoteFiles = ref<BFile[]>()
+const remoteError = ref('')
+const remoteLoading = ref(false)
+async function listRemote() {
+  const name = remoteItem.value || uploadItems.value[0]?.name
+  if (!name) return
+  remoteItem.value = name
+  const current = captureContext()
+  remoteLoading.value = true
+  remoteError.value = ''
+  try {
+    const r = await reads.run('remote', signal => readCall<Status>(['backup', props.target, 'remote', name, '-c', props.config], signal))
+    if (current()) remoteFiles.value = r.files ?? []
+  } catch (e) {
+    if (current() && !(e instanceof ReadCanceled)) remoteError.value = (e as Error).message
+  } finally {
+    remoteLoading.value = false
+  }
+}
+async function fetchRemote(f: BFile) {
+  if (await long('fetch:' + f.name, ['backup', props.target, 'fetch', f.item, f.name])) {
+    ElMessage.success('已取回服务器：在上面的「备份文件」里可以用它恢复')
+    await load()
+    await listRemote()
+  }
+}
 
 async function load() {
   const current = captureContext()
@@ -212,6 +247,9 @@ const example = `backups:
     schedule: daily                # daily | hourly | weekly | systemd 的 OnCalendar
     keep: 7
     beforeDeploy: true             # 部署前先备份一次
+    upload:                        # 再加密传一份到对象存储（可以不写）
+      s3: { endpoint: https://oss-cn-hangzhou.aliyuncs.com, bucket: shop-backups }
+      # envFile 里再写 S3_ACCESS_KEY_ID=…、S3_SECRET_ACCESS_KEY=…、FERRY_BACKUP_PASSWORD=…
   - name: uploads
     paths: [/srv/shop/uploads]`
 </script>
@@ -242,6 +280,7 @@ const example = `backups:
             <template #default="{ row }">
               {{ calendar(row.onCalendar) }}<span v-if="row.beforeDeploy">、部署前</span>
               <div class="muted">留 {{ row.keep }} 份</div>
+              <div v-if="row.upload" class="muted">传到异地，留 {{ row.upload.keep }} 份{{ row.upload.encrypt ? '（加密）' : '' }}</div>
             </template>
           </el-table-column>
           <el-table-column label="上次" min-width="170">
@@ -250,6 +289,8 @@ const example = `backups:
                 <span :class="row.last.ok ? 'ok' : 'bad'">{{ row.last.ok ? '成功' : '失败' }}</span>
                 <span class="muted">（{{ row.last.reason }}，{{ when(row.last.time) }}）</span>
                 <div v-if="!row.last.ok" class="bad err">{{ row.last.error }}</div>
+                <div v-else-if="row.last.uploaded" class="ok err">已传到异地</div>
+                <div v-else-if="row.last.uploadError" class="warn err">没传到异地：{{ row.last.uploadError }}</div>
               </template>
               <span v-else class="muted">还没备份过</span>
               <div v-if="row.changed" class="warn">配置改过了，打开或部署一次后同步到服务器</div>
@@ -288,6 +329,35 @@ const example = `backups:
             </template>
           </el-table-column>
         </el-table>
+
+        <template v-if="uploadItems.length">
+          <div class="files-head">
+            <h4>异地的备份</h4>
+            <div class="remote-tools">
+              <el-select v-model="remoteItem" size="small" placeholder="选一项" style="width: 140px" @change="remoteFiles = undefined">
+                <el-option v-for="it in uploadItems" :key="it.name" :label="it.name" :value="it.name" />
+              </el-select>
+              <el-button size="small" :loading="remoteLoading" :disabled="!!busy" @click="listRemote">列出</el-button>
+            </div>
+          </div>
+          <p class="muted small">服务器坏了、数据丢了时，在新服务器上配好同样的 ferry.yaml 和 envFile（访问密钥、加密的密码），在这里把异地的一份取回服务器，再在「备份文件」里恢复。</p>
+          <el-alert v-if="remoteError" type="error" :title="remoteError" :closable="false" show-icon class="block" />
+          <el-table v-if="remoteFiles" :data="remoteFiles" size="small" max-height="220" empty-text="异地还没有备份">
+            <el-table-column label="文件" prop="name" min-width="250" />
+            <el-table-column label="大小" width="90">
+              <template #default="{ row }">{{ size(row.size) }}</template>
+            </el-table-column>
+            <el-table-column label="时间" width="110">
+              <template #default="{ row }">{{ when(row.time) }}</template>
+            </el-table-column>
+            <el-table-column width="130">
+              <template #default="{ row }">
+                <span v-if="row.local" class="muted">服务器上也有</span>
+                <el-button v-else link type="primary" size="small" :loading="busy === 'fetch:' + row.name" :disabled="!!busy" @click="fetchRemote(row)">取回服务器</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
       </template>
       <el-progress v-if="progress" :percentage="progress.pct" class="block" />
       <pre v-if="log.length" class="log">{{ log.join('\n') }}</pre>
@@ -315,6 +385,10 @@ const example = `backups:
 }
 .files-head h4 {
   margin: 0;
+}
+.remote-tools {
+  display: flex;
+  gap: 8px;
 }
 .example,
 .log {

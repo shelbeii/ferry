@@ -1,5 +1,7 @@
 # 发布：推送 v 开头的标签（如 v0.12.80）时，构建 Linux 版 ferry（amd64、arm64）、Windows 安装包、macOS 安装包（Apple 芯片、Intel），
-# 建一个 GitHub Release 并附上它们和 SHA256SUMS.txt。标签要和 desktop/package.json 里的版本号一致（v + 版本号），不一致时不发布。
+# 建一个 GitHub Release 并附上它们、SHA256SUMS.txt 和它的签名 SHA256SUMS.txt.sig。标签要和 desktop/package.json 里的版本号一致（v + 版本号），不一致时不发布。
+# 签名的私钥在仓库 Settings → Secrets 的 FERRY_SIGN_KEY（scripts/signsums）；没有它、或者和编进 Ferry 的公钥不是一对时不发布——
+# Ferry 自动更新时验这个签名，没签名的版本装不上。
 #
 #   git tag v0.12.80 && git push origin v0.12.80
 #
@@ -123,6 +125,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
       - uses: actions/download-artifact@v7
         with:
           path: files
@@ -133,6 +138,10 @@ jobs:
           ls -l
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: 签名
+        env:
+          FERRY_SIGN_KEY: ${{ secrets.FERRY_SIGN_KEY }}
+        run: go run ./scripts/signsums sign -key-env FERRY_SIGN_KEY files/SHA256SUMS.txt
       - name: 发布
         env:
           GH_TOKEN: ${{ github.token }}

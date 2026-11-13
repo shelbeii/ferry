@@ -26,6 +26,7 @@
 
    - ARM 的机器下载 `ferry-linux-arm64`；`releases/latest/download/ferry-linux-amd64` 总是最新版。
    - 每个 Release 里有 `SHA256SUMS.txt`，要核对的话：`curl -fsSL -O …/SHA256SUMS.txt && sha256sum --ignore-missing -c SHA256SUMS.txt`。
+   - `SHA256SUMS.txt` 本身有签名（`SHA256SUMS.txt.sig`，Ed25519）：在 Ferry 的源码目录里 `go run ./scripts/signsums verify SHA256SUMS.txt` 用编进 Ferry 的公钥验。Ferry 自动更新时会自己验。
    - 服务器端的组件已经编进 ferry 里，不用另外准备。CI 里不用装 Go。
 
 ## 环境变量

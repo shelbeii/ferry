@@ -13,6 +13,7 @@ import { appSettings, applyTheme, dropTasks, loadSettings, saveSettings, setting
 import { appInfo, browserDataUsage, clearBrowserData, clearUiCache, isTauri, uiCacheUsage, openUrl, pickDir, pickFile, reveal } from '../platform'
 import { clearHistory } from '../browser/address'
 import { glass, GLASS_TRANSPARENCY_DEFAULT } from '../glass/runtime'
+import { setParticles } from '../fx/dialogParticles'
 import GlassToggle from './glass/GlassToggle.vue'
 import { checkUpdate, updater } from '../update'
 
@@ -570,11 +571,19 @@ watch(
     if (value !== undefined && old !== undefined) glass.transparency = value
   },
 )
+// 粒子特效同样马上生效：切换后关掉、再打开这个窗口就能看到
+watch(
+  () => form.value?.ui.particles,
+  (on, old) => {
+    if (on !== undefined && old !== undefined) setParticles(on)
+  },
+)
 function restoreTheme() {
   if (!appSettings.value) return
   applyTheme(appSettings.value.ui.theme)
   glass.enabled = appSettings.value.ui.glass !== false
   glass.transparency = appSettings.value.ui.glassTransparency ?? GLASS_TRANSPARENCY_DEFAULT
+  setParticles(appSettings.value.ui.particles !== false)
 }
 
 async function save() {
@@ -1163,6 +1172,12 @@ async function pickKeyDir() {
                 <el-button link type="primary" size="small" :disabled="form.ui.glassTransparency === GLASS_TRANSPARENCY_DEFAULT" @click="form.ui.glassTransparency = GLASS_TRANSPARENCY_DEFAULT">恢复默认</el-button>
               </div>
               <div class="muted small">越往右越透明：列表从工具栏下面滑过时看得越清楚，拖到最右边不再磨砂，能直接看清后面的字；越往左磨砂越重、越不透，玻璃上的字更好认。拖动时马上能看到效果，默认 {{ GLASS_TRANSPARENCY_DEFAULT }}%</div>
+            </div>
+          </el-form-item>
+          <el-form-item label="粒子特效">
+            <div>
+              <GlassToggle v-model="form.ui.particles">弹窗和下拉框打开、关闭时显示粒子动画</GlassToggle>
+              <div class="muted small">打开时细小的粒子收拢成窗口，关闭时窗口化成粒子散开。关掉后是普通的淡入淡出；系统设置了「减少动态效果」时也不显示</div>
             </div>
           </el-form-item>
           <el-form-item label="关闭窗口">

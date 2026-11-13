@@ -96,6 +96,26 @@ func (e *Engine) Control(target string, names []string, action string) ([]proto.
 	return out.Apps, err
 }
 
+// RunJob 现在运行一次定时任务：等它跑完（输出实时显示），返回结果。不等下次的时间、不影响定时器。
+func (e *Engine) RunJob(target, app string) (proto.JobRun, error) {
+	var out proto.JobRun
+	err := e.withSession(target, []string{app}, func(s *session, specs []proto.AppSpec) error {
+		if len(specs) != 1 || specs[0].Job == nil {
+			return fmt.Errorf("%s 不是定时任务（配置里没有写 job）", app)
+		}
+		if err := e.checkDeployer(s.t, "运行"); err != nil {
+			return err
+		}
+		if s.t.Production && !e.Yes {
+			if !e.confirmProduction(fmt.Sprintf("现在运行 %s 上的定时任务 %s？", s.t.Name, app), []string{s.t.Name}) {
+				return ErrCanceled
+			}
+		}
+		return s.callData("runjob", &proto.Request{Apps: specs}, &out)
+	})
+	return out, err
+}
+
 // Releases 各应用的版本。
 func (e *Engine) Releases(target string, names []string) ([]proto.AppReleases, error) {
 	var out []proto.AppReleases

@@ -572,6 +572,9 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 			return err
 		}
 	}
+	if err := saveJobTimer(meta, s); err != nil {
+		return err
+	}
 	m := rel.Meta
 	m.ID, m.App, m.SHA256, m.Size = rel.ID, s.Name, rel.SHA256, rel.Size
 	m.FileSums = fileSums
@@ -636,6 +639,9 @@ func (a *Agent) switchService(s *proto.AppSpec, id, prev string) (string, string
 		}
 	}
 	if wasActive {
+		if isJob(s) {
+			a.warn(proto.EvWarn, s.Name, "定时任务正在运行：这次运行会被停掉")
+		}
 		a.info(proto.EvStop, s.Name, "%s", s.Unit)
 		if err := a.Sys.Systemctl("stop", s.Unit); err != nil {
 			a.warn(proto.EvWarn, s.Name, "%v", err)
@@ -670,6 +676,23 @@ func (a *Agent) switchService(s *proto.AppSpec, id, prev string) (string, string
 	if err := a.installUnit(s.Name, s.Unit, []byte(s.UnitText)); err != nil {
 		return fail(err.Error())
 	}
+	if isJob(s) {
+		// 定时任务：不启动服务，打开定时器（runOnDeploy 时马上运行一次）
+		a.markStopped(s.Name, false)
+		if err := a.applyJob(s, id); err != nil {
+			a.diag(s, s.Unit)
+			return fail(err.Error())
+		}
+		if s.Hooks != nil {
+			ph := hookPhase{name: "afterSwitch", label: "切换后的命令", dir: a.runningDir(s.Name)}
+			if err := a.runHooks(s, ph, s.Hooks.AfterSwitch, id, prev); err != nil {
+				a.fail(proto.EvFail, s.Name, "%v", err)
+				return fail(err.Error())
+			}
+		}
+		return "OK", ""
+	}
+	a.removeJobTimer(s.Unit) // 以前是定时任务
 	a.autostart(s, s.Unit)
 	a.info(proto.EvStart, s.Name, "%s", s.Unit)
 	if err := a.Sys.Systemctl("restart", s.Unit); err != nil {
@@ -680,6 +703,8 @@ func (a *Agent) switchService(s *proto.AppSpec, id, prev string) (string, string
 		a.diag(s, s.Unit)
 		return fail(err.Error())
 	}
+	// 告警平时也按它检查（进程在、接口不通时告警）
+	a.saveAppHealth(s.Name, s.Unit, s.Health)
 	a.tlsAfterStart(s) // 站点起来了：需要时申请 HTTPS 证书（失败只提示）
 	if s.Hooks != nil {
 		ph := hookPhase{name: "afterSwitch", label: "切换后的命令", dir: a.runningDir(s.Name)}
@@ -753,12 +778,26 @@ func (a *Agent) restoreService(s *proto.AppSpec, failed, prev string, wasActive 
 	if before == nil {
 		a.Sys.Systemctl("disable", s.Unit)
 		a.removeBootTimer(s.Unit)
+		a.removeJobTimer(s.Unit)
 		os.Remove(a.unitPath(s.Unit))
 		a.Sys.Systemctl("daemon-reload")
 	} else if err := a.installUnit(s.Name, s.Unit, before); err != nil {
 		return err
 	} else if a.isStopped(s.Name) {
 		a.bootOff(s.Unit) // 部署前是手动停着的：部署时打开的开机自启再关掉
+	}
+	if s.Job != nil && before != nil {
+		if prev != "" && a.jobTimerText(s, prev) != nil {
+			old, j := *s, *s.Job
+			j.RunOnDeploy = false // 切回旧版本：不再运行一次
+			old.Job = &j
+			if err := a.applyJob(&old, prev); err != nil {
+				return err
+			}
+			wasActive = false // 定时任务不用启动服务
+		} else {
+			a.removeJobTimer(s.Unit)
+		}
 	}
 	if wasActive && before != nil {
 		if err := a.Sys.Systemctl("restart", s.Unit); err != nil {

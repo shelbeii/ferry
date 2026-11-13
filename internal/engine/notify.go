@@ -91,6 +91,10 @@ func (e *Engine) notifyDeploy(reports []*DeployReport, err error) {
 	if errors.Is(err, ErrCanceled) {
 		return
 	}
+	anyErr := false
+	for _, r := range reports {
+		anyErr = anyErr || r.Error != ""
+	}
 	for i, r := range reports {
 		t, _ := e.File.Target(r.Target)
 		ev := e.baseEvent("deploy", t)
@@ -108,10 +112,12 @@ func (e *Engine) notifyDeploy(reports []*DeployReport, err error) {
 			ev.Apps = append(ev.Apps, na)
 			ev.OK = ev.OK && a.Result == "OK"
 		}
-		// 出错的是最后一台（后面的没有切换）
-		if err != nil && i == len(reports)-1 {
-			ev.OK = false
-			ev.Error = err.Error()
+		switch {
+		case r.Error != "": // 这台失败了（部署到多台时同一批可能有几台）
+			ev.OK, ev.Error = false, r.Error
+		case !anyErr && err != nil && i == len(reports)-1 && !errors.Is(err, errCanaryStopped):
+			// 出错的是最后一台（后面的没有切换）
+			ev.OK, ev.Error = false, err.Error()
 		}
 		e.sendNotify(ev)
 	}

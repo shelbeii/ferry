@@ -54,3 +54,35 @@ func TestVarsBomb(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 }
+
+func TestBackupUploadConfig(t *testing.T) {
+	head := "version: 1\nproject: p\ntargets:\n  a:\n    host: 1.2.3.4\n    runAs: demo\napps:\n  - {name: Sys, type: java, artifact: {path: sys.jar}}\nbackups:\n  - name: db\n    mysql: {database: app}\n"
+	load := func(extra string) (*File, error) {
+		p := filepath.Join(t.TempDir(), "ferry.yaml")
+		os.WriteFile(p, []byte(head+extra), 0o644)
+		return Load(p)
+	}
+	f, err := load("    envFile: /etc/p/backup.env\n    upload:\n      s3: {endpoint: 'https://oss-cn-hangzhou.aliyuncs.com', bucket: my-backups}\n      keep: 30\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := f.Backups[0].Upload
+	if u == nil || u.S3.Bucket != "my-backups" || !u.EncryptOn() || u.Keep != 30 {
+		t.Fatalf("%+v", u)
+	}
+	for what, c := range map[string]string{
+		"没写 s3":          "    envFile: /e\n    upload: {keep: 3}\n",
+		"地址不对":           "    envFile: /e\n    upload: {s3: {endpoint: oss-cn-hangzhou.aliyuncs.com, bucket: abc}}\n",
+		"桶名不对":           "    envFile: /e\n    upload: {s3: {endpoint: 'https://x.com', bucket: My_Bucket}}\n",
+		"目录以 / 开头":       "    envFile: /e\n    upload: {s3: {endpoint: 'https://x.com', bucket: abc, prefix: /x}}\n",
+		"没有 envFile 放密钥": "    upload: {s3: {endpoint: 'https://x.com', bucket: abc}}\n",
+	} {
+		if _, err := load(c); err == nil || !strings.Contains(err.Error(), "upload") {
+			t.Errorf("%s：应报 upload 的错：%v", what, err)
+		}
+	}
+	f, err = load("    envFile: /e\n    upload: {s3: {endpoint: 'http://10.0.0.5:9000', bucket: abc, prefix: x/y}, encrypt: false}\n")
+	if err != nil || f.Backups[0].Upload.EncryptOn() {
+		t.Fatal(err)
+	}
+}

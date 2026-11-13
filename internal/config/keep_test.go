@@ -141,8 +141,82 @@ apps:
 	if strings.Contains(string(b), "keep") {
 		t.Fatalf("应去掉 keep：\n%s", b)
 	}
-	// artifact 写成一行的不自动改
-	if err := SetAppKeep(f.Path, "api", keep); err == nil || !strings.Contains(err.Error(), "手工") {
+	// artifact 写成一行的：改成分行写再加 keep
+	if err := SetAppKeep(f.Path, "api", []*KeepItem{{Path: "config.js"}}); err != nil {
 		t.Fatalf("一行的 artifact：%v", err)
+	}
+	b, _ = os.ReadFile(f.Path)
+	if !strings.Contains(string(b), "    artifact:\n      path: api\n      keep: [config.js]") {
+		t.Fatalf("一行的 artifact 应改成分行写：\n%s", b)
+	}
+}
+
+func TestSetAppKeepFlowArtifact(t *testing.T) {
+	text := "version: 1\r\nproject: demo\r\ntargets:\r\n  a: {host: h, runAs: demo}\r\napps:\r\n" +
+		"  - name: web\r\n    type: static\r\n    artifact: {path: D:/IDEA-WorkSpace/web/dist, exclude: [a.map, '*.log']}   # 构建输出\r\n    static:\r\n      port: 8000\r\n      spa: true\r\n" +
+		"  - name: site\r\n    type: static\r\n    static: {port: 8001}\r\n    artifact: {path: 'dist 2', keep: [old.js]}\r\n" +
+		"  - artifact: {path: x}\r\n    name: lead\r\n    type: static\r\n    static: {port: 8002}\r\n"
+	f, err := load(t, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAppKeep(f.Path, "web", []*KeepItem{{Path: "config.js"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(f.Path)
+	want := "    artifact:   # 构建输出\r\n      path: D:/IDEA-WorkSpace/web/dist\r\n      exclude: [a.map, '*.log']\r\n      keep: [config.js]   # 部署时保留服务器上的（不用包里的）\r\n    static:\r\n"
+	if !strings.Contains(string(b), want) {
+		t.Fatalf("应改成分行写并保留 CRLF、注释：\n%s", b)
+	}
+	g, err := Load(f.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := g.App("web")
+	if w.Artifact.Path == "" || len(w.Artifact.Exclude) != 2 || len(w.Artifact.Keep) != 1 || w.Static.Port != "8000" {
+		t.Fatalf("%+v", w.Artifact)
+	}
+	// 一行里已有 keep：替换
+	if err := SetAppKeep(f.Path, "site", []*KeepItem{{Path: "new.js"}}); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := Load(f.Path); len(g.App("site").Artifact.Keep) != 1 || g.App("site").Artifact.Keep[0].Path != "new.js" || g.App("site").Artifact.Path != "dist 2" {
+		t.Fatalf("%+v", g.App("site").Artifact)
+	}
+	// artifact 在「- 」同一行
+	if err := SetAppKeep(f.Path, "lead", []*KeepItem{{Path: "c.js"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(f.Path)
+	if !strings.Contains(string(b), "  - artifact:\r\n      path: x\r\n      keep: [c.js]") {
+		t.Fatalf("「- artifact」：\n%s", b)
+	}
+	// 一行写法、没有 keep 时去掉：不动文件
+	os.WriteFile(f.Path, []byte(text), 0o644)
+	if err := SetAppKeep(f.Path, "web", nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(f.Path); string(b) != text {
+		t.Fatalf("不应改动：\n%s", b)
+	}
+}
+
+func TestSetAppKeepAnchor(t *testing.T) {
+	text := `version: 1
+project: demo
+targets:
+  a: {host: h, runAs: demo}
+apps:
+  - name: web
+    type: static
+    artifact: &art {path: dist}
+    static: {port: 8000}
+`
+	f, err := load(t, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAppKeep(f.Path, "web", []*KeepItem{{Path: "config.js"}}); err == nil || !strings.Contains(err.Error(), "手工") {
+		t.Fatalf("锚点：%v", err)
 	}
 }

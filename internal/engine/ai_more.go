@@ -17,7 +17,7 @@ import (
 
 // 服务器助手的其余工具（和编程软件经 MCP 能用的一样，只对着当前这台服务器）：端口和防火墙、登录用户、
 // 连接检查、部署前检查、软件日志、部署会带上线的改动、构建日志；允许改动时还有放行 / 关闭端口、打开防火墙、
-// 断开 SSH 连接、现在备份、部署。
+// 断开 SSH 连接、现在备份、部署、现在运行定时任务、取回异地的备份。
 
 var (
 	rePortArg     = regexp.MustCompile(`^([1-9][0-9]{0,4})(?:/(tcp|udp))?$`)
@@ -233,7 +233,8 @@ func (e *Engine) aiMoreTools(t *config.Target, change bool) []ai.Tool {
 	if !change {
 		return tools
 	}
-	return append(tools, e.aiChangeTools(t)...)
+	tools = append(tools, e.aiChangeTools(t)...)
+	return append(tools, e.aiJobTools(t)...)
 }
 
 // aiChangeTools 改动服务器的工具：每次先给用户确认。

@@ -91,6 +91,9 @@ const usage = `ferry —— 后端 / 前端部署工具
                                 set 的值从终端输入，或环境变量 FERRY_SECRET_VALUE
   preflight <目标> [应用…]       检查服务器环境
   deploy   <目标>[,<目标>…] [应用…]  构建、上传、逐个切换；失败自动回滚该应用并停止后续应用和目标
+           [--batch N] [--canary N] [--observe 2m] [--on-failure stop|rollback]
+                                部署到多台时：每次 N 台同时切换；先切换 N 台、（观察一会儿后）确认再部署其余的；
+                                有一台失败时停下，或把这次已经切换的回滚到部署前的版本（默认用 ferry.yaml 的 rollout）
   status   <目标> [应用…]        查看状态
   start | stop | restart <目标> [应用…]   stop 同时取消开机自启，start、restart 后恢复
   app-info <目标> <应用>         查看实际运行环境、进程、服务配置与部署位置
@@ -100,14 +103,18 @@ const usage = `ferry —— 后端 / 前端部署工具
   keep     scan <目标> <应用> [--dir <目录>] [--keep-files <JSON>]   部署时保留的（artifact.keep）在服务器上的情况；
                                 --dir 列出运行中的版本里这个目录下的（"." = 最上层），--keep-files 用这份代替配置里的
   keep     set <应用> <JSON>    把要保留的写回 ferry.yaml（如 [{"path":"config.js"},{"path":"uploads","shared":true}]，[] = 去掉）
-  monitor  <目标> [status | on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14] | off | check | test]
+  monitor  <目标> [status | on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14] [--mem 90] [--load 2] [--ping URL] | off | check | test]
                                 服务器监控：服务器上每隔几分钟检查应用停了 / 反复重启、磁盘快满、证书快到期、防火墙被关、
                                 新出现对外开放的端口，出现、恢复时各发一次通知（发到设置 → 通知里的地方）
   backup   <目标> [status | on | off | run [名字] | list [名字] | restore <名字> <文件> [--force] | delete <名字> <文件> | download <名字> <文件> [本机目录]]
                                 数据备份（配置里的 backups：MySQL、PostgreSQL、目录、自己写的命令）：打开后服务器上按时备份、
                                 部署前备份（beforeDeploy），随时可以关；恢复前先自动备份一份现在的
   rollback <目标> <应用> [--to <版本ID|legacy>]
+  run-job  <目标> <应用>        现在运行一次定时任务（配置里写了 job 的应用），等它跑完、显示输出；不影响定时器
   history  <目标> [应用…] [--limit N]
+  audit    <目标> [--kind 类型] [--actor 人] [--since 24h|7d|2026-11-01] [--limit N] [--local]
+                                审计记录：谁什么时候在这台服务器上做了什么改动（部署、终端、文件、数据库、软件、防火墙……），
+                                团队里所有人的都在服务器上；--local 只看这台电脑上记的。ferry audit --local 看这台电脑上记的全部
   software <目标>               查看服务器上已有的软件（MySQL、Redis、Nacos……，包括 Docker / 1Panel 装的）；只读
   software install <目标> <模板> [选项]   按模板安装软件（ferry software 查看全部用法）
   software start|stop|restart|remove|logs|password <目标> <名称>   Ferry 安装的软件
@@ -175,7 +182,8 @@ type cli struct {
 var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": true, "limit": true, "offset": true, "tool": true, "client": true, "result": true, "since": true, "until": true, "q": true, "n": true, "expect": true, "key": true, "passphrase": true, "account": true,
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
 	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
-	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "keep-files": true, "query": true}
+	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "mem": true, "load": true, "ping": true, "keep-files": true, "query": true,
+	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true}
 var boolFlags = map[string]bool{
 	"with-secrets": true,
 	"y":            true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
@@ -302,6 +310,9 @@ func run(argv []string, cio *cliIO) int {
 	if c.has("json") {
 		js = ui.NewJSON(cio.stdout)
 		js.Verbose = c.has("verbose") || st.Build.Verbose
+		if cio.tty != nil { // 桌面版：中途要问用户时（先发的已上线，继续吗）弹窗，回答经 input 送回
+			js.Answers = cio.tty.in
+		}
 		rep = js
 	} else if serving {
 		con = ui.NewConsoleTo(cio.stderr, c.has("verbose") || st.Build.Verbose)
@@ -397,6 +408,8 @@ func run(argv []string, cio *cliIO) int {
 		return mcpApprovalsCmd(cmd, c, cio, js, fail)
 	case cmd == "mcp-log":
 		return mcpLogCmd(c, cio, js, st, fail)
+	case cmd == "audit" && len(c.pos) == 0 && c.has("local"):
+		return auditLocalCmd(c, js, fail)
 	case cmd == "mcp-tools":
 		return mcpToolsCmd(cio, js)
 	case cmd == "task-history":
@@ -682,6 +695,9 @@ func run(argv []string, cio *cliIO) int {
 			return fail(err)
 		}
 		o := engine.DeployOptions{SkipBuild: c.has("skip-build"), Full: c.has("full"), NoRollback: c.has("no-rollback"), KeepPerms: c.has("keep-perms")}
+		if o.Rollout, err = rolloutFlags(c.flags); err != nil {
+			return fail(err)
+		}
 		if v := c.flags["keep-files"]; v != "" {
 			if err := json.Unmarshal([]byte(v), &o.Keep); err != nil {
 				return fail(fmt.Errorf("--keep-files 不是有效的 JSON：%v", err))
@@ -847,6 +863,28 @@ func run(argv []string, cio *cliIO) int {
 		con.OK("%s 完成", cmd)
 		return 0
 
+	case "run-job":
+		t, apps, err := targetArgs()
+		if err != nil {
+			return fail(err)
+		}
+		if len(apps) != 1 {
+			return fail(errors.New("用法：ferry run-job <目标> <应用>"))
+		}
+		run, err := e.RunJob(t, apps[0])
+		if js != nil {
+			if err != nil {
+				js.Result(false, run, err)
+				return 1
+			}
+			return ok(run)
+		}
+		if err != nil {
+			return fail(err)
+		}
+		con.OK("%s 运行完了（%.0f 秒）", apps[0], run.Sec)
+		return 0
+
 	case "releases":
 		t, apps, err := targetArgs()
 		if err != nil {
@@ -916,6 +954,9 @@ func run(argv []string, cio *cliIO) int {
 
 	case "local":
 		return localCmd(c, cio, e, js, con, fail)
+
+	case "audit":
+		return auditCmd(c, e, js, fail)
 
 	case "history":
 		t, apps, err := targetArgs()
@@ -1104,7 +1145,7 @@ func resultColor(con *ui.Console, s string) string {
 		return con.Paint("ok", s)
 	case "FAILED", "ROLLBACK_FAILED", "failed", "不健康":
 		return con.Paint("bad", s)
-	case "ROLLED_BACK", "SKIPPED", "activating", "auto-restart":
+	case "ROLLED_BACK", "SKIPPED", "REVERTED", "activating", "auto-restart":
 		return con.Paint("warn", s)
 	}
 	return s
@@ -1605,8 +1646,16 @@ func inspect(f *config.File) map[string]any {
 	if problems == nil {
 		problems = []config.MachineProblem{}
 	}
-	return map[string]any{"project": f.Project, "path": f.Path, "dir": f.Dir, "targets": targets, "apps": apps,
+	out := map[string]any{"project": f.Project, "path": f.Path, "dir": f.Dir, "targets": targets, "apps": apps,
 		"localVars": f.LocalVars, "problems": problems}
+	if r := f.Rollout; r != nil { // 部署到多台时的切换方式（部署对话框的初值）
+		ro := map[string]any{"batch": r.Batch, "canary": r.Canary, "onFailure": r.OnFailure}
+		if r.Observe != nil {
+			ro["observeSec"] = int(r.Observe.Std() / time.Second)
+		}
+		out["rollout"] = ro
+	}
+	return out
 }
 
 func cmdInit() int {

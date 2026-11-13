@@ -659,5 +659,6 @@ async function moveConfig(path: string) {
   min-width: 0;
   padding: 16px 20px;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 </style>

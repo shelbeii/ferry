@@ -26,8 +26,22 @@ type monitorIn struct {
 
 type backupIn struct {
 	targetIn
-	Files bool   `json:"files,omitempty" jsonschema:"列出服务器上的备份文件（文件名、大小、时间）"`
-	Name  string `json:"name,omitempty" jsonschema:"files 时只列这一项（backups 里的 name）"`
+	Files  bool   `json:"files,omitempty" jsonschema:"列出服务器上的备份文件（文件名、大小、时间）"`
+	Remote bool   `json:"remote,omitempty" jsonschema:"列出传到异地（S3）的备份文件；local 为 true 的服务器上也有"`
+	Name   string `json:"name,omitempty" jsonschema:"files、remote 时只列这一项（backups 里的 name）"`
+}
+
+type backupFetchIn struct {
+	targetIn
+	Name   string `json:"name" jsonschema:"哪一项备份（backup_status 结果里 items 的 name）"`
+	File   string `json:"file" jsonschema:"异地的备份文件名（backup_status 的 remote 列出的 name）"`
+	Reason string `json:"reason" jsonschema:"为什么要取回（显示在 Ferry 的确认框里）"`
+}
+
+type runJobIn struct {
+	targetIn
+	App    string `json:"app" jsonschema:"定时任务的应用名（配置里写了 job 的，list_projects 里有 schedule）"`
+	Reason string `json:"reason" jsonschema:"为什么现在运行（显示在 Ferry 的确认框里）"`
 }
 
 type backupRunIn struct {
@@ -53,7 +67,8 @@ func (s *server) addDataTools(m *mcp.Server) {
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "monitor_status", Title: "服务器告警",
-		Description: "服务器告警（服务器上的 Ferry 定时检查应用、磁盘、HTTPS 证书、防火墙、对外开放的端口、数据备份，有问题发到群里）：开没开、多久检查一次、发到哪、上次检查发现的问题。" +
+		Description: "服务器告警（服务器上的 Ferry 定时检查：应用停了或反复重启、健康检查不通、内存和负载太高、进程被 OOM 杀掉、磁盘、HTTPS 证书、防火墙、对外开放的端口、" +
+			"数据备份和传到异地、定时任务运行失败，有问题发到群里）：开没开、多久检查一次、发到哪、内存和负载的告警线、心跳地址（pingUrl，pingError 是上次报到失败的原因）、上次检查发现的问题。" +
 			"check 为 true 时现在检查一次，返回发现的问题（不发告警，没打开告警也能查）。打开、关闭告警要用户在 Ferry 的「服务器告警」里操作。",
 		Annotations: readOnly},
 		logged(s, "monitor_status", func(ctx context.Context, in monitorIn) (any, error) {
@@ -68,7 +83,8 @@ func (s *server) addDataTools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "backup_status", Title: "数据备份",
 		Description: "某台服务器上的数据备份（配置里的 backups：MySQL、PostgreSQL、目录、自己写的备份命令）：开没开、各项多久备份一次、下次什么时候、上次的结果（失败时有原因）、有几份、占多少；" +
-			"files 为 true 时列出备份文件。只读。现在备份一次用 backup_run；打开、关闭、恢复、删掉备份要用户在 Ferry 的「数据备份」里操作。",
+			"设了传到异地（upload）的，上次的结果里有 uploaded（传到了哪）或 uploadError（没传上去的原因）。" +
+			"files 为 true 时列出服务器上的备份文件，remote 为 true 时列出异地的。只读。现在备份一次用 backup_run，从异地取回用 backup_fetch；打开、关闭、恢复、删掉备份要用户在 Ferry 的「数据备份」里操作。",
 		Annotations: readOnly},
 		logged(s, "backup_status", func(ctx context.Context, in backupIn) (any, error) {
 			action := "status"
@@ -79,6 +95,9 @@ func (s *server) addDataTools(m *mcp.Server) {
 				return nil, fmt.Errorf("备份的名字不对：%q（用 backup_status 结果里 items 的 name）", in.Name)
 			}
 			return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
+				if in.Remote {
+					return e.RemoteBackups(t, in.Name)
+				}
 				return e.Backup(t, action, engine.BackupOptions{Name: in.Name})
 			})
 		}))
@@ -102,6 +121,45 @@ func (s *server) addDataTools(m *mcp.Server) {
 				return nil, err
 			}
 			return s.change(ctx, req, in.targetIn, approve.Request{Action: "backup-run", Backup: in.Name, Reason: in.Reason})
+		}))
+
+	how := "和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次在 Ferry 桌面版里确认，同意后由桌面版执行；生产服务器不允许。最多等 40 秒，没结束用 task_status 查。"
+	addTool(s, m, &mcp.Tool{Name: "backup_fetch", Title: "取回异地的备份",
+		Description: "把传到异地（S3 兼容存储）的一份备份取回服务器的备份目录（加密的自动解密），服务器上那份被清掉了、坏了时用。" +
+			"先用 backup_status 的 remote 列出异地的（local 为 true 的服务器上已经有了，不用取回）。取回后恢复要用户在 Ferry 的「数据备份」里做。" + how,
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)}},
+		loggedReq(s, "backup_fetch", func(ctx context.Context, req *mcp.CallToolRequest, in backupFetchIn) (any, error) {
+			_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
+				if err := allowedOn(e, t); err != nil {
+					return nil, err
+				}
+				return nil, e.CheckFetch(t, in.Name, in.File)
+			})
+			if err != nil {
+				return nil, err
+			}
+			return s.aiChange(ctx, req, in.targetIn, "backup-fetch", map[string]string{"name": in.Name, "file": in.File}, in.Reason)
+		}))
+
+	addTool(s, m, &mcp.Tool{Name: "run_job", Title: "现在运行定时任务",
+		Description: "现在运行一次定时任务（配置里写了 job 的应用，list_projects 里有 schedule）：等它运行完，返回结果（成功、退出码、用了多久）。" +
+			"不影响定时器，到点照样运行。先用 app_status 看它上次运行的结果、是不是正在运行。" + how,
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)}},
+		loggedReq(s, "run_job", func(ctx context.Context, req *mcp.CallToolRequest, in runJobIn) (any, error) {
+			_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
+				if err := allowedOn(e, t); err != nil {
+					return nil, err
+				}
+				tg, err := e.File.Target(t)
+				if err != nil {
+					return nil, err
+				}
+				return nil, e.CheckJob(tg, in.App)
+			})
+			if err != nil {
+				return nil, err
+			}
+			return s.aiChange(ctx, req, in.targetIn, "run-job", map[string]string{"app": in.App}, in.Reason)
 		}))
 }
 

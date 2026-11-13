@@ -124,6 +124,13 @@ func (a *Agent) rollbackService(s *proto.AppSpec, to, cur string) error {
 			return err
 		}
 		a.markStopped(s.Name, false)
+		if j := a.jobFor(s, id); j != nil {
+			// 那个版本是定时任务：换上它的定时器（时间表随版本），不启动服务
+			js := *s
+			js.Job = j
+			return a.applyJob(&js, id)
+		}
+		a.removeJobTimer(s.Unit)
 		a.autostart(s, s.Unit)
 		a.info(proto.EvStart, s.Name, "%s", s.Unit)
 		if err := a.Sys.Systemctl("restart", s.Unit); err != nil {
@@ -184,6 +191,7 @@ func (a *Agent) toLegacy(s *proto.AppSpec) error {
 		return errors.New("没有接管前的服务可恢复")
 	}
 	a.Sys.Systemctl("stop", s.Unit)
+	a.removeJobTimer(s.Unit)
 	a.rotateLogs(s, a.current(s.Name))
 	a.markRun(s, "")
 	saved := filepath.Join(a.legacyDir(s.Name), s.Unit)
@@ -264,6 +272,18 @@ func (a *Agent) control() int {
 			}
 			a.info(proto.EvStop, s.Name, "%s", s.Unit)
 			res := "OK"
+			if isJob(s) {
+				// 定时任务：关掉定时器，到点不再运行
+				if err := a.stopJob(s); err != nil {
+					a.fail(proto.EvFail, s.Name, "%v", err)
+					res = "FAILED"
+				} else {
+					a.markStopped(s.Name, true)
+				}
+				a.addHistory(proto.HistoryEntry{Action: "stop", App: s.Name, Release: a.current(s.Name), Result: res})
+				out.Apps = append(out.Apps, proto.AppOutcome{App: s.Name, Result: res})
+				continue
+			}
 			if err := a.Sys.Systemctl("stop", s.Unit); err != nil {
 				a.fail(proto.EvFail, s.Name, "%v", err)
 				res = "FAILED"
@@ -365,6 +385,9 @@ func (a *Agent) startOne(s *proto.AppSpec, action string) error {
 		return err
 	}
 	a.markStopped(s.Name, false)
+	if isJob(s) {
+		return a.startJob(s) // 启动、重启 = 打开定时器（不马上运行）
+	}
 	if action == "start" && isRunning(a.Sys.UnitProps(s.Unit)) {
 		a.info(proto.EvReady, s.Name, "已在运行")
 		a.autostart(s, s.Unit)
@@ -554,6 +577,10 @@ func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.
 			st.Autostart = &off
 		}
 		st.Stopped = st.Current != nil && a.isStopped(s.Name)
+		if isJob(s) && st.Current != nil {
+			st.Job = a.jobStatus(s)
+			st.Autostart = nil // 不开机自启：到点由定时器启动
+		}
 		st.Port = healthPort(s.Health)
 		if st.Port == "" && servedStatic(s) {
 			_, port := splitSiteListen(s.SitePort)
@@ -846,4 +873,18 @@ func osRelease() string {
 		}
 	}
 	return runtime.GOOS
+}
+
+// jobFor 版本 id 是定时任务时它的定时器（配置里现在的 job，或那个版本保存的定时器）；不是定时任务时为 nil。
+func (a *Agent) jobFor(s *proto.AppSpec, id string) *proto.JobSpec {
+	text := a.jobTimerText(s, id)
+	if text == nil {
+		return nil
+	}
+	if s.Job != nil {
+		j := *s.Job
+		j.TimerText = string(text)
+		return &j
+	}
+	return &proto.JobSpec{Timer: strings.TrimSuffix(s.Unit, ".service") + "-schedule.timer", TimerText: string(text)}
 }

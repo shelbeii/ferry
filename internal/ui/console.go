@@ -303,6 +303,10 @@ type JSON struct {
 	enc *json.Encoder
 	// Verbose 时构建输出逐行以 kind=build 输出
 	Verbose bool
+	// Answers 用户的回答（桌面版经 ferry serve 的 input 送来，一行 yes 或 no）；为空时不能中途问用户
+	Answers io.Reader
+	askMu   sync.Mutex
+	ans     *bufio.Reader
 }
 
 // NewJSON 输出到 w。
@@ -352,6 +356,24 @@ type jsonLineWriter struct {
 func (w *jsonLineWriter) Write(b []byte) (int, error) {
 	w.buf = splitLines(append(w.buf, b...), func(l string) { w.j.emit("build", map[string]any{"msg": l}) })
 	return len(b), nil
+}
+
+// Ask 中途问用户（kind=ask，桌面版弹窗），等回答；没有回答的通道时 asked 为 false。任务取消时算「不」。
+func (j *JSON) Ask(prompt string) (yes, asked bool) {
+	if j.Answers == nil {
+		return false, false
+	}
+	j.askMu.Lock()
+	defer j.askMu.Unlock()
+	if j.ans == nil {
+		j.ans = bufio.NewReader(j.Answers)
+	}
+	j.emit("ask", map[string]any{"msg": prompt})
+	line, err := j.ans.ReadString('\n')
+	if err != nil {
+		return false, true
+	}
+	return strings.TrimSpace(line) == "yes", true
 }
 
 // Confirm JSON 模式下不交互：需要确认时请带 --yes。

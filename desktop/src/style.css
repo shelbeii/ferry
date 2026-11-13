@@ -5,12 +5,17 @@ body,
   height: 100%;
 }
 
-/* 应用窗口本身不滚动：滚动都在内部区域（项目页、表格、编辑器、日志）里。
-   否则挂在 body 上的元素（如编辑器的提示框容器）会让页面短暂可滚动——
-   关闭对话框时 Element Plus 先解除滚动锁定、编辑器随后才销毁，右侧会闪出滚动条。 */
-html,
+html {
+  overflow: clip;
+}
+
+/* 滚动由工作区、列表和弹层内部处理。覆盖 Element Plus 的滚动锁，
+   防止编辑器挂到 body 的提示层触发滚动条宽度补偿或让焦点切换带动整个页面。 */
 body {
-  overflow: hidden;
+  position: fixed;
+  inset: 0;
+  width: auto !important;
+  overflow: clip !important;
 }
 
 /* 主色：靛蓝。浅色、深色主题各一套（Element Plus 的浅色变体在深色主题里是和背景混色） */
@@ -386,6 +391,9 @@ html.dark.cg-on .el-overlay { background-color: rgb(3 8 18 / .44); }
 /* Element Plus 弹出、关闭对话框和确认框时，让遮罩和外层整体淡入淡出。外层半透明期间，浏览器不给里面的玻璃做背后的磨砂：
    背后的文字清楚地透出来，动画结束才突然变模糊。所以遮罩只渐变底色，由弹窗自己淡入淡出（自己半透明不影响磨砂）。
    位移用 translate，不和可拖动对话框写在 transform 上的位置冲突。 */
+/* 对话框打开、关闭的动画期间，遮罩的底色挪到 ::before 上、只渐变它的透明度（fx/dialogParticles.ts 的 fadeMask） */
+.el-overlay.ferry-fx-mask { background-color: transparent !important; }
+.el-overlay.ferry-fx-mask::before { content: ''; position: fixed; inset: 0; background-color: var(--ferry-fx-mask); pointer-events: none; }
 html.cg-on .el-overlay.dialog-fade-enter-active { animation: ferry-mask-in var(--el-transition-duration); }
 html.cg-on .el-overlay.dialog-fade-leave-active { animation: ferry-mask-in var(--el-transition-duration) reverse; }
 html.cg-on .el-overlay.fade-in-linear-enter-from,
@@ -407,9 +415,6 @@ html.cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip)
 }
 html.dark.cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) { border-color: rgb(207 223 255 / .16); }
 .el-popper { box-sizing: border-box; max-width: calc(100vw - 24px); }
-/* 整个界面固定在窗口里，body 从不出现滚动条。但 YAML 编辑器把悬停说明的容器挂在 body 最下面（窗口之外），
-   Element Plus 打开弹窗时以为 body 有滚动条，把 body 宽度减去一条滚动条（10px）：主页整体缩一下，关掉又弹回去 */
-body.el-popup-parent--hidden { width: 100% !important; }
 html.cg-on :is(.el-popper, .cm-tooltip) { border-radius: 14px; color: var(--el-text-color-primary); }
 html.cg-on .el-popper .el-popper__arrow { display: none; }
 html.cg-on .el-popover { line-height: 1.7; overflow-wrap: anywhere; }
@@ -559,6 +564,10 @@ html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__poppe
 }
 html.cg-on :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .cg-menu-popover)[data-popper-placement^=top]:is(.el-zoom-in-top-enter-from, .el-zoom-in-top-leave-active) {
   transform: translateY(6px) scale(.9);
+}
+/* 下拉框的粒子动画（html.fx-particles，见 fx/popperParticles.ts）：弹出层不再缩放弹出，改由粒子收拢、弹出层淡入 */
+html.fx-particles :is(.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-popover).el-popper:is(.el-zoom-in-top-enter-from, .el-zoom-in-top-leave-active) {
+  transform: none;
 }
 /* 液态玻璃的分段切换（html.cg-on）：所有 el-radio-button 组成的分段是一条浅色凹槽，选中项是凹槽里一块白色的玻璃选中块
    （四边各缩进 2px，凹槽和按钮的大小都和原来一样，和旁边的输入框、按钮对齐）；切换时选中块变成一颗清透的液滴滑过去

@@ -87,6 +87,13 @@ func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
 	for i := range req.Apps {
 		a.applySlot(&req.Apps[i])
 	}
+	code = a.dispatch(cmd)
+	a.auditRun(cmd, code)
+	return code
+}
+
+// dispatch 按命令名执行。
+func (a *Agent) dispatch(cmd string) int {
 	switch cmd {
 	case "preflight":
 		return a.preflight()
@@ -100,6 +107,8 @@ func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
 		return a.rollback()
 	case "control":
 		return a.control()
+	case "runjob":
+		return a.runjobCmd()
 	case "status":
 		return a.status()
 	case "appinfo":
@@ -162,6 +171,8 @@ func (a *Agent) Run(cmd string, req *proto.Request) (code int) {
 		return a.monitor()
 	case "backup":
 		return a.backup()
+	case "audit":
+		return a.auditCmd()
 	}
 	return a.result(proto.CodeBadInput, "未知命令："+cmd, nil)
 }

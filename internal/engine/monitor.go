@@ -17,6 +17,9 @@ type MonitorOptions struct {
 	IntervalMin int
 	DiskPct     int
 	CertDays    int
+	MemPct      int
+	LoadX       int
+	PingURL     string // 心跳地址（Healthchecks.io、Uptime Kuma 的 Push 监控）；空 = 不用
 }
 
 // Monitor 服务器监控：on 打开（把告警发到的地方和设置存到服务器上，装上定时器）、off 关闭、status 查看、
@@ -28,13 +31,16 @@ func (e *Engine) Monitor(target, action string, o MonitorOptions) (proto.Monitor
 		return out, err
 	}
 	spec := proto.MonitorSpec{Action: action, Project: e.File.Project, Target: t.Name, Host: t.Host,
-		IntervalMin: o.IntervalMin, DiskPct: o.DiskPct, CertDays: o.CertDays}
+		IntervalMin: o.IntervalMin, DiskPct: o.DiskPct, CertDays: o.CertDays, MemPct: o.MemPct, LoadX: o.LoadX, PingURL: strings.TrimSpace(o.PingURL)}
 	if action == "on" {
 		if spec.Channels, err = e.monitorChannels(o.Channels); err != nil {
 			return out, err
 		}
 	}
-	err = e.withSession(target, []string{}, func(s *session, _ []proto.AppSpec) error {
+	err = e.withSession(target, []string{}, func(s *session, specs []proto.AppSpec) error {
+		if action == "on" || action == "check" {
+			spec.Apps = monitorApps(specs)
+		}
 		return s.callData("monitor", &proto.Request{Monitor: &spec}, &out)
 	})
 	return out, err
@@ -72,4 +78,24 @@ func (e *Engine) monitorChannels(want []string) ([]proto.MonitorChannel, error) 
 		return nil, errors.New("还没有地方发告警：先在设置 → 通知里添加企业微信、钉钉、飞书群机器人或自定义接口")
 	}
 	return out, nil
+}
+
+// monitorApps 各应用单元平时也要通过的健康检查（不停机发布的两个槽位各一个）。
+func monitorApps(specs []proto.AppSpec) []proto.MonitorApp {
+	var out []proto.MonitorApp
+	add := func(app, unit string, h proto.Health) {
+		if unit != "" && (h.TCP != "" || h.HTTP != "") {
+			out = append(out, proto.MonitorApp{App: app, Unit: unit, Health: h})
+		}
+	}
+	for _, s := range specs {
+		if s.ZD != nil {
+			for _, sl := range s.ZD.Slots {
+				add(s.Name, sl.Unit, sl.Health)
+			}
+			continue
+		}
+		add(s.Name, s.Unit, s.Health)
+	}
+	return out
 }

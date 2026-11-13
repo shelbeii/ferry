@@ -244,7 +244,7 @@ func (e *Engine) aiSystemPrompt(s *session, t *config.Target, mode string) strin
 	if mode == AIConfirm {
 		b.WriteString(`你能做的：
 - 查看：只读命令` + map[bool]string{true: "", false: "、应用状态和日志、已装的软件、端口和防火墙、登录用户、部署前检查、部署会带上线的改动、构建日志"}[t.Plain] + `。这些自动执行。
-- 改动：执行改动服务器的命令、写文件` + map[bool]string{true: "", false: "、部署、启停 / 重启 / 回滚项目里的应用、用软件模板安装软件、启停 / 升级 / 恢复 Ferry 装的软件、给 Ferry 装的数据库设置数据备份、放行 / 关闭端口、打开防火墙、断开 SSH 连接、现在备份"}[t.Plain] + `、保存软件模板。每个改动都会先把完整内容给用户看，用户同意后才执行；用户也可能拒绝。
+- 改动：执行改动服务器的命令、写文件` + map[bool]string{true: "", false: "、部署、启停 / 重启 / 回滚项目里的应用、用软件模板安装软件、启停 / 升级 / 恢复 Ferry 装的软件、给 Ferry 装的数据库设置数据备份、放行 / 关闭端口、打开防火墙、断开 SSH 连接、现在备份、把异地的备份取回服务器、现在运行定时任务"}[t.Plain] + `、保存软件模板。每个改动都会先把完整内容给用户看，用户同意后才执行；用户也可能拒绝。
 
 做法：
 1. 先查清楚现状再动手。动手前用一两句话说明计划（分几步、每步做什么）。
@@ -314,14 +314,29 @@ func (e *Engine) aiSystemPrompt(s *session, t *config.Target, mode string) strin
 		b.WriteString("python、node 应用的依赖装在 apps/<应用>/deps/ 下（版本目录里的 .venv、node_modules 链接到这里），由 Ferry 在部署时安装，不要手动改。\n")
 		if len(e.File.Backups) > 0 {
 			b.WriteString("项目配置了数据备份，备份文件在 <部署目录>/backups/<名字>/ 下（用 backup_status 看）。\n")
+			for _, bk := range e.File.Backups {
+				if bk.AppliesTo(t.Name) && bk.Upload != nil && bk.Upload.S3 != nil {
+					b.WriteString("有的备份设置了传到异地（S3 兼容存储），backup_status 的 remote 列出异地的。\n")
+					break
+				}
+			}
 		}
 		b.WriteString("项目里的应用（名称 · 类型 · systemd 单元）：\n")
+		jobs := false
 		for _, a := range e.File.Apps {
 			unit := a.Service.Unit
 			if a.Type == "static" && a.Static.Port == "" {
 				unit = "（静态文件，由服务器上的 nginx 提供）"
 			}
+			if a.Job != nil {
+				jobs = true
+				unit += "（定时任务，按 " + strings.Join(a.Job.Schedule, "、") + " 运行）"
+			}
 			fmt.Fprintf(&b, "- %s · %s · %s\n", a.Name, a.Type, unit)
+		}
+		if jobs {
+			b.WriteString("定时任务不常驻：到点由 systemd 定时器（<单元名去掉 .service>-schedule.timer）运行一次，运行完就结束，不在运行是正常的。" +
+				"上次运行的结果、下次运行时间看 app_status 的 job；输出用 app_logs 的 journal 看。\n")
 		}
 		b.WriteString("查看应用优先用 app_status、app_logs，比自己拼命令可靠。\n")
 		b.WriteString(ConfigToolsHelp)
@@ -452,9 +467,10 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 		return tools
 	}
 	tools = append(tools, ai.Tool{
-		Name:        "app_status",
-		Description: "项目里各应用在这台服务器上的状态：是否运行、进程号、监听端口、健康检查、当前版本与部署时间、问题。",
-		Schema:      schema(map[string]any{}),
+		Name: "app_status",
+		Description: "项目里各应用在这台服务器上的状态：是否运行、进程号、监听端口、健康检查、当前版本与部署时间、问题。" +
+			"定时任务（写了 job 的应用）不常驻，看 job：定时器开没开、下次运行时间、上次运行的结果（退出码、用了多久）。",
+		Schema: schema(map[string]any{}),
 		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
 			st, err := e.Status(t.Name, nil)
 			if err != nil {
@@ -559,9 +575,38 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			return toJSON(r), nil
 		},
 	}, ai.Tool{
+		Name: "audit_log",
+		Description: "这台服务器上的审计记录：谁、什么时候做了什么改动（部署、终端、保存 / 删除文件、数据库里执行的语句、软件、防火墙、告警、备份……）、成功没有，最近的在前。" +
+			"「谁改了这个配置文件」「昨天谁动过数据库」用这个。终端只记开关，文件不记内容。",
+		Schema: schema(map[string]any{
+			"kind":       str("只看这种操作（deploy、terminal-open、file-save、file-remove、db-exec、software-config……）；以 - 结尾按前缀，如 file-"),
+			"actor":      str("操作人里含这几个字"),
+			"sinceHours": map[string]any{"type": "integer", "description": "只看最近多少小时的；不填 = 不限"},
+			"limit":      map[string]any{"type": "integer", "description": "最多多少条，默认 30，最多 200"},
+		}),
+		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
+			var a struct {
+				Kind, Actor       string
+				SinceHours, Limit int
+			}
+			json.Unmarshal(in, &a)
+			if a.Limit <= 0 || a.Limit > 200 {
+				a.Limit = 30
+			}
+			q := proto.AuditQuery{Kind: a.Kind, Actor: a.Actor, Limit: a.Limit}
+			if a.SinceHours > 0 {
+				q.Since = time.Now().Add(-time.Duration(a.SinceHours) * time.Hour)
+			}
+			r, err := e.AuditLog(t.Name, q)
+			if err != nil {
+				return "", err
+			}
+			return toJSON(r), nil
+		},
+	}, ai.Tool{
 		Name: "server_problems",
-		Description: "现在检查一次这台服务器（和服务器告警同一套检查：应用停了或反复重启、磁盘快满、HTTPS 证书快到期、防火墙被关、新出现对外开放的端口、数据备份失败），" +
-			"返回发现的问题。不发告警。",
+		Description: "现在检查一次这台服务器（和服务器告警同一套检查：应用停了或反复重启、健康检查不通、内存或负载太高、进程被 OOM 杀掉、磁盘快满、HTTPS 证书快到期、" +
+			"防火墙被关、新出现对外开放的端口、数据备份或传到异地失败、定时任务运行失败或定时器被关），返回发现的问题和告警设置（含心跳地址上次报到的结果）。不发告警。",
 		Schema: schema(map[string]any{}),
 		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
 			r, err := e.Monitor(t.Name, "check", MonitorOptions{})
@@ -572,17 +617,37 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 		},
 	}, ai.Tool{
 		Name: "backup_status",
-		Description: "这台服务器上的数据备份（配置里的 backups）：开没开、各项上次备份的结果（失败时有原因）、下次什么时候、有几份；files 为 true 时列出备份文件。" +
-			"改数据库、数据目录之前先看有没有可用的备份，没有就用 backup_run 现在备份一次（允许改动时）；恢复备份要用户在 Ferry 的「数据备份」里做。",
-		Schema: schema(map[string]any{"files": map[string]any{"type": "boolean", "description": "列出备份文件"}}),
+		Description: "这台服务器上的数据备份（配置里的 backups）：开没开、各项上次备份的结果（失败时有原因；设了传到异地的还有 uploaded / uploadError）、下次什么时候、有几份；" +
+			"files 为 true 时列出服务器上的备份文件，remote 为 true 时列出传到异地（S3）的（local 为 true 的服务器上也有）。" +
+			"改数据库、数据目录之前先看有没有可用的备份，没有就用 backup_run 现在备份一次（允许改动时）；服务器上那份没了时用 backup_fetch 从异地取回；恢复备份要用户在 Ferry 的「数据备份」里做。",
+		Schema: schema(map[string]any{
+			"files":  map[string]any{"type": "boolean", "description": "列出服务器上的备份文件"},
+			"remote": map[string]any{"type": "boolean", "description": "列出传到异地的备份文件"},
+			"name":   str("只看这一项（items 的 name）"),
+		}),
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
-			var a struct{ Files bool }
-			json.Unmarshal(in, &a)
+			var a struct {
+				Files, Remote bool
+				Name          string
+			}
+			if err := parseArgs(in, &a); err != nil {
+				return "", err
+			}
+			if a.Name != "" && !reBackupArg.MatchString(a.Name) {
+				return "", fmt.Errorf("备份的名字不对：%q", a.Name)
+			}
+			if a.Remote {
+				r, err := e.RemoteBackups(t.Name, a.Name)
+				if err != nil {
+					return "", err
+				}
+				return toJSON(r), nil
+			}
 			action := "status"
 			if a.Files {
 				action = "list"
 			}
-			r, err := e.Backup(t.Name, action, BackupOptions{})
+			r, err := e.Backup(t.Name, action, BackupOptions{Name: a.Name})
 			if err != nil {
 				return "", err
 			}
@@ -636,8 +701,9 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 	}
 	tools = append(tools, e.aiSoftwareLife(t)...)
 	return append(tools, ai.Tool{
-		Name:        "app_control",
-		Description: "启动、停止或重启项目里的应用（走 Ferry 的流程：等健康检查通过）。",
+		Name: "app_control",
+		Description: "启动、停止或重启项目里的应用（走 Ferry 的流程：等健康检查通过）。" +
+			"定时任务（写了 job 的）：停止 = 关掉定时器（到点不再运行），启动 = 打开定时器（不会马上运行；要马上运行用 run_job）。",
 		Schema: schema(map[string]any{
 			"apps":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "应用名"},
 			"action": map[string]any{"type": "string", "enum": []string{"start", "stop", "restart"}},

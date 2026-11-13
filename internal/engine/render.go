@@ -336,6 +336,9 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 			return s, err
 		}
 	}
+	if a.Job != nil {
+		s.Job = jobSpec(f, t, a, s.Unit)
+	}
 	return s, nil
 }
 
@@ -452,7 +455,11 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	line("%s — 由 ferry 生成，手工修改会在下次部署时被覆盖", agent.ManagedMarker)
-	if d := svc.AutostartDelay; svc.AutostartOn() && d != nil {
+	job := a.Job
+	if job != nil {
+		// 定时任务：服务器告警按 job=yes 认出来（平时停着是正常的，看上次运行的结果）
+		line("# project=%s app=%s target=%s job=yes", f.Project, a.Name, t.Name)
+	} else if d := svc.AutostartDelay; svc.AutostartOn() && d != nil {
 		// 服务器告警：开机自启由定时器做（服务本身没 enable），开机后这段时间里还没起来不算停了
 		line("# project=%s app=%s target=%s bootDelay=%d", f.Project, a.Name, t.Name, int(d.Std().Seconds()))
 	} else if svc.AutostartOn() {
@@ -469,6 +476,9 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	}
 	r := svc.Restart
 	restart := r.WhenOr()
+	if job != nil {
+		restart = config.RestartNo // 定时任务：失败了等下次运行
+	}
 	if restart != config.RestartNo && r != nil && r.Max > 0 {
 		line("StartLimitIntervalSec=%s", sdSeconds(r.WithinOr()))
 		line("StartLimitBurst=%d", r.Max)
@@ -481,7 +491,11 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	}
 	line("")
 	line("[Service]")
-	line("Type=simple")
+	if job != nil {
+		line("Type=oneshot")
+	} else {
+		line("Type=simple")
+	}
 	line("User=%s", appUser(t, a))
 	line("WorkingDirectory=%s", sdEscapePercent(workdir))
 	for _, ef := range envFiles {
@@ -502,7 +516,12 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	if a.Type == proto.TypeJava {
 		line("SuccessExitStatus=143")
 	}
-	line("Restart=%s", restart)
+	if job != nil {
+		// oneshot 运行的整个过程都算「启动」：超过就停掉（老 systemd 默认只给 90 秒，一定要写）
+		line("TimeoutStartSec=%s", sdSeconds(job.TimeoutOr()))
+	} else {
+		line("Restart=%s", restart)
+	}
 	if restart != config.RestartNo {
 		line("RestartSec=%s", sdSeconds(r.DelayOr()))
 		if r != nil && r.Max > 0 {
@@ -518,6 +537,9 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	for _, l := range extra["service"] {
 		line("%s", oneLine(l))
 	}
+	if job != nil {
+		return b.String(), nil // 不开机自启：到点由定时器启动
+	}
 	line("")
 	line("[Install]")
 	line("WantedBy=multi-user.target")
@@ -525,6 +547,34 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 		line("%s", oneLine(l))
 	}
 	return b.String(), nil
+}
+
+// JobTimer 定时任务的定时器单元名：shop-report.service → shop-report-schedule.timer
+// （不叫 shop-report.timer：那个名字是开机延迟启动用的）。
+func JobTimer(unit string) string { return strings.TrimSuffix(unit, ".service") + "-schedule.timer" }
+
+// jobSpec 定时任务的定时器。
+func jobSpec(f *config.File, t *config.Target, a *config.App, unit string) *proto.JobSpec {
+	j := a.Job
+	var b strings.Builder
+	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
+	line("%s — 由 ferry 生成：按时运行 %s，手工修改会在下次部署时被覆盖", agent.ManagedMarker, unit)
+	line("# project=%s app=%s target=%s job=yes", f.Project, a.Name, t.Name)
+	line("[Unit]")
+	line("Description=%s %s（定时）", oneLine(f.Project), oneLine(a.Name))
+	line("")
+	line("[Timer]")
+	for _, c := range j.Schedule {
+		line("OnCalendar=%s", oneLine(c))
+	}
+	line("Persistent=%t", j.CatchUpOn())
+	line("AccuracySec=1s")
+	line("Unit=%s", unit)
+	line("")
+	line("[Install]")
+	line("WantedBy=timers.target")
+	return &proto.JobSpec{Timer: JobTimer(unit), TimerText: b.String(), Schedule: append([]string(nil), j.Schedule...),
+		RunOnDeploy: j.RunOnDeploy, TimeoutSec: int(j.TimeoutOr() / time.Second)}
 }
 
 // sdSeconds systemd 的时长：整秒写 5、600，不是整秒写 500ms。

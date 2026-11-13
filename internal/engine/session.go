@@ -364,12 +364,26 @@ func (s *session) call(cmd string, req *proto.Request) (*proto.Result, error) {
 		}
 		return nil, continuesNote(cmd, fmt.Errorf("agent %s 没有返回结果：%s", cmd, msg))
 	}
+	s.auditLocal(cmd, req, result)
 	return result, nil
+}
+
+// auditLocal 改动服务器的 agent 命令（服务器上 agent 自己记了审计）：这台电脑上也记一份。
+func (s *session) auditLocal(cmd string, req *proto.Request, r *proto.Result) {
+	kind, object, detail, ok := proto.AuditOf(cmd, req)
+	if !ok {
+		return
+	}
+	var err error
+	if r.RC != proto.CodeOK {
+		err = errors.New(r.Msg)
+	}
+	saveLocalAudit(s.auditEntry(kind, object, detail, err))
 }
 
 // changingCmds 改动服务器的 agent 命令：本机取消或连接断开后，agent 在服务器上照常做完（不会停在半路）。
 var changingCmds = map[string]string{
-	"deploy": "（失败时自动回滚）", "rollback": "（失败时切回原版本）", "control": "", "runtime": "",
+	"deploy": "（失败时自动回滚）", "rollback": "（失败时切回原版本）", "control": "", "runtime": "", "runjob": "（定时任务在服务器上照常跑完）",
 	"swinstall": "", "swcontrol": "", "swremove": "", "portset": "", "fwenable": "（3 分钟内没确认会自动关掉防火墙）", "fwdisable": "",
 }
 

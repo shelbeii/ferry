@@ -59,6 +59,7 @@ apps:
 | `targets` | 目标服务器 |
 | `apps` | 应用（列表） |
 | `backups` | 数据备份（列表）：数据库、目录、自己写的备份命令。见文末「数据备份」 |
+| `rollout` | 一次部署到几台服务器时怎么切换：分批、先发几台、失败时回滚。见「部署到多台（rollout）」 |
 
 部署记录、部署通知里的提交信息（提交号、分支、是否有未提交修改）按应用分别读：先看应用的构建目录（`workdir`），再看产物所在的目录，用它所在的 git 仓库；都不在 git 仓库里的应用（如没有用 git 管理的前端）不记提交。配置文件所在的仓库不算，所以配置文件放在后端仓库里时，前端不会记成后端的提交。一次部署里的应用来自不同的仓库时，通知里各写各的。`git.requireClean` 检查这次部署用到的每个仓库。
 
@@ -485,6 +486,64 @@ static:
 
 静态目录打成 tar.gz 上传，服务器解压时拒绝绝对路径、`..`、链接和设备文件。版本目录对所有用户可读（nginx 通常不是运行用户）。
 
+## 部署到多台（rollout）
+
+`ferry deploy a,b,c`（或桌面版部署对话框里勾几台）时：先全部预检、确认一次，构建一次，同时上传到各台，最后再切换。切换默认一台一台来，一台失败就停下，后面的不部署（已上传的文件删掉），前面已经切换好的保持新版本。
+
+`rollout` 改切换的方式：
+
+```yaml
+rollout:
+  batch: 2            # 一次同时切换几台（同一批同时切换，一批做完再做下一批），默认 1
+  canary: 1           # 先切换几台，成功后暂停，确认了再部署其余的；默认 0（不暂停）
+  observe: 2m         # 先切换的那几台上线后观察多久：这期间应用一直要在运行、健康检查一直要通过，默认不观察
+  onFailure: rollback # 有一台失败时：stop 停下（默认）；rollback 再把这次已经切换的回滚到部署前的版本
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `batch` | 1～50。台数多、每台启动慢（Java 常要几十秒）时，同时切换省时间：4 台、`batch: 2` 用的时间约等于 2 台。同时切换的几台，输出里应用名后面带服务器名（`api@b`） |
+| `canary` | 0～50。先部署这几台（按命令里写的顺序取前面的），成功后：桌面版弹窗问「继续部署剩下的？」；命令行在终端里问；加了 `--yes` 时不问，观察完直接继续 |
+| `observe` | 0～1h，要和 `canary` 一起写。观察期间每 10 秒看一次这几台的应用，有一次没在运行或健康检查不通过就算失败（按 `onFailure` 处理） |
+| `onFailure` | `rollback`：有一台失败（或先发的之后选了不继续）时，把这次已经切换好的各台回滚到部署前在运行的版本，让各台保持同一个版本；失败的那台 Ferry 本来就会切回原来的版本。第一次部署（之前没有版本）的回滚不了，会列出来要人工处理。回滚会记进部署历史，通知里写「部署成功后又回滚到部署前的版本」 |
+
+命令行可以临时改：`ferry deploy a,b,c --batch 2 --canary 1 --observe 2m --on-failure rollback`；没写的用 `rollout` 的。桌面版部署对话框勾了几台时有「部署方式」，初值来自 `rollout`。只部署一台时这些都不起作用。
+
+编程软件经 MCP 也能一次部署到几台（`deploy` 的 `targets`，和切换方式），同样要在 Ferry 里确认；先发的上线后也是在 Ferry 里弹窗问你。
+
+## 定时任务（job）
+
+每天跑的报表、清理脚本、数据同步这类「到点运行一次就结束」的程序，写成一个应用、加上 `job`：照常构建、部署、回滚、看日志，只是不常驻——到点由 systemd 定时器启动，运行完就结束。java、binary、python、node、dotnet 都可以。
+
+```yaml
+apps:
+  - name: report
+    type: java
+    artifact: {path: report/target/report.jar}
+    service:
+      args: [--date=yesterday]
+      envFile: /etc/shop/report.env
+    job:
+      schedule: "*-*-* 02:30:00"     # 什么时候运行，可以写几个：[daily, "Mon..Fri 12:00"]
+      timeout: 1h                    # 一次最长运行多久，超过就停掉（算失败），默认 6h
+      catchUp: true                  # 关机、停着时错过的那次，开机后补跑一次（默认）
+      runOnDeploy: false             # 部署、回滚后马上运行一次，成功才算部署成功（数据迁移这类）
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `job.schedule` | `daily`（每天 0 点）、`hourly`、`weekly`、`minutely`，或 systemd 的 OnCalendar：`*-*-* 02:30:00`（每天 2:30）、`Mon..Fri 09:00`（工作日 9 点）、`*:0/15`（每 15 分钟）、`*-*-01 03:00`（每月 1 号 3 点） |
+| `job.timeout` | 一次最长运行多久，1s～168h，默认 6h |
+| `job.catchUp` | 错过的补跑一次，默认 true |
+| `job.runOnDeploy` | 部署、回滚后马上运行一次，失败就回滚这次部署 |
+
+- 服务器上：服务单元 `<项目>-<应用>.service` 是 `Type=oneshot`、不开机自启；定时器 `<项目>-<应用>-schedule.timer`（`systemctl list-timers` 能看到）。服务单元和定时器都**随版本保存**：回滚后用那个版本的程序和时间表。
+- 不能和 `service.health`、`restart`、`autostart`、`autostartDelay`、`zeroDowntime` 一起写（运行完就退出，没有接口可查；成功与否看退出码，0 是成功）。
+- **现在运行**：桌面版应用卡片「更多 → 现在运行」，或 `ferry run-job <目标> <应用>`：马上运行一次，输出实时显示，等它结束；不影响定时器，到点照样运行。
+- **停止 / 启动**：在 Ferry 里「停止」= 关掉定时器（到点不再运行，正在运行的这次也停掉），「启动」= 打开。部署后定时器总是打开的。
+- 应用卡片上显示下次运行的时间和上次运行的结果；「日志」里能看每次运行的输出。
+- 开着服务器告警时：上次运行失败（退出码不是 0、超时、被杀）、定时器被关了（不是在 Ferry 里停的）会告警，下次成功后发恢复通知。
+
 ## 数据备份（backups）
 
 备份数据库、应用的数据目录，或用自己写的命令备份。**写在配置里不会自动开始**：在桌面版的「数据备份」里打开（或 `ferry backup <目标> on`）后，服务器上按时备份；随时可以关掉，关掉后已有的备份文件留着。关着的时候「现在备份」、恢复、下载照样能用。
@@ -497,6 +556,11 @@ backups:
     schedule: daily                  # daily（每天 3 点，默认）| hourly | weekly | systemd 的 OnCalendar，如 "*-*-* 02:30:00"
     keep: 7                          # 保留最近几份，默认 7
     beforeDeploy: true               # 部署前先备份一次（失败就不部署）
+    upload:                          # 每次定时、手动备份完，再加密传一份到对象存储（可以不写）
+      s3:
+        endpoint: https://oss-cn-hangzhou.aliyuncs.com   # 腾讯云 COS：https://cos.ap-guangzhou.myqcloud.com；MinIO：http://10.0.0.5:9000
+        bucket: shop-backups         # 先在对象存储的控制台建好
+      keep: 30                       # 那边留几份，默认和 keep 一样
   - name: pg
     postgres: {database: app, user: app, host: 127.0.0.1, port: 5432}
     envFile: /etc/app/pg.env
@@ -519,12 +583,45 @@ backups:
 | `keep` | 保留最近几份 |
 | `beforeDeploy` | 部署前备份一次；失败就不部署 |
 | `targets` | 只在这些目标上 |
+| `upload` | 传到异地（见下面） |
 
 - 备份文件在服务器的 `<root>/backups/<名字>/<名字>-20261025-030000.sql.gz`（只有 root 能读），每项一个 systemd 定时器 `ferry-backup-*.timer`（这台电脑不用开着）。数据库用 `mysqldump --single-transaction`（不锁表）、`pg_dump --clean`，都压缩成 gz。
 - **恢复**：在「数据备份」里选一份点「恢复」，或 `ferry backup <目标> restore <名字> <文件>`。恢复前先自动备份一份现在的（文件名带 `pre-restore`），恢复错了还能用它恢复回来；目录先解到旁边，全部解好后再换上（备份之后才有的文件会去掉）。恢复期间最好先停掉用这些数据的应用。
 - **下载到本机**：「数据备份」里点「下载」，或 `ferry backup <目标> download <名字> <文件> [本机目录]`。
 - 定时备份失败了：开着服务器告警（`ferry monitor`）时会发告警，恢复后发恢复通知；「数据备份」里也能看到每项上次的结果。
 - 改了配置里的 backups：重新打开一次，或部署一次（开着的话部署时会同步到服务器）。
+
+### 传到异地（upload）
+
+备份和数据放在同一台服务器上，服务器磁盘坏了、被误删、被勒索软件加密、云主机欠费释放时会一起没。写上 `upload` 后，每次**定时、手动**备份成功，Ferry 再把这一份**加密**后传到 S3 兼容的对象存储（阿里云 OSS、腾讯云 COS、七牛、MinIO、AWS S3……），并删掉那边多出来的旧备份。部署前、恢复前自动做的那份不传（不拖慢部署、恢复）。
+
+| 字段 | 说明 |
+| --- | --- |
+| `s3.endpoint` | 对象存储的地址：`https://oss-cn-hangzhou.aliyuncs.com`、`https://cos.ap-guangzhou.myqcloud.com`、`http://10.0.0.5:9000` |
+| `s3.bucket` | 桶（先在控制台建好） |
+| `s3.region` | 签名用的区域；不写时按地址猜（OSS、COS、AWS 能猜出来），猜不到用 `us-east-1` |
+| `s3.prefix` | 放在桶里的哪个目录，默认 `ferry/<项目>/<目标>/` |
+| `s3.pathStyle` | 用 `http://地址/桶/文件` 的形式（MinIO 常用）；地址是 IP 或带端口时自动用 |
+| `encrypt` | 上传前加密，默认 `true` |
+| `keep` | 那边留几份，默认和 `keep` 一样 |
+
+访问密钥和加密的密码写在这一项的 `envFile` 里（服务器上的文件，只有 root 能读），不写进 ferry.yaml：
+
+```
+S3_ACCESS_KEY_ID=…            # 也认 AWS_ACCESS_KEY_ID
+S3_SECRET_ACCESS_KEY=…        # 也认 AWS_SECRET_ACCESS_KEY
+FERRY_BACKUP_PASSWORD=…       # 加密用的密码：另外记在安全的地方，服务器整台没了时取回要用它
+```
+
+- 那边的文件是 `<prefix><名字>/<名字>-20261112-030000.sql.gz.age`。加密用的是 [age](https://age-encryption.org) 格式（密码方式），没有 Ferry 也能解开：`age -d -o db.sql.gz db-20261112-030000.sql.gz.age`，输入密码。
+- 建议给 Ferry 用一个只能读写这个桶的子账号（阿里云 RAM、腾讯云 CAM）的密钥，不要用主账号的。
+- 没传上去（地址、密钥不对、网络不通）不算备份失败：服务器上的那份是好的，「数据备份」里这一项显示「没传到异地」和原因；开着服务器告警时会发告警。
+- **取回**：新服务器上配好同样的 ferry.yaml 和 envFile，在「数据备份 → 异地的备份」里点「列出」，选一份「取回服务器」（下载、解密、检查是完整的 gzip），然后在「备份文件」里恢复。命令行：
+
+```
+ferry backup <目标> remote <名字>          列出异地的备份
+ferry backup <目标> fetch <名字> <文件>    取回服务器（之后用 restore 恢复）
+```
 
 ```
 ferry backup <目标>                      查看：开没开、各项上次的结果、有几份
@@ -534,16 +631,22 @@ ferry backup <目标> list [名字]          列出备份文件
 ferry backup <目标> restore <名字> <文件> [--force]   恢复（--force：恢复前备份现在的数据失败了也恢复）
 ferry backup <目标> delete <名字> <文件>
 ferry backup <目标> download <名字> <文件> [本机目录]
+ferry backup <目标> remote <名字>                 列出传到异地的备份
+ferry backup <目标> fetch <名字> <文件>           把异地的一份取回服务器
 ```
 
 ## 服务器告警（ferry monitor）
 
-服务器上的 Ferry 每隔几分钟检查一次，有问题发到「设置 → 通知」里的群机器人（企业微信、钉钉、飞书、自定义接口）；问题出现时、恢复时各发一次，不会每次检查都发。检查：应用停了或启动失败在反复重启、Ferry 装的软件停了或在反复重启（在 Ferry 里停掉的不算）、不是部署引起的重启、磁盘快满、HTTPS 证书快到期或一直是临时证书、防火墙被关、新出现对外开放的端口、数据备份失败。在桌面版的「服务器告警」里打开、关闭，或：
+服务器上的 Ferry 每隔几分钟检查一次，有问题发到「设置 → 通知」里的群机器人（企业微信、钉钉、飞书、自定义接口）；问题出现时、恢复时各发一次，不会每次检查都发。检查：应用停了或启动失败在反复重启、应用在运行但健康检查不通过（假死）、Ferry 装的软件停了或在反复重启（在 Ferry 里停掉的不算）、不是部署引起的重启、内存快用完、负载太高、内存不够系统杀了进程（OOM）、磁盘快满、HTTPS 证书快到期或一直是临时证书、防火墙被关、新出现对外开放的端口、数据备份失败或没传到异地。在桌面版的「服务器告警」里打开、关闭，或：
 
 ```
-ferry monitor <目标> on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14]
+ferry monitor <目标> on [--notify ID,…] [--interval 5] [--disk 90] [--cert-days 14] [--mem 90] [--load 2] [--ping URL]
 ferry monitor <目标> [status | off | check | test]
 ```
+
+- **健康检查**：应用的 `service.health`（HTTP / TCP）平时也探：进程在、接口不通（线程池满、Full GC、连不上数据库……）时告警。每轮探 3 次（隔 5 秒），都不通才算。部署成功时服务器上记下这个应用当前用的单元和健康检查（不停机发布时是运行中的槽位）；还没用新版 Ferry 部署过的应用，用打开告警时传过去的。
+- **内存**（`--mem`，默认 90）：可用内存（MemAvailable）算出的使用率到了就告警，附上占内存最多的 3 个进程。**负载**（`--load`，默认 2）：15 分钟平均负载超过 CPU 核数的这么多倍时告警。**OOM**：内核因为内存不够杀了进程（`journalctl -k` 里的 Out of memory）时告警一次。
+- **心跳**（`--ping URL`）：服务器整台宕机、断网、定时器跑不起来时，它自己发不出告警。在 [Healthchecks.io](https://healthchecks.io) 或 Uptime Kuma（Push 类型的监控）建一个检查，把它给的地址填上：每次检查完访问一下这个地址，那边超过周期没收到就由那边告警（那边的周期设得比检查间隔长一些，如间隔 5 分钟设 10 分钟）。访问失败时「服务器告警」里显示原因。
 
 ## 团队协作
 

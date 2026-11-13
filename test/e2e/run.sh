@@ -498,6 +498,112 @@ t "关闭告警" ok "" -- F monitor e2e-a off
 t "定时器停了" ok "inactive" -- dx a 'systemctl is-active ferry-monitor.timer || true'
 dx a 'pkill -f /usr/local/bin/recv || true'
 
+step "定时任务（job）：定时器按时运行、现在运行、失败时告警、启停"
+cat > "$OUT/job.yaml" <<'EOF'
+version: 1
+project: jb
+targets:
+  e2e-a:
+    host: 127.0.0.1
+    port: 2222
+    identityFile: id_test
+    root: /opt/jb
+    runAs: jbuser
+    confirm: false
+apps:
+  - name: tick
+    type: binary
+    artifact: {path: tick}
+    service:
+      exec: [/bin/sh, -c, 'echo tick-run; test ! -f /tmp/jobfail']
+    job:
+      schedule: "*:*:0/10"
+      timeout: 2m
+EOF
+cp "$OUT/demo-v1" "$OUT/tick"
+JF() { FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/job.yaml" "$@"; }
+dx a 'rm -f /tmp/jobfail'
+t "部署定时任务：打开定时器" ok "定时器已打开，下次运行" -- JF deploy e2e-a tick --skip-build
+t "定时器开着" ok "active" -- dx a 'systemctl is-active jb-tick-schedule.timer'
+t "服务不常驻、不开机自启" ok "static" -- dx a 'systemctl is-enabled jb-tick.service || true'
+sleep 12
+t "到点由定时器运行了" ok "tick-run" -- dx a 'journalctl -u jb-tick.service --no-pager -q | tail -5'
+t "状态：定时器开着、上次成功" ok '"timerActive":true' -- JF status e2e-a --json
+t "状态：上次运行成功" ok '"ok":true' -- JF status e2e-a --json
+t "现在运行：显示输出和结果" ok "tick-run" -- JF run-job e2e-a tick --yes
+dx a 'touch /tmp/jobfail'
+t "运行失败：说出退出码" fail "退出码 1" -- JF run-job e2e-a tick --yes
+t "告警检查：上次运行失败" ok "定时任务 tick 上次运行失败" -- JF monitor e2e-a check
+t "ai-exec run_job：失败时交回原因" fail "退出码 1" -- env FERRY_AI_INPUT='{"app":"tick"}' FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/job.yaml" ai-exec e2e-a run_job --scope mcp-e2e
+dx a 'rm -f /tmp/jobfail'
+t "部署历史里有这几次运行" ok "run" -- JF history e2e-a tick
+# AI 助手、编程软件（用户同意后桌面版用 ai-exec 执行）现在运行
+t "ai-exec run_job：现在运行" ok '"ok": true' -- env FERRY_AI_INPUT='{"app":"tick"}' FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/job.yaml" ai-exec e2e-a run_job --scope mcp-e2e
+t "ai-exec run_job：不是定时任务" fail "没有应用" -- env FERRY_AI_INPUT='{"app":"nope"}' FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/job.yaml" ai-exec e2e-a run_job --scope mcp-e2e
+t "停止：关掉定时器" ok "" -- JF stop e2e-a tick --yes
+t "定时器关了" ok "inactive" -- dx a 'systemctl is-active jb-tick-schedule.timer || true'
+nojob() { JF monitor e2e-a check 2>&1 | grep -q "定时任务 tick" || echo "没有报 tick"; }
+t "停着时告警不报它" ok "没有报 tick" -- nojob
+t "启动：打开定时器" ok "" -- JF start e2e-a tick
+t "定时器又开着了" ok "active" -- dx a 'systemctl is-active jb-tick-schedule.timer'
+JF stop e2e-a tick --yes >/dev/null 2>&1
+
+step "多台部署（rollout）：同时切换、失败时回滚已切换的、先发一台"
+cat > "$OUT/ro.yaml" <<'EOF'
+version: 1
+project: ro
+targets:
+  e2e-a: {host: 127.0.0.1, port: 2222, identityFile: id_test, root: /opt/ro, runAs: demo, confirm: false}
+  e2e-b: {host: 127.0.0.1, port: 2223, user: deployer, sudo: true, identityFile: id_test, root: /opt/ro, runAs: demo, confirm: false, ferryDir: /opt/ferry-tools}
+apps:
+  - name: web
+    type: binary
+    artifact: {path: ro}
+    service:
+      env: {PORT: "18095"}
+      health: {http: "http://127.0.0.1:18095/health", contains: UP, timeout: 20s}
+    hooks:
+      beforeSwitch:
+        - test ! -e /tmp/ro-fail
+EOF
+RO() { FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/ro.yaml" "$@"; }
+dx a 'rm -f /tmp/ro-fail'; dx b 'rm -f /tmp/ro-fail'
+cp "$OUT/demo-v1" "$OUT/ro"
+t "--batch 2：两台同时切换" ok "部署完成" -- RO deploy e2e-a,e2e-b web --skip-build --batch 2
+t "输出：同时切换、事件带服务器名" ok "同时切换 e2e-a、e2e-b" -- grep -A80 '### --batch 2：两台同时切换' "$LOG"
+t "e2e-b 的事件后面带服务器名" ok "web@e2e-b" -- grep -A80 '### --batch 2：两台同时切换' "$LOG"
+t "e2e-a 运行 v1" ok "UP v1" -- health a 18095
+t "e2e-b 运行 v1" ok "UP v1" -- health b 18095
+cp "$OUT/demo-v2" "$OUT/ro"
+dx b 'touch /tmp/ro-fail'
+t "e2e-b 失败、--on-failure rollback" fail "e2e-b" -- RO deploy e2e-a,e2e-b web --skip-build --on-failure rollback
+t "把已经切换的 e2e-a 回滚了" ok "把这次已经切换的回滚到部署前的版本" -- grep -A120 '### e2e-b 失败、--on-failure rollback' "$LOG"
+t "e2e-a 回到 v1" ok "UP v1" -- health a 18095
+t "e2e-b 还是 v1" ok "UP v1" -- health b 18095
+t "e2e-a 的部署历史里有这次回滚" ok "rollback" -- RO history e2e-a web
+t "结果里 e2e-a 是 REVERTED" ok "REVERTED" -- grep -A120 '### e2e-b 失败、--on-failure rollback' "$LOG"
+t "默认（stop）：e2e-a 留着新版本" fail "e2e-b" -- RO deploy e2e-a,e2e-b web --skip-build
+t "e2e-a 是 v2" ok "UP v2" -- health a 18095
+dx b 'rm -f /tmp/ro-fail'
+cp "$OUT/demo-v1" "$OUT/ro"
+t "先发一台、观察 3 秒（--yes 观察完自动继续）" ok "部署完成" -- RO deploy e2e-a,e2e-b web --skip-build --canary 1 --observe 3s --yes
+t "先发的观察了 3 秒" ok "e2e-a 观察结束，观察了 3 秒，一直正常" -- grep -A120 '### 先发一台、观察 3 秒' "$LOG"
+bothv() { echo "$(health a 18095) $(health b 18095)"; }
+t "两台都是 v1" ok "UP v1 UP v1" -- bothv
+# 桌面版：经 ferry serve 部署，先发的上线后输出 kind=ask，用户的回答经 input 送回（这里回答「不」）
+cp "$OUT/demo-v2" "$OUT/ro"
+roserve() {
+  { printf '%s\n' '{"id":"1","op":"run","args":["deploy","e2e-a,e2e-b","web","-c","'"$OUT/ro.yaml"'","--skip-build","--canary","1","--on-failure","rollback","--yes","--json"]}' '{"id":"1","op":"input","data":"no\n"}'; sleep 40; } \
+    | FERRY_HOME="$OUT/home" timeout 45 "$FERRY" serve 2>&1 | sed '/"exit":/q'
+}
+out=$(roserve)
+printf '\n### 先发一台、桌面版问用户（回答不）\n%s\n' "$out" >> "$LOG"
+has "桌面版：先发的上线后问用户" '\"kind\":\"ask\"' "$out"
+has "回答不：其余的不部署，先发的回滚" "没有继续部署其余的" "$out"
+t "e2e-a 回滚到 v1" ok "UP v1" -- health a 18095
+t "e2e-b 没动（v1）" ok "UP v1" -- health b 18095
+RO stop e2e-a web --yes >/dev/null 2>&1; RO stop e2e-b web --yes >/dev/null 2>&1
+
 step "数据备份（ferry backup）：可以打开、关闭；定时、部署前备份，恢复、下载"
 dx a 'rm -rf /srv/e2e-data /opt/e2e/backups; mkdir -p /srv/e2e-data/sub && echo one > /srv/e2e-data/sub/a.txt && echo v1 > /srv/e2e-kv.txt'
 BK=/opt/e2e/backups
@@ -543,6 +649,7 @@ MC() { FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" "$@"
 t "list_projects：当前目录的项目" ok '"currentDir": true' -- MC list_projects
 t "app_status" ok '"name": "hk"' -- MC app_status '{"target":"e2e-a","apps":["hk"]}'
 t "deploy_history：谁做的" ok '"actor":' -- MC deploy_history '{"target":"e2e-a","apps":["hk"],"limit":3}'
+t "audit_log：部署也在审计记录里" ok '"kind": "deploy"' -- MC audit_log '{"target":"e2e-a","kind":"deploy","limit":3}'
 t "deploy_changes：线上的版本和本地比" ok '"app": "hk"' -- MC deploy_changes '{"target":"e2e-a","apps":["hk"]}'
 t "monitor_status：没开" ok '"on": false' -- MC monitor_status '{"target":"e2e-a"}'
 dx a 'systemctl stop e2e-hk.service'
@@ -551,6 +658,7 @@ dx a 'systemctl start e2e-hk.service'
 t "backup_status：各项" ok '"name": "kv"' -- MC backup_status '{"target":"e2e-a"}'
 t "backup_status files：备份文件" ok '"name": "kv-' -- MC backup_status '{"target":"e2e-a","files":true,"name":"kv"}'
 t "backup_status：名字不对" fail "名字不对" -- MC backup_status '{"target":"e2e-a","files":true,"name":"../x"}'
+t "backup_status remote：没设传到异地" fail "没有设置传到异地" -- MC backup_status '{"target":"e2e-a","remote":true}'
 t "backup_run：没允许编程软件改动时不做" fail "允许编程软件" -- MC backup_run '{"target":"e2e-a","name":"kv","reason":"e2e"}'
 t "run_change_command：只读命令直接执行" ok "e2e-mcp-readonly" -- MC run_change_command '{"target":"e2e-a","command":"echo e2e-mcp-readonly","reason":"e2e"}'
 t "run_change_command：改动的命令没允许时不做" fail "允许编程软件" -- MC run_change_command '{"target":"e2e-a","command":"touch /tmp/e2e-mcp-x","reason":"e2e"}'
@@ -1104,6 +1212,30 @@ exec {SRV_IN}>&-
 wait "$SRV_PID" 2>/dev/null
 has "stdin 关闭后 serve 退出" "=0=" "=$?="
 
+step "审计记录（终端、文件、部署……记在服务器上和这台电脑上）"
+au=$(F audit e2e-a --json)
+has "终端打开记在服务器上" '"kind":"terminal-open"' "$au"
+has "终端关闭也记了，带用了多久" '"kind":"terminal-close","object":"root@127.0.0.1:2222","detail":"用了' "$au"
+has "部署、启停也在（agent 自己记的）" '"kind":"deploy"' "$au"
+has "记了操作人" '"actor":"' "$au"
+lacks "不记终端里敲的命令" "sleep 4242" "$au"
+t "sudo 目标的终端也记了" ok '"kind":"terminal-close","object":"deployer@127.0.0.1:2223"' -- F audit e2e-b --kind terminal- --json
+dx a 'echo x > /tmp/audit-me.conf'
+t "删除文件" ok '"ok":true' -- F files rm e2e-a /tmp/audit-me.conf --json
+t "删除文件记在服务器上" ok '"kind":"file-remove","object":"/tmp/audit-me.conf","result":"ok"' -- F audit e2e-a --kind file-remove --json
+auf=$(F audit e2e-a --kind file- --json)
+has "按类型前缀筛：有文件的" '"kind":"file-remove"' "$auf"
+lacks "按类型前缀筛：没有终端的" '"kind":"terminal' "$auf"
+t "按操作人筛：没有这个人" ok '[]' -- F audit e2e-a --actor 没有这个人 --json
+t "系统日志里也有（journalctl -t ferry-audit）" ok "删除文件 /tmp/audit-me.conf" -- dx a 'journalctl -t ferry-audit --no-pager'
+t "服务器上的审计文件只有 root 能读" ok "600 root" -- dx a 'stat -c "%a %U" /usr/local/lib/ferry/audit.jsonl'
+t "这台电脑上也有一份" ok '"kind":"file-remove"' -- F audit e2e-a --local --json
+t "这台电脑上的全部（不用项目配置）" ok '"kind":"terminal-open"' -- env FERRY_HOME="$OUT/home" "$FERRY" audit --local --json
+t "导出 CSV" ok "已导出" -- F audit e2e-a --out "$OUT/audit.csv"
+t "CSV 里是中文的类型" ok "删除文件" -- cat "$OUT/audit.csv"
+t "命令行表格" ok "删除文件" -- F audit e2e-a --kind file-remove
+t "--since 写错了说清楚" fail "--since" -- F audit e2e-a --since 昨天
+
 step "新建连接：只登录（不用 sudo、不装 agent），文件上传下载"
 CONNS="$OUT/home/connections.yaml"
 FC() { FERRY_HOME="$OUT/home" "$FERRY" -c "$CONNS" "$@"; }
@@ -1134,6 +1266,7 @@ t "删除整个目录" ok '"ok":true' -- FC files rm deployer-127.0.0.1 /home/de
 t "删除后不在" ok "gone" -- dx b 'test -e /home/deployer/up || test -e /home/deployer/改过名 || echo gone'
 t "没有权限删除时说清楚" fail "没有权限" -- FC files rm deployer-127.0.0.1 /etc/ssh --json
 t "没有权限时什么都没删" ok "yes" -- dx b 'test -e /etc/ssh/sshd_config && echo yes'
+t "只登录的连接：审计写进系统日志" ok "删除文件 /home/deployer/up" -- dx b 'journalctl -t ferry-audit --no-pager'
 t "没有权限的目录说清楚" fail "没有权限" -- FC files upload deployer-127.0.0.1 --dir /root "$OUT/up/中文名.txt" --json
 t "连接不能用来部署" fail "只能打开终端" -- FC deploy deployer-127.0.0.1 --json
 unset FERRY_PASSWORD_DEPLOYER_127_0_0_1

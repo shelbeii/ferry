@@ -22,6 +22,7 @@ import (
 // serve 常驻模式（桌面版用）：从 stdin 逐行读请求，并发执行，到服务器的连接在请求之间复用。
 //
 //	请求 {"id":"1","op":"run","args":["status","prod","--json"],"env":{"FERRY_PASSWORD_PROD":"…"}}
+//	     {"id":"1","op":"input","data":"yes\n"}（输出里有 kind=ask 时：用户的回答，yes 或 no）
 //	     {"id":"1","op":"cancel"}
 //	输出 {"id":"1","outs":["<stdout 的几行>"]} {"id":"1","err":"<stderr 的一行>"} {"id":"1","exit":0}
 //	stdout 攒一小会儿（最多 80 毫秒或 1000 行）一起发：日志刷得很快时，桌面版不用每行处理一次
@@ -94,6 +95,7 @@ func serve(in io.Reader, out io.Writer) int {
 		case "cancel":
 			if r := find(req.ID); r != nil {
 				r.cancel()
+				r.tty.in.Close() // 正在等回答的（部署中途问用户）不再等
 			}
 		case "input": // 终端的键盘输入：放进队列，不阻塞这里读请求
 			if r := find(req.ID); r != nil {

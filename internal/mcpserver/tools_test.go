@@ -47,7 +47,7 @@ func TestTools(t *testing.T) {
 	for _, p := range byName["deploy"].Params {
 		names = append(names, p.Name)
 	}
-	if !slices.Equal(names, []string{"project", "target", "apps", "skipBuild", "reason"}) {
+	if !slices.Equal(names, []string{"project", "target", "apps", "skipBuild", "reason", "targets", "batch", "canary", "observeSec", "onFailure"}) {
 		t.Errorf("deploy 的参数：%v", names)
 	}
 	if p := byName["deploy"].Params[2]; p.Type != "string[]" || !p.Required || p.Description == "" {

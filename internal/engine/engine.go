@@ -99,6 +99,8 @@ type DeployOptions struct {
 	KeepPerms bool
 	// Keep 这次部署保留服务器上的（应用名 → 列表，代替 ferry.yaml 里的 artifact.keep；没有的应用按配置）
 	Keep map[string][]*config.KeepItem
+	// Rollout 部署到多台时怎么切换（分批、先发几台、失败时回滚）；没给的项用 ferry.yaml 的 rollout
+	Rollout RolloutOptions
 }
 
 // DeployReport 部署结果。
@@ -113,6 +115,10 @@ type DeployReport struct {
 	Upload  int64              `json:"upload"`  // 实际上传字节
 	Total   int64              `json:"total"`   // 全量大小
 	Elapsed time.Duration      `json:"elapsed"` // 纳秒
+	// Error 这台失败的原因（部署到多台时看是哪台）
+	Error string `json:"error,omitempty"`
+	// Reverted 别的服务器失败后，这台这次部署成功的应用已回滚到部署前的版本（rollout.onFailure: rollback）
+	Reverted bool `json:"reverted,omitempty"`
 }
 
 // ErrCanceled 用户取消。
@@ -153,6 +159,8 @@ type targetPlan struct {
 	needPins []pinNeed
 	// needNginx 部署根目录下还没有、部署时要安装的 nginx（链接名：nginx、nginx-1.30）
 	needNginx []string
+	// before 部署前各应用在运行的版本（读不到、第一次部署时没有）：多台部署失败时回滚到它
+	before map[string]string
 }
 
 // Deploy 部署到一个或多个目标。先连接并预检全部目标、确认一次；然后逐个目标：
@@ -275,6 +283,17 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 		}
 		var rels []proto.AppReleases
 		if err := p.s.callData("releases", &proto.Request{Apps: specs, Detail: true}, &rels); err == nil {
+			p.before = map[string]string{}
+			for _, r := range rels {
+				for _, x := range r.Releases {
+					if x.Current {
+						p.before[r.App] = x.ID
+					}
+				}
+				if p.before[r.App] == "" && r.Legacy {
+					p.before[r.App] = "legacy" // 接管前的（agent 的 LegacyID）
+				}
+			}
 			if len(plans) > 1 {
 				e.Rep.Step("%s 要上线的改动", p.t.Name)
 			} else {
@@ -367,22 +386,8 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 			}
 		}
 	}
-	// 3. 依次切换：一台失败就停，后面的不切换（已上传的文件删掉）
-	var reports []*DeployReport
-	for i, p := range plans {
-		r, err := e.switchTarget(p, ups[i], id, git, filepath.Join(tmp, p.t.Name), o)
-		if r != nil {
-			reports = append(reports, r)
-		}
-		if err != nil {
-			if rest := tnames[i+1:]; len(rest) > 0 {
-				e.Rep.Error("%s 失败，未部署：%s", p.t.Name, strings.Join(rest, "、"))
-				e.dropStages(plans[i+1:], ups[i+1:])
-			}
-			return reports, fmt.Errorf("%s：%w", p.t.Name, err)
-		}
-	}
-	return reports, nil
+	// 3. 切换：默认一台一台、一台失败就停（后面的不切换，已上传的文件删掉）；rollout 可以分批、先发几台、失败时回滚
+	return e.switchAll(plans, ups, id, git, tmp, o)
 }
 
 // readyTarget 一个目标上：构建、检查产物、打包（还没连服务器做改动）。

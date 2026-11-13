@@ -14,7 +14,7 @@ function settings(): AppSettings {
     connect: { timeoutSec: 15, acceptNewHostKey: false, keyDir: '', uploadStreams: 6, idleMinutes: 15, statusMinutes: 1 },
     build: { env: {}, path: [], verbose: false }, logs: { buildLogDays: 30 }, deploy: { skipBuild: false, full: false, keepPerms: false },
     runtime: { source: '', cacheDir: '', nginxSource: '', githubMirror: '', mysqlSource: '' },
-    ui: { theme: 'system', taskKeep: 50, taskKeepDays: 30, taskMaxMB: 100, confirmClose: true, notify: true, glass: true, glassTransparency: 90, checkUpdate: true },
+    ui: { theme: 'system', taskKeep: 50, taskKeepDays: 30, taskMaxMB: 100, confirmClose: true, notify: true, glass: true, glassTransparency: 90, particles: true, checkUpdate: true },
     ai: { models: [], default: '', keepDays: 30, maxMB: 200 }, mcp: { allowChanges: false, targets: [], logKeepDays: 30, logMaxMB: 20 },
     notify: { channels: [] }, desktop: { projects: [{ path: 'a.yaml', name: 'demo' }], current: 'a.yaml' }, team: { name: '' },
   }

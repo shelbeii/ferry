@@ -1,10 +1,10 @@
 ﻿# 打 Windows 安装包（NSIS）：可选升版本号，先做检查（go vet、gofmt、go test、界面类型检查），再构建，最后列出安装包。
 #   powershell -File scripts\package.ps1                  # 用现在的版本号打包
-#   powershell -File scripts\package.ps1 -Bump            # 版本号末位加 1 再打包（0.12.48 -> 0.12.49）
+#   powershell -File scripts\package.ps1 -Bump            # 版本号末位加 1 再打包，逢十进一（0.14.1 -> 0.14.2，0.14.9 -> 0.15.0）
 #   powershell -File scripts\package.ps1 -Version 0.13.0  # 指定版本号再打包
 #   powershell -File scripts\package.ps1 -Bump -SkipCheck # 跳过检查，直接打包（比如刚检查过）
 #   powershell -File scripts\package.ps1 -Open            # 打好后在资源管理器里选中安装包
-#   powershell -File scripts\package.ps1 -Ask             # 先问要不要把版本号末位加 1（双击 scripts\package.cmd 就是这样）
+#   powershell -File scripts\package.ps1 -Ask             # 先问要不要升版本号（双击 scripts\package.cmd 就是这样）
 #
 # 版本号写在四个文件里：desktop/package.json、desktop/package-lock.json、desktop/src-tauri/tauri.conf.json、
 # desktop/src-tauri/Cargo.toml（Cargo.lock 里的也一起改），脚本会一起改。只改文件，不提交。
@@ -52,20 +52,25 @@ $confPath = Join-Path $desktop 'src-tauri\tauri.conf.json'
 $current = ([regex]'"version":\s*"([^"]+)"').Match((Read-Text $confPath)).Groups[1].Value
 if (-not $current) { throw "读不到 $confPath 里的版本号" }
 
+# 下一个版本号：末位加 1，逢十进一（末位到 10 就中间一位加 1、末位归 0：0.14.9 -> 0.15.0）
+function Next-Version([string]$v) {
+    $p = $v.Split('.')
+    $patch = [int]$p[2] + 1
+    if ($patch -ge 10) { $p[1] = [string]([int]$p[1] + 1); $patch = 0 }
+    $p[2] = [string]$patch
+    return $p -join '.'
+}
+
 if ($Bump -and $Version) { throw '-Bump 和 -Version 只能用一个' }
 if ($Ask -and -not $Bump -and -not $Version) {
-    $parts = $current.Split('.')
-    $parts[$parts.Length - 1] = [string]([int]$parts[$parts.Length - 1] + 1)
-    $next = $parts -join '.'
+    $next = Next-Version $current
     Write-Host "`n现在的版本号是 $current。" -ForegroundColor Cyan
     $a = (Read-Host "升到 $next 再打包？（输入 y 回车 = 升到 $next；也可以直接输入版本号，如 0.13.0；直接回车 = 不改）").Trim()
     if ($a.ToLower() -eq 'y') { $Bump = $true }
     elseif ($a) { $Version = $a }
 }
 if ($Bump) {
-    $parts = $current.Split('.')
-    $parts[$parts.Length - 1] = [string]([int]$parts[$parts.Length - 1] + 1)
-    $Version = $parts -join '.'
+    $Version = Next-Version $current
 }
 if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+$') { throw "版本号格式不对：$Version（应为 x.y.z）" }
 

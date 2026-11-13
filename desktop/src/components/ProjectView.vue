@@ -2,8 +2,8 @@
 import LoadingBlock from './LoadingBlock.vue'
 import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, type Component } from 'vue'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
-import { Refresh, Upload, VideoPlay, VideoPause, RefreshRight, Clock, EditPen, Key, Monitor, ChatDotRound, Grid, List, SwitchButton, Setting, ArrowDown, Tools, Bell, Box, Connection, User, DataLine } from '@element-plus/icons-vue'
-import { call, FerryError, latencyInfo, latencyTip, shortCommit, time, type AppStatus, type ConnStatus, type LockHolder, type ExtraPort, type Inspect, type InspectTarget } from '../ferry'
+import { Refresh, Upload, VideoPlay, VideoPause, RefreshRight, Clock, EditPen, Key, Monitor, ChatDotRound, Grid, List, SwitchButton, Setting, ArrowDown, Tools, Bell, Box, Connection, User, DataLine, Document } from '@element-plus/icons-vue'
+import { call, FerryError, latencyInfo, latencyTip, shortCommit, time, type AppStatus, type JobRun, type ConnStatus, type LockHolder, type ExtraPort, type Inspect, type InspectTarget } from '../ferry'
 import { addProject, addTerminal, aiAskRequest, configWritten, startTask, trustRequest, trustedTick, secretRequest, localRequest, appSettings, tasks, projectSummary, projectTraits, type Project } from '../state'
 import SoftwarePanel from './SoftwarePanel.vue'
 import RowActions from './RowActions.vue'
@@ -35,6 +35,7 @@ const AppInfoDialog = defineAsyncComponent(() => import('./AppInfoDialog.vue'))
 const RuntimeSwitchDialog = defineAsyncComponent(() => import('./RuntimeSwitchDialog.vue'))
 const LogsDialog = defineAsyncComponent(() => import('./LogsDialog.vue'))
 const HistoryDialog = defineAsyncComponent(() => import('./HistoryDialog.vue'))
+const AuditDialog = defineAsyncComponent(() => import('./AuditDialog.vue'))
 const ConfigEditor = defineAsyncComponent(() => import('./ConfigEditor.vue'))
 const KeygenDialog = defineAsyncComponent(() => import('./KeygenDialog.vue'))
 const LocalDialog = defineAsyncComponent(() => import('./LocalDialog.vue'))
@@ -182,6 +183,9 @@ const editorDeployment = ref<DeploymentRequest>()
 const releasesApp = ref('')
 const appInfoRequest = ref<{ app: string; target: string }>()
 const runtimeSwitchRequest = ref<{ app: string; target: string; prefer?: string }>()
+// 从审阅部署里打开的「切换运行环境」：叠在审阅部署上面，审阅部署不关；保存了配置就重新读，审阅部署跟着重新比较
+const runtimeFromDeploy = ref(false)
+const runtimeSaved = ref(false)
 const logsApp = ref('')
 const filesOpen = ref(false)
 const filesPath = ref('')
@@ -223,6 +227,7 @@ function appActions(row: AppStatus): RowAction[] {
   ]
   if (row.type !== 'static' || row.unit) actions.push({ id: 'logs', label: '日志', run: () => { logsRelease.value = ''; logsApp.value = row.name } })
   actions.push({ id: 'releases', label: '版本 / 回滚', run: () => { releasesApp.value = row.name } })
+  if (row.job && row.current) actions.push({ id: 'run-job', label: '现在运行', run: () => runJob(row), disabled: row.job.running, title: row.job.running ? '正在运行' : '马上运行一次（不影响定时器）' })
   if (isAbnormal(row)) actions.push({ id: 'ai', label: 'AI 排查', run: () => askAboutApp(row) })
   return actions
 }
@@ -279,6 +284,7 @@ function openKeygen(name = '') {
 const localOpen = ref(false)
 // 服务器告警（ferry monitor）
 const monitorOpen = ref(false)
+const auditOpen = ref(false)
 const backupOpen = ref(false)
 
 /** 别人正在这台服务器上部署、回滚、启停：这台电脑上没有这个目标在跑的任务时才显示 */
@@ -341,6 +347,8 @@ const editorFocus = ref<string[] | undefined>()
 
 // 服务器下的标签：应用 / 软件 / 端口 / 登录用户 / 服务器信息
 const view = ref<'apps' | 'software' | 'ports' | 'ssh' | 'server'>('apps')
+// 现在显示的是软件、端口这些面板（不是应用列表）：应用列表这时只隐藏，见模板里的 apps-pane
+const panelView = computed(() => view.value !== 'apps' && !!activeTarget.value)
 const targetDetails = ref(false)
 const workspaceTabs: { value: typeof view.value; label: string; icon: Component }[] = [
   { value: 'apps', label: '应用', icon: Grid },
@@ -665,7 +673,7 @@ watch(activeTarget, (t, previous) => {
   refreshReads.cancel(previous)
   statusReads.cancel(previous)
   releasesApp.value = logsApp.value = logsRelease.value = ''
-  historyOpen.value = monitorOpen.value = backupOpen.value = keygenOpen.value = false
+  historyOpen.value = monitorOpen.value = backupOpen.value = keygenOpen.value = auditOpen.value = false
   targetDetails.value = false
   filesOpen.value = false
   filesPath.value = ''
@@ -691,6 +699,12 @@ const selectedNames = computed(() => {
 
 function stateType(s: AppStatus): 'success' | 'danger' | 'warning' | 'info' {
   if (s.type === 'static' && !s.unit) return s.current ? 'success' : 'info'
+  if (s.job) {
+    // 定时任务：平时服务就是停着的，看定时器开没开、上次运行成没成功
+    if (s.job.running) return 'success'
+    if (s.job.last && !s.job.last.ok) return 'danger'
+    return s.job.timerActive ? 'success' : 'info'
+  }
   if (s.active === 'active' && s.healthy !== false) return 'success'
   if (s.active === 'failed' || s.healthy === false) return 'danger'
   if (s.active === 'activating' || s.sub === 'auto-restart') return 'warning'
@@ -864,6 +878,11 @@ function siteTip(s: AppStatus, l: string): string {
 function stateText(s: AppStatus): string {
   if (s.type === 'static' && !s.unit) return s.current ? '已发布' : '未部署'
   if (notDeployed(s)) return '未部署'
+  if (s.job) {
+    if (s.job.running) return '正在运行'
+    if (s.job.last && !s.job.last.ok) return '上次失败'
+    return s.job.timerActive ? '定时运行' : '定时器关着'
+  }
   if (!s.active) return '-'
   if (s.sub === 'auto-restart') return '自动重启中'
   if (s.active === 'active' && s.sub === 'exited') return '已退出'
@@ -923,7 +942,33 @@ function sinceText(v?: string): string {
   const m = v?.match(/(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(:\d{2})?)/)
   return m ? `${m[1]} ${m[2]}` : ''
 }
+// 定时任务：上次运行的结果写成人话
+function jobResultText(r?: JobRun): string {
+  if (!r) return '还没运行过'
+  if (r.ok) return `成功（${durationText(Math.max(1, Math.round(r.sec ?? 0)))}）`
+  if (r.result === 'timeout') return '超过最长运行时间，被停掉了'
+  if (r.result === 'exit-code') return `失败（退出码 ${r.exitCode}）`
+  if (r.result === 'signal' || r.result === 'core-dump') return `被信号杀掉了（${r.result}）`
+  return `失败（${r.result}）`
+}
+// 定时任务的时间：agent 给的是带时区的（服务器的时区），换成这台电脑的时间「11-13 02:30」
+function jobTime(v?: string): string {
+  if (!v) return ''
+  const d = new Date(v)
+  if (isNaN(d.getTime())) return sinceText(v).slice(5, 16)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+function jobTip(s: AppStatus): string {
+  const j = s.job!
+  const parts = [`定时任务：${j.schedule.join('、')}`]
+  parts.push(j.timerActive ? (j.next ? `下次 ${jobTime(j.next)}` : '定时器开着') : s.stopped ? STOPPED_TIP : '定时器关着：到点不会运行（「启动」打开）')
+  if (j.running) parts.push('正在运行')
+  parts.push(`上次：${j.last ? `${jobTime(j.last.start)} ${jobResultText(j.last)}` : '还没运行过'}`)
+  return parts.join('；')
+}
 function stateTip(s: AppStatus): string {
+  if (s.job && !notDeployed(s)) return jobTip(s)
   if (!s.active) return stateText(s)
   const parts: string[] = []
   if (notDeployed(s)) parts.push(s.problem === '单元不存在' ? '还没部署过：服务器上没有这个服务' : '还没通过 Ferry 部署过，没有版本记录')
@@ -977,6 +1022,25 @@ function afterTask() {
 }
 
 // 启动 / 重启 / 停止和部署一样只作用于勾选的应用：没勾选时按钮是灰的
+// 定时任务「现在运行」：马上运行一次，在任务面板里看输出
+async function runJob(row: AppStatus) {
+  const current = captureContext()
+  const targetName = activeTarget.value
+  const config = props.project.path
+  const what = `现在运行 ${targetName} 上的定时任务 ${row.name}`
+  if (target.value?.production) {
+    if (!(await confirmProduction(what, targetName))) return
+  } else {
+    try {
+      await ElMessageBox.confirm(`${what}？不影响定时器，到点照样运行。`, '现在运行', { type: 'info', confirmButtonText: '运行' })
+    } catch {
+      return
+    }
+  }
+  if (!current()) return
+  startTask(`运行 ${targetName}：${row.name}`, ['run-job', targetName, row.name, '-c', config, '--yes'], afterTask)
+}
+
 async function control(action: 'start' | 'stop' | 'restart') {
   const current = captureContext()
   const targetName = activeTarget.value
@@ -1011,6 +1075,24 @@ function openDeploy() {
   }
   editorDeployment.value = { apps: [...selectedNames.value], targets: [activeTarget.value] }
   deployOpen.value = true
+}
+
+function deployToRuntime(app: string, target: string, prefer?: string) {
+  runtimeFromDeploy.value = true
+  runtimeSaved.value = false
+  runtimeSwitchRequest.value = { app, target, prefer }
+}
+
+// 切换运行环境的对话框关了：从审阅部署打开、又保存了配置的，重新读配置（审阅部署还开着，按新配置重新比较）
+async function runtimeClosed() {
+  runtimeSwitchRequest.value = undefined
+  const reload = runtimeFromDeploy.value && runtimeSaved.value
+  runtimeFromDeploy.value = false
+  runtimeSaved.value = false
+  if (reload) {
+    ElMessage.success('配置已保存，审阅部署已按新配置重新比较')
+    await loadInspect()
+  }
 }
 
 function openTrust() {
@@ -1137,7 +1219,10 @@ async function onSaved(deployment?: DeploymentRequest) {
           </section>
         </el-popover>
         <el-button v-if="target.keyMissing" size="small" type="danger" plain :icon="Key" @click="localOpen = true">私钥缺失</el-button>
-        <el-button v-if="needKeygen" :icon="Key" size="small" @click="openKeygen()">配置免密登录</el-button>
+        <GlassPane v-if="needKeygen" as="button" type="button" radius="pill" class="server-glass-button" @click="openKeygen()">
+          <el-icon><Key /></el-icon>
+          <span>配置免密登录</span>
+        </GlassPane>
         <!-- 这个目标套用了本机设置时标出「已生效」，提示里写用的是什么 -->
         <el-tooltip
           :show-after="HOVER_DELAY"
@@ -1161,7 +1246,16 @@ async function onSaved(deployment?: DeploymentRequest) {
           content="配置里写的备份：在服务器上打开按时备份、现在备份、恢复、下载到这台电脑（要备份什么在「编辑配置」里改）"
           placement="bottom"
         >
-          <el-button :icon="Box" size="small" @click="backupOpen = true">数据备份</el-button>
+          <GlassPane as="button" type="button" radius="pill" class="server-glass-button" @click="backupOpen = true">
+            <el-icon><Box /></el-icon>
+            <span>数据备份</span>
+          </GlassPane>
+        </el-tooltip>
+        <el-tooltip :show-after="HOVER_DELAY" content="谁什么时候在这台服务器上做了什么改动：部署、终端、文件、数据库、软件、防火墙……（团队里每个人的）" placement="bottom">
+          <GlassPane as="button" type="button" radius="pill" class="server-glass-button" @click="auditOpen = true">
+            <el-icon><Document /></el-icon>
+            <span>审计记录</span>
+          </GlassPane>
         </el-tooltip>
         <el-tooltip v-if="readAgo" :show-after="HOVER_DELAY" :content="readTip" placement="bottom">
           <span class="read-at">状态{{ readAgo }}读取{{ autoMinutes < 0 ? '（不自动更新）' : conn?.connected ? '' : '（已断开，不自动更新）' }}</span>
@@ -1364,7 +1458,9 @@ async function onSaved(deployment?: DeploymentRequest) {
         :focus="portFocus"
         @loaded="loadConns"
       />
-      <template v-else>
+      <!-- 应用列表切到别的页时只隐藏、不销毁：每张卡片都带勾选框、下拉菜单和几个提示，十几个应用重新生成一次要一两百毫秒，
+           切回来时标签的液滴动画会顿一下。隐藏时数据照常更新（不显示就不排版，很省）。没有选服务器时各页都显示这里的提示 -->
+      <div v-show="!panelView" class="apps-pane">
 
         <el-alert v-if="statusError[activeTarget]" type="error" :closable="false" show-icon class="status-err">
           <template #title>{{
@@ -1413,7 +1509,22 @@ async function onSaved(deployment?: DeploymentRequest) {
               </div>
               <el-tooltip :show-after="HOVER_DELAY" :content="stateTip(row)" placement="top"><span class="state" :class="stateDot(row)"><span class="dot" />{{ stateText(row) }}</span></el-tooltip>
             </div>
-            <dl class="card-fields">
+            <dl v-if="row.job" class="card-fields">
+              <div>
+                <dt>下次</dt>
+                <dd class="mono">{{ row.job.timerActive && row.job.next ? jobTime(row.job.next) : '—' }}</dd>
+              </div>
+              <div>
+                <dt>上次</dt>
+                <dd :class="{ bad: row.job.last && !row.job.last.ok }" :title="row.job.last ? `${jobTime(row.job.last.start)} ${jobResultText(row.job.last)}` : ''">{{ row.job.running ? '正在运行' : row.job.last ? (row.job.last.ok ? '成功' : '失败') : '—' }}</dd>
+              </div>
+              <div class="wide">
+                <dt>版本</dt>
+                <dd class="mono ellipsis" :title="row.current?.id">{{ row.current?.id ?? '—' }}</dd>
+                <dd v-if="row.current" class="sub ellipsis">{{ time(row.current.deployedAt).slice(5, 16) }} · {{ row.current.deployedBy }}</dd>
+              </div>
+            </dl>
+            <dl v-else class="card-fields">
               <div>
                 <dt>端口</dt>
                 <dd class="mono">
@@ -1544,7 +1655,7 @@ async function onSaved(deployment?: DeploymentRequest) {
             </el-table-column>
           </el-table>
         </div>
-      </template>
+      </div>
       </div>
       </div>
     </template>
@@ -1560,7 +1671,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       @close="deployOpen = false; editorDeployment = undefined"
       @started="deployOpen = false; editorDeployment = undefined"
       @finished="afterTask"
-      @switch-runtime="(app: string, t: string, prefer?: string) => { deployOpen = false; editorDeployment = undefined; runtimeSwitchRequest = { app, target: t, prefer } }"
+      @switch-runtime="deployToRuntime"
     />
     <AppInfoDialog
       v-if="appInfoRequest"
@@ -1580,8 +1691,8 @@ async function onSaved(deployment?: DeploymentRequest) {
       :target="runtimeSwitchRequest.target"
       :app="runtimeSwitchRequest.app"
       :prefer="runtimeSwitchRequest.prefer"
-      @close="runtimeSwitchRequest = undefined"
-      @saved="onSaved"
+      @close="runtimeClosed"
+      @saved="(d?: DeploymentRequest) => (runtimeFromDeploy ? (runtimeSaved = true) : onSaved(d))"
       @versions="showAppReleases(runtimeSwitchRequest)"
     />
     <ReleasesDialog
@@ -1616,6 +1727,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       :no-changes="info?.targets.find((x) => x.name === tn)?.aiChanges === false"
     />
     <MonitorDialog v-if="monitorOpen" :config="project.path" :target="activeTarget" @close="monitorOpen = false" />
+    <AuditDialog v-if="auditOpen" :config="project.path" :target="activeTarget" @close="auditOpen = false" />
     <BackupDialog v-if="backupOpen" :config="project.path" :target="activeTarget" :production="target?.production" @close="backupOpen = false" />
     <LocalDialog
       v-if="localOpen"
@@ -1688,6 +1800,7 @@ async function onSaved(deployment?: DeploymentRequest) {
   flex: 1;
   min-height: 200px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   /* 选中卡片的外圈阴影不被裁掉 */
   margin: -3px;
   padding: 3px;
@@ -1718,8 +1831,13 @@ async function onSaved(deployment?: DeploymentRequest) {
   background: transparent;
 }
 /* 列表里的东西放不下时由列表滚动，不能被压扁（表格外框裁剪了溢出，会被压到列表那么高、下面的行看不到也滚不动） */
-.list > * {
+.list > *,
+.list > .apps-pane > * {
   flex-shrink: 0;
+}
+/* 应用列表外面这层只管显示、隐藏，不占布局：里面的卡片、表格还是列表的直接排版对象 */
+.apps-pane {
+  display: contents;
 }
 /* 表格比列表宽时，横向滚动条贴在列表可见区域的底部，不用先滚到表格最下面才能拖。
    贴底（sticky）要求和列表之间没有会滚动的裁剪层：表格这几层的 overflow: hidden 换成 clip（一样裁掉、圆角也在） */
@@ -1770,7 +1888,7 @@ async function onSaved(deployment?: DeploymentRequest) {
 }
 /* 各页工具栏上的刷新：上面的四格概览和应用列表变淡（软件、端口等面板自己把内容变淡），读完恢复 */
 .body.tab-refreshing > .stats,
-.body.apps-refreshing > .list > * {
+.body.apps-refreshing > .list > .apps-pane > * {
   opacity: 0.4;
   transition: opacity 0.2s;
 }
@@ -2325,6 +2443,9 @@ button.stat:hover {
 }
 .card-fields dd.sub {
   color: var(--el-text-color-secondary);
+}
+.card-fields dd.bad {
+  color: var(--el-color-danger);
 }
 .ellipsis {
   overflow: hidden;
