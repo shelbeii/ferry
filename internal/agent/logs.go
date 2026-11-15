@@ -425,7 +425,7 @@ func listFiles(base string, dirs []string) ([]proto.LogFile, int64) {
 				return nil
 			}
 			rel, _ := filepath.Rel(base, p)
-			if rel = filepath.ToSlash(rel); rel != ".meta.json" {
+			if rel = filepath.ToSlash(rel); rel != ".meta.json" && !proto.IsAppSecretsPath(rel) {
 				files = append(files, proto.LogFile{Path: rel, Size: fi.Size(), MTime: fi.ModTime()})
 				total += fi.Size()
 			}

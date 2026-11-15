@@ -37,6 +37,8 @@ const AuditMaxDetail = 2048
 // AuditKinds 审计记录的类型和中文名。
 var AuditKinds = map[string]string{
 	"deploy": "部署", "rollback": "回滚", "control": "启停应用", "runjob": "运行定时任务", "runtime": "安装 JDK",
+	"https-renew":   "续期 HTTPS 证书",
+	"secretset":     "更新应用密钥",
 	"terminal-open": "打开终端", "terminal-close": "关闭终端",
 	"file-save": "保存文件", "file-rename": "改名", "file-remove": "删除文件", "file-upload": "上传文件", "file-mkdir": "新建文件夹",
 	"db-exec": "执行 SQL", "redis-exec": "执行 Redis 命令",
@@ -81,8 +83,12 @@ func AuditOf(cmd string, q *Request) (kind, object, detail string, ok bool) {
 		return "rollback", apps(), "回滚到 " + d, true
 	case "control":
 		return "control", apps(), q.Action, true
+	case "secretset":
+		return "secretset", apps(), "", true
 	case "runjob":
 		return "runjob", apps(), "", true
+	case "https-renew":
+		return "https-renew", apps(), "", true
 	case "runtime":
 		if q.Runtime != nil {
 			return "runtime", q.Runtime.ID, "", true

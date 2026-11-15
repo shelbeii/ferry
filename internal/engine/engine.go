@@ -26,6 +26,7 @@ import (
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/remote"
 	"github.com/captain/ferry/internal/safe"
+	"github.com/captain/ferry/internal/secret"
 	"github.com/captain/ferry/internal/zipx"
 )
 
@@ -131,6 +132,7 @@ var ErrNotConnected = errors.New("没有连着服务器，不自动连接")
 type item struct {
 	app       *config.App
 	spec      proto.AppSpec
+	secrets   *proto.AppSecretValues
 	local     string // 本机产物路径（static 为目录）
 	file      string // 要上传的文件（static 为打好的 tar.gz）
 	sha       string
@@ -192,8 +194,13 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 			return nil, err
 		}
 		p := &targetPlan{t: t, apps: apps}
+		lookup := e.appSecretLookup(t)
 		for _, a := range apps {
 			spec, err := Spec(f, t, a)
+			if err != nil {
+				return nil, err
+			}
+			values, err := appSecretValues(t, a, lookup)
 			if err != nil {
 				return nil, err
 			}
@@ -202,10 +209,14 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 					return nil, fmt.Errorf("%s 这次保留的：%w", a.Name, err)
 				}
 			}
-			if spec.TLS != nil && spec.TLS.DNS != "" {
+			tls := spec.TLS
+			if spec.HTTPS != nil {
+				tls = &spec.HTTPS.TLS
+			}
+			if tls != nil && tls.DNS != "" {
 				// DNS 验证的密钥：服务器上存一份，每天续期时用
-				if spec.TLS.DNSCred = e.DNSCred(spec.TLS.DNS); spec.TLS.DNSCred == nil {
-					e.Rep.Warn("%s：这台电脑上没有 %s 的 DNS 密钥，用服务器上以前存的（没有的话证书申请不下来，在设置 → 部署里填上）", a.Name, spec.TLS.DNS)
+				if tls.DNSCred = e.DNSCred(tls.DNS); tls.DNSCred == nil {
+					e.Rep.Warn("%s：这台电脑上没有 %s 的 DNS 密钥，用服务器上以前存的（没有的话证书申请不下来，在设置 → 部署里填上）", a.Name, tls.DNS)
 				}
 			}
 			local, err := LocalArtifact(f, t, a)
@@ -216,7 +227,7 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 			if err != nil {
 				return nil, err
 			}
-			p.items = append(p.items, &item{app: a, spec: spec, local: local, files: files})
+			p.items = append(p.items, &item{app: a, spec: spec, secrets: values, local: local, files: files})
 		}
 		plans = append(plans, p)
 	}
@@ -739,44 +750,57 @@ func orStable(series string) string {
 // installNginx 安装部署根目录下还没有的 nginx：本机库里没有就下载，上传后由 agent 校验、放好、更新链接。
 func (e *Engine) installNginx(p *targetPlan) error {
 	for _, l := range p.needNginx {
-		s := p.s
-		series := strings.TrimPrefix(strings.TrimPrefix(l, "nginx"), "-")
-		arch := nginxrt.ArchOf(s.arch)
-		dir := e.Settings.NginxDir()
-		m := nginxrt.Find(dir, series, arch)
-		if m == nil {
-			src := e.Settings.Runtime.NginxSource
-			if src == "" {
-				src = nginxrt.DefaultSource
+		if err := e.installNginxLink(p, l); err != nil {
+			for _, it := range p.items {
+				if it.spec.RuntimeNginx == l && (it.spec.HTTPS == nil ||
+					it.app.Service.ZeroDowntime != nil && it.app.Service.ZeroDowntime.Listen != "") {
+					return err
+				}
 			}
-			e.Rep.Step("下载 nginx %s（linux/%s，%s）", orStable(series), arch, src)
-			var err error
-			m, err = nginxrt.Download(e.ctx(), src, series, arch, dir, func(done, total int64) { e.Rep.Progress("nginx", done, total) })
-			if err != nil {
-				return fmt.Errorf("下载 nginx 失败：%w（可以在设置 → 运行环境里换下载源，或手动导入下载好的 nginx）", err)
-			}
-			e.Rep.Info("已下载 nginx %s（%s），存放在 %s", m.Version, humanBytes(m.Size), dir)
+			e.Rep.Warn("%s 的 HTTPS nginx 安装失败，继续部署应用：%v", p.t.Name, err)
 		}
-		e.Rep.Step("上传 nginx %s 到 %s 的 %s/runtimes", m.Version, p.t.Name, p.t.Root)
-		var prep proto.Prepared
-		if err := s.callData("prepare", &proto.Request{}, &prep); err != nil {
-			return err
-		}
-		item := remote.UploadItem{Local: filepath.Join(dir, m.File), Remote: remote.Join(prep.Stage, m.File), Mode: 0o640, Size: m.Size}
-		if err := e.uploadItems(s, []remote.UploadItem{item}, m.Size, m.Size); err != nil {
-			s.discardStage(prep.Stage)
-			return fmt.Errorf("上传 nginx 失败：%w", err)
-		}
-		var r proto.Runtime
-		spec := &proto.RuntimeSpec{Kind: "nginx", ID: m.ID, Link: l, Version: m.Version, File: m.File, SHA256: m.SHA256, Size: m.Size}
-		if err := s.callData("runtime", &proto.Request{Root: p.t.Root, Stage: prep.Stage, Runtime: spec}, &r); err != nil {
-			return fmt.Errorf("安装 nginx 失败：%w", err)
-		}
-		if p.pf.Nginx == nil {
-			p.pf.Nginx = map[string]proto.Runtime{}
-		}
-		p.pf.Nginx[l] = r
 	}
+	return nil
+}
+
+func (e *Engine) installNginxLink(p *targetPlan, l string) error {
+	s := p.s
+	series := strings.TrimPrefix(strings.TrimPrefix(l, "nginx"), "-")
+	arch := nginxrt.ArchOf(s.arch)
+	dir := e.Settings.NginxDir()
+	m := nginxrt.Find(dir, series, arch)
+	if m == nil {
+		src := e.Settings.Runtime.NginxSource
+		if src == "" {
+			src = nginxrt.DefaultSource
+		}
+		e.Rep.Step("下载 nginx %s（linux/%s，%s）", orStable(series), arch, src)
+		var err error
+		m, err = nginxrt.Download(e.ctx(), src, series, arch, dir, func(done, total int64) { e.Rep.Progress("nginx", done, total) })
+		if err != nil {
+			return fmt.Errorf("下载 nginx 失败：%w（可以在设置 → 运行环境里换下载源，或手动导入下载好的 nginx）", err)
+		}
+		e.Rep.Info("已下载 nginx %s（%s），存放在 %s", m.Version, humanBytes(m.Size), dir)
+	}
+	e.Rep.Step("上传 nginx %s 到 %s 的 %s/runtimes", m.Version, p.t.Name, p.t.Root)
+	var prep proto.Prepared
+	if err := s.callData("prepare", &proto.Request{}, &prep); err != nil {
+		return err
+	}
+	item := remote.UploadItem{Local: filepath.Join(dir, m.File), Remote: remote.Join(prep.Stage, m.File), Mode: 0o640, Size: m.Size}
+	if err := e.uploadItems(s, []remote.UploadItem{item}, m.Size, m.Size); err != nil {
+		s.discardStage(prep.Stage)
+		return fmt.Errorf("上传 nginx 失败：%w", err)
+	}
+	var r proto.Runtime
+	spec := &proto.RuntimeSpec{Kind: "nginx", ID: m.ID, Link: l, Version: m.Version, File: m.File, SHA256: m.SHA256, Size: m.Size}
+	if err := s.callData("runtime", &proto.Request{Root: p.t.Root, Stage: prep.Stage, Runtime: spec}, &r); err != nil {
+		return fmt.Errorf("安装 nginx 失败：%w", err)
+	}
+	if p.pf.Nginx == nil {
+		p.pf.Nginx = map[string]proto.Runtime{}
+	}
+	p.pf.Nginx[l] = r
 	return nil
 }
 
@@ -895,6 +919,12 @@ func (e *Engine) runBuilds(t *config.Target, apps []*config.App, items []*item, 
 		OnWait:  func(lock string) { e.Rep.Warn("另一个构建正在使用构建锁 %s，排队等待……", lock) },
 		Ctx:     e.Ctx,
 	}
+	runner.OmitEnv = append(runner.OmitEnv, ageIdentityEnv)
+	for _, app := range e.File.Apps {
+		for _, ref := range app.Service.Secrets {
+			runner.OmitEnv = append(runner.OmitEnv, secret.AppEnv(app.Name, ref.Name))
+		}
+	}
 	for _, st := range steps {
 		key := st.Key()
 		start, done := built[key]
@@ -961,7 +991,8 @@ func (e *Engine) upload(s *session, items []*item, id string, gits DeployGit, tm
 	var files []upFile
 	var upBytes, total int64
 	req := &proto.Request{Apps: specs, Stage: prep.Stage}
-	for _, it := range items {
+	for i, it := range items {
+		specs[i].Secrets = it.secrets
 		git := gits[it.app.Name] // 这个应用自己的代码的提交；不在 git 仓库里的为空
 		rel := proto.ReleaseSpec{App: it.app.Name, ID: id, SHA256: it.sha, Size: it.size, Archive: it.app.Type == proto.TypeStatic || proto.DirService(it.app.Type),
 			Meta: proto.ReleaseMeta{Commit: git.Commit, Branch: git.Branch, Dirty: git.Dirty, DeployedBy: e.actor(), Source: it.local}}

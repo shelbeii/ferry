@@ -129,6 +129,9 @@ func (a *Agent) hookEnv(s *proto.AppSpec, ph hookPhase, release, prev string) ([
 	for _, f := range s.HookEnvFiles {
 		optional := strings.HasPrefix(f, "-")
 		f = strings.TrimPrefix(f, "-")
+		if isAppSecretsFile(f) {
+			return nil, fmt.Errorf("%s 是 Ferry 管理的应用密钥文件，由 systemd 交给服务", proto.AppSecretsFile)
+		}
 		kv, err := readEnvFile(f)
 		if err != nil {
 			if optional && os.IsNotExist(err) {

@@ -108,7 +108,7 @@ func TestMCP(t *testing.T) {
 			t.Errorf("%s 的只读标记不对", tl.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "app_control,app_logs,app_releases,app_status,ask_secret,audit_log,backup_fetch,backup_run,backup_status,build_log,config_check,config_edit,config_get,config_schema,create_project,db_connections,db_execute,db_query,db_schema,deploy,deploy_changes,deploy_history,detect_project,firewall_enable,list_projects,monitor_status,port_check,port_control,preflight,redis_execute,redis_query,rollback,run_change_command,run_command,run_job,save_software_template,server_check,server_ports,server_software,software_backup,software_control,software_install,software_logs,software_restore,software_templates,software_upgrade,ssh_disconnect,ssh_sessions,task_status,template_guide,write_file" {
+	if got := strings.Join(names, ","); got != "app_control,app_logs,app_releases,app_secrets,app_status,ask_secret,audit_log,backup_fetch,backup_run,backup_status,build_log,config_check,config_edit,config_get,config_schema,create_project,db_connections,db_execute,db_query,db_schema,deploy,deploy_changes,deploy_history,detect_project,firewall_enable,list_projects,monitor_status,port_check,port_control,preflight,redis_execute,redis_query,rollback,run_change_command,run_command,run_job,save_software_template,server_check,server_ports,server_software,software_backup,software_control,software_install,software_logs,software_restore,software_templates,software_upgrade,ssh_disconnect,ssh_sessions,task_status,template_guide,write_file" {
 		t.Fatalf("工具：%s", got)
 	}
 
@@ -154,6 +154,22 @@ func TestMCP(t *testing.T) {
 	if len(lines) != 5 || !strings.Contains(lines[0], `"client":"test-client 1.0"`) || !strings.Contains(lines[0], `"tool":"list_projects"`) ||
 		!strings.Contains(lines[4], `"ok":false`) {
 		t.Errorf("调用记录：\n%s", b)
+	}
+}
+
+func TestMCPAppSecretsShowOnlyAvailability(t *testing.T) {
+	t.Setenv("FERRY_HOME", t.TempDir())
+	t.Setenv("FERRY_SECRET_API_DB_PASSWORD", "dummy-ci-must-not-reach-mcp")
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+	dir := t.TempDir()
+	writeProject(t, dir, shopYAML+"    service: {secrets: [DB_PASSWORD]}\n")
+	cs := connect(t, dir)
+	out, failed := callText(t, cs, "app_secrets", map[string]any{"target": "test", "apps": []string{"api"}})
+	var states map[string]map[string]bool
+	if failed || json.Unmarshal([]byte(out), &states) != nil || !states["api"]["DB_PASSWORD"] ||
+		strings.Contains(out, "dummy-ci-must-not-reach-mcp") {
+		t.Fatalf("unexpected app_secrets result: %s", out)
 	}
 }
 

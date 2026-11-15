@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Check local Markdown links and heading anchors in Ferry's documentation."""
+
+import re
+import subprocess
+import sys
+import unicodedata
+from collections import Counter
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DESTINATION = r"<([^>\n]+)>|((?:\\.|[^\s()\\]|\([^\s()]*\))+)"
+INLINE = re.compile(r"(?<!\\)\]\(\s*(?:" + DESTINATION + r")")
+REFERENCE = re.compile(r"^ {0,3}\[[^\]]+\]:\s*(?:" + DESTINATION + r")")
+HTML_LINK = re.compile(r"""<(?:a|img)\b[^>]*?\b(?:href|src)=["']([^"']+)["']""", re.I)
+HTML_ANCHOR = re.compile(r"""<a\b[^>]*?\b(?:id|name)=["']([^"']+)["']""", re.I)
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+HEADING = re.compile(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+
+
+def visible_lines(path):
+    fence = ""
+    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+        match = FENCE.match(line)
+        if fence:
+            if match and match[1].startswith(fence) and not match[2].strip():
+                fence = ""
+        elif match:
+            fence = match[1]
+        else:
+            yield number, line
+
+
+def slug(text):
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"(?<!\\)</?[A-Za-z][^>]*>", "", text)
+    return "".join(
+        "-" if char == " " else char
+        for char in text.lower()
+        if char in " -_" or unicodedata.category(char)[0] in "LMN"
+    )
+
+
+def anchors(lines):
+    occurrences = Counter()
+    found = set()
+    for _, line in lines:
+        found.update(HTML_ANCHOR.findall(line))
+        heading = HEADING.match(line)
+        if heading:
+            base = slug(heading[1])
+            anchor = base
+            while anchor in found:
+                occurrences[base] += 1
+                anchor = f"{base}-{occurrences[base]}"
+            found.add(anchor)
+    return found
+
+
+def local_destinations(line):
+    for match in INLINE.finditer(line):
+        yield match[1] or match[2]
+    reference = REFERENCE.match(line)
+    if reference:
+        yield reference[1] or reference[2]
+    yield from HTML_LINK.findall(line)
+
+
+def check():
+    filenames = subprocess.check_output(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
+         "README.md", "README.en.md", "docs", "desktop/README.md", "examples", ".github"],
+        cwd=ROOT,
+    ).decode("utf-8").split("\0")
+    sources = sorted({ROOT / name for name in filenames if name.lower().endswith(".md")})
+    lines_by_file = {path: list(visible_lines(path)) for path in sources if path.is_file()}
+    anchors_by_file = {path: anchors(lines) for path, lines in lines_by_file.items()}
+    errors = []
+    checked = 0
+    for source, lines in lines_by_file.items():
+        for number, line in lines:
+            for destination in local_destinations(line):
+                url = urlsplit(re.sub(r"\\([()])", r"\1", destination))
+                if url.scheme or url.netloc:
+                    continue
+                checked += 1
+                path = unquote(url.path)
+                if path.startswith("/"):
+                    target = (ROOT / path.lstrip("/")).resolve()
+                else:
+                    target = (source.parent / path).resolve() if path else source
+                anchor = unquote(url.fragment)
+                if not target.is_relative_to(ROOT) or not target.exists():
+                    error = "missing local target"
+                elif anchor and target.suffix.lower() == ".md":
+                    if target not in anchors_by_file:
+                        anchors_by_file[target] = anchors(visible_lines(target))
+                    error = "" if anchor in anchors_by_file[target] else "missing Markdown anchor"
+                else:
+                    error = ""
+                if error:
+                    errors.append(f"{source.relative_to(ROOT)}:{number}: {error}: {destination}")
+    for error in errors:
+        print(error, file=sys.stderr)
+    print(f"Checked {checked} local links in {len(lines_by_file)} Markdown files. {len(errors)} errors.")
+    return bool(errors)
+
+
+if __name__ == "__main__":
+    sys.exit(check())

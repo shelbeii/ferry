@@ -10,6 +10,7 @@ import (
 	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/engine"
+	"github.com/captain/ferry/internal/proto"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -120,6 +121,9 @@ func (s *server) addAITools(m *mcp.Server) {
 		loggedReq(s, "write_file", func(ctx context.Context, req *mcp.CallToolRequest, in writeFileIn) (any, error) {
 			if !strings.HasPrefix(in.Path, "/") {
 				return nil, errors.New("path 要写绝对路径")
+			}
+			if proto.IsAppSecretsPath(in.Path) {
+				return nil, errors.New("此文件由 Ferry 管理，请在应用详情中更新密钥")
 			}
 			return s.aiChange(ctx, req, in.targetIn, "write-file", map[string]string{"path": in.Path, "content": in.Content, "mode": in.Mode}, in.Reason)
 		}))

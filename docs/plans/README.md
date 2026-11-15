@@ -8,12 +8,12 @@
 | 2 | 服务器失联告警（心跳） | 0.13.96 已做 | 见下面「已做」 |
 | 3 | 备份传到异地（S3 兼容）并加密 | 0.13.96 已做 | 见下面「已做」 |
 | 4 | 多台部署：分批、先发一台、失败时回滚已切换的 | 0.13.98 已做（摘流量的钩子没做） | [04-multi-target-rollout.md](04-multi-target-rollout.md) |
-| 5 | Ferry 管理的应用密钥（加密的环境变量） | 待做 | [05-app-secrets.md](05-app-secrets.md) |
-| 6 | 后端应用填域名就有 HTTPS | 待做 | [06-backend-https.md](06-backend-https.md) |
+| 5 | Ferry 管理的应用密钥（加密的环境变量） | 0.14.9 实现本机凭据库，0.15.1 实现团队共享 | [05-app-secrets.md](05-app-secrets.md) |
+| 6 | 后端应用填域名就有 HTTPS | 0.14.8 已实现，待发布 | [06-backend-https.md](06-backend-https.md) |
 | 7 | 部署 Docker / Compose 应用 | 待做 | [07-docker-apps.md](07-docker-apps.md) |
 | 8 | 定时任务（cron）作为应用 | 0.13.97 已做 | [08-scheduled-jobs.md](08-scheduled-jobs.md) |
 | 9 | 审计补全 + 更新包签名 | 0.14.2 已做（终端录像没做） | [09-audit-and-signing.md](09-audit-and-signing.md) |
-| 10 | 英文 README、快速上手、常见问题 | 待做 | [10-docs-onboarding.md](10-docs-onboarding.md) |
+| 10 | 英文 README、快速上手、常见问题 | 0.15.2 已实现，待发布 | [10-docs-onboarding.md](10-docs-onboarding.md) |
 
 ## 建议的顺序
 
@@ -34,6 +34,7 @@
 做每一项时的通用要求（和平时一样）：
 
 - 改了 ferry.yaml 的写法：同时改 `internal/config`（结构 + 校验）、`desktop/src/editor/schema.ts`（`FERRY_UPDATE_SCHEMA=1` 重新生成 `internal/config/schema.json`）、`internal/config/testdata/fields.txt`、`docs/config.md`。
+- 更新相应的中英文文档，运行 `python3 scripts/checklinks` 检查相对链接。
 - 改了 agent：协议字段只加不改；老 agent 不认识的字段会被忽略，新功能要靠新 agent（agent 按内容自动更新）。
 - `go vet`、`gofmt -l`、`go test ./...`、`vue-tsc`、`vitest`、e2e 都过；涉及并发的用 `golang:1.26` 容器跑 `-race`。
 - 每项单独一个版本号，装上安装包验证；不碰真实服务器，除非先问过。
@@ -46,6 +47,7 @@
 - 8：`list_projects` 的应用带 `schedule`，`app_status` 的 `job`；新工具 `run_job` 现在运行一次（要确认）；`app_control` 写明定时任务的启停是开关定时器；助手的系统提示里标出哪些应用是定时任务。
 - 9（0.14.2）：新的只读工具 `audit_log`（MCP 和 AI 助手都有）：按类型（可按前缀）、操作人、最近多少小时看服务器上的审计记录。签名不用接。
 - 4：MCP 的 `deploy` 加 `targets`（一次部署到几台）和 `batch`、`canary`、`observeSec`、`onFailure`，确认内容里写上切换方式。AI 助手只对着一台服务器，没有多台部署。
+- 5（0.14.9）：MCP 和 AI 助手的只读工具 `app_secrets` 返回应用名、变量名和本机供值状态。
 
 ## 已做（0.13.96）
 

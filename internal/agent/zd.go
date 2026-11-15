@@ -109,6 +109,9 @@ func (a *Agent) zdSwitch(s *proto.AppSpec, id, prev string, hooks bool) (string,
 		free = 1
 	}
 	sl := zd.Slots[free]
+	if !hooks {
+		sl.UnitText = slotSecretsUnit(sl.UnitText, a.slotDir(s.Name, sl.Name), lexists(a.appSecretsPath(s.Name, id)))
+	}
 	spec := *s
 	spec.Unit, spec.UnitText, spec.Health = sl.Unit, sl.UnitText, sl.Health
 	// 启动失败时看的日志：running 还指着旧版本，换成新版本的槽位
@@ -169,9 +172,9 @@ func (a *Agent) zdSwitch(s *proto.AppSpec, id, prev string, hooks bool) (string,
 		oldPort = zd.Slots[0].Port
 	}
 	if zd.ProxyUnit != "" {
-		if err := a.zdProxy(s, sl.Port); err != nil {
+		if err := a.switchZDProxy(s, sl.Port); err != nil {
 			if oldPort != 0 {
-				a.zdProxy(s, oldPort)
+				a.switchZDProxy(s, oldPort)
 			}
 			return failed("前面的 nginx：" + err.Error())
 		}
@@ -181,9 +184,17 @@ func (a *Agent) zdSwitch(s *proto.AppSpec, id, prev string, hooks bool) (string,
 		if err := a.runHooks(s, ph, s.Hooks.AfterSwitch, id, prev); err != nil {
 			a.fail(proto.EvFail, s.Name, "%v", err)
 			if zd.ProxyUnit != "" && oldPort != 0 {
-				a.zdProxy(s, oldPort)
+				a.switchZDProxy(s, oldPort)
 			}
 			return failed(err.Error())
+		}
+	}
+	if s.HTTPS == nil || s.HTTPS.Instance != "" {
+		if err := a.applyBackendHTTPS(s, sl.Port); err != nil && oldPort != 0 && a.readBackendHTTPS(s.Name).Instance != "" {
+			if zd.ProxyUnit != "" {
+				a.switchZDProxy(s, oldPort)
+			}
+			return failed("HTTPS 转发还在使用旧版本：" + err.Error())
 		}
 	}
 	// 让还在处理的请求做完、注册中心摘掉旧版本，再停旧的
@@ -215,6 +226,9 @@ func (a *Agent) zdSwitch(s *proto.AppSpec, id, prev string, hooks bool) (string,
 		a.warn(proto.EvWarn, s.Name, "%v", err)
 	}
 	a.info(proto.EvSwitch, s.Name, "running → %s（槽位 %s）", id, sl.Name)
+	if s.HTTPS != nil && s.HTTPS.Instance == "" {
+		a.finishBackendHTTPS(s)
+	}
 	return "OK", ""
 }
 

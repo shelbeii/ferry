@@ -88,6 +88,7 @@ type Target struct {
 	Arch          string `yaml:"arch"`          // 可选：amd64 / arm64；与服务器实际不符时报错
 	KeepReleases  int    `yaml:"keepReleases"`  // 每个应用保留的版本数，默认 5
 	UploadStreams int    `yaml:"uploadStreams"` // 上传并行连接数（0 = 用设置里的默认值）；VPN 等对单条连接限速时调大
+	SecretsFrom   string `yaml:"secretsFrom"`   // keyring（默认）或 file:<相对路径>.age
 	// FerryDir 服务器上存放 ferry 组件的目录：agent 与 Ferry 提供的运行环境（JDK）。默认 /usr/local/lib/ferry；必须归 root、他人不可写
 	FerryDir    string                `yaml:"ferryDir"`
 	Confirm     *bool                 `yaml:"confirm"` // 部署前是否要求确认，默认 true
@@ -136,7 +137,8 @@ type App struct {
 	// Hooks 部署时在服务器上执行的命令
 	Hooks Hooks `yaml:"hooks"`
 	// Job 定时任务：按时间表运行一次就结束（systemd 定时器启动），不常驻、不开机自启
-	Job *Job `yaml:"job"`
+	Job   *Job      `yaml:"job"`
+	HTTPS *AppHTTPS `yaml:"https"`
 
 	index int // 在配置中的位置，Order 相同时按它排序
 }
@@ -265,6 +267,7 @@ type Service struct {
 	Exec         []string          `yaml:"exec"` // 完整命令行，设置后忽略 java/jvmArgs/args
 	Env          map[string]string `yaml:"env"`
 	EnvFile      StringList        `yaml:"envFile"` // 可多个；以 - 开头表示文件不存在也不报错
+	Secrets      []SecretRef       `yaml:"secrets"`
 	ExecStartPre []string          `yaml:"execStartPre"`
 	Conflicts    []string          `yaml:"conflicts"` // 启动前停掉的单元（如同一端口的旧服务）
 	SharedDirs   []string          `yaml:"sharedDirs"`
@@ -441,6 +444,17 @@ type HTTPS struct {
 	Redirect *bool `yaml:"redirect"`
 	// CA 证书服务：letsencrypt（默认）| letsencrypt-staging（测试用，证书浏览器不认）| ACME 目录地址
 	CA string `yaml:"ca"`
+}
+
+// AppHTTPS 为常驻后端应用配置 HTTPS 反向代理。
+type AppHTTPS struct {
+	HTTPS         `yaml:",inline"`
+	Upstream      string `yaml:"upstream"`
+	NginxInstance string `yaml:"nginxInstance"`
+	MaxBody       string `yaml:"maxBody"`
+	WebSocket     *bool  `yaml:"websocket"`
+	Cert          string `yaml:"cert"`
+	Key           string `yaml:"key"`
 }
 
 // CAURL ACME 目录地址。

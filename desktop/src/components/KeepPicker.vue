@@ -106,6 +106,11 @@ const size = (d: KeepEntry) => (d.dir ? '' : bytes(d.size ?? 0))
 .tip { font-size: 12px; line-height: 1.6; margin-bottom: 8px; }
 .err { color: var(--el-color-danger); font-size: 12px; margin-bottom: 8px; }
 .tree-box { max-height: 52vh; overflow: auto; border: 1px solid var(--ferry-stroke); border-radius: 6px; padding: 4px 0; min-height: 120px; }
+/* 树节点直接沿用外层弹窗的磨砂底色，保留悬停和键盘焦点反馈。 */
+html.cg-on .tree-box :deep(.el-tree) {
+  background: transparent;
+  --el-tree-node-hover-bg-color: color-mix(in srgb, var(--el-color-primary) 7%, transparent);
+}
 .node { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .node.off { color: var(--el-text-color-disabled); }
 .small { font-size: 11px; }

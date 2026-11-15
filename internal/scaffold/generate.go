@@ -70,6 +70,7 @@ type AppSpec struct {
 	NoSPA         bool              `json:"noSpa"` // 不是前端路由（找不到的路径返回 404）
 	NginxInstance string            `json:"nginxInstance"`
 	Domains       []string          `json:"domains"`
+	HTTPSDomains  []string          `json:"httpsDomains"`
 	// python、node、dotnet：启动命令（每项一个参数）、服务的环境变量、不上传的、装依赖的镜像源
 	Exec       []string          `json:"exec"`
 	ServiceEnv map[string]string `json:"serviceEnv"`
@@ -243,6 +244,13 @@ func Generate(s Spec, configPath string) (string, error) {
 		}
 		if a.Root != "" {
 			w(2, "root: %s   # 这个应用单独的部署目录（如另一个分区）", q(a.Root))
+		}
+		if a.Type != "static" && len(a.HTTPSDomains) > 0 {
+			w(2, "https:")
+			w(3, "domains: [%s]", strings.Join(quoteAll(a.HTTPSDomains), ", "))
+			if a.Port > 0 && a.Health != "http" {
+				w(3, "upstream: 127.0.0.1:%d", a.Port)
+			}
 		}
 		if a.Type == "static" && a.Port > 0 {
 			w(2, "static:")

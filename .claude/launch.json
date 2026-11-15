@@ -1,0 +1,30 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "desktop-vite",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "desktop",
+        "run",
+        "dev"
+      ],
+      "port": 1420
+    },
+    {
+      "name": "desktop-vite-1430",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "desktop",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "1430"
+      ],
+      "port": 1430
+    }
+  ]
+}

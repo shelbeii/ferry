@@ -420,6 +420,9 @@ func (a *Agent) deployOne(s *proto.AppSpec, rel proto.ReleaseSpec, stage string)
 	a.addHistory(proto.HistoryEntry{Action: "deploy", App: s.Name, Release: rel.ID, Result: res,
 		Commit: rel.Meta.Commit, SHA256: rel.SHA256, Msg: msg, ReadySec: o.ReadySec, ErrorLines: errLines})
 	if res == "OK" {
+		if s.Type != proto.TypeStatic && s.ZD == nil {
+			a.applyBackendHTTPS(s, 0)
+		}
 		a.pruneReleases(s)
 		a.dropEmptyData(s)
 	}
@@ -492,6 +495,12 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 	}
 	if err := os.MkdirAll(meta, 0o750); err != nil {
 		return err
+	}
+	if s.HTTPS != nil && s.ZD == nil {
+		b, _ := json.Marshal(backendHTTPSRelease{Upstream: s.HTTPS.Upstream, Health: s.Health})
+		if err := os.WriteFile(filepath.Join(meta, "https-release.json"), b, 0o640); err != nil {
+			return err
+		}
 	}
 	src := filepath.Join(stage, rel.File)
 	var fileSums map[string]string
@@ -574,6 +583,18 @@ func (a *Agent) placeRelease(s *proto.AppSpec, rel proto.ReleaseSpec, stage stri
 	}
 	if err := saveJobTimer(meta, s); err != nil {
 		return err
+	}
+	if isService(s) {
+		file := filepath.Join(tmp, proto.AppSecretsFile)
+		if lexists(file) {
+			return fmt.Errorf("%s 是 Ferry 管理的应用密钥文件，发布包不能占用", proto.AppSecretsFile)
+		}
+		if s.Secrets != nil {
+			data, _ := appSecretsContent(*s.Secrets)
+			if err := writeAppSecrets(file, data); err != nil {
+				return err
+			}
+		}
 	}
 	m := rel.Meta
 	m.ID, m.App, m.SHA256, m.Size = rel.ID, s.Name, rel.SHA256, rel.Size
@@ -1044,12 +1065,19 @@ func (a *Agent) waitProbe(s *proto.AppSpec) error {
 
 // diag 输出启动失败原因：配置的日志文件（去掉堆栈）最后几行；没有就看 journald。
 func (a *Agent) diag(s *proto.AppSpec, unit string) {
+	if a.hasAppSecrets(s, unit) {
+		a.info(proto.EvDiag, s.Name, "此服务使用应用密钥，部署诊断省略进程日志。查看完整日志：journalctl -u %s", unit)
+		return
+	}
 	var lines []string
 	for _, p := range s.DiagLogs {
 		if hasGlob(p) { // 按天命名的日志：看最近修改的那个
 			if p = newestGlob(p); p == "" {
 				continue
 			}
+		}
+		if isAppSecretsFile(p) {
+			continue
 		}
 		ls, err := tailFile(p, 200)
 		if err != nil {

@@ -1,6 +1,8 @@
 # 5. Ferry 管理的应用密钥（加密的环境变量）
 
-## 现状
+> 0.14.9 实现第一期，桌面版及 CLI 支持保存、查询和轮换本机凭据。0.15.1 实现第二期，支持随仓库共享的 age 文件。普通应用和不停机发布均按版本保存密钥，CI 可用环境变量覆盖。用法见[应用密钥配置](../config.md#应用密钥)。
+
+## 改进前
 
 - 应用的密码、密钥靠 `service.envFile`（`internal/config/config.go` 的 `Service.EnvFile`，渲染成单元里的 `EnvironmentFile=`，`internal/engine/render.go`）。文件由用户自己登录服务器写，README 示例：`envFile: -/etc/myapp/api.env  # 密码等放这里，不要写进 ferry.yaml`。
 - `service.env` 是明文，写在 ferry.yaml 里，会进 git。
@@ -42,9 +44,9 @@ targets:
 
 ## 服务器上
 
-- 部署时 engine 把这次的值写成 `versions/<版本>/.ferry-secrets.env`（0600，属主 root，运行用户只读 —— 单元里用 `EnvironmentFile=`，systemd 以 root 读，不需要运行用户能读）。
+- 部署时 agent 把这次的值写成 `.ferry-secrets.env`，按版本随目录保存。权限为 `root:root 0600`，通过单元的 `EnvironmentFile=` 由 systemd 读取。
 - 单元里加一行 `EnvironmentFile=<running>/.ferry-secrets.env`（在用户的 `envFile` 之后，同名时 Ferry 的优先）。不停机发布的两个槽位各指向自己的版本目录。
-- 回滚：`running` 链接切回旧版本，读到的就是旧版本的 `.ferry-secrets.env`，天然跟着回滚。
+- 回滚：普通部署恢复旧版本目录，不停机发布切换槽位。systemd 读取该版本保存的 `.ferry-secrets.env`。
 - 「只更新密钥」：agent 新命令 `secretset`：把新值写进**当前版本**的 `.ferry-secrets.env`（先写临时文件再改名），记一条部署历史 `action: secrets`（只记变量名，不记值），按用户选择重启。
 
 为什么不放 `/etc`：放版本目录才能随版本回滚；版本目录本来就只保留 `keepReleases` 个。
@@ -60,14 +62,14 @@ targets:
 ### engine
 
 - `secrets.go` 旁边新文件 `appsecrets.go`：
-  - `AppSecretValues(t, a) (map[string]string, missing []string, error)`：从凭据库按「目标级 → 通配」查。
-  - 部署：`Spec` 之后、上传之前取值；有缺的非 optional 变量 → 部署前报错「api 缺少 DB_PASSWORD：在「应用密钥」里填上」（和私钥缺失一样的提示风格，`secret.NeedError` 让桌面版直接弹输入框）。
-  - 值经上传的请求带过去（`AppSpec.Secrets map[string]string`），**不写进任何本机日志**；`proto.Request` 打日志的地方（`-v` 调试输出）要遮掉这个字段。
+  - CI 环境变量优先。使用 `keyring` 时依次查当前目标和所有目标的默认值，使用 `file:` 时解密项目内的团队文件。
+  - 部署在连接服务器之前检查密钥。必填项缺失时返回 `app-secrets-required`，桌面版可据此直接打开填写框。
+  - 值只在部署或轮换时通过 SSH 标准输入发送。调试、任务和审计输出只记录变量名或供值状态。
 - `ferry secrets <目标> [list | set <应用> <变量> | unset … | push [应用]]`。
 
 ### agent
 
-- 部署切换前把 `spec.Secrets` 写进新版本目录的 `.ferry-secrets.env`（格式：`KEY='值'`，systemd 的 EnvironmentFile 引号规则，值里的 `'` `\` 转义）。
+- 部署切换前把 `spec.Secrets` 写进新版本目录的 `.ferry-secrets.env`，按 systemd 的 EnvironmentFile 双引号规则保留空格、引号和反斜杠。
 - `secretset` 命令（见上）。
 - `appinfo`（应用详情）返回「这个版本带了哪些变量名」，不返回值。
 
@@ -79,11 +81,11 @@ targets:
 
 ### MCP / AI
 
-- 只给变量名和「有没有值」，**永远不返回值**。AI 不能设密钥值（`ask_secret` 是对话里临时用的，不进应用密钥）。
+- 只读工具 `app_secrets` 返回变量名和本机供值状态。密钥通过桌面版和 CLI 管理。
 
 ## 第二期：团队共享
 
-`secretsFrom: file:secrets/prod.age`：仓库里放一个 age 加密的 YAML（`变量: 值`），每个人用自己的 age 身份（桌面版生成，私钥存本机凭据库）解开；加人 = 用新成员的公钥重新加密一遍（桌面版「共享给…」）。这样新同事 clone 仓库、把公钥给管理员，就能部署，不用一个个传密码。
+`secretsFrom: file:secrets/prod.age` 指向仓库内的 age 加密文件。解密后的 YAML 按应用保存变量和值，并包含版本和接收方公钥。成员用各自的 X25519 身份解密，桌面版可生成身份并将私钥保存在本机凭据库。已有成员在「团队共享」中添加公钥并提交重新加密的文件，新成员拉取后即可部署。CLI 提供 `keygen` 和 `team [status|init|add|remove]`，CI 可以用 `FERRY_AGE_IDENTITY` 提供独立身份。
 
 ## 兼容
 
@@ -91,7 +93,7 @@ targets:
 
 ## 出错和边界
 
-- 值里有换行：EnvironmentFile 不支持多行，拒绝并提示「多行的值（证书、私钥）用附带文件」。
+- Ferry 只接受单行值，证书、私钥等多行内容仍可用附带文件部署。
 - 本机凭据库不可用（Linux 没有 Secret Service）：提示用环境变量 `FERRY_SECRET_<应用>_<变量>` 提供（CI 用）。
 - CI：环境变量提供值，和登录密码的 `FERRY_PASSWORD_*` 一样的命名规则，写进 docs/ci.md。
 
@@ -100,7 +102,8 @@ targets:
 - config：解析、校验、重名。
 - engine：取值顺序（目标级优先于通配、环境变量优先于凭据库）、缺值报错类型；请求日志不含值。
 - agent：写文件权限 0600、引号转义（值里有 `'`、`$`、空格）、回滚后读到旧值、`secretset` 只改当前版本。
-- e2e：部署带一个密钥 → 应用读到；改值 + `secrets push` → 重启后读到新值；回滚 → 读到旧值。demoserver 加一个 `/env?name=X` 接口回显变量（只在 e2e 的 demo 里）。
+- e2e：双目标部署、目标与共享值以及 CI 优先级、轮换与跳过重启、轮换失败恢复、普通和不停机回滚。测试服务的 `/env-digest?name=X` 只返回测试变量的 SHA-256 摘要。
+- 团队共享：标准 age 密文、并发写入、新成员部署、轮换、撤销公钥、CI 覆盖和输出保密。0.15.1 的完整 Docker 端到端测试通过 1004 项，其中团队共享新增 17 项。
 
 ## 分步
 
@@ -112,5 +115,5 @@ targets:
 ## 验收
 
 - 新加一台服务器，只在 ferry.yaml 的 targets 里加它、部署：应用直接能启动，不用登录服务器写任何文件。
-- 回滚到上一个版本，`systemctl show -p Environment` / 应用里读到的是那个版本部署时的值。
+- 回滚到旧版本时，应用读到那个版本保存的值。
 - 部署日志、`-v` 调试输出、MCP 返回里都搜不到密钥的值。

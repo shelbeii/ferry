@@ -1,8 +1,10 @@
 package build
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -57,6 +59,24 @@ func TestRunCapturesFailure(t *testing.T) {
 	be, ok := err.(*Error)
 	if !ok || len(be.Tail) == 0 || !strings.Contains(be.Tail[len(be.Tail)-1], "boom") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestRunOmitsAppSecretEnvironment(t *testing.T) {
+	const name = "FERRY_SECRET_API_DB_PASSWORD"
+	t.Setenv(name, "dummy-do-not-print")
+	dir := t.TempDir()
+	var out bytes.Buffer
+	command := "test -z \"${" + name + "+x}\" && echo passed"
+	if runtime.GOOS == "windows" {
+		command = "if defined " + name + " (exit /b 1) else (echo passed)"
+	}
+	r := &Runner{Out: &out, OmitEnv: []string{name}, LogDir: filepath.Join(dir, "logs"), LockDir: filepath.Join(dir, "locks")}
+	if _, err := r.Run(&Step{Name: "build", Command: command, Workdir: dir, Lock: "build"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "passed") {
+		t.Fatal("build did not confirm the secret was absent")
 	}
 }
 

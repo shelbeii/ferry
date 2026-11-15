@@ -3,13 +3,14 @@
 // 部署时带到服务器上存一份（只有 root 能读），服务器每天续期证书时用。
 import { onMounted, reactive, ref } from 'vue'
 import { call } from '../ferry'
-import { dnsSecretChanges } from '../settingsSecrets'
+import { dnsProviderNames, dnsSecretChanges, type DnsProvider } from '../settingsSecrets'
 
-type Provider = 'aliyun' | 'dnspod' | 'cloudflare'
-const providers: { id: Provider; name: string; idLabel?: string; secretLabel: string; tip: string }[] = [
-  { id: 'aliyun', name: '阿里云 DNS', idLabel: 'AccessKey ID', secretLabel: 'AccessKey Secret', tip: '建一个 RAM 用户，只给 AliyunDNSFullAccess 权限，用它的 AccessKey' },
-  { id: 'dnspod', name: '腾讯云 DNSPod', idLabel: 'SecretId', secretLabel: 'SecretKey', tip: '建一个子用户，只给 QcloudDNSPodFullAccess 权限，用它的 API 密钥' },
-  { id: 'cloudflare', name: 'Cloudflare', secretLabel: 'API Token', tip: 'My Profile → API Tokens → Create Token，权限选 Zone · DNS · Edit' },
+const providers: { id: DnsProvider; idLabel?: string; secretLabel: string; tip: string }[] = [
+  { id: 'aliyun', idLabel: 'AccessKey ID', secretLabel: 'AccessKey Secret', tip: '建一个 RAM 用户，只给 AliyunDNSFullAccess 权限，用它的 AccessKey' },
+  { id: 'dnspod', idLabel: 'SecretId', secretLabel: 'SecretKey', tip: '建一个子用户，只给 QcloudDNSPodFullAccess 权限，用它的 API 密钥' },
+  { id: 'cloudflare', secretLabel: 'API Token', tip: 'My Profile → API Tokens → Create Token，权限选 Zone · DNS · Edit' },
+  { id: 'huaweicloud', idLabel: 'AK', secretLabel: 'SK', tip: '允许查询公网域名和读写 TXT 记录' },
+  { id: 'route53', idLabel: 'Access key ID', secretLabel: 'Secret access key', tip: '允许查询公网托管区和读写 TXT 记录' },
 ]
 
 const stored = ref<Record<string, boolean>>({})
@@ -17,6 +18,8 @@ const draft = reactive<Record<string, { id: string; secret: string }>>({
   aliyun: { id: '', secret: '' },
   dnspod: { id: '', secret: '' },
   cloudflare: { id: '', secret: '' },
+  huaweicloud: { id: '', secret: '' },
+  route53: { id: '', secret: '' },
 })
 const removed = reactive(new Set<string>())
 
@@ -28,7 +31,7 @@ onMounted(async () => {
   }
 })
 
-const has = (p: Provider) => !removed.has(p) && !!stored.value[p]
+const has = (p: DnsProvider) => !removed.has(p) && !!stored.value[p]
 
 function getSecretChanges() { return dnsSecretChanges(draft, removed) }
 function acceptSecretChanges() {
@@ -51,7 +54,7 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
   <div class="dns">
     <div v-for="p in providers" :key="p.id" class="provider">
       <div class="head">
-        <span class="name">{{ p.name }}</span>
+        <span class="name">{{ dnsProviderNames[p.id] }}</span>
         <el-tag v-if="has(p.id)" size="small" type="success" effect="plain" disable-transitions>已保存</el-tag>
         <el-button v-if="has(p.id)" text size="small" type="danger" @click="removed.add(p.id)">删除</el-button>
         <span class="muted small tip">{{ p.tip }}</span>

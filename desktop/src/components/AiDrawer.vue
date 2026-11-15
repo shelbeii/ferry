@@ -1137,6 +1137,7 @@ function copy(text: string) {
 .bot-answer:hover .copy-answer, .copy-answer:focus-visible { opacity: 1; }
 /* 下拉菜单里当前选中的一项（菜单挂在 body 下，不能用 scoped） */
 .el-dropdown-menu__item.chip-cur {
+  --el-dropdown-menuItem-hover-color: var(--el-color-primary);
   color: var(--el-color-primary);
   font-weight: 600;
 }

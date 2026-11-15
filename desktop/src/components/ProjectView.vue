@@ -1679,6 +1679,8 @@ async function onSaved(deployment?: DeploymentRequest) {
       :config="project.path"
       :target="appInfoRequest.target"
       :app="appInfoRequest.app"
+      :has-secrets="info?.apps.find((a) => a.name === appInfoRequest?.app)?.hasSecrets"
+      :production="info?.targets.find((t) => t.name === appInfoRequest?.target)?.production"
       @close="appInfoRequest = undefined"
       @saved="onSaved"
       @versions="showAppReleases(appInfoRequest)"
@@ -1996,7 +1998,12 @@ async function onSaved(deployment?: DeploymentRequest) {
 :global(.target-menu .el-dropdown-menu__item) { gap: 8px; }
 .target-menu-name { font-size: 13px; }
 .target-menu-host { font-size: 11.5px; color: var(--el-text-color-secondary); }
-:global(.target-menu .el-dropdown-menu__item.target-on) { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+:global(.target-menu .el-dropdown-menu__item.target-on) {
+  --el-dropdown-menuItem-hover-fill: var(--el-color-primary-light-9);
+  --el-dropdown-menuItem-hover-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
 :global(.target-menu .target-on .target-menu-name) { font-weight: 600; }
 .tdot {
   width: 6px;

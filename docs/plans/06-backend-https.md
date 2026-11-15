@@ -1,5 +1,7 @@
 # 6. 后端应用填域名就有 HTTPS
 
+> 0.14.8 已实现，待发布。支持独立 nginx、共享 nginx、不停机切换、自带证书、华为云 DNS 和 AWS Route 53。配置和迁移步骤见[后端 HTTPS](../config.md#后端-httpshttps)。删除应用的 `https` 配置并重新部署时会移除入口和续期记录。完整 Docker 端到端测试通过 941 项，其中 29 项覆盖后端 HTTPS。不停机切换期间的 240 次 HTTPS 请求均返回 200。HTTP 签发和续期使用 Pebble 验证，云 DNS 使用模拟 API 测试。
+
 ## 现状
 
 - 自动 HTTPS 只在静态站点上：`static.https`（`internal/config/https.go`、`config.go` 的 `Static.HTTPS`）。engine 在 `servedStaticSpec`（`internal/engine/nginxconf.go`）里生成 `proto.TLSSpec`，agent 的 `tlsPrepare` / `tlsAfterStart`（`internal/agent/acme.go`）申请证书、`ferry-acme.timer` 每天检查续期，证书在 `<root>/.ferry/apps/<应用>/tls`，告警会检查到期（`monitor.go` 的「证书」一节）。

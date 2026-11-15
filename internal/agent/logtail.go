@@ -50,6 +50,9 @@ func (a *Agent) logtail() int {
 		if a.req.LogDiag == "" {
 			return a.result(proto.CodeBadInput, s.Name+" 没有配置 diagLogs，请指定日志文件", nil)
 		}
+		if isAppSecretsFile(a.req.LogDiag) {
+			return a.result(proto.CodeBadInput, "应用密钥文件不能作为日志读取", nil)
+		}
 		r, ok := logRel(filepath.ToSlash(a.appDir(s.Name)), run, a.req.LogDiag)
 		if !ok {
 			if !run.Current {
@@ -68,6 +71,9 @@ func (a *Agent) logtail() int {
 	}
 	if follow && run.Dir != "" {
 		p := path.Join(run.Dir, rel)
+		if isAppSecretsFile(p) {
+			return a.result(proto.CodeBadInput, "应用密钥文件不能作为日志读取", nil)
+		}
 		if hasGlob(rel) {
 			out.Stream, out.Path = true, p // 有通配符：按天切分的日志会换文件，由 ferry 的脚本跟着换
 			return a.result(proto.CodeOK, "", out)

@@ -80,7 +80,7 @@ func keepMatches(src string, k proto.KeepItem) []string {
 			continue
 		}
 		rel = filepath.ToSlash(rel)
-		if noLinkUnder(src, rel) {
+		if !proto.IsAppSecretsPath(rel) && noLinkUnder(src, rel) {
 			out = append(out, rel)
 		}
 	}

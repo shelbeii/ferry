@@ -85,7 +85,7 @@ func secretChanges(changes []SecretChange) ([]secret.Change, error) {
 			switch c.ID {
 			case "cloudflare":
 				accounts = append(accounts, accountValue{secret.DNSAccount(c.ID, "token"), value})
-			case "aliyun", "dnspod":
+			case "aliyun", "dnspod", "huaweicloud", "route53":
 				id := strings.TrimSpace(c.AccessID)
 				if !c.Remove && id == "" {
 					return nil, errors.New("DNS 的访问 ID 和密钥必须一起填写，未保存")

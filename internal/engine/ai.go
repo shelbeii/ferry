@@ -469,6 +469,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 	tools = append(tools, ai.Tool{
 		Name: "app_status",
 		Description: "项目里各应用在这台服务器上的状态：是否运行、进程号、监听端口、健康检查、当前版本与部署时间、问题。" +
+			"后端 HTTPS 看 https：域名、证书有效期、入口是否运行及错误。" +
 			"定时任务（写了 job 的应用）不常驻，看 job：定时器开没开、下次运行时间、上次运行的结果（退出码、用了多久）。",
 		Schema: schema(map[string]any{}),
 		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
@@ -477,6 +478,17 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 				return "", err
 			}
 			return toJSON(st), nil
+		},
+	}, ai.Tool{
+		Name:        "app_secrets",
+		Description: "查询目标上各应用声明的密钥名和本机是否有可用值。",
+		Schema:      schema(map[string]any{}),
+		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
+			status, err := e.AppSecretAvailability(t.Name, nil)
+			if err != nil {
+				return "", err
+			}
+			return toJSON(status), nil
 		},
 	}, ai.Tool{
 		Name: "app_logs",
@@ -550,17 +562,29 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 		},
 	}, ai.Tool{
 		Name:        "deploy_history",
-		Description: "这台服务器上的部署、回滚、启停记录（时间、应用、版本、结果、谁做的），最近的在前。看「什么时候开始出问题、那时谁部署了什么」用这个。",
+		Description: "这台服务器上的部署、回滚、启停记录，最近的在前。带筛选条件或 page=true 时返回 items、total、snapshot。翻页时保持筛选条件，传回 snapshot 并递增 offset。",
 		Schema: schema(map[string]any{
-			"app":   str("应用名；不填 = 全部"),
-			"limit": map[string]any{"type": "integer", "description": "最多多少条，默认 20，最多 100"},
+			"app":      str("应用名；不填为全部"),
+			"since":    str("从何时起，RFC 3339 格式"),
+			"until":    str("到何时止，RFC 3339 格式"),
+			"action":   map[string]any{"type": "array", "items": str("deploy、rollback、start、stop、restart、run 等")},
+			"result":   map[string]any{"type": "array", "items": str("OK、FAILED、ROLLED_BACK、ROLLBACK_FAILED")},
+			"actor":    str("操作人包含的文字"),
+			"text":     str("在应用名、版本、提交、操作人和说明中查找的关键词"),
+			"offset":   map[string]any{"type": "integer", "description": "跳过多少条符合条件的记录，从 0 开始"},
+			"limit":    map[string]any{"type": "integer", "description": "每页最多多少条，默认 20，最多 100"},
+			"page":     map[string]any{"type": "boolean", "description": "只指定 app 和 limit 时也返回分页信息"},
+			"snapshot": map[string]any{"type": "integer", "description": "继续翻页时传回上一次返回的 snapshot"},
 		}),
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
 			var a struct {
-				App   string
-				Limit int
+				proto.HistoryQuery
+				App  string
+				Page bool
 			}
-			json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return "", fmt.Errorf("部署历史筛选条件无效：%w", err)
+			}
 			if a.Limit <= 0 || a.Limit > 100 {
 				a.Limit = 20
 			}
@@ -568,7 +592,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			if a.App != "" {
 				names = []string{a.App}
 			}
-			r, err := e.History(t.Name, names, a.Limit)
+			r, err := e.QueryHistory(t.Name, names, a.HistoryQuery, a.Page)
 			if err != nil {
 				return "", err
 			}
@@ -968,6 +992,9 @@ func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool 
 	check := func(a args) error {
 		if !strings.HasPrefix(a.Path, "/") {
 			return errors.New("path 要写绝对路径")
+		}
+		if proto.IsAppSecretsPath(a.Path) {
+			return errors.New("此文件由 Ferry 管理，请在应用详情中更新密钥")
 		}
 		if a.Mode != "" && !reMode.MatchString(a.Mode) {
 			return errors.New("mode 要写八进制权限，如 644")

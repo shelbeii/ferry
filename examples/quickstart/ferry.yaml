@@ -1,0 +1,22 @@
+version: 1
+project: shop
+
+targets:
+  prod:
+    host: 192.0.2.10
+    user: deployer
+    sudo: true
+    identityFile: ~/.ssh/id_ed25519
+    runAs: shop
+
+apps:
+  - name: api
+    type: java
+    build:
+      command: mvn -q clean package
+    artifact:
+      path: target/shop.jar
+      verify: {springBoot: {}}
+    service:
+      java: /usr/bin/java
+      health: {http: "http://127.0.0.1:8080/health"}

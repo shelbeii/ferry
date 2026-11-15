@@ -32,12 +32,13 @@ export function notifySecretChanges(pending: Record<string, string>, removed: It
   return [...changes.values()]
 }
 
-export type DnsProvider = 'aliyun' | 'dnspod' | 'cloudflare'
-export function dnsSecretChanges(draft: Record<DnsProvider, { id: string; secret: string }>, removed: ReadonlySet<string>): SettingsSecretChange[] {
+export const dnsProviderNames = { aliyun: '阿里云 DNS', dnspod: '腾讯云 DNSPod', cloudflare: 'Cloudflare', huaweicloud: '华为云 DNS', route53: 'AWS Route 53' }
+export type DnsProvider = keyof typeof dnsProviderNames
+export function dnsSecretChanges(draft: Partial<Record<DnsProvider, { id: string; secret: string }>>, removed: ReadonlySet<string>): SettingsSecretChange[] {
   const changes: SettingsSecretChange[] = []
-  for (const id of ['aliyun', 'dnspod', 'cloudflare'] as const) {
-    const d = draft[id], value = d.secret.trim(), accessId = d.id.trim()
-    if (id !== 'cloudflare' && !!value !== !!accessId) throw new Error(`${id === 'aliyun' ? '阿里云 DNS' : '腾讯云 DNSPod'}：访问 ID 和密钥要一起填写`)
+  for (const id of Object.keys(dnsProviderNames) as DnsProvider[]) {
+    const d = draft[id], value = d?.secret.trim(), accessId = d?.id.trim()
+    if (id !== 'cloudflare' && !!value !== !!accessId) throw new Error(`${dnsProviderNames[id]}：访问 ID 和密钥要一起填写`)
     if (value) changes.push({ kind: 'dns', id, value, ...(id === 'cloudflare' ? {} : { accessId }) })
     else if (removed.has(id)) changes.push({ kind: 'dns', id, remove: true })
   }

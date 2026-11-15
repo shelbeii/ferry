@@ -117,6 +117,7 @@ func newServer(o Options) (*server, *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "app_status", Title: "应用状态",
 		Description: "项目里的应用在某台服务器上的状态：是否运行、进程号、监听端口、健康检查、当前版本与部署时间、发现的问题；" +
+			"后端 HTTPS 看 https：域名、证书有效期、入口是否运行及错误；" +
 			"定时任务（job）不常驻，看 job：定时器开没开、下次什么时候运行、上次运行的结果（退出码、用了多久）；" +
 			"busy 是正在部署、回滚或启停它的人（团队里别人在操作时，等对方做完再动）。",
 		Annotations: readOnly},
@@ -137,6 +138,15 @@ func newServer(o Options) (*server, *mcp.Server) {
 			})
 		}))
 
+	addTool(s, m, &mcp.Tool{Name: "app_secrets", Title: "应用密钥状态",
+		Description: "查询目标上各应用声明的密钥名和本机是否有可用值。无需连接服务器。",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		logged(s, "app_secrets", func(ctx context.Context, in appsIn) (any, error) {
+			return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
+				return e.AppSecretAvailability(t, in.Apps)
+			})
+		}))
+
 	addTool(s, m, &mcp.Tool{Name: "app_releases", Title: "应用版本",
 		Description: "项目里的应用在某台服务器上保留的版本：哪个在运行、各版本的部署时间、提交、是否失败过。",
 		Annotations: readOnly},
@@ -148,14 +158,14 @@ func newServer(o Options) (*server, *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "deploy_history", Title: "部署记录",
 		Description: "某台服务器上的部署、回滚、启停记录（时间、应用、版本、结果、谁做的；部署成功的还有启动用了几秒、启动期间的错误行数），最近的在前。" +
-			"记录在服务器上，团队里每个人（包括 CI）的操作都在。",
+			"带筛选条件或 page=true 时返回 items、total 和 snapshot；翻页时保持筛选条件，传回 snapshot 并递增 offset。仅传 apps、limit 时默认返回记录数组。",
 		Annotations: readOnly},
 		logged(s, "deploy_history", func(ctx context.Context, in historyIn) (any, error) {
 			if in.Limit <= 0 || in.Limit > 200 {
 				in.Limit = 30
 			}
 			return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
-				return e.History(t, in.Apps, in.Limit)
+				return e.QueryHistory(t, in.Apps, in.HistoryQuery, in.Page)
 			})
 		}))
 
@@ -229,8 +239,8 @@ type appsIn = statusIn
 
 type historyIn struct {
 	targetIn
-	Apps  []string `json:"apps,omitempty" jsonschema:"只看这些应用；不填 = 全部"`
-	Limit int      `json:"limit,omitempty" jsonschema:"最多多少条，默认 30"`
+	proto.HistoryQuery
+	Page bool `json:"page,omitempty" jsonschema:"返回分页信息；只有 apps 和 limit 时也可用"`
 }
 
 type auditIn struct {

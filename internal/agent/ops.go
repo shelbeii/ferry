@@ -93,6 +93,15 @@ func (a *Agent) rollback() int {
 		a.addHistory(e)
 		return a.result(proto.CodeFailed, rerr.Error(), nil)
 	}
+	if s.Type != proto.TypeStatic && s.ZD == nil && to != LegacyID {
+		if a.jobFor(s, to) != nil {
+			withoutHTTPS := *s
+			withoutHTTPS.HTTPS = nil
+			a.applyBackendHTTPS(&withoutHTTPS, 0)
+		} else {
+			a.rollbackBackendHTTPS(s, to)
+		}
+	}
 	a.addHistory(e)
 	a.info(proto.EvRollback, s.Name, "已回滚到 %s", to)
 	return a.result(proto.CodeOK, "", proto.AppOutcome{App: s.Name, Release: to, Result: "OK"})
@@ -136,9 +145,16 @@ func (a *Agent) rollbackService(s *proto.AppSpec, to, cur string) error {
 		if err := a.Sys.Systemctl("restart", s.Unit); err != nil {
 			return err
 		}
-		if err := a.waitReady(s, s.Unit); err != nil {
-			a.diag(s, s.Unit)
+		spec := *s
+		if release, ok := a.backendHTTPSRelease(s.Name, id); ok {
+			spec.Health = release.Health
+		}
+		if err := a.waitReady(&spec, s.Unit); err != nil {
+			a.diag(&spec, s.Unit)
 			return err
+		}
+		if s.HTTPS != nil {
+			a.saveAppHealth(s.Name, s.Unit, spec.Health)
 		}
 		return nil
 	}
@@ -374,7 +390,8 @@ func (a *Agent) finishControl(out proto.DeployOutcome) int {
 }
 
 func (a *Agent) startOne(s *proto.AppSpec, action string) error {
-	if a.current(s.Name) == "" {
+	current := a.current(s.Name)
+	if current == "" {
 		err := errors.New("还没有部署过")
 		a.fail(proto.EvFail, s.Name, "%v", err)
 		return err
@@ -406,8 +423,14 @@ func (a *Agent) startOne(s *proto.AppSpec, action string) error {
 		return err
 	}
 	a.autostart(s, s.Unit) // 没起来也设：应用是要运行的，开机时再试
-	if err := a.waitReady(s, s.Unit); err != nil {
-		a.diag(s, s.Unit)
+	spec := *s
+	if s.ZD == nil {
+		if release, ok := a.backendHTTPSRelease(s.Name, current); ok {
+			spec.Health = release.Health
+		}
+	}
+	if err := a.waitReady(&spec, s.Unit); err != nil {
+		a.diag(&spec, s.Unit)
 		return err
 	}
 	return nil
@@ -556,6 +579,11 @@ func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.
 	st := proto.AppStatus{Name: s.Name, Type: s.Type, Unit: s.Unit, Releases: len(a.listReleases(s.Name))}
 	if cur := a.current(s.Name); cur != "" {
 		st.Current = a.readMeta(s.Name, cur)
+		if s.ZD == nil && s.Type != proto.TypeStatic {
+			if release, ok := a.backendHTTPSRelease(s.Name, cur); ok {
+				s.Health = release.Health
+			}
+		}
 	} else {
 		st.Problem = "未部署"
 	}
@@ -612,6 +640,9 @@ func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.
 		}
 		st.Sites, st.Listen, st.Serving = a.staticServing(s, nginx)
 		st.Port = healthPort(s.Health)
+	}
+	if s.Type != proto.TypeStatic {
+		st.HTTPS = a.backendHTTPSStatus(s)
 	}
 	return st
 }
@@ -725,6 +756,11 @@ func (a *Agent) preflight() int {
 		}
 		if s.Type == proto.TypeStatic && !servedStatic(s) && s.NginxInstance == "" {
 			a.checkStaticServing(s, &p)
+		}
+		if s.HTTPS != nil {
+			if err := a.checkBackendHTTPS(s); err != nil {
+				p.Warnings = append(p.Warnings, s.Name+" HTTPS："+err.Error())
+			}
 		}
 		if s.Type == proto.TypeStatic && s.Reload != "" {
 			if f := strings.Fields(s.Reload); len(f) > 0 {

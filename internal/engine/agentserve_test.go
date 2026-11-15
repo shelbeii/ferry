@@ -177,7 +177,10 @@ func TestSessionCallUsesServer(t *testing.T) {
 	if err != nil || r.RC != proto.CodeOK {
 		t.Fatalf("经常驻的 agent：%+v %v", r, err)
 	}
-	s.call("history", &proto.Request{})
+	var page proto.HistoryPage
+	if err := s.callData("history", &proto.Request{HistoryQuery: &proto.HistoryQuery{Limit: 20}}, &page); err != nil || page.Total != 0 || page.Items == nil {
+		t.Fatalf("常驻 agent 的历史分页：%+v %v", page, err)
+	}
 	d.mu.Lock()
 	execs := append([]string(nil), d.execs...)
 	d.mu.Unlock()

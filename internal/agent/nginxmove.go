@@ -78,6 +78,9 @@ func (a *Agent) deployedStaticSpec(s proto.AppSpec) proto.AppSpec {
 
 // 多实例事务按名字排序加锁，publish 中复用持有的锁，避免相反方向迁移互相等待。
 func (a *Agent) lockNginxInstances(names ...string) (func(), error) {
+	if err := os.MkdirAll(a.swDir(), 0o700); err != nil {
+		return nil, err
+	}
 	if a.nginxLocks == nil {
 		a.nginxLocks = map[string]bool{}
 	}

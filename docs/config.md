@@ -1,5 +1,7 @@
 # ferry.yaml 配置说明
 
+[English configuration reference](en/config.md) · [5 分钟上手](quickstart.md)
+
 ferry 从当前目录向上查找 `ferry.yaml`，也可以 `-c` 指定。未知字段、未定义的变量、重名应用、重复的单元名都会在 `ferry validate` 时报错。
 写在用不到它的应用上的项（如 java 应用写了 `static.port`、binary 写了 `jvmArgs`）不报错、也不起作用：`ferry validate`、部署时会提示，桌面版表单里标出「用不到这项」。
 本机路径（产物、构建目录、私钥）相对配置文件所在目录，支持 `~`。
@@ -92,6 +94,7 @@ apps:
 | `keepReleases` | 5 | 每个应用保留的版本数（当前版本和上一个可用版本始终保留） |
 | `ferryDir` | `/usr/local/lib/ferry` | ferry 组件在服务器上的目录：agent 与 Ferry 提供的 JDK（`runtimes/`）。同一台服务器上的项目共用；它及其上级必须归 root 且他人不可写（agent 以 root 运行，执行前会检查） |
 | `uploadStreams` | 设置里的值（默认 6） | 上传并行连接数 1～32：一次上传 8 MB 以上时切成 4 MB 的片，多条 SSH 连接同时写；VPN 等对单条连接限速时调大 |
+| `secretsFrom` | `keyring` | 应用密钥来源，取 `keyring`（本机凭据库）或 `file:secrets/prod.age`（项目内的团队加密文件）。CI 环境变量优先 |
 | `confirm` | true | 部署、回滚前确认（`-y` 跳过） |
 | `production` | false | 生产服务器：部署、回滚、停止、重启要输入服务器名确认（命令行加 `--yes` 跳过，CI 用）；AI 助手的每个改动都要确认（不能「同类不再询问」），打开时总是从「只读」开始；编程软件经 MCP 不能改动它；界面上标出「生产」；部署通知可以设成只发生产服务器的 |
 | `aiChanges` | true | 允许 AI 助手改动这台服务器（每步确认）；false = 只能查看。也管编程软件经 MCP 请求的部署、启停、回滚 |
@@ -275,6 +278,7 @@ apps:
 | `exec` | | 完整命令行（列表，第一项必须是绝对路径；python、node、dotnet 可以写 `node` 这样的命令名），设置后忽略上面三项。python、node、dotnet 必填 |
 | `env` | | `Environment=` |
 | `envFile` | | 字符串或列表；`-` 开头表示文件不存在也不报错。密码等放这里，不要写进 ferry.yaml |
+| `secrets` | | 应用密钥的环境变量名。值来自本机系统凭据库、团队加密文件或 CI 环境变量，随部署版本保存 |
 | `execStartPre` | | 原样写入 `ExecStartPre=` |
 | `conflicts` | | 同端口的其他单元：部署前停止，成功后取消其开机自启；失败回滚时恢复 |
 | `sharedDirs` | | `data` 下要创建的目录（归运行用户，不随版本变化）；不写时不建 `data` |
@@ -297,6 +301,56 @@ apps:
 预检会以运行用户的身份（`runuser -u <用户> -- test …`，ACL 与安全模块的限制也算在内）检查单元里用到的路径：`ExecStartPre` / `ExecStart` / `ExecStartPost` 的程序要能执行（脚本还要能读），参数里已存在的文件要能读（可执行文件还要能执行）、目录要能进入和列出，`-Djava.io.tmpdir` 还要能写，`WorkingDirectory` 要存在且能进入；`ProtectHome=` 挡住 `/home` 下的路径也会指出。访问不了时说明卡在哪一级目录及其属主、权限。部署时默认**自动修正**这些权限（`--keep-perms` 或设置里关掉「部署时自动修正权限」则只报告）：要写入的交给运行用户（`chown`，不递归）；要读、进入、执行的只补缺的那一位——属主、同组用 `chmod u+ / g+`，其他用户优先 `setfacl` 只给运行用户开，文件系统不支持 ACL 时才 `chmod o+`；部署目录本身属主不是 root 或他人可写时改回 `root`、去掉组和其他用户的写权限。系统目录（/etc、/usr…）、一级目录（/home、/data 这类挂载点）、别人的家目录、部署目录的上级都不会自动修改；权限位允许却仍被拒绝（ACL、麒麟 KYSEC、SELinux）的也不自动改。运行用户不存在时，部署时同样会自动创建（`useradd -r -m -s /sbin/nologin <用户>`）。单独的 `ferry preflight` 只列出「部署时会自动修正」的内容，不修改；部署时在确认之后、构建之前修改，并在任务里逐条列出。修正不了的问题会在改动服务器之前阻止部署；带 `-` 前缀（失败可忽略）的命令只提示。
 
 Java 应用：预检读取 `service.java` 的版本，并找出服务器上常见位置（/usr/lib/jvm、/usr/java、/opt、/usr/local、/home/*/runtime…）已有的 JDK；构建之后、上传之前读取 jar 主类的 class 文件版本（61 = Java 17），服务器上的 java 不够新时直接停下（不上传、不动服务器），并列出可以改用的 JDK。本次部署的应用自己的目录、含变量或通配符的参数不检查，`EnvironmentFile` 由 systemd 以 root 读取，也不检查。
+
+### 应用密钥
+
+在 `service.secrets` 里声明变量名。名字以大写字母或下划线开头，可以包含大写字母、数字和下划线，不能重复或与 `service.env` 同名。默认必须有值，带 `optional: true` 的项可以留空。目标的 `secretsFrom` 默认为 `keyring`。
+
+```yaml
+service:
+  secrets:
+    - DB_PASSWORD
+    - {name: SMS_KEY, optional: true, doc: 短信服务的访问密钥}
+```
+
+在桌面版的「查看运行情况 → 应用密钥」管理。CLI 用法如下。
+
+```sh
+ferry secrets prod list api
+ferry secrets prod set api DB_PASSWORD
+ferry secrets prod set api DB_PASSWORD --all-targets
+ferry secrets prod unset api DB_PASSWORD
+ferry secrets prod push api
+ferry secrets prod push api --no-restart
+```
+
+`set` 在终端隐藏输入，也支持环境变量 `FERRY_SECRET_VALUE`。密钥值须是 UTF-8 单行。CI 环境变量优先。使用 `keyring` 时，Ferry 先查当前目标的凭据，再查所有目标的默认凭据。给多台机器使用同一个凭据时，在任一目标上勾选「所有目标的默认值」或用 `--all-targets`。
+
+首次配置需发布一次。服务器把密钥放在当前版本的 `.ferry-secrets.env`，权限为 `root:root 0600`，systemd 在用户的 `envFile` 之后读取。回滚时使用目标版本各自保存的密钥。迁移时可以逐项从原有的 `envFile` 搬到 Ferry，部署验证后再从旧文件中删除该项。
+
+`push` 只更新当前版本的密钥文件，默认重启正在运行的服务。重启失败时恢复原密钥并尝试重新启动。已停止的服务、定时任务，以及带 `--no-restart` 的服务，在下次启动时读新值。已填状态反映当前电脑的供值情况，已应用变量名反映服务器上的当前版本。
+
+目标的 `deployers` 也控制谁能向服务器推送密钥。对生产目标，桌面版和交互式 CLI 要求输入目标名确认。
+
+服务器上的文件和应用进程中的环境变量仍可被服务器管理员访问。应用应避免打印密钥。对于使用 Ferry 管理密钥的服务，部署失败诊断和定时任务的执行事件省略进程日志。密钥经 systemd 交给服务，部署钩子仍按原方式读取 `env` 和 `envFile`。
+
+#### 团队共享
+
+为目标配置项目内的相对路径，路径使用 `/` 分隔，文件名以 `.age` 结尾。
+
+```yaml
+targets:
+  prod:
+    host: 10.0.0.10
+    secretsFrom: file:secrets/prod.age
+```
+
+1. 每位成员在「应用密钥 → 团队共享」生成自己的 age 公钥，也可以执行 `ferry secrets prod keygen`。Ferry 把私钥存在本机系统凭据库。
+2. 由第一位成员点击「初始化团队文件」，或执行 `ferry secrets prod team init`。接着用「填写」或原有的 `ferry secrets prod set api DB_PASSWORD` 保存值。原先存在本机凭据库的值需要重新填写。
+3. 已有访问权限的成员核对新成员的公钥后，在「团队共享」中点击「共享给成员」，或执行 `ferry secrets prod team add <公钥>`。将更新后的 `.age` 文件提交到团队仓库。新成员同步后就可以用自己的私钥部署或更新密钥。
+4. 可用 `ferry secrets prod team status` 检查文件状态。移除成员时点击对应公钥的「移除」，或执行 `ferry secrets prod team remove <公钥>`，再提交更新后的文件。被移除的成员仍可解密自己有权访问的历史提交。需要撤销实际访问权限时，请轮换对应的密钥值并更新服务器。
+
+仓库只需保存 `.age` 密文，私钥由每位成员保管。共享权限控制谁能解密，部署仍需目标的登录和部署权限。用 `file:` 的目标从指定文件读取值，`--all-targets` 适用于 `keyring`。团队文件无法读取时，仍依赖该文件的应用会在部署前提示原因。CI 可以用独立的 age 身份解密，或者直接通过环境变量提供该应用声明的所有值。
 
 ### 重启和开机自启
 
@@ -370,6 +424,39 @@ apps:
 - 程序在 `apps/<应用>/slots/a`、`slots/b` 下运行（指向版本目录的链接），`running` 是指向运行中的版本的链接；每个版本的日志在它自己的目录里。
 - 已经按普通方式部署过的应用，加上 `zeroDowntime` 后第一次部署就不停机：旧版本在 `<unit>` 里，新版本用槽位 b。去掉 `zeroDowntime` 后下一次部署会停掉两个槽位、换回普通方式（会停机）。
 - 重启（`ferry restart`）还是普通重启，会短暂中断；不能回到接管前（`--to legacy`），要先去掉 `zeroDowntime`。
+
+### 后端 HTTPS（https）
+
+Java、原生程序、Python、Node.js 和 .NET 的常驻服务都可以配置。Ferry 会在后端就绪后配置 nginx、申请证书，并每天检查是否需要续期。HTTPS 配置和证书独立于应用版本。使用不停机发布时，入口随当前槽位切换。
+
+```yaml
+apps:
+  - name: api
+    type: java
+    artifact: {path: target/api.jar}
+    service:
+      health: {http: "http://127.0.0.1:8080/health"}
+    https:
+      domains: [api.example.com]
+```
+
+默认用 HTTP 验证。域名要指向部署服务器，公网需要能访问 80 和 443。80 用于域名验证，其余请求默认跳到 HTTPS。后端可只监听本机地址，让公网流量经 nginx 进入。
+
+| 字段 | 含义 |
+| --- | --- |
+| `domains` | 证书域名，必填。通配符证书用 DNS 验证或自带证书。 |
+| `upstream` | 后端的 HTTP 地址和端口，如 `127.0.0.1:8080`。留空时从健康检查推断。开启 `service.zeroDowntime` 时自动使用当前槽位。 |
+| `nginxInstance` | 软件中安装的 nginx 实例名，或 `system:nginx.service`。多个应用可按域名共享实例的 80 和 443。留空时使用 Ferry 自带 nginx。 |
+| `dns` | DNS 验证支持 `aliyun`、`dnspod`、`cloudflare`、`huaweicloud` 和 `route53`。密钥填在「设置 → 部署」，也可以用 `ferry dns-key set`。 |
+| `port` | 默认 `443`。使用 DNS 验证或自带证书时可以改用其他端口。 |
+| `cert`、`key` | 服务器上 PEM 证书链和私钥的绝对路径，两项一起填写。更新文件后重新部署即可重新加载证书。Ferry 会检查到期时间，由你替换证书。 |
+| `redirect` | HTTP 验证时默认从 HTTP 跳到 HTTPS。设为 `false` 可保留 HTTP 转发。DNS 验证或自带证书默认只监听 HTTPS，可设为 `true` 开启 80 跳转。 |
+| `email`、`ca` | 可选的证书联系邮箱和 ACME 服务。默认 Let's Encrypt，也可用 `letsencrypt-staging` 或 HTTPS 格式的 ACME 目录地址。 |
+| `maxBody`、`websocket` | 请求体上限默认 `100m`，WebSocket 转发默认开启。 |
+
+在应用的「运行情况 → HTTPS」里查看域名、证书到期时间和续期状态，也可以点「现在续期」或运行 `ferry https-renew <目标> <应用>`。首次申请失败时可以在状态页和告警里查看原因，自动续期任务会继续尝试。
+
+删除应用的 `https` 并重新部署会移除 Ferry 管理的入口及续期记录。迁移已有的 `static + proxy` 时，先停止原站点以释放域名和端口，再部署配置了 `https` 的后端。换用其他 nginx 实例时可以先去掉 `https` 部署一次，再配置新实例。
 
 ### Ferry 提供的运行环境（JDK）
 

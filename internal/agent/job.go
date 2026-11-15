@@ -257,8 +257,15 @@ func (a *Agent) runJob(s *proto.AppSpec) proto.JobRun {
 		return proto.JobRun{Result: "start-failed: " + err.Error()}
 	}
 	limit := time.Duration(max(s.Job.TimeoutSec, 1))*time.Second + time.Minute
+	hideOutput := a.hasAppSecrets(s, s.Unit)
+	if hideOutput {
+		a.info(proto.EvInfo, s.Name, "此任务使用应用密钥。查看进程日志：journalctl -u %s", s.Unit)
+	}
 	seen := 0
 	emit := func() {
+		if hideOutput {
+			return
+		}
 		lines := a.Sys.Journal(s.Unit, 2000, start.Add(-time.Second))
 		for _, l := range lines[min(seen, len(lines)):] {
 			a.info(proto.EvLogs, s.Name, "%s", l)

@@ -336,6 +336,11 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 			return s, err
 		}
 	}
+	if a.HTTPS != nil {
+		if err := backendHTTPSSpec(f, t, a, sc, &s); err != nil {
+			return s, err
+		}
+	}
 	if a.Job != nil {
 		s.Job = jobSpec(f, t, a, s.Unit)
 	}
@@ -536,6 +541,9 @@ func unitText(f *config.File, t *config.Target, a *config.App, sc *config.Scope)
 	line("LimitNOFILE=65536")
 	for _, l := range extra["service"] {
 		line("%s", oneLine(l))
+	}
+	if len(svc.Secrets) > 0 {
+		line("%s", proto.AppSecretsDirective(sc.Builtins["running"]))
 	}
 	if job != nil {
 		return b.String(), nil // 不开机自启：到点由定时器启动

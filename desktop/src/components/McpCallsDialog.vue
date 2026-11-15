@@ -29,6 +29,7 @@ const RESULT_TOOL = '（结果）'
 const TOOL_NAMES: Record<string, string> = {
   list_projects: '列出项目',
   app_status: '应用状态',
+  app_secrets: '应用密钥状态',
   app_logs: '应用日志',
   app_releases: '应用版本',
   deploy_history: '部署记录',

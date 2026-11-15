@@ -7,7 +7,7 @@ import { ask } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from './platform'
 import { call, FerryError, type Connection, type Inspect } from './ferry'
-import { connectionsPath as connPath, CONN_PREFIX, pageTerminals, loadTaskHistory } from './state'
+import { appSecretsRequest, connectionsPath as connPath, CONN_PREFIX, pageTerminals, loadTaskHistory } from './state'
 import { projects, currentPath, loadProjects, addProject, removeProject, relocateProject, selectProject, connGen, hangupConnection, tasks, drawerOpen, browserOpen, browserRequest, localRequest, trustRequest, trustedTick, secretRequest, busyRequest, settingsRequest, appSettings, terminals, terminalShown, terminalHeight, connections, loadConnections, projectSummary, projectTraits, uiPref, setUiPref } from './state'
 import ProjectScene from './components/ProjectScene.vue'
 import FerryLogo from './components/FerryLogo.vue'
@@ -27,6 +27,7 @@ const SettingsDialog = defineAsyncComponent(() => import('./components/SettingsD
 const NewProjectDialog = defineAsyncComponent(() => import('./components/NewProjectDialog.vue'))
 const ConnectionDialog = defineAsyncComponent(() => import('./components/ConnectionDialog.vue'))
 const BusyDialog = defineAsyncComponent(() => import('./components/BusyDialog.vue'))
+const AppSecretsDialog = defineAsyncComponent(() => import('./components/AppSecretsDialog.vue'))
 const BrowserDrawer = defineAsyncComponent(() => import('./components/BrowserDrawer.vue'))
 const UpdateDialog = defineAsyncComponent(() => import('./components/UpdateDialog.vue'))
 // 浏览器第一次打开后一直留着（关上抽屉网页还在，再打开接着用）
@@ -128,6 +129,12 @@ function onTrusted() {
 }
 function onSecretDone() {
   const request = secretRequest.value
+  if (!request) return
+  completeRequest(request)
+  request.retry()
+}
+function onAppSecretsDone() {
+  const request = appSecretsRequest.value
   if (!request) return
   completeRequest(request)
   request.retry()
@@ -462,6 +469,9 @@ async function moveConfig(path: string) {
       @done="onSecretDone"
       @close="secretRequest = null"
     />
+    <AppSecretsDialog v-if="appSecretsRequest" :key="requestKey(appSecretsRequest)"
+      :config="appSecretsRequest.config" :target="appSecretsRequest.target" :apps="appSecretsRequest.apps"
+      can-retry @retry="onAppSecretsDone" @close="appSecretsRequest = null" />
   </el-container>
 </template>
 

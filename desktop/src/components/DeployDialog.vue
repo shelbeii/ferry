@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { call, type AppChange, type Inspect, type KeepItem, type KeepItemReport, type KeepReport } from '../ferry'
+import { appSecretBlocksDeployment, call, type AppChange, type AppSecretStatus, type Inspect, type KeepItem, type KeepItemReport, type KeepReport } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { appSettings, startTask } from '../state'
 import { deploymentTargets } from '../deploymentReview'
 import KeepPicker from './KeepPicker.vue'
 import { Loading } from '@element-plus/icons-vue'
+
+const AppSecretsDialog = defineAsyncComponent(() => import('./AppSecretsDialog.vue'))
 
 const props = defineProps<{ config: string; info: Inspect; target: string; apps: string[]; initialTargets?: string[] }>()
 const emit = defineEmits<{
@@ -46,6 +48,13 @@ const plans = computed(() => deploymentTargets(props.info, targets.value, props.
 const appList = computed(() => [...new Set(plans.value.flatMap((p) => p.apps))])
 const conflicts = computed(() => plans.value.filter((p) => p.unavailable.length || !p.apps.length))
 const starting = ref(false)
+const manageSecretsFor = ref<{ target: string; apps: string[] }>()
+const missingSecrets = ref<{ target: string; apps: string[]; rows: AppSecretStatus[] }[]>([])
+function updateMissingSecrets(rows: AppSecretStatus[]) {
+  const target = manageSecretsFor.value?.target
+  const pending = rows.filter(appSecretBlocksDeployment)
+  missingSecrets.value = missingSecrets.value.flatMap((p) => p.target !== target ? [p] : pending.length ? [{ ...p, rows: pending }] : [])
+}
 const canStart = computed(() => targets.value.length > 0 && appList.value.length > 0 && !conflicts.value.length && prodOK.value && !starting.value)
 const builds = computed(() => {
   const set = new Set<string>()
@@ -189,6 +198,27 @@ function removeRow(app: string, r: KeepRow) {
 async function start() {
   if (!canStart.value) return
   starting.value = true
+  try {
+    const requests = plans.value.map((p) => ({
+      target: p.target.name,
+      apps: p.apps.filter((name) => appInfo(name)?.hasSecrets),
+    })).filter((p) => p.apps.length)
+    const results = await Promise.all(requests.map(async (p) => ({
+      ...p,
+      rows: (await call<AppSecretStatus[]>(['secrets', p.target, 'list', ...p.apps, '-c', props.config]))
+        .filter(appSecretBlocksDeployment),
+    })))
+    missingSecrets.value = results.filter((p) => p.rows.length)
+    if (missingSecrets.value.length || !visible.value) {
+      if (visible.value) manageSecretsFor.value = missingSecrets.value[0]
+      starting.value = false
+      return
+    }
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+    starting.value = false
+    return
+  }
   const args = ['deploy', targets.value.join(','), ...(props.apps.length ? [props.apps.join(',')] : []), '-c', props.config, '--yes']
   if (skipBuild.value) args.push('--skip-build')
   if (full.value) args.push('--full')
@@ -225,11 +255,19 @@ async function start() {
     </div>
     <el-form label-width="84px" class="review-form">
       <el-form-item label="目标">
-        <el-checkbox-group v-model="targets">
+        <el-checkbox-group v-model="targets" :disabled="starting" @change="missingSecrets = []">
           <el-checkbox v-for="t in info.targets" :key="t.name" :value="t.name">
             {{ t.name }}<el-tag v-if="t.production" size="small" type="danger" effect="plain" class="prod-tag" disable-transitions>生产</el-tag>
           </el-checkbox>
         </el-checkbox-group>
+      </el-form-item>
+      <el-form-item v-if="missingSecrets.length" label="应用密钥">
+        <div>
+          <div v-for="p in missingSecrets" :key="p.target">
+            <span class="invalid">{{ p.target }} · {{ p.rows.map((r) => `${r.app}/${r.name}`).join('、') }}</span>
+            <el-button link type="primary" @click="manageSecretsFor = p">填写密钥</el-button>
+          </div>
+        </div>
       </el-form-item>
       <el-form-item label="应用">
         <div class="full">
@@ -413,6 +451,8 @@ async function start() {
     @pick="(items) => onPick(picker!.app, items)"
     @close="picker = undefined"
   />
+  <AppSecretsDialog v-if="manageSecretsFor" :config="config" :target="manageSecretsFor.target" :apps="manageSecretsFor.apps"
+    @changed="updateMissingSecrets" @close="manageSecretsFor = undefined" />
 </template>
 
 <style scoped>
@@ -430,6 +470,7 @@ async function start() {
 .full { width: 100%; }
 .apps-line { margin-bottom: 4px; }
 .plan-grid { display: grid; grid-template-columns: max-content max-content 1fr; gap: 6px 16px; align-items: baseline; font-size: 12px; padding: 8px 12px; margin-bottom: 4px; border-radius: 8px; background: var(--el-fill-color-lighter); }
+html.cg-on .plan-grid { background: var(--ferry-overlay-section-fill); }
 .review { width: 100%; border: 1px solid var(--ferry-stroke); border-radius: 10px; overflow: hidden; }
 .review-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; background: var(--el-fill-color-light); border-bottom: 1px solid var(--ferry-stroke); }
 .review-what { margin-left: auto; }

@@ -37,10 +37,16 @@
 | `FERRY_SSH_KEY_<目标>` | 某个目标单独用的私钥（目标名大写，`-` 等换成 `_`，如 `FERRY_SSH_KEY_PROD_A`），优先于 `FERRY_SSH_KEY` |
 | `FERRY_SSH_KEY_PASSPHRASE` | 私钥的密码（有的话；按目标的写 `FERRY_SSH_KEY_<目标>_PASSPHRASE`） |
 | `FERRY_PASSWORD_<目标>` | 用密码登录的目标（`auth: password`）的密码 |
+| `FERRY_SECRET_<应用>_<变量>` | 应用在 `service.secrets` 声明的变量值，优先于系统凭据库和团队加密文件 |
+| `FERRY_AGE_IDENTITY` | 解密团队 `.age` 文件的单行 X25519 私钥，优先于系统凭据库中的 age 身份 |
 | `FERRY_NOTIFY` | 部署通知：`dingtalk:https://…`（方式写 `wecom`、`dingtalk`、`feishu`、`webhook`，多个用空格分开）；加签密钥放 `FERRY_NOTIFY_SECRET` |
 | `FERRY_ACTOR` | 部署记录、通知里的「谁」，如 `张三`。不设时 GitHub Actions 用 `github:<触发的人>`（`GITHUB_ACTOR`），GitLab CI 用 `gitlab:<触发的人>`（`GITLAB_USER_LOGIN`）；目标写了 `deployers` 时按它核对 |
 | `FERRY_VIA` | 部署记录里操作人后面附上的说明，如 `GitLab CI #1234`，记成「runner@host（经 GitLab CI #1234）」 |
 | `FERRY_HOME` | 数据目录（JDK、nginx 的下载缓存、构建日志、部署记录）。指到 CI 能缓存的目录，下次不用重新下载 JDK |
+
+例如应用 `shop-api` 声明了 `DB_PASSWORD`，在 CI 的密钥设置里配置 `FERRY_SECRET_SHOP_API_DB_PASSWORD`。应用名用大写，标点换成下划线。一次部署到多台时，该环境变量供这些目标共用。目标需要不同的 CI 值时，为各目标运行各自的部署步骤。没有系统凭据库的 CI 可以完全通过环境变量部署。Ferry 启动构建命令时会从子进程环境中移除已声明的应用密钥变量和 `FERRY_AGE_IDENTITY`。
+
+使用[团队共享文件](config.md#团队共享)时，可以用 `age-keygen` 为 CI 生成独立的身份。已有成员用 `ferry secrets prod team add <CI 公钥>` 共享并提交更新的密文，再把单行私钥放进 CI 的密钥变量 `FERRY_AGE_IDENTITY`。若 CI 直接提供本次部署涉及的全部应用密钥（含声明的可选项），Ferry 可跳过团队文件的解密。
 
 ## 命令
 

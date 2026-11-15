@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -137,6 +138,7 @@ type Runner struct {
 	LogDir  string            // 构建日志目录
 	LockDir string            // 构建锁目录（所有项目共用，在数据目录下）
 	Env     []string          // 设置里的构建环境（在构建自身的 env 之前）
+	OmitEnv []string          // 只供 Ferry 使用，不传给构建命令的环境变量
 	Out     io.Writer         // 实时输出（nil = 不输出）
 	OnWait  func(lock string) // 等构建锁时回调
 	LockMax time.Duration     // 最多等锁多久，默认 1 小时
@@ -175,6 +177,16 @@ func (r *Runner) Run(s *Step) (time.Time, error) {
 	cmd := shellCommand(s.Shell, s.Command)
 	cmd.Dir = s.Workdir
 	cmd.Env = append(append(os.Environ(), r.Env...), s.Env...)
+	if len(r.OmitEnv) > 0 {
+		env := cmd.Env[:0]
+		for _, kv := range cmd.Env {
+			key, _, _ := strings.Cut(kv, "=")
+			if !slices.Contains(r.OmitEnv, strings.ToUpper(key)) {
+				env = append(env, kv)
+			}
+		}
+		cmd.Env = env
+	}
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
 	tail := &tailBuffer{max: 40}

@@ -42,6 +42,10 @@ var (
 func walkFields(t reflect.Type, prefix string, out *[]string) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
+		if f.Tag.Get("yaml") == ",inline" {
+			walkFields(f.Type, prefix, out)
+			continue
+		}
 		name := strings.Split(f.Tag.Get("yaml"), ",")[0]
 		if name == "" || name == "-" {
 			continue

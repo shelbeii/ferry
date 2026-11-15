@@ -1,47 +1,107 @@
 <script setup lang="ts">
 import LoadingBlock from './LoadingBlock.vue'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { shortCommit, time, type HistoryEntry } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
-import { PAGE_SIZES, usePager } from '../pager'
+import { PAGE_SIZES } from '../pager'
 import type { TableInstance } from 'element-plus'
 
 const props = defineProps<{ config: string; target: string }>()
 const emit = defineEmits<{ close: [] }>()
 
 const visible = ref(true)
-const loading = ref(true)
 const error = ref('')
 const rows = ref<HistoryEntry[]>([])
 const reads = useReadRequests()
-// 部署记录在服务器上：团队里每个人的部署、回滚、启停都在这里，可以按人、应用、操作筛
-const who = ref('')
-const app = ref('')
-const action = ref('')
-const uniq = (f: (r: HistoryEntry) => string | undefined) => [...new Set(rows.value.map(f).filter((v): v is string => !!v))].sort()
-const actors = computed(() => uniq((r) => r.actor))
-const apps = computed(() => uniq((r) => r.app))
-const actions = computed(() => uniq((r) => r.action))
-const shown = computed(() => rows.value.filter((r) => (!who.value || r.actor === who.value) && (!app.value || r.app === app.value) && (!action.value || r.action === action.value)))
-// 一页 50 条：最多读 200 条，一次全生成成表格时打开窗口会卡一下
+const loading = computed(() => reads.loading.value.history === true)
+const actors = ref<string[]>([])
+const apps = ref<string[]>([])
 const table = ref<TableInstance>()
-const { page, pageSize, total, paged } = usePager(shown, [rows, who, app, action], table)
+const page = ref(1)
+const pageSize = ref(50)
+const total = ref(0)
+let snapshot: number | undefined
+let applied: string[] = []
+
+interface HistoryPage {
+  items: HistoryEntry[]
+  total: number
+  snapshot: number
+  actors?: string[]
+  apps?: string[]
+}
+
+function emptyFilters() {
+  return { app: '', actor: '', action: '', result: '', text: '', dates: null as [string, string] | null }
+}
+const filters = reactive(emptyFilters())
 
 async function load() {
-  loading.value = true
+  reads.cancel('history')
   error.value = ''
+  const args = [
+    'history', props.target, '-c', props.config, '--page',
+    '--limit', String(pageSize.value), '--offset', String((page.value - 1) * pageSize.value),
+    ...(snapshot === undefined ? ['--facets'] : ['--snapshot', String(snapshot)]),
+    ...applied,
+  ]
   try {
-    rows.value = (await reads.run('history', (s) => readCall<HistoryEntry[] | null>(['history', props.target, '-c', props.config, '--limit', '200'], s))) ?? []
+    const result = await reads.run('history', (signal) => readCall<HistoryPage>(args, signal))
+    snapshot = result.snapshot
+    total.value = result.total
+    rows.value = result.items
+    if (result.actors) actors.value = result.actors
+    if (result.apps) apps.value = result.apps
+    table.value?.setScrollTop(0)
   } catch (e) {
     if (e instanceof ReadCanceled) return
+    rows.value = []
     error.value = (e as Error).message
-  } finally {
-    loading.value = false
   }
 }
+
+function search() {
+  const { app, actor, action, result, text, dates } = filters
+  applied = []
+  for (const [flag, value] of [
+    ['--app', app], ['--actor', actor], ['--action', action], ['--result', result], ['--q', text],
+    ['--since', dates?.[0]], ['--until', dates?.[1]],
+  ]) {
+    if (flag && value?.trim()) applied.push(flag, value.trim())
+  }
+  reload()
+}
+
+function reload() {
+  page.value = 1
+  snapshot = undefined
+  total.value = 0
+  rows.value = []
+  void load()
+}
+
+function resetFilters() {
+  Object.assign(filters, emptyFilters())
+  search()
+}
+
+function changePage(value: number) {
+  if (value === page.value) return
+  page.value = value
+  void load()
+}
+
+function changeSize(value: number) {
+  if (value === pageSize.value) return
+  pageSize.value = value
+  page.value = 1
+  void load()
+}
+
 onMounted(load)
 
-const actionText: Record<string, string> = { deploy: '部署', rollback: '回滚', start: '启动', stop: '停止', restart: '重启' }
+const actionText: Record<string, string> = { deploy: '部署', rollback: '回滚', start: '启动', stop: '停止', restart: '重启', run: '运行', secrets: '更新应用密钥' }
+const results = ['OK', 'FAILED', 'ROLLED_BACK', 'ROLLBACK_FAILED']
 
 function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
   if (r === 'OK') return 'success'
@@ -52,23 +112,29 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`部署历史（${target}）`" width="1000px" append-to-body @closed="emit('close')">
+  <el-dialog v-model="visible" :title="`部署历史（${target}）`" width="1000px" class="history-dialog" append-to-body @close="reads.cancelAll" @closed="emit('close')">
     <div>
-      <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon><el-button link type="primary" @click="load">重新读取</el-button></el-alert>
-      <LoadingBlock v-if="loading" :text="`正在连接 ${target}，读取部署历史…`" :rows="10" min-height="60vh" />
-      <div v-if="!loading && rows.length" class="filters">
-        <el-select v-model="who" size="small" clearable placeholder="全部操作人" style="width: 220px">
+      <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon><el-button link type="primary" @click="reload">重新读取</el-button></el-alert>
+      <form class="filters" @submit.prevent="search">
+        <el-select v-model="filters.actor" size="small" filterable allow-create clearable placeholder="全部操作人" aria-label="操作人" style="width: 185px">
           <el-option v-for="a in actors" :key="a" :label="a" :value="a" />
         </el-select>
-        <el-select v-model="app" size="small" clearable placeholder="全部应用" style="width: 150px">
+        <el-select v-model="filters.app" size="small" filterable allow-create clearable placeholder="全部应用" aria-label="应用" style="width: 150px">
           <el-option v-for="a in apps" :key="a" :label="a" :value="a" />
         </el-select>
-        <el-select v-model="action" size="small" clearable placeholder="全部操作" style="width: 120px">
-          <el-option v-for="a in actions" :key="a" :label="actionText[a] ?? a" :value="a" />
+        <el-select v-model="filters.action" size="small" clearable placeholder="全部操作" aria-label="操作" style="width: 108px">
+          <el-option v-for="(label, value) in actionText" :key="value" :label="label" :value="value" />
         </el-select>
-        <span class="muted small">记录在服务器上，团队里每个人的操作都在这里（{{ shown.length }} 条）</span>
-      </div>
-      <el-table v-if="!loading" ref="table" :data="paged" size="small" border height="52vh" empty-text="还没有记录">
+        <el-select v-model="filters.result" size="small" clearable placeholder="全部结果" aria-label="结果" style="width: 150px">
+          <el-option v-for="result in results" :key="result" :label="result" :value="result" />
+        </el-select>
+        <el-date-picker v-model="filters.dates" type="daterange" value-format="YYYY-MM-DD" size="small" start-placeholder="开始日期" end-placeholder="结束日期" style="width: 238px" />
+        <el-input v-model="filters.text" size="small" clearable placeholder="搜索版本、提交或说明" aria-label="搜索关键词" style="width: 200px" />
+        <el-button native-type="submit" type="primary" size="small">查询</el-button>
+        <el-button size="small" @click="resetFilters">重置</el-button>
+      </form>
+      <LoadingBlock v-if="loading" :text="`正在读取 ${target} 的部署历史…`" :rows="10" min-height="52vh" />
+      <el-table v-else-if="!error" ref="table" :data="rows" size="small" border height="52vh" :empty-text="applied.length ? '没有符合条件的记录' : '还没有记录'">
         <el-table-column type="expand" width="36"><template #default="{ row }"><div class="history-detail"><p><span>完整版本</span><code>{{ row.release || '—' }}</code></p><p><span>提交</span><code>{{ row.commit || '—' }}</code></p><p><span>操作人</span>{{ row.actor || '—' }}</p><p v-if="row.msg"><span>说明</span>{{ row.msg }}</p></div></template></el-table-column>
         <el-table-column label="时间" width="165">
           <template #default="{ row }">{{ time(row.time) }}</template>
@@ -87,15 +153,17 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
         <!-- 说明：只有失败原因、「从某版本回滚」这类才有，成功的部署、启停没有；整列都空时不显示 -->
       </el-table>
       <el-pagination
-        v-if="!loading && total > PAGE_SIZES[0]"
-        v-model:current-page="page"
-        v-model:page-size="pageSize"
+        v-if="total > 0"
+        :current-page="page"
+        :page-size="pageSize"
         :page-sizes="PAGE_SIZES"
         :total="total"
         size="small"
         background
         layout="total, sizes, prev, pager, next"
         class="pager"
+        @update:current-page="changePage"
+        @update:page-size="changeSize"
       />
     </div>
   </el-dialog>
@@ -112,11 +180,5 @@ function resultType(r: string): 'success' | 'danger' | 'warning' | 'info' {
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 8px;
-}
-.muted {
-  color: var(--el-text-color-secondary);
-}
-.small {
-  font-size: 12px;
 }
 </style>

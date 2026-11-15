@@ -105,6 +105,29 @@ func (a *Agent) appInfo() int {
 	s = a.deployedStaticSpec(s)
 	r := proto.AppInfo{Name: s.Name, Type: s.Type, CollectedAt: a.Sys.Now()}
 	r.Status = a.appStatus(&s, a.Sys.NginxDump)
+	if current != "" && isService(&s) {
+		if data, err := readAppSecrets(a.appSecretsPath(s.Name, current)); err == nil {
+			r.AppliedSecrets = appSecretNames(data)
+		}
+	}
+	if h := r.Status.HTTPS; h != nil {
+		var fields infoFields
+		fields.add("域名", strings.Join(h.Domains, "、"))
+		fields.add("监听端口", strconv.Itoa(h.Port))
+		switch {
+		case h.Custom:
+			fields.add("证书", "自带证书，需手动更新")
+		case h.Temp:
+			fields.add("证书", "临时证书，服务器每天尝试申请")
+		case h.Expires != nil:
+			fields.add("证书", "由 Ferry 自动续期")
+		}
+		if h.Expires != nil {
+			fields.add("证书到期时间", h.Expires.Format("2006-01-02 15:04:05 MST"))
+		}
+		fields.add("状态", h.Problem)
+		r.Sections = append(r.Sections, fields.section("https", "HTTPS"))
+	}
 	var installed *proto.SoftwareInstance
 	unit := s.Unit
 	if s.NginxInstance != "" {

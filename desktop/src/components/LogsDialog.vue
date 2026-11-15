@@ -187,6 +187,8 @@ async function start() {
   incoming = []
   buffered.value = 0
   dropped.value = 0
+  rateCount = 0
+  rate.value = 0
   paused.value = false
   stickBottom.value = true
   error.value = ''
@@ -324,6 +326,22 @@ const scopeTip = computed(() => {
   return scope.value === 'all' ? '在这次运行的全部日志文件里找（包括压缩的 .gz）' : `只在 ${path.value || 'diagLogs 指定的文件'} 里找`
 })
 
+const logNotice = computed(() => {
+  if (!isCurrent.value || !follow.value || around.value || searching.value || result.value) return
+  if (paused.value) {
+    return {
+      text: `已缓冲 ${buffered.value} 行${dropped.value ? ` · 丢掉最早的 ${dropped.value} 行` : ''}`,
+      detail: `最多缓冲 ${MAX} 行，点「继续」接着显示`,
+    }
+  }
+  if (streaming.value && !loading.value && rate.value > 100) {
+    return {
+      text: `输出很快 · 约 ${rate.value} 行/秒 · 最近 ${MAX} 行`,
+      detail: `只显示最近 ${MAX} 行，可用搜索查找较早的日志`,
+    }
+  }
+})
+
 onMounted(() => {
   if (!props.release) start() // 指定了版本：等知道它有哪些运行再开始
   loadRuns()
@@ -349,7 +367,20 @@ onBeforeUnmount(() => {
 <template>
   <el-dialog v-model="visible" :title="release ? `日志：${app}（${target}）· 版本 ${release}` : `日志：${app}（${target}）`" :width="expandedLogs ? '96vw' : 'min(1180px, 94vw)'" top="4vh" append-to-body @closed="emit('close')">
     <div class="logs-workspace">
-    <div class="log-context"><span><i :class="{ live: isCurrent && follow && streaming && !paused }" />{{ loading ? '正在读取日志' : isCurrent && follow ? streaming ? paused ? '显示已暂停' : '持续接收日志' : '接收已结束' : '日志快照' }}</span><span class="muted small">{{ lines.length }} 行已加载<span v-if="paused && buffered"> · {{ buffered }} 行待显示</span></span><el-button v-if="!result && lines.length" size="small" text @click="copyLog">复制日志</el-button><el-button v-if="!result && !around && !stickBottom" size="small" text type="primary" @click="followLatest">回到最新输出</el-button><el-button size="small" text class="expand-logs" @click="expandedLogs = !expandedLogs">{{ expandedLogs ? '还原宽度' : '展开工作区' }}</el-button></div>
+    <div class="log-context">
+      <div class="log-summary">
+        <span class="log-state"><i :class="{ live: isCurrent && follow && streaming && !paused }" />{{ loading ? '正在读取日志' : isCurrent && follow ? streaming ? paused ? '显示已暂停' : '持续接收日志' : '接收已结束' : '日志快照' }}</span>
+        <span class="muted">{{ lines.length }} 行已加载</span>
+        <el-button v-if="!result && lines.length" size="small" text @click="copyLog">复制日志</el-button>
+        <el-button v-if="!result && !around && !stickBottom" size="small" text type="primary" @click="followLatest">回到最新输出</el-button>
+      </div>
+      <div class="log-notice">
+        <el-tooltip v-if="logNotice" placement="bottom" :trigger="['hover', 'focus']" :show-after="HOVER_DELAY" :content="`${logNotice.text}。${logNotice.detail}`">
+          <span class="log-notice-text" tabindex="0">{{ logNotice.text }}</span>
+        </el-tooltip>
+      </div>
+      <el-button size="small" text class="expand-logs" @click="expandedLogs = !expandedLogs">{{ expandedLogs ? '还原宽度' : '展开工作区' }}</el-button>
+    </div>
     <div class="bar">
       <el-select v-model="runKey" size="small" class="run" :loading="!runsLoaded && !runsError" :disabled="noRuns" @change="onRunChange">
         <el-option v-if="!release && !runs.some((r) => r.current)" value="current" label="当前运行" />
@@ -432,10 +463,6 @@ onBeforeUnmount(() => {
         {{ path }} 第 {{ around }} 行附近
         <el-button link size="small" type="primary" @click="reload">回到末尾</el-button>
       </div>
-      <div v-if="isCurrent && follow && !around && (rate > 100 || paused)" class="hint fast">
-        <template v-if="paused">已暂停：新的输出先攒着<template v-if="dropped">（已丢掉最早的 {{ dropped }} 行）</template>，点「继续」接着显示</template>
-        <template v-else>输出很快（每秒约 {{ rate }} 行），只显示最近 {{ MAX }} 行；想找某个错误可以用上面的搜索</template>
-      </div>
       <div ref="box" class="log mono" :class="{ busy: loading && !lines.length }" role="region" aria-label="日志内容" tabindex="0" @scroll="onScroll">
         <!-- 读取中：大日志、慢网络时要等一会儿，说清楚在读什么，免得以为没有日志 -->
         <div v-if="loading && !lines.length" class="loading">
@@ -461,12 +488,19 @@ onBeforeUnmount(() => {
 <style scoped>
 .logs-workspace { display: flex; flex-direction: column; height: min(680px, calc(100dvh - 180px)); min-height: 340px; }
 .logs-workspace > :not(.log) { flex-shrink: 0; }
-.log-context { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--ferry-stroke); font-size: 12px; }
-.log-context > span:first-child { display: flex; align-items: center; gap: 7px; }
+.log-context { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 4px 16px; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--ferry-stroke); font-size: 12px; }
+.log-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; min-width: 0; }
+.log-state { display: flex; align-items: center; gap: 7px; }
+.log-notice { min-height: 20px; line-height: 20px; }
+.log-notice-text { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--el-color-warning-dark-2); }
 .log-context .el-button { margin-left: 0; }
-.log-context .expand-logs { margin-left: auto; }
+.expand-logs { grid-column: -2 / -1; grid-row: 1; }
 .log-context i { width: 6px; height: 6px; border-radius: 50%; background: var(--el-text-color-placeholder); }
 .log-context i.live { background: var(--el-color-success); box-shadow: 0 0 0 4px var(--el-color-success-light-9); }
+@media (max-width: 760px) {
+  .log-context { grid-template-columns: minmax(0, 1fr) auto; }
+  .log-notice { grid-column: 1 / -1; grid-row: 2; }
+}
 .bar {
   display: flex;
   align-items: center;
@@ -546,9 +580,6 @@ onBeforeUnmount(() => {
   font: inherit;
   white-space: pre-wrap;
   word-break: break-all;
-}
-.fast {
-  color: var(--el-color-warning);
 }
 .ln {
   display: inline-block;

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/captain/ferry/internal/proto"
 )
 
 // ReadOnly 检查模型要执行的命令是不是只读的：只看、不改服务器。不是的返回原因（交回给模型）。
@@ -41,12 +43,13 @@ func ReadOnly(cmd string) error {
 }
 
 var sensitive = []string{"/etc/shadow", "/etc/gshadow", "/etc/sudoers", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
-	"/.ssh/", ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", "authorized_keys", "known_hosts", ".bash_history", ".mysql_history"}
+	"/.ssh/", ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", "authorized_keys", "known_hosts", ".bash_history", ".mysql_history", proto.AppSecretsFile, "/environ"}
 
 // 敏感文件的样例路径：用来判断通配符、{a,b} 写法会不会展开成它们
 var sensitivePaths = []string{"/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/ssh/ssh_host_rsa_key", "/etc/ssh/ssh_host_ecdsa_key",
 	"/etc/ssh/ssh_host_ed25519_key", "/root/.ssh/id_rsa", "/root/.ssh/id_ed25519", "/root/.ssh/id_ecdsa", "/root/.ssh/authorized_keys",
-	"/home/u/.ssh/id_rsa", "/home/u/.ssh/id_ed25519", "/root/.bash_history", "/home/u/.bash_history", "/root/.mysql_history"}
+	"/home/u/.ssh/id_rsa", "/home/u/.ssh/id_ed25519", "/root/.bash_history", "/home/u/.bash_history", "/root/.mysql_history",
+	"/opt/project/apps/api/running/" + proto.AppSecretsFile, "/proc/1/environ"}
 
 // patternHitsSensitive 命令里带通配符（* ? [ ]）或 {a,b} 的参数，展开后可能是敏感文件。
 func patternHitsSensitive(cmd string) bool {
@@ -70,6 +73,17 @@ func patternHitsSensitive(cmd string) bool {
 						if ok, _ := path.Match(p, cand); ok {
 							return true
 						}
+					}
+				}
+				dir := path.Dir(p)
+				switch {
+				case strings.Contains(dir, "/apps/") && (strings.Contains(dir, "/running") || strings.Contains(dir, "/versions/") || strings.Contains(dir, "/slots/")):
+					if ok, _ := path.Match(path.Base(p), proto.AppSecretsFile); ok {
+						return true
+					}
+				case strings.HasPrefix(dir, "/proc/"):
+					if ok, _ := path.Match(path.Base(p), "environ"); ok {
+						return true
 					}
 				}
 			}

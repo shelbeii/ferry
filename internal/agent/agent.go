@@ -107,6 +107,8 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.rollback()
 	case "control":
 		return a.control()
+	case "secretset":
+		return a.secretset()
 	case "runjob":
 		return a.runjobCmd()
 	case "status":
@@ -123,6 +125,8 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.keepscan()
 	case "history":
 		return a.history()
+	case "https-renew":
+		return a.renewBackendHTTPS()
 	case "logruns":
 		return a.logruns()
 	case "runtime":
@@ -192,6 +196,9 @@ var reSafe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 func validateApp(s *proto.AppSpec) error {
 	if !reSafe.MatchString(s.Name) {
 		return fmt.Errorf("应用名无效：%q", s.Name)
+	}
+	if err := validateAppSecrets(s); err != nil {
+		return fmt.Errorf("%s：%w", s.Name, err)
 	}
 	switch s.Type {
 	case proto.TypeJava, proto.TypeBinary, proto.TypePython, proto.TypeNode, proto.TypeDotnet:
@@ -274,6 +281,11 @@ func validateApp(s *proto.AppSpec) error {
 	}
 	if s.ZD != nil {
 		if err := validateZD(s); err != nil {
+			return err
+		}
+	}
+	if s.HTTPS != nil {
+		if err := validateBackendHTTPS(s); err != nil {
 			return err
 		}
 	}
@@ -419,8 +431,12 @@ func (a *Agent) lockAction() string {
 		return "部署"
 	case "rollback":
 		return "回滚"
+	case "https-renew":
+		return "续期 HTTPS 证书"
 	case "control":
 		return map[string]string{"start": "启动", "stop": "停止", "restart": "重启"}[a.req.Action]
+	case "secretset":
+		return "更新应用密钥"
 	}
 	return a.cmd
 }
@@ -516,30 +532,6 @@ func (a *Agent) addHistory(e proto.HistoryEntry) {
 	}
 	f.Write(append(b, '\n'))
 	f.Close()
-}
-
-func (a *Agent) history() int {
-	limit := a.req.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	lines, _ := tailFile(filepath.Join(a.meta(), "history.jsonl"), limit*4)
-	want := map[string]bool{}
-	for _, s := range a.req.Apps {
-		want[s.Name] = true
-	}
-	var out []proto.HistoryEntry
-	for i := len(lines) - 1; i >= 0 && len(out) < limit; i-- {
-		var e proto.HistoryEntry
-		if json.Unmarshal([]byte(lines[i]), &e) != nil {
-			continue
-		}
-		if len(want) > 0 && !want[e.App] {
-			continue
-		}
-		out = append(out, e)
-	}
-	return a.result(proto.CodeOK, "", out)
 }
 
 // chownTree 把目录树（不跟随符号链接）交给运行用户。

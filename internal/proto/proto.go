@@ -66,6 +66,9 @@ type Request struct {
 	// control
 	Action string `json:"action,omitempty"` // start | stop | restart
 
+	// secretset
+	RestartSecrets bool `json:"restartSecrets,omitempty"`
+
 	// rollback
 	To string `json:"to,omitempty"` // 目标版本 ID；空 = 当前版本之前最近一个没失败的版本
 
@@ -76,6 +79,8 @@ type Request struct {
 
 	// history
 	Limit int `json:"limit,omitempty"`
+	// HistoryQuery 不为空时按条件分页读，回 HistoryPage；为空时回最近 Limit 条（[]HistoryEntry）
+	HistoryQuery *HistoryQuery `json:"historyQuery,omitempty"`
 
 	// logread：读归档的运行日志（LogRun 为空 = 当前运行）
 	LogRelease string `json:"logRelease,omitempty"`
@@ -158,10 +163,11 @@ type AppSpec struct {
 	// 不用 java-N（同一台服务器上别的项目升级 JDK 影响不到它）
 	RuntimeVersion string `json:"runtimeVersion,omitempty"`
 
-	Unit     string   `json:"unit,omitempty"`     // systemd 单元名（含 .service）；static 为空
-	UnitText string   `json:"unitText,omitempty"` // 渲染好的单元文件内容
-	User     string   `json:"user,omitempty"`     // 运行用户：版本目录、shared 目录归它所有
-	Conflict []string `json:"conflicts,omitempty"`
+	Unit     string           `json:"unit,omitempty"`     // systemd 单元名（含 .service）；static 为空
+	UnitText string           `json:"unitText,omitempty"` // 渲染好的单元文件内容
+	Secrets  *AppSecretValues `json:"secrets,omitempty"`
+	User     string           `json:"user,omitempty"` // 运行用户：版本目录、shared 目录归它所有
+	Conflict []string         `json:"conflicts,omitempty"`
 	// NoAutostart service.autostart: false：部署、启动后不设开机自启
 	NoAutostart bool `json:"noAutostart,omitempty"`
 	// BootDelaySec service.autostartDelay：开机后等这么多秒再启动（用 systemd 定时器，服务本身不设开机自启）；0 = 开机马上启动
@@ -201,10 +207,29 @@ type AppSpec struct {
 	// ZD 不停机发布（java / binary）：两个槽位轮流用。设置了时 Unit、UnitText、Health 是槽位 a 的
 	ZD *ZeroDowntime `json:"zd,omitempty"`
 	// TLS 由 Ferry 的 nginx 运行的站点：自动申请、续期 HTTPS 证书
-	TLS *TLSSpec `json:"tls,omitempty"`
+	TLS   *TLSSpec      `json:"tls,omitempty"`
+	HTTPS *BackendHTTPS `json:"https,omitempty"`
 	// Job 定时任务：Unit 是 oneshot 的服务（不开机自启），由 Job.Timer 这个定时器按时启动
 	Job *JobSpec `json:"job,omitempty"`
 }
+
+// BackendHTTPS 是与应用版本分开配置、由 nginx 提供的 HTTPS 入口。
+type BackendHTTPS struct {
+	TLS      TLSSpec `json:"tls"`
+	Cert     string  `json:"cert,omitempty"`
+	Key      string  `json:"key,omitempty"`
+	Port     int     `json:"port"`
+	HTTP     bool    `json:"http,omitempty"`
+	Instance string  `json:"instance,omitempty"`
+	Unit     string  `json:"unit,omitempty"`
+	UnitText string  `json:"unitText,omitempty"`
+	Config   string  `json:"config"`
+	Binary   string  `json:"binary,omitempty"`
+	Prefix   string  `json:"prefix,omitempty"`
+	Upstream string  `json:"upstream,omitempty"`
+}
+
+const BackendHTTPSUpstream = "{{FERRY_HTTPS_UPSTREAM}}"
 
 // TLSSpec 自动申请 HTTPS 证书（ACME，默认 Let's Encrypt）。证书放在 .ferry/apps/<app>/tls/，nginx 配置里写这个位置；
 // 服务器上的 ferry-acme.timer 每天检查一次，快到期时续期并重新加载 nginx。
@@ -478,7 +503,7 @@ type ReleaseMeta struct {
 }
 
 // reservedFileNames 版本目录里归 Ferry 用的名字（运行日志、站点文件、以前放在版本目录里的 Ferry 文件）：附带文件不能用。
-var reservedFileNames = []string{"logs", "www", ".ferry", "release.json", "unit.service", "nginx.conf", ".failed", ".libs-seeded", ".logruns"}
+var reservedFileNames = []string{"logs", "www", ".ferry", "release.json", "unit.service", "nginx.conf", ".failed", ".libs-seeded", ".logruns", AppSecretsFile}
 
 // CheckExtraFile 检查附带文件放到的位置 to：版本目录里的相对路径（用 /），不能越界，
 // 不能占用程序文件名 program（空 = 不查）和 Ferry 用的名字。
@@ -684,7 +709,18 @@ type AppStatus struct {
 	// Stopped 在 Ferry 里手动停止的（开机也不会起来）
 	Stopped bool `json:"stopped,omitempty"`
 	// Job 定时任务的下次运行、上次结果（定时任务才有）
-	Job *JobStatus `json:"job,omitempty"`
+	Job   *JobStatus   `json:"job,omitempty"`
+	HTTPS *HTTPSStatus `json:"https,omitempty"`
+}
+
+type HTTPSStatus struct {
+	Domains []string   `json:"domains"`
+	Port    int        `json:"port"`
+	Expires *time.Time `json:"expires,omitempty"`
+	Custom  bool       `json:"custom,omitempty"`
+	Temp    bool       `json:"temporary,omitempty"`
+	Active  bool       `json:"active"`
+	Problem string     `json:"problem,omitempty"`
 }
 
 // JobSpec 定时任务（配置里的 job）。
@@ -851,6 +887,39 @@ type HistoryEntry struct {
 	ReadySec int `json:"readySec,omitempty"`
 	// ErrorLines 部署成功时，启动期间服务输出里的错误行数（nil = 没有记录）
 	ErrorLines *int `json:"errorLines,omitempty"`
+}
+
+// HistoryQuery 按条件分页读部署历史，新的在前。
+type HistoryQuery struct {
+	Apps     []string  `json:"apps,omitempty" jsonschema:"只看这些应用；不填为全部"`
+	Since    time.Time `json:"since,omitempty,omitzero" jsonschema:"从这个时间起，RFC 3339 格式，含该时间"`
+	Until    time.Time `json:"until,omitempty,omitzero" jsonschema:"到这个时间止，RFC 3339 格式，含该时间"`
+	Action   []string  `json:"action,omitempty" jsonschema:"操作类型，如 deploy、rollback、start、stop、restart、run"`
+	Result   []string  `json:"result,omitempty" jsonschema:"结果，如 OK、FAILED、ROLLED_BACK、ROLLBACK_FAILED"`
+	Actor    string    `json:"actor,omitempty" jsonschema:"操作人包含的文字，英文字母不分大小写"`
+	Text     string    `json:"text,omitempty" jsonschema:"在应用名、版本、提交、操作人和说明中查找关键词"`
+	Offset   int       `json:"offset,omitempty" jsonschema:"跳过多少条符合条件的记录，从 0 开始"`
+	Limit    int       `json:"limit,omitempty" jsonschema:"这一页最多几条"`
+	Facets   bool      `json:"facets,omitempty" jsonschema:"返回近期记录中的操作人和应用名"`
+	Snapshot *int64    `json:"snapshot,omitempty" jsonschema:"继续翻页时传回上一次返回的 snapshot"`
+}
+
+// NeedsPage 判断只指定应用和条数的旧查询能否继续使用数组响应。
+func (q HistoryQuery) NeedsPage() bool {
+	return !q.Since.IsZero() || !q.Until.IsZero() || len(q.Action) != 0 || len(q.Result) != 0 ||
+		q.Actor != "" || q.Text != "" || q.Offset != 0 || q.Facets || q.Snapshot != nil
+}
+
+// HistoryMaxLimit 一页最多几条。
+const HistoryMaxLimit = 500
+
+// HistoryPage 一页部署历史。Total 是符合条件的总条数。
+type HistoryPage struct {
+	Items    []HistoryEntry `json:"items"`
+	Total    int            `json:"total"`
+	Snapshot int64          `json:"snapshot"`
+	Actors   []string       `json:"actors,omitempty"`
+	Apps     []string       `json:"apps,omitempty"`
 }
 
 // SoftwareReport software 的结果：服务器上已有的软件（只读查看，不改动服务器）。

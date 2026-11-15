@@ -383,7 +383,8 @@ func (s *session) auditLocal(cmd string, req *proto.Request, r *proto.Result) {
 
 // changingCmds 改动服务器的 agent 命令：本机取消或连接断开后，agent 在服务器上照常做完（不会停在半路）。
 var changingCmds = map[string]string{
-	"deploy": "（失败时自动回滚）", "rollback": "（失败时切回原版本）", "control": "", "runtime": "", "runjob": "（定时任务在服务器上照常跑完）",
+	"secretset": "",
+	"deploy":    "（失败时自动回滚）", "rollback": "（失败时切回原版本）", "control": "", "runtime": "", "runjob": "（定时任务在服务器上照常跑完）",
 	"swinstall": "", "swcontrol": "", "swremove": "", "portset": "", "fwenable": "（3 分钟内没确认会自动关掉防火墙）", "fwdisable": "",
 }
 

@@ -964,6 +964,8 @@ t "再部署：证书还有效，不重新申请" ok "证书有效到" -- F depl
 t "续期：没到期不续" ok "证书有效到" -- dx a '/usr/local/lib/ferry/ferry-acme acme-renew'
 t "续期：--force 重新申请并重新加载 nginx" ok "证书已换上" -- dx a '/usr/local/lib/ferry/ferry-acme acme-renew --force'
 t "换上新证书后照常访问" ok "<h1>site v" -- tlsget
+
+source "$E2E/backend_https.sh"
 docker rm -f ferry-e2e-chall ferry-e2e-pebble >/dev/null 2>&1
 
 step "密码登录"
@@ -2000,6 +2002,9 @@ cp "$OUT/demo-v1" "$OUT/api"
 t "部署被锁拒绝" fail "正在进行" -- F deploy e2e-a api --skip-build
 t "被拒绝的部署不留上传目录" ok "0" -- dx a 'ls /opt/e2e/.ferry/incoming | wc -l'
 t "restart 等锁后完成" ok "restart 完成" -- F restart e2e-a api
+
+source "$E2E/app_secrets.sh"
+source "$E2E/team_secrets.sh"
 
 # ---------------------------------------------------------------- 结束
 if [[ ${KEEP:-} != 1 ]]; then

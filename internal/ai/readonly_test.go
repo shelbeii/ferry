@@ -51,6 +51,19 @@ func TestReadOnlyAllows(t *testing.T) {
 	}
 }
 
+func TestReadOnlyProtectsAppSecrets(t *testing.T) {
+	for _, cmd := range []string{
+		"cat /opt/custom/apps/api/running/.ferry-secrets.env",
+		"tail /opt/custom/apps/api/versions/v1/.*.env",
+		"cat /proc/200/environ",
+		"cat /proc/200/envi*",
+	} {
+		if err := ReadOnly(cmd); err == nil {
+			t.Errorf("unexpectedly allowed %q", cmd)
+		}
+	}
+}
+
 func TestReadOnlyRejects(t *testing.T) {
 	for _, c := range []string{
 		// 脚本语言、换个参数就改东西的：交给用户确认

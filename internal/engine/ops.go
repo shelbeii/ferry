@@ -14,6 +14,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func (e *Engine) RenewHTTPS(target, app string) error {
+	return e.withSession(target, []string{app}, func(s *session, specs []proto.AppSpec) error {
+		return s.callData("https-renew", &proto.Request{Apps: specs}, nil)
+	})
+}
+
 // specs 选中应用的 AppSpec。
 func (e *Engine) specs(targetName string, names []string) (*config.Target, []proto.AppSpec, error) {
 	t, err := e.File.Target(targetName)
@@ -168,6 +174,35 @@ func (e *Engine) History(target string, names []string, limit int) ([]proto.Hist
 	return out, err
 }
 
+// HistoryPage 按条件分页读服务器上的部署历史（新的在前，带符合条件的总条数）。
+func (e *Engine) HistoryPage(target string, names []string, q proto.HistoryQuery) (*proto.HistoryPage, error) {
+	if !q.Since.IsZero() && !q.Until.IsZero() && q.Since.After(q.Until) {
+		return nil, fmt.Errorf("开始时间不能晚于结束时间")
+	}
+	t, err := e.File.Target(target)
+	if err != nil {
+		return nil, err
+	}
+	s, err := e.connect(t)
+	if err != nil {
+		return nil, err
+	}
+	defer s.close()
+	// 应用名是历史记录里的筛选值，也可以查已经从项目配置里移除的应用。
+	q.Apps = names
+	var out proto.HistoryPage
+	err = s.callData("history", &proto.Request{HistoryQuery: &q}, &out)
+	return &out, err
+}
+
+// QueryHistory 保持现有调用方的数组响应，带分页或筛选条件时返回 HistoryPage。
+func (e *Engine) QueryHistory(target string, names []string, q proto.HistoryQuery, page bool) (any, error) {
+	if page || q.NeedsPage() {
+		return e.HistoryPage(target, names, q)
+	}
+	return e.History(target, names, q.Limit)
+}
+
 // HostKey 取目标的主机公钥（ferry trust）。
 func (e *Engine) HostKey(target string) (*config.Target, ssh.PublicKey, error) {
 	t, err := e.File.Target(target)
@@ -258,7 +293,8 @@ func followCmd(o LogOptions, file string) string {
 		}
 		return cmd + " -- " + shQuote(file)
 	}
-	newest := "ls -1t -- " + shGlob(file) + " 2>/dev/null | head -n 1"
+	newest := "ls -1t -- " + shGlob(file) +
+		" 2>/dev/null | grep -vE '(^|/)\\.ferry-secrets\\.env(\\.tmp-[^/]*)?$' | head -n 1"
 	if !o.Follow {
 		return "sh -c " + shQuote(fmt.Sprintf(`f=$(%s); [ -n "$f" ] || { echo "没有匹配 %s 的日志文件" >&2; exit 1; }; echo "==> $f"; tail -n %d -- "$f"`, newest, file, o.Lines))
 	}

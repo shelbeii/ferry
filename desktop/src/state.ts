@@ -366,6 +366,8 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
     } else if (d?.kind === 'busy-artifacts' && d.items?.length) {
       // 本机有程序占着要构建的 jar：弹窗列出来，可以结束它们后重新部署
       busyRequest.value = { config: configOf(args), target: d.target ?? '', items: d.items, retry: () => startTask(title, args, onDone, env) }
+    } else if (d?.kind === 'app-secrets-required' && d.target && d.app) {
+      appSecretsRequest.value = { config: configOf(args), target: d.target, apps: [d.app], retry: () => startTask(title, args, onDone, env) }
     } else if (d && isSecretKind(d.kind)) {
       // 需要密码：弹框询问，填好后重新执行同一个任务
       secretRequest.value = { detail: d, config: configOf(args), retry: () => startTask(title, args, onDone, env) }
@@ -745,3 +747,6 @@ export const settingsRequest = ref('')
 export const localRequest = ref<string | null>(null)
 
 export const secretRequest = queuedRequest<{ detail: ErrorDetail; config: string; retry: () => void }>({ key: r => JSON.stringify([r.config, r.detail.kind, r.detail.env, r.detail.target, r.detail.key, r.detail.account]), merge: mergeRetries })
+export const appSecretsRequest = queuedRequest<{ config: string; target: string; apps: string[]; retry: () => void }>({
+  key: (r) => JSON.stringify([r.config, r.target, r.apps]), merge: mergeRetries,
+})

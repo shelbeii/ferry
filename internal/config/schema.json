@@ -275,6 +275,14 @@
        "unit": "条"
       },
       {
+       "name": "secretsFrom",
+       "label": "应用密钥来源",
+       "doc": "keyring 使用本机系统凭据库；file:secrets/prod.age 使用项目里的团队加密文件。CI 环境变量优先",
+       "kind": "str",
+       "type": "字符串",
+       "default": "keyring"
+      },
+      {
        "name": "confirm",
        "label": "部署前确认",
        "doc": "部署、回滚前先确认",
@@ -925,6 +933,55 @@
          "single": true
         },
         {
+         "name": "secrets",
+         "label": "应用密钥",
+         "doc": "只写环境变量名，值在应用详情中填写，或由 CI 的 FERRY_SECRET_<应用>_<变量> 提供。部署时随版本保存",
+         "kind": "objList",
+         "type": "列表",
+         "appTypes": [
+          "java",
+          "binary",
+          "python",
+          "node",
+          "dotnet"
+         ],
+         "item": {
+          "label": "应用密钥",
+          "doc": "大写环境变量名，或 {name, optional, doc}",
+          "kind": "obj",
+          "type": "字符串或对象",
+          "short": "name",
+          "fields": [
+           {
+            "name": "name",
+            "label": "变量名",
+            "doc": "只能使用大写英文字母、数字和下划线，且不能以数字开头",
+            "kind": "str",
+            "type": "字符串",
+            "required": true
+           },
+           {
+            "name": "optional",
+            "label": "可选",
+            "doc": "没有值时仍可部署",
+            "kind": "bool",
+            "type": "布尔",
+            "values": [
+             "true",
+             "false"
+            ]
+           },
+           {
+            "name": "doc",
+            "label": "说明",
+            "doc": "用于在填写时说明这个变量的用途",
+            "kind": "str",
+            "type": "字符串"
+           }
+          ]
+         }
+        },
+        {
          "name": "execStartPre",
          "label": "启动前执行",
          "doc": "原样写入 ExecStartPre=",
@@ -1262,6 +1319,131 @@
        ]
       },
       {
+       "name": "https",
+       "label": "后端 HTTPS",
+       "doc": "通过 nginx 转发到运行中的后端。Ferry 自动申请并续期证书，也可以使用服务器上的证书",
+       "kind": "obj",
+       "type": "对象",
+       "appTypes": [
+        "java",
+        "binary",
+        "python",
+        "node",
+        "dotnet"
+       ],
+       "fields": [
+        {
+         "name": "domains",
+         "label": "域名",
+         "doc": "如 api.example.com；HTTP 验证要求域名指向服务器且外网可访问 80 端口",
+         "kind": "list",
+         "type": "列表",
+         "required": true
+        },
+        {
+         "name": "email",
+         "label": "联系邮箱",
+         "doc": "提交给证书服务，可留空",
+         "kind": "str",
+         "type": "字符串"
+        },
+        {
+         "name": "port",
+         "label": "HTTPS 端口",
+         "doc": "HTTP 验证使用 443",
+         "kind": "str",
+         "type": "字符串",
+         "default": "443"
+        },
+        {
+         "name": "dns",
+         "label": "DNS 验证",
+         "doc": "在设置 → 部署中填写 DNS 密钥",
+         "kind": "str",
+         "type": "字符串",
+         "values": [
+          "aliyun",
+          "dnspod",
+          "cloudflare",
+          "huaweicloud",
+          "route53"
+         ]
+        },
+        {
+         "name": "ca",
+         "label": "证书服务",
+         "doc": "可填写 HTTPS ACME 目录地址",
+         "kind": "str",
+         "type": "字符串",
+         "values": [
+          "letsencrypt",
+          "letsencrypt-staging"
+         ],
+         "open": true,
+         "default": "letsencrypt"
+        },
+        {
+         "name": "redirect",
+         "label": "HTTP 跳到 HTTPS",
+         "doc": "仅在 HTTP 验证时默认启用 80 端口；显式打开也可在 DNS 验证或自带证书时启用",
+         "kind": "bool",
+         "type": "布尔",
+         "values": [
+          "true",
+          "false"
+         ]
+        },
+        {
+         "name": "upstream",
+         "label": "后端地址",
+         "doc": "如 127.0.0.1:8080；留空时从健康检查推断，不停机发布时自动转发到当前槽位",
+         "kind": "str",
+         "type": "字符串"
+        },
+        {
+         "name": "nginxInstance",
+         "label": "共享 nginx 实例",
+         "doc": "软件中已安装的 nginx 实例名，或 system:nginx.service；留空由 Ferry 启动 nginx",
+         "kind": "str",
+         "type": "字符串"
+        },
+        {
+         "name": "maxBody",
+         "label": "请求体上限",
+         "doc": "如 100m",
+         "kind": "str",
+         "type": "字符串",
+         "default": "100m"
+        },
+        {
+         "name": "websocket",
+         "label": "WebSocket 转发",
+         "doc": "",
+         "kind": "bool",
+         "type": "布尔",
+         "values": [
+          "true",
+          "false"
+         ],
+         "default": "true"
+        },
+        {
+         "name": "cert",
+         "label": "自带证书",
+         "doc": "服务器上的 PEM 证书链绝对路径，与私钥一起填写",
+         "kind": "str",
+         "type": "字符串"
+        },
+        {
+         "name": "key",
+         "label": "自带证书私钥",
+         "doc": "服务器上的 PEM 私钥绝对路径，与证书一起填写",
+         "kind": "str",
+         "type": "字符串"
+        }
+       ]
+      },
+      {
        "name": "static",
        "label": "静态站点",
        "doc": "选择软件中已安装的 nginx 实例托管站点；旧配置仍兼容独立运行",
@@ -1386,7 +1568,9 @@
            "values": [
             "aliyun",
             "dnspod",
-            "cloudflare"
+            "cloudflare",
+            "huaweicloud",
+            "route53"
            ],
            "default": "不用（HTTP 验证）"
           },

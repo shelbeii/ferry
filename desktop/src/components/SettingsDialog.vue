@@ -931,7 +931,7 @@ async function pickKeyDir() {
         </div>
         <h4>HTTPS 证书的 DNS 密钥</h4>
         <p class="muted small">
-          站点配置了 <span class="mono">static.https.dns</span>（用 DNS 验证申请证书，不要求 80 端口能从外网访问、也能申请通配符证书）时用。
+          配置了 <span class="mono">https.dns</span> 或 <span class="mono">static.https.dns</span> 后，用这里的密钥验证域名。DNS 验证可以签发通配符证书。
           存在系统凭据库；部署时带到服务器上存一份（只有 root 能读），服务器每天续期证书时用。只给改 DNS 记录的权限。
         </p>
         <DnsKeys v-if="form" ref="dnsKeys" />

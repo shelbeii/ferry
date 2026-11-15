@@ -106,3 +106,66 @@ apps:
 		}
 	}
 }
+
+func TestBackendHTTPSSpec(t *testing.T) {
+	const base = `
+version: 1
+project: shop
+targets:
+  prod: {host: 10.0.0.1, runAs: shop}
+apps:
+  - name: api
+    type: binary
+    artifact: {path: dist/api}
+`
+	for _, tc := range []struct {
+		name, yaml   string
+		want, absent []string
+	}{
+		{"ACME", "    service: {health: {http: 'http://127.0.0.1:8080/health'}}\n    https: {domains: [Api.Example.com]}",
+			[]string{"listen 80;", "return 301 https://$host$request_uri", "listen 443 ssl;", "server_name api.example.com;", "proxy_pass http://{{FERRY_HTTPS_UPSTREAM}};", "proxy_set_header Upgrade", `root "/opt/shop/.ferry/apps/api/acme-web"`}, []string{"try_files"}},
+		{"shared custom", "    https: {domains: [api.example.com], upstream: '127.0.0.1:8000', cert: /etc/ssl/app.pem, key: /etc/ssl/app.key, nginxInstance: shared, port: 8443, websocket: false, maxBody: 10m}",
+			[]string{"listen 8443 ssl;", "client_max_body_size 10m;", "tls-custom/fullchain.pem"}, []string{"listen 80;", "proxy_set_header Upgrade", "http {", "daemon off"}},
+		{"slots", "    service: {zeroDowntime: {ports: [8081, 8082], listen: 9080}}\n    https: {domains: [api.example.com]}",
+			[]string{"listen 443 ssl;", "listen 9080;", "proxy_pass http://{{FERRY_HTTPS_UPSTREAM}};"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := loadYAML(t, base+tc.yaml)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, _ := f.Target("prod")
+			s, err := Spec(f, target, f.App("api"))
+			if err != nil || s.HTTPS == nil {
+				t.Fatalf("HTTPS：%+v %v", s.HTTPS, err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(s.HTTPS.Config, want) {
+					t.Errorf("配置缺少 %q：\n%s", want, s.HTTPS.Config)
+				}
+			}
+			for _, unwanted := range tc.absent {
+				if strings.Contains(s.HTTPS.Config, unwanted) {
+					t.Errorf("配置不应包含 %q：\n%s", unwanted, s.HTTPS.Config)
+				}
+			}
+			if tc.name == "ACME" && s.HTTPS.Upstream != "127.0.0.1:8080" {
+				t.Errorf("没有从健康检查推断后端：%s", s.HTTPS.Upstream)
+			}
+			if s.ZD != nil && s.ZD.ProxyUnit != s.HTTPS.Unit {
+				t.Fatalf("HTTPS 和不停机转发须共用单元：%+v", s.HTTPS)
+			}
+		})
+	}
+	for yaml, want := range map[string]string{
+		"    https: {domains: [a.com]}":                                                                                 "填写 upstream",
+		"    https: {domains: [a.com], upstream: 'no; good:80'}":                                                        "地址和端口",
+		"    https: {domains: [a.com], upstream: '127.0.0.1:8080', port: 8443}":                                         "使用 HTTP 验证",
+		"    https: {domains: [a.com], upstream: '127.0.0.1:8080', cert: /cert.pem}":                                    "成对",
+		"    service: {zeroDowntime: {ports: [8081, 8082]}}\n    https: {domains: [a.com], upstream: '127.0.0.1:8081'}": "运行中的槽位",
+	} {
+		if _, err := loadYAML(t, base+yaml); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q：期望 %q，实际 %v", yaml, want, err)
+		}
+	}
+}

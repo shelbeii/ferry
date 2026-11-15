@@ -215,18 +215,7 @@ func nginxConf(f *config.File, t *config.Target, a *config.App, sc *config.Scope
 		}
 		sort.Strings(paths)
 		for _, p := range paths {
-			w(2, "location %s {", p)
-			w(3, "proxy_pass %s;", proxy[p])
-			w(3, "proxy_http_version 1.1;")
-			w(3, "proxy_set_header Host $http_host;")
-			w(3, "proxy_set_header X-Real-IP $remote_addr;")
-			w(3, "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;")
-			w(3, "proxy_set_header X-Forwarded-Proto $scheme;")
-			w(3, "proxy_set_header Upgrade $http_upgrade;")
-			w(3, "proxy_set_header Connection %s;", connectionVar)
-			w(3, "proxy_read_timeout 300s;")
-			w(3, "proxy_buffering off;") // 流式返回（SSE、大模型逐字输出）不攒到最后才发
-			w(2, "}")
+			proxyLocation(w, p, proxy[p], connectionVar)
 		}
 		for _, l := range server {
 			w(2, "%s", oneLine(l))
@@ -305,6 +294,23 @@ func nginxConf(f *config.File, t *config.Target, a *config.App, sc *config.Scope
 		return header + strings.TrimSuffix(text[start:], "}\n"), nil
 	}
 	return b.String(), nil
+}
+
+func proxyLocation(w func(int, string, ...any), location, upstream, connectionVar string) {
+	w(2, "location %s {", location)
+	w(3, "proxy_pass %s;", upstream)
+	w(3, "proxy_http_version 1.1;")
+	w(3, "proxy_set_header Host $http_host;")
+	w(3, "proxy_set_header X-Real-IP $remote_addr;")
+	w(3, "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;")
+	w(3, "proxy_set_header X-Forwarded-Proto $scheme;")
+	if connectionVar != "" {
+		w(3, "proxy_set_header Upgrade $http_upgrade;")
+		w(3, "proxy_set_header Connection %s;", connectionVar)
+	}
+	w(3, "proxy_read_timeout 300s;")
+	w(3, "proxy_buffering off;")
+	w(2, "}")
 }
 
 // mimeTypes 常用的类型（静态 nginx 没有带 mime.types 文件）。

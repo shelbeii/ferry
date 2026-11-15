@@ -66,6 +66,7 @@ interface AppForm {
   // 前端：绑定软件中已安装的 nginx，或只部署文件后手动接入。
   serve: 'ferry' | 'server'
   domains?: string
+  httpsDomains?: string
   proxies: { path: string; to: string }[]
   spa: boolean
   // python、node、dotnet：启动命令（一行一个参数）、服务的环境变量（一行一个 KEY=值）、不上传的（一行一个）、装依赖的镜像源
@@ -654,6 +655,8 @@ const stepError = computed(() => {
       }
       if (a.health === 'http' && !/^https?:\/\//.test(a.healthUrl)) return `${a.name}：健康检查地址要以 http:// 开头`
       if (a.health === 'tcp' && !a.port) return `${a.name}：按端口检查健康时请填写端口`
+      if (a.type !== 'static' && a.httpsDomains?.trim() && !a.port && a.health !== 'http')
+        return `${a.name}：启用 HTTPS 时请填写后端端口或 HTTP 健康检查地址`
     }
     const used = new Map<number, string>()
     for (const a of included.value) {
@@ -770,6 +773,7 @@ function spec() {
       runtimeJava: a.type === 'java' && a.javaSource === 'ferry' ? a.runtimeJava : 0, jvmArgs: a.type === 'java' ? lines(a.jvmArgs) : [],
       args: lines(a.args), port: a.type === 'static' && a.serve !== 'ferry' ? 0 : a.port ?? 0,
       health: a.type === 'static' ? 'none' : a.health, healthUrl: a.healthUrl.trim(), fileLogs: a.type === 'java' && a.fileLogs,
+      httpsDomains: a.type === 'static' ? [] : (a.httpsDomains ?? '').split(/[\s,，]+/).filter(Boolean),
       link: a.type === 'static' && a.serve === 'server' ? a.link.trim() : '', reload: a.type === 'static' && a.serve === 'server' ? a.reload.trim() : '',
       proxy: a.type === 'static' && a.serve === 'ferry' ? proxyMap(a) : {}, noSpa: a.type === 'static' && a.serve === 'ferry' && !a.spa,
       nginxInstance: a.type === 'static' && a.serve === 'ferry' ? '${nginxInstance}' : '', domains: a.domains?.split(/[,\s]+/).filter(Boolean) ?? [],
@@ -1202,6 +1206,10 @@ const levelIcon = { ok: CircleCheckFilled, warn: WarningFilled, error: CircleClo
                   <el-form-item label="端口">
                     <el-input-number v-model="a.port" :min="1" :max="65535" controls-position="right" @change="(n: number | undefined, o: number | undefined) => onPortChange(a, o)" />
                     <div v-if="!a.port" class="warn-text small">没填端口：按「进程持续运行 10 秒」判断是否启动成功，也检查不了端口冲突</div>
+                  </el-form-item>
+                  <el-form-item label="HTTPS 域名">
+                    <el-input v-model="a.httpsDomains" placeholder="可选，如 api.example.com" />
+                    <div v-if="a.httpsDomains && !a.port && a.health !== 'http'" class="warn-text small">请填写后端端口或 HTTP 健康检查地址</div>
                   </el-form-item>
                   <el-form-item label="就绪判断">
                     <el-select v-model="a.health">

@@ -53,12 +53,13 @@ func (a *Agent) acmeDir() string          { return filepath.Join(a.meta(), "acme
 
 // acmeRecord 续期用的记录。
 type acmeRecord struct {
-	App  string        `json:"app"`
-	Unit string        `json:"unit"`
-	User string        `json:"user"`
-	TLS  proto.TLSSpec `json:"tls"`            // 不含 DNSCred
-	Root string        `json:"root,omitempty"` // 应用单独设置的部署根目录
-	At   time.Time     `json:"at"`
+	App     string        `json:"app"`
+	Unit    string        `json:"unit"`
+	User    string        `json:"user"`
+	TLS     proto.TLSSpec `json:"tls"`            // 不含 DNSCred
+	Root    string        `json:"root,omitempty"` // 应用单独设置的部署根目录
+	At      time.Time     `json:"at"`
+	Backend bool          `json:"backend,omitempty"`
 }
 
 // certInfo 证书文件里第一张证书。
@@ -155,6 +156,10 @@ func (a *Agent) tlsPrepare(s *proto.AppSpec) error {
 // tlsAfterStart 站点起来之后：记下续期的配置、装上每天检查的定时器；需要时申请证书、换上、重新加载 nginx。
 // 失败只提示：网站照常能用 http 访问，https 先用临时证书。
 func (a *Agent) tlsAfterStart(s *proto.AppSpec) {
+	a.configureRenewal(s, false)
+}
+
+func (a *Agent) configureRenewal(s *proto.AppSpec, backend bool) {
 	t := s.TLS
 	if t == nil {
 		return
@@ -164,14 +169,24 @@ func (a *Agent) tlsAfterStart(s *proto.AppSpec) {
 			a.warn(proto.EvCert, s.Name, "保存 DNS 密钥失败：%v", err)
 		}
 	}
-	rec := acmeRecord{App: s.Name, Unit: s.Unit, User: s.User, TLS: *t, Root: a.appRoots[s.Name], At: a.Sys.Now()}
+	rec := acmeRecord{App: s.Name, Unit: s.Unit, User: s.User, TLS: *t, Root: a.appRoots[s.Name], At: a.Sys.Now(), Backend: backend}
 	rec.TLS.DNSCred = nil
 	if err := a.saveRenewal(rec); err != nil {
+		if backend {
+			a.httpsProblem(s.Name, "设置自动续期失败："+err.Error())
+		}
 		a.warn(proto.EvCert, s.Name, "装续期的定时器失败（证书到期前要重新部署一次）：%v", err)
 	}
 	if err := a.ensureCert(rec, false); err != nil {
+		if backend {
+			a.httpsRenewalProblem(s.Name, "申请证书失败："+err.Error())
+			a.warn(proto.EvCert, s.Name, "申请 HTTPS 证书失败：%v；服务器每天会再试一次", err)
+			return
+		}
 		a.warn(proto.EvCert, s.Name, "申请 HTTPS 证书失败：%v。网站照常能用 http 访问，https 先用临时证书（浏览器会提示不安全）；"+
 			"服务器每天会再试一次，也可以改好后重新部署", err)
+	} else if backend {
+		a.httpsRenewalProblem(s.Name, "")
 	}
 }
 
@@ -195,7 +210,14 @@ func (a *Agent) ensureCert(rec acmeRecord, force bool) error {
 	a.info(proto.EvCert, rec.App, "申请证书 %s（%s，%s）", strings.Join(rec.TLS.Domains, "、"), why, how)
 	var cred map[string]string
 	if rec.TLS.DNS != "" {
-		var err error
+		if _, ok := DNSProviders[rec.TLS.DNS]; !ok {
+			return fmt.Errorf("不支持的 DNS 服务商：%s", rec.TLS.DNS)
+		}
+		unlock, err := a.Sys.Lock(filepath.Join(a.ferryDir(), "acme-dns-"+rec.TLS.DNS+".lock"), acmeTimeout)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 		if cred, err = a.loadDNSCred(rec.TLS.DNS); err != nil {
 			return err
 		}
@@ -442,7 +464,7 @@ func (a *Agent) saveRenewal(rec acmeRecord) error {
 		return err
 	}
 	b, _ := json.MarshalIndent(rec, "", "  ")
-	if err := writeFileAtomic(filepath.Join(dir, rec.App+".json"), b, 0o600); err != nil {
+	if err := writeFileAtomic(a.acmeRecordPath(rec.App), b, 0o600); err != nil {
 		return err
 	}
 	// 记下这个部署目录（一台服务器上可以有好几个项目）
@@ -517,6 +539,17 @@ func RenewAll(sys System, out io.Writer, force bool) int {
 				continue
 			}
 			a := &Agent{Sys: sys, Out: out, Plain: true, req: &proto.Request{Root: root, FerryDir: filepath.Dir(exe)}, appRoots: map[string]string{}}
+			if rec.Backend {
+				err = a.renewSavedBackendHTTPS(rec.App, force)
+				if errors.Is(err, ErrLocked) || os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					fmt.Fprintf(out, "%s %s：续期失败：%v\n", root, rec.App, err)
+					rc = 1
+				}
+				continue
+			}
 			if rec.Root != "" {
 				a.appRoots[rec.App] = rec.Root
 			}

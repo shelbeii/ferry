@@ -1,5 +1,11 @@
 # 10. 英文 README、快速上手、常见问题
 
+> 0.15.2 已实现。中英文 README 链接到各自的快速上手和配置参考，中文 FAQ 收录 20 条常见提示。旧 README 的部署、运维和开发资料已迁入专题指南、命令参考及开发文档。GitHub Actions 运行 `scripts/checklinks`。
+
+本机 Docker 验证使用真实 Spring Boot JAR、SSH、systemd 和 Java 21。按照[快速上手](../quickstart.md)分别完成桌面部署和 CLI 重复部署，`/health` 返回 `OK`。教程与专题使用这套测试环境拍摄的 7 张 PNG，每张小于 200 KB。
+
+完整 Docker 回归通过 1004 项。Windows 和 Linux 上均检查了 142 个相对链接，桌面测试通过 239 项。Windows 安装包通过解包和 CLI 验证。
+
 ## 现状
 
 - `README.md` 650 多行，从功能列表一路讲到命令表、目录结构；`docs/config.md` 近 600 行。全是中文。

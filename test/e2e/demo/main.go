@@ -4,6 +4,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"os"
@@ -47,6 +48,18 @@ func main() {
 		port = portFromArgs(os.Args[1:])
 	}
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "UP", version) })
+	http.HandleFunc("/env-digest", func(w http.ResponseWriter, r *http.Request) {
+		value, ok := os.LookupEnv(r.URL.Query().Get("name"))
+		if !ok {
+			fmt.Fprintln(w, "unset")
+			return
+		}
+		fmt.Fprintf(w, "%x\n", sha256.Sum256([]byte(value)))
+	})
+	if os.Getenv("E2E_START_CHECK") == "1" && os.Getenv("TEST_TOKEN") == "e2e-test-refuse-start" {
+		fmt.Fprintln(os.Stderr, "refusing startup for simulated credential", os.Getenv("TEST_TOKEN"))
+		os.Exit(1)
+	}
 	// CONF_FILE：按相对工作目录的路径读配置文件（测试附带文件和程序放在一起）
 	http.HandleFunc("/conf", func(w http.ResponseWriter, _ *http.Request) {
 		b, err := os.ReadFile(os.Getenv("CONF_FILE"))

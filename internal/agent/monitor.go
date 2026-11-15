@@ -478,6 +478,13 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 		dirs, _ := filepath.Glob(filepath.Join(e.Root, ".ferry", "apps", "*", "tls"))
 		for _, d := range dirs {
 			app := filepath.Base(filepath.Dir(d))
+			var https backendHTTPSState
+			if data, err := os.ReadFile(filepath.Join(filepath.Dir(d), "https.json")); err == nil {
+				json.Unmarshal(data, &https)
+			}
+			if https.Custom {
+				continue
+			}
 			c, err := certInfo(d)
 			if err != nil {
 				continue
@@ -488,6 +495,29 @@ func (a *Agent) monitorCheck(entries []monitorEntry, st *monitorState) ([]findin
 				out = append(out, finding{proto.MonitorProblem{Key: "cert:" + app, Level: "warn", Text: fmt.Sprintf("%s 的 HTTPS 一直是临时证书（正式证书申请不下来，看 journalctl -u ferry-acme）", app)}, entryKey(e.Project, e.Target)})
 			case c.Subject.CommonName != tempCertName && days < e.CertDays:
 				out = append(out, finding{proto.MonitorProblem{Key: "cert:" + app, Level: "warn", Text: fmt.Sprintf("%s 的 HTTPS 证书 %d 天后到期（续期没成功？看 journalctl -u ferry-acme）", app, days)}, entryKey(e.Project, e.Target)})
+			}
+		}
+		httpsApps, _ := filepath.Glob(filepath.Join(e.Root, ".ferry", "apps", "*", "https.json"))
+		for _, file := range httpsApps {
+			data, err := os.ReadFile(file)
+			var https backendHTTPSState
+			if err != nil || json.Unmarshal(data, &https) != nil || !https.Custom {
+				continue
+			}
+			cert, err := certInfo(filepath.Join(filepath.Dir(file), "tls-custom"))
+			if err != nil {
+				continue
+			}
+			app := filepath.Base(filepath.Dir(file))
+			if days := int(cert.NotAfter.Sub(now).Hours() / 24); days < e.CertDays {
+				out = append(out, finding{proto.MonitorProblem{Key: "cert:" + app, Level: "warn", Text: fmt.Sprintf("%s 的自带 HTTPS 证书有效期至 %s，请更新证书", app, cert.NotAfter.Format("2006-01-02"))}, entryKey(e.Project, e.Target)})
+			}
+		}
+		problems, _ := filepath.Glob(filepath.Join(e.Root, ".ferry", "apps", "*", "https*-error"))
+		for _, file := range problems {
+			if data, err := os.ReadFile(file); err == nil {
+				app := filepath.Base(filepath.Dir(file))
+				out = append(out, finding{proto.MonitorProblem{Key: filepath.Base(file) + ":" + app, Level: "warn", Text: app + " HTTPS：" + string(data)}, entryKey(e.Project, e.Target)})
 			}
 		}
 	}

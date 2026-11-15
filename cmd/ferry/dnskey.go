@@ -11,9 +11,9 @@ import (
 	"github.com/captain/ferry/internal/ui"
 )
 
-const dnsKeyUsage = "用法：ferry dns-key [list] | set aliyun|dnspod --id <ID> | set cloudflare | delete <服务商>"
+const dnsKeyUsage = "用法：ferry dns-key [list] | set <aliyun|dnspod|huaweicloud|route53> --id <ID> | set cloudflare | delete <服务商>"
 
-var dnsKeyNames = map[string]string{"aliyun": "阿里云 DNS", "dnspod": "腾讯云 DNSPod", "cloudflare": "Cloudflare"}
+var dnsKeyNames = map[string]string{"aliyun": "阿里云 DNS", "dnspod": "腾讯云 DNSPod", "cloudflare": "Cloudflare", "huaweicloud": "华为云 DNS", "route53": "AWS Route 53"}
 
 // dnsKeyCmd HTTPS 证书 DNS 验证用的 DNS 服务商密钥（存在系统凭据库）：
 //
@@ -62,7 +62,7 @@ func dnsKeyCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail func(error
 		return 0
 	case "set":
 		v := strings.TrimSpace(cio.getenv("FERRY_SECRET_VALUE"))
-		label := map[string]string{"aliyun": "AccessKey Secret：", "dnspod": "SecretKey：", "cloudflare": "API Token："}[p]
+		label := map[string]string{"aliyun": "AccessKey Secret：", "dnspod": "SecretKey：", "cloudflare": "API Token：", "huaweicloud": "SK：", "route53": "Secret access key："}[p]
 		if v == "" && con != nil {
 			v, _ = con.Secret(label)
 		}

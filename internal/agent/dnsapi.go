@@ -21,7 +21,7 @@ import (
 )
 
 // DNS 验证（ACME dns-01）：在域名的 DNS 里加一条 TXT 记录 _acme-challenge.<域名>，验证完删掉。
-// 支持阿里云 DNS、腾讯云 DNSPod、Cloudflare；密钥只需要改 DNS 记录的权限。
+// 密钥用于查找公网域名、读写验证记录。
 
 // dnsProvider 一家 DNS 服务商。
 type dnsProvider interface {
@@ -32,24 +32,28 @@ type dnsProvider interface {
 
 // DNSProviders 支持的 DNS 服务商与它们要的密钥字段。
 var DNSProviders = map[string][]string{
-	"aliyun":     {"id", "secret"}, // AccessKey ID、AccessKey Secret（RAM 用户，权限 AliyunDNSFullAccess）
-	"dnspod":     {"id", "secret"}, // 腾讯云 SecretId、SecretKey（权限 QcloudDNSPodFullAccess）
-	"cloudflare": {"token"},        // API Token（权限 Zone.DNS Edit）
+	"aliyun":      {"id", "secret"}, // AccessKey ID、AccessKey Secret（RAM 用户，权限 AliyunDNSFullAccess）
+	"dnspod":      {"id", "secret"}, // 腾讯云 SecretId、SecretKey（权限 QcloudDNSPodFullAccess）
+	"cloudflare":  {"token"},        // API Token（权限 Zone.DNS Edit）
+	"huaweicloud": {"id", "secret"},
+	"route53":     {"id", "secret"},
 }
 
-var dnsNames = map[string]string{"aliyun": "阿里云 DNS", "dnspod": "腾讯云 DNSPod", "cloudflare": "Cloudflare"}
+var dnsNames = map[string]string{"aliyun": "阿里云 DNS", "dnspod": "腾讯云 DNSPod", "cloudflare": "Cloudflare", "huaweicloud": "华为云 DNS", "route53": "AWS Route 53"}
 
 // dnsEndpoints 各家 API 的地址（测试时换成本地的假服务）。
 var dnsEndpoints = map[string]string{
-	"aliyun":     "https://alidns.aliyuncs.com/",
-	"dnspod":     "https://dnspod.tencentcloudapi.com/",
-	"cloudflare": "https://api.cloudflare.com/client/v4",
+	"aliyun":      "https://alidns.aliyuncs.com/",
+	"dnspod":      "https://dnspod.tencentcloudapi.com/",
+	"cloudflare":  "https://api.cloudflare.com/client/v4",
+	"huaweicloud": "https://dns.myhuaweicloud.com",
+	"route53":     "https://route53.amazonaws.com/2013-04-01",
 }
 
 func newDNSProvider(name string, cred map[string]string, client *http.Client) (dnsProvider, error) {
 	fields, ok := DNSProviders[name]
 	if !ok {
-		return nil, fmt.Errorf("不支持的 DNS 服务商：%s（支持 aliyun、dnspod、cloudflare）", name)
+		return nil, fmt.Errorf("不支持的 DNS 服务商：%s", name)
 	}
 	for _, f := range fields {
 		if strings.TrimSpace(cred[f]) == "" {
@@ -62,6 +66,8 @@ func newDNSProvider(name string, cred map[string]string, client *http.Client) (d
 		return &aliDNS{id: cred["id"], secret: cred["secret"], ep: ep, c: client}, nil
 	case "dnspod":
 		return &dnspod{id: cred["id"], secret: cred["secret"], ep: ep, c: client}, nil
+	case "huaweicloud", "route53":
+		return &cloudDNS{provider: name, id: cred["id"], secret: cred["secret"], endpoint: ep, client: client}, nil
 	default:
 		return &cloudflare{token: cred["token"], ep: ep, c: client}, nil
 	}

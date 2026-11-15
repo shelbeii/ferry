@@ -239,6 +239,9 @@ func (f *File) normalize() error {
 		if t.UploadStreams < 0 || t.UploadStreams > 32 {
 			bad("%s：uploadStreams 只能是 1～32", where)
 		}
+		if err := checkAppSecretsSource(t.SecretsFrom); err != nil {
+			bad("%s：%v", where, err)
+		}
 		if t.KeepReleases == 0 {
 			t.KeepReleases = 5
 		}
@@ -303,6 +306,7 @@ func (f *File) normalize() error {
 		switch a.Type {
 		case "java", "binary", "python", "node", "dotnet":
 			s := &a.Service
+			checkAppSecrets(s, where, bad)
 			if (a.Type == "python" || a.Type == "node" || a.Type == "dotnet") && len(s.Exec) == 0 {
 				bad("%s：type: %s 要写 service.exec（启动命令），如 %s", where, a.Type, map[string]string{
 					"python": `["${running}/.venv/bin/uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"]`,
@@ -392,6 +396,9 @@ func (f *File) normalize() error {
 			if z := s.ZeroDowntime; z != nil {
 				checkZD(z, where, bad)
 			}
+			if a.HTTPS != nil {
+				checkAppHTTPS(a, where, units, bad)
+			}
 			if a.Static.Link != "" || a.Static.Reload != "" {
 				bad("%s：static 只用于 type: static", where)
 			}
@@ -400,6 +407,9 @@ func (f *File) normalize() error {
 			}
 		case "static":
 			st := &a.Static
+			if a.HTTPS != nil {
+				bad("%s：静态站点请用 static.https", where)
+			}
 			if a.Job != nil {
 				bad("%s：静态站点不能是定时任务（job 只用于 java、binary、python、node、dotnet）", where)
 			}
@@ -749,7 +759,7 @@ func checkJob(a *App, where string, bad func(string, ...any)) {
 // hasServiceExtras service 里除 unit、user、description 之外还设置了别的。
 func hasServiceExtras(s *Service) bool {
 	return s.Workdir != "" || s.Java != "" || s.Runtime != nil || len(s.JvmArgs) > 0 || len(s.Args) > 0 || len(s.Exec) > 0 ||
-		len(s.Env) > 0 || len(s.EnvFile) > 0 || len(s.ExecStartPre) > 0 || len(s.Conflicts) > 0 || len(s.SharedDirs) > 0 ||
+		len(s.Env) > 0 || len(s.EnvFile) > 0 || len(s.Secrets) > 0 || len(s.ExecStartPre) > 0 || len(s.Conflicts) > 0 || len(s.SharedDirs) > 0 ||
 		len(s.DiagLogs) > 0 || s.ArchiveLogs != nil || s.Health.TCP != "" || s.Health.HTTP != "" ||
 		len(s.UnitExtra.Unit)+len(s.UnitExtra.Service)+len(s.UnitExtra.Install) > 0 || s.ZeroDowntime != nil ||
 		s.Restart != nil || s.Autostart != nil || s.AutostartDelay != nil || len(s.After) > 0

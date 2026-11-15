@@ -391,6 +391,7 @@ export interface InspectApp {
   root?: string
   build?: string
   unit?: string
+  hasSecrets?: boolean
   /** 部署时保留服务器上的（artifact.keep） */
   keep?: KeepItem[]
 }
@@ -475,6 +476,7 @@ export interface LockHolder {
 }
 
 export interface AppStatus {
+  https?: { domains: string[]; port: number; expires?: string; custom?: boolean; temporary?: boolean; active: boolean; problem?: string }
   name: string
   /** 现在有人在这台服务器上部署、回滚、启停 */
   busy?: LockHolder
@@ -545,6 +547,40 @@ export interface AppInfo {
   status: AppStatus
   sections: AppInfoSection[]
   notes?: string[]
+  appliedSecrets?: string[]
+}
+
+export interface AppSecretStatus {
+  app: string
+  name: string
+  doc?: string
+  optional?: boolean
+  available: boolean
+  source?: 'env' | 'target' | 'shared' | 'team' | 'team-unavailable' | 'unavailable' | 'invalid'
+}
+
+export interface TeamSecretsStatus {
+  path?: string
+  publicKey?: string
+  recipients?: string[]
+  exists: boolean
+  ready: boolean
+  problem?: string
+}
+
+export function appSecretBlocksDeployment(row: AppSecretStatus): boolean {
+  return !row.available && (!row.optional || row.source === 'invalid' || row.source === 'team-unavailable')
+}
+
+export function appSecretStatus(row: AppSecretStatus): string {
+  if (row.source === 'env') return '环境变量'
+  if (row.source === 'target') return '已填（当前目标）'
+  if (row.source === 'shared') return '已填（所有目标）'
+  if (row.source === 'team') return '已填（团队文件）'
+  if (row.source === 'team-unavailable') return '无法读取团队文件'
+  if (row.source === 'unavailable') return '凭据库不可用'
+  if (row.source === 'invalid') return '值格式无效'
+  return row.optional ? '缺少（可选）' : '缺少'
 }
 
 /** ferry software：服务器上已有的软件（只读查看） */
@@ -1275,7 +1311,7 @@ export interface AuditEntry {
 
 /** 审计记录的类型，按组（筛选用）；和 internal/proto/audit.go 的 AuditKinds 一致 */
 export const AUDIT_GROUPS: { label: string; kinds: Record<string, string> }[] = [
-  { label: '部署、启停', kinds: { deploy: '部署', rollback: '回滚', control: '启停应用', runjob: '运行定时任务', runtime: '安装 JDK' } },
+  { label: '部署、启停', kinds: { deploy: '部署', rollback: '回滚', control: '启停应用', runjob: '运行定时任务', runtime: '安装 JDK', 'https-renew': '续期 HTTPS 证书', secretset: '更新应用密钥' } },
   { label: '终端', kinds: { 'terminal-open': '打开终端', 'terminal-close': '关闭终端' } },
   { label: '文件', kinds: { 'file-save': '保存文件', 'file-rename': '改名', 'file-remove': '删除文件', 'file-upload': '上传文件', 'file-mkdir': '新建文件夹' } },
   { label: '数据库', kinds: { 'db-exec': '执行 SQL', 'redis-exec': '执行 Redis 命令' } },

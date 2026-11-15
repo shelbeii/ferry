@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,13 +85,15 @@ const usage = `ferry —— 后端 / 前端部署工具
                                 部署通知（企业微信、钉钉、飞书、自定义接口；在设置 → 通知里添加）：save 保存机器人地址或
                                 加签密钥（存在系统凭据库，值从 FERRY_SECRET_VALUE 读），test 发一条测试消息。
                                 CI 里可以不用设置：FERRY_NOTIFY="dingtalk:https://…"，加签密钥放 FERRY_NOTIFY_SECRET
-  dns-key  [list] | set aliyun|dnspod --id <ID> | set cloudflare | delete <服务商>
-                                HTTPS 证书 DNS 验证用的密钥（static.https.dns；存在系统凭据库，Secret / Token 从 FERRY_SECRET_VALUE 读）；
+  dns-key  [list] | set <服务商> [--id <ID>] | delete <服务商>
+                                HTTPS 证书 DNS 验证用的密钥（存在系统凭据库，Secret / Token 从 FERRY_SECRET_VALUE 读）；
                                 CI 里用环境变量 FERRY_DNS_ALIYUN_ID、FERRY_DNS_ALIYUN_SECRET、FERRY_DNS_CLOUDFLARE_TOKEN……
   datadir  [set <目录> | reset] [--move]   数据目录（密钥、主机公钥记录、构建日志、设置）；--move 同时搬数据
                                 set 的值从终端输入，或环境变量 FERRY_SECRET_VALUE
   preflight <目标> [应用…]       检查服务器环境
   deploy   <目标>[,<目标>…] [应用…]  构建、上传、逐个切换；失败自动回滚该应用并停止后续应用和目标
+  secrets  <目标> [list | set <应用> <变量> | unset <应用> <变量> | push [应用…]]
+  secrets  <目标> keygen | team [status | init | add <公钥> | remove <公钥>]
            [--batch N] [--canary N] [--observe 2m] [--on-failure stop|rollback]
                                 部署到多台时：每次 N 台同时切换；先切换 N 台、（观察一会儿后）确认再部署其余的；
                                 有一台失败时停下，或把这次已经切换的回滚到部署前的版本（默认用 ferry.yaml 的 rollout）
@@ -111,7 +114,9 @@ const usage = `ferry —— 后端 / 前端部署工具
                                 部署前备份（beforeDeploy），随时可以关；恢复前先自动备份一份现在的
   rollback <目标> <应用> [--to <版本ID|legacy>]
   run-job  <目标> <应用>        现在运行一次定时任务（配置里写了 job 的应用），等它跑完、显示输出；不影响定时器
-  history  <目标> [应用…] [--limit N]
+  history  <目标> [应用…] [--app 应用] [--since 时间] [--until 时间] [--action 操作] [--result 结果]
+                         [--actor 操作人] [--q 关键词] [--limit N] [--offset N] [--json --page]
+  https-renew <目标> <应用>     重新申请后端 HTTPS 证书并重新加载 nginx
   audit    <目标> [--kind 类型] [--actor 人] [--since 24h|7d|2026-11-01] [--limit N] [--local]
                                 审计记录：谁什么时候在这台服务器上做了什么改动（部署、终端、文件、数据库、软件、防火墙……），
                                 团队里所有人的都在服务器上；--local 只看这台电脑上记的。ferry audit --local 看这台电脑上记的全部
@@ -183,14 +188,14 @@ var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": t
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
 	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
 	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "mem": true, "load": true, "ping": true, "keep-files": true, "query": true,
-	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true}
+	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true, "action": true, "snapshot": true, "app": true}
 var boolFlags = map[string]bool{
 	"with-secrets": true,
 	"y":            true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
-	"ai": true, "restart": true, "tls": true,
+	"ai": true, "restart": true, "tls": true, "page": true, "facets": true, "all-targets": true, "no-restart": true,
 }
 
 func parseArgs(argv []string) (*cli, error) {
@@ -689,6 +694,9 @@ func run(argv []string, cio *cliIO) int {
 		}
 		return 0
 
+	case "secrets":
+		return appSecretsCmd(e, c, cio, js, con, fail)
+
 	case "deploy":
 		t, apps, err := targetArgs()
 		if err != nil {
@@ -963,18 +971,18 @@ func run(argv []string, cio *cliIO) int {
 		if err != nil {
 			return fail(err)
 		}
-		limit := 30
-		if v := c.flags["limit"]; v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+		return historyCmd(c, e, t, apps, js, con, cio.stdout, fail)
+	case "https-renew":
+		if len(c.pos) != 2 {
+			return fail(errors.New("用法：ferry https-renew <目标> <应用>"))
 		}
-		hs, err := e.History(t, apps, limit)
-		if err != nil {
+		if err := e.RenewHTTPS(c.pos[0], c.pos[1]); err != nil {
 			return fail(err)
 		}
 		if js != nil {
-			return ok(hs)
+			return ok(nil)
 		}
-		printHistory(con, hs)
+		fmt.Fprintln(cio.stdout, "HTTPS 证书已续期")
 		return 0
 	}
 	fmt.Fprintf(cio.stderr, "ferry: 未知命令 %q\n\n%s", cmd, usage)
@@ -1369,7 +1377,7 @@ func printSearch(w io.Writer, res *proto.LogSearch) {
 	fmt.Fprintf(w, "\n共 %d 处%s\n", len(res.Matches), more)
 }
 
-func printHistory(con *ui.Console, hs []proto.HistoryEntry) {
+func printHistory(con *ui.Console, out io.Writer, hs []proto.HistoryEntry) {
 	t := &ui.Table{Header: []string{"时间", "操作", "应用", "结果", "版本", "提交", "操作人", "说明"}}
 	for _, h := range hs {
 		t.Rows = append(t.Rows, []string{h.Time.Local().Format("2006-01-02 15:04:05"), h.Action, h.App, h.Result, h.Release,
@@ -1381,7 +1389,7 @@ func printHistory(con *ui.Console, hs []proto.HistoryEntry) {
 		}
 		return s
 	}
-	t.Write(os.Stdout)
+	t.Write(out)
 }
 
 func printPreflight(con *ui.Console, p *proto.Preflight) {
@@ -1636,6 +1644,9 @@ func inspect(f *config.File) map[string]any {
 		}
 		if a.Type != "static" {
 			m["unit"] = a.Service.Unit
+		}
+		if len(a.Service.Secrets) > 0 {
+			m["hasSecrets"] = true
 		}
 		if a.Root != "" {
 			m["root"] = a.Root // 原样（可能含变量）；各目标上的实际目录见 targets[].appRoots
@@ -2081,6 +2092,9 @@ func secretAccountCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail fun
 		if c.flags["account"] == "" {
 			return fail(errors.New("用 --account 指定要查看的凭据"))
 		}
+		if strings.HasPrefix(strings.ToLower(c.flags["account"]), secret.KindApp+"/") {
+			return fail(errors.New("应用密钥请在应用详情中管理"))
+		}
 		value, found, err := secret.Get(c.flags["account"])
 		if err != nil {
 			return fail(err)
@@ -2092,6 +2106,9 @@ func secretAccountCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail fun
 	case "delete":
 		if c.flags["account"] == "" {
 			return fail(errors.New("用 --account 指定要删除的凭据"))
+		}
+		if strings.EqualFold(c.flags["account"], secret.AppAgeIdentityAccount) {
+			return fail(errors.New("团队共享的 age 私钥用于解密项目文件，不能通过 secret delete 删除"))
 		}
 		if err := secret.Delete(c.flags["account"]); err != nil {
 			return fail(err)
@@ -2120,6 +2137,9 @@ func secretAccountCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail fun
 	if err != nil {
 		return fail(err)
 	}
+	es = slices.DeleteFunc(es, func(entry secret.Entry) bool {
+		return strings.HasPrefix(strings.ToLower(entry.Account), secret.KindApp+"/")
+	})
 	if js != nil {
 		js.Result(true, es, nil)
 		return 0

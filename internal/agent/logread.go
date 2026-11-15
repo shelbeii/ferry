@@ -41,7 +41,7 @@ func newestGlob(pattern string) string {
 	best, bestT := "", int64(0)
 	for _, m := range ms {
 		fi, err := os.Stat(m)
-		if err != nil || !fi.Mode().IsRegular() {
+		if err != nil || !fi.Mode().IsRegular() || isAppSecretsFile(m) {
 			continue
 		}
 		if t := fi.ModTime().UnixNano(); best == "" || t > bestT || (t == bestT && m > best) {
@@ -105,7 +105,7 @@ func (src *logSource) match(pattern string) []proto.LogFile {
 		ms, _ := filepath.Glob(filepath.Join(src.Base, filepath.FromSlash(pattern)))
 		for _, m := range ms {
 			fi, err := os.Stat(m)
-			if err != nil || !fi.Mode().IsRegular() {
+			if err != nil || !fi.Mode().IsRegular() || isAppSecretsFile(m) {
 				continue
 			}
 			rel, err := filepath.Rel(src.Base, m)
@@ -197,6 +197,9 @@ func withGz(name string, r io.Reader, fn func(io.Reader) error) error {
 // openRegular 打开 base 下的普通文件。目录由服务的运行用户写入，可能有符号链接：解析后必须仍在 base 里。
 func openRegular(base, rel string) (*os.File, error) {
 	p := filepath.Join(base, rel)
+	if isAppSecretsFile(p) {
+		return nil, errors.New("应用密钥文件不能作为日志读取")
+	}
 	fi, err := os.Lstat(p)
 	if err != nil {
 		return nil, errors.New("没有这个日志文件")
@@ -214,7 +217,7 @@ func openRegular(base, rel string) (*os.File, error) {
 
 // validLogPath 请求里的日志路径：相对、不越界（可以有通配符）。
 func validLogPath(file string) bool {
-	return file != "" && !path.IsAbs(file) && !strings.Contains(file, "..") && path.Clean(file) == file
+	return file != "" && !proto.IsAppSecretsPath(file) && !path.IsAbs(file) && !strings.Contains(file, "..") && path.Clean(file) == file
 }
 
 func (a *Agent) logread() int {

@@ -66,7 +66,8 @@ func zdSpec(f *config.File, t *config.Target, a *config.App, s *proto.AppSpec) e
 		}
 		conf := path.Join(sc.Builtins["root"], ".ferry", "apps", a.Name, "proxy.conf")
 		zd.ProxyConf = proxyConf(f, t, a, z.Listen, data)
-		zd.ProxyUnitText = proxyUnit(f, t, a, s.User, t.RuntimeNginx(s.RuntimeNginx), conf, data, z.Listen)
+		_, port := splitListen(z.Listen)
+		zd.ProxyUnitText = proxyUnit(f, t, a, s.User, t.RuntimeNginx(s.RuntimeNginx), conf, data, port < 1024)
 	}
 	s.ZD = zd
 	s.Unit, s.UnitText, s.Health = zd.Slots[0].Unit, zd.Slots[0].UnitText, zd.Slots[0].Health
@@ -109,32 +110,24 @@ func proxyConf(f *config.File, t *config.Target, a *config.App, listen, data str
 	w(1, "upstream app { server 127.0.0.1:%s; keepalive 32; }", proto.ProxyPort)
 	w(1, "server {")
 	w(2, "listen %s;", listen)
-	w(2, "location / {")
-	w(3, "proxy_pass http://app;")
-	w(3, "proxy_http_version 1.1;")
-	w(3, "proxy_set_header Host $http_host;")
-	w(3, "proxy_set_header X-Real-IP $remote_addr;")
-	w(3, "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;")
-	w(3, "proxy_set_header X-Forwarded-Proto $scheme;")
-	w(3, "proxy_set_header Upgrade $http_upgrade;")
-	w(3, "proxy_set_header Connection $connection_upgrade;")
-	w(3, "proxy_read_timeout 300s;")
-	w(3, "proxy_buffering off;")
-	w(2, "}")
+	proxyLocation(w, "/", "http://app", "$connection_upgrade")
 	w(1, "}")
 	w(0, "}")
 	return b.String()
 }
 
 // proxyUnit 前面的 nginx 的 systemd 单元（运行用户与应用一样）。
-func proxyUnit(f *config.File, t *config.Target, a *config.App, user, nginx, conf, data, listen string) string {
-	_, port := splitListen(listen)
+func proxyUnit(f *config.File, t *config.Target, a *config.App, user, nginx, conf, data string, lowPort bool) string {
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	line("%s — 由 ferry 生成，手工修改会在下次部署时被覆盖", agent.ManagedMarker)
 	line("# project=%s app=%s target=%s", f.Project, a.Name, t.Name)
 	line("[Unit]")
-	line("Description=%s", oneLine(f.Project+" "+a.Name+"（不停机发布的转发）"))
+	description := "（不停机发布的转发）"
+	if a.Service.ZeroDowntime == nil {
+		description = "（HTTPS）"
+	}
+	line("Description=%s", oneLine(f.Project+" "+a.Name+description))
 	line("After=network-online.target")
 	line("Wants=network-online.target")
 	line("")
@@ -145,7 +138,7 @@ func proxyUnit(f *config.File, t *config.Target, a *config.App, user, nginx, con
 	line("ExecStartPre=%s", sdCommand([]string{nginx, "-t", "-q", "-e", "stderr", "-p", data + "/", "-c", conf}))
 	line("ExecStart=%s", sdCommand([]string{nginx, "-e", "stderr", "-p", data + "/", "-c", conf}))
 	line("ExecReload=/bin/kill -HUP $MAINPID")
-	if port < 1024 {
+	if lowPort {
 		line("AmbientCapabilities=CAP_NET_BIND_SERVICE")
 	}
 	line("Restart=on-failure")

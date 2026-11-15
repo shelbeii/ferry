@@ -55,6 +55,9 @@ func CheckKeep(k KeepItem, program string, static bool) error {
 		return fmt.Errorf("共用的 %q 不能用通配符（要写确定的路径）", p)
 	}
 	top, _, _ := strings.Cut(p, "/")
+	if !static && IsAppSecretsPath(top) {
+		return fmt.Errorf("%q 是 Ferry 管理的应用密钥文件，不能保留", p)
+	}
 	if program != "" {
 		if ok, _ := path.Match(top, program); ok {
 			return fmt.Errorf("保留的路径 %q 是程序文件，不能保留", p)

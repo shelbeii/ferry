@@ -172,6 +172,17 @@ func TestRunJob(t *testing.T) {
 	if !strings.Contains(calls(f), "start --no-block demo-report.service") {
 		t.Fatalf("\n%s", calls(f))
 	}
+	// 部署后的运行和手动运行走同一条路径；有密钥的任务只回报运行结果。
+	if err := os.WriteFile(filepath.Join(f.unitDir, job.Unit), []byte(job.UnitText+
+		proto.AppSecretsDirective("/opt/demo/apps/Report/running")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sys.polls = 0
+	out.Reset()
+	code = a.Run("runjob", &proto.Request{Proto: proto.Version, Root: f.root, Actor: "t", Apps: []proto.AppSpec{job}})
+	if code != 0 || !strings.Contains(out.String(), "运行完了：成功（12 秒）") || strings.Contains(out.String(), "BindException") {
+		t.Fatalf("expected only the result for a job with app secrets:\n%s", out.String())
+	}
 	// 失败：返回失败，写进部署历史
 	f.shellOut[jobShowCmd(job.Job.Timer, job.Unit)] = "ActiveState=active\n---\nActiveState=failed\nResult=timeout\nExecMainStatus=0\nExecMainStartTimestamp=Thu 2026-11-12 10:00:00 CST\nExecMainExitTimestamp=Thu 2026-11-12 11:00:00 CST\n"
 	sys.polls = 0

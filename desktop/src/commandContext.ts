@@ -1,4 +1,4 @@
-const direct = new Set(['deploy', 'start', 'stop', 'restart', 'rollback', 'status', 'preflight', 'changes', 'app-info', 'app-runtimes', 'server-info', 'logs', 'backup', 'monitor', 'keygen', 'trust', 'hostkey', 'ai-exec'])
+const direct = new Set(['deploy', 'secrets', 'start', 'stop', 'restart', 'rollback', 'status', 'preflight', 'changes', 'app-info', 'app-runtimes', 'server-info', 'logs', 'backup', 'monitor', 'keygen', 'trust', 'hostkey', 'ai-exec'])
 const softwareActions = new Set(['install', 'start', 'stop', 'restart', 'remove', 'restore', 'upgrade', 'backup', 'logs', 'password'])
 const softwareLocal = new Set(['templates', 'template', 'latest', 'lib'])
 const portActions = new Set(['open', 'close', 'enable', 'disable', 'check'])

@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +43,7 @@ type fakeSys struct {
 	bad        map[string]bool   // 这些版本启动后崩溃
 	unitBad    map[string]bool   // 这些单元启动后崩溃（不看版本）
 	calls      []string
+	shellMu    sync.Mutex
 	locked     bool
 	namedLocks map[string]bool
 	nextPID    int
@@ -262,6 +264,8 @@ func (f *fakeSys) Pipe(cmd string, env []string, stdin io.Reader, stdout io.Writ
 }
 
 func (f *fakeSys) Shell(cmd string, _ time.Duration) (string, error) {
+	f.shellMu.Lock()
+	defer f.shellMu.Unlock()
 	f.calls = append(f.calls, "sh "+cmd)
 	if out, ok := f.shellOut[cmd]; ok {
 		return out, nil

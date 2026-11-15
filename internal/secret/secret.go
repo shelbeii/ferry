@@ -36,7 +36,11 @@ const (
 	KindAIInput    = "ai-input"   // 用户在 AI 助手的输入框里填、并选了记住的密码、账号
 	KindDB         = "db"         // 「数据库」里保存的数据库密码
 	KindWeb        = "web"        // 「打开网页」时记住的控制台、管理面板的账号密码
+	KindApp        = "ferry-secret"
 )
+
+// AppAgeIdentityAccount 存放这台电脑用来解密项目共享密钥的 age 私钥。
+const AppAgeIdentityAccount = KindApp + "/age-identity"
 
 func service() string {
 	if s := os.Getenv("FERRY_KEYRING_SERVICE"); s != "" { // 测试时隔离
@@ -73,6 +77,16 @@ func NotifySignAccount(id string) string { return KindNotify + ":sign:" + id }
 
 // DNSAccount DNS 服务商密钥的一项（id、secret、token）。
 func DNSAccount(provider, field string) string { return KindDNS + ":" + provider + ":" + field }
+
+// AppAccount 的 target 为 * 时，作为同项目内所有目标的回退值。
+func AppAccount(project, target, app, name string) string {
+	return strings.Join([]string{KindApp, project, target, app, name}, "/")
+}
+
+// AppEnv 环境变量名：应用名大写，标点替换为下划线。
+func AppEnv(app, name string) string {
+	return "FERRY_SECRET_" + strings.TrimPrefix(PasswordEnv(app), "FERRY_PASSWORD_") + "_" + name
+}
 
 // DNSEnv 环境变量名（CI 用）：FERRY_DNS_ALIYUN_ID、FERRY_DNS_CLOUDFLARE_TOKEN……
 func DNSEnv(provider, field string) string {

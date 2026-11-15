@@ -189,6 +189,26 @@ func TestGenerateServedStatic(t *testing.T) {
 	}
 }
 
+func TestGenerateBackendHTTPS(t *testing.T) {
+	dir := t.TempDir()
+	spec := Spec{ProjectDir: dir, Project: "shop",
+		Targets: []TargetSpec{{Name: "prod", Host: "192.0.2.1", User: "root", Root: "/data/shop", RunAs: "app"}},
+		Apps: []AppSpec{{Name: "api", Type: "binary", Artifact: "api", Port: 8080,
+			HTTPSDomains: []string{"api.example.com"}}}}
+	path := filepath.Join(dir, "ferry.yaml")
+	text, err := Generate(spec, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.LoadContent([]byte(text), path)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, text)
+	}
+	if h := f.App("api").HTTPS; h == nil || h.Upstream != "127.0.0.1:8080" || h.Domains[0] != "api.example.com" {
+		t.Fatalf("向导配置：%+v", h)
+	}
+}
+
 // Gradle 多模块、放在第二层目录里的工程、profile 里的端口、${PORT:8080} 写法、没找到端口的提醒
 func TestDetectMore(t *testing.T) {
 	dir := t.TempDir()
