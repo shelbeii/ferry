@@ -23,7 +23,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $desktop = Join-Path $root 'desktop'
-$utf8 = New-Object System.Text.UTF8Encoding($false)
+. (Join-Path $PSScriptRoot 'desktop-version.ps1')
 
 function Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
 
@@ -45,32 +45,19 @@ if (-not $env:CARGO_HOME -and (Test-Path (Join-Path $rustHome 'cargo'))) { $env:
 if (-not $env:RUSTUP_HOME -and (Test-Path (Join-Path $rustHome 'rustup'))) { $env:RUSTUP_HOME = Join-Path $rustHome 'rustup' }
 
 # ---- 版本号
-function Read-Text([string]$path) { [IO.File]::ReadAllText($path) }
-function Write-Text([string]$path, [string]$text) { [IO.File]::WriteAllText($path, $text, $utf8) }
-
-$confPath = Join-Path $desktop 'src-tauri\tauri.conf.json'
-$current = ([regex]'"version":\s*"([^"]+)"').Match((Read-Text $confPath)).Groups[1].Value
-if (-not $current) { throw "读不到 $confPath 里的版本号" }
-
-# 下一个版本号：末位加 1，逢十进一（末位到 10 就中间一位加 1、末位归 0：0.14.9 -> 0.15.0）
-function Next-Version([string]$v) {
-    $p = $v.Split('.')
-    $patch = [int]$p[2] + 1
-    if ($patch -ge 10) { $p[1] = [string]([int]$p[1] + 1); $patch = 0 }
-    $p[2] = [string]$patch
-    return $p -join '.'
-}
+$versionFiles = @(Read-DesktopVersionFiles $root -AllowMissingCargoLock)
+$current = ($versionFiles | Where-Object File -eq 'desktop/src-tauri/tauri.conf.json').Versions[0]
 
 if ($Bump -and $Version) { throw '-Bump 和 -Version 只能用一个' }
 if ($Ask -and -not $Bump -and -not $Version) {
-    $next = Next-Version $current
+    $next = Next-DesktopVersion $current
     Write-Host "`n现在的版本号是 $current。" -ForegroundColor Cyan
     $a = (Read-Host "升到 $next 再打包？（输入 y 回车 = 升到 $next；也可以直接输入版本号，如 0.13.0；直接回车 = 不改）").Trim()
     if ($a.ToLower() -eq 'y') { $Bump = $true }
     elseif ($a) { $Version = $a }
 }
 if ($Bump) {
-    $Version = Next-Version $current
+    $Version = Next-DesktopVersion $current
 }
 if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+$') { throw "版本号格式不对：$Version（应为 x.y.z）" }
 
@@ -98,26 +85,9 @@ if ($SkipCheck) {
     } finally { Pop-Location }
 }
 
-if ($Version -and $Version -ne $current) {
-    Step "版本号 $current -> $Version"
-    $old = [regex]::Escape($current)
-    # package.json、tauri.conf.json：顶层的 "version"
-    foreach ($f in 'package.json', 'src-tauri\tauri.conf.json') {
-        $p = Join-Path $desktop $f
-        $t = ([regex]"`"version`":\s*`"$old`"").Replace((Read-Text $p), "`"version`": `"$Version`"", 1)
-        Write-Text $p $t
-    }
-    # package-lock.json：开头两处（项目本身和 packages[""]）
-    $p = Join-Path $desktop 'package-lock.json'
-    Write-Text $p (([regex]"`"version`":\s*`"$old`"").Replace((Read-Text $p), "`"version`": `"$Version`"", 2))
-    # Cargo.toml：[package] 里的 version
-    $p = Join-Path $desktop 'src-tauri\Cargo.toml'
-    Write-Text $p (([regex]"(?m)^version = `"$old`"").Replace((Read-Text $p), "version = `"$Version`"", 1))
-    # Cargo.lock：ferry-desktop 那一项
-    $p = Join-Path $desktop 'src-tauri\Cargo.lock'
-    if (Test-Path $p) {
-        Write-Text $p (([regex]"(name = `"ferry-desktop`"\r?\nversion = `")$old`"").Replace((Read-Text $p), "`${1}$Version`"", 1))
-    }
+if ($Version) {
+    Step "同步版本号到 $Version"
+    Write-DesktopVersions $versionFiles $Version
     $current = $Version
 } else {
     Step "版本号 $current（不改）"

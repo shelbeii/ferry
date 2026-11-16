@@ -1,13 +1,12 @@
-﻿# 在 GitHub 上发布现在的版本：检查后给当前提交打上 v<版本号> 标签并推送，
+﻿# 在 GitHub 上发布当前 main。已有发布之后新增了提交时，会在确认后同步递增版本号。
 # GitHub 上的「发布」工作流（.github/workflows/release.yml）随后构建 Windows、macOS、Linux 的安装包，建好 Release。
 #   双击 scripts\release.cmd
 #   powershell -File scripts\release.ps1            # 和双击一样，发布前会问一次
-#   powershell -File scripts\release.ps1 -DryRun    # 只检查、列出要发布的内容，不打标签
+#   powershell -File scripts\release.ps1 -DryRun    # 预览版本与提交，不写版本文件、不推送
 #   powershell -File scripts\release.ps1 -Yes       # 不问，直接发布
 #   powershell -File scripts\release.ps1 -Yes -NoOpen  # 自动发布，不打开浏览器
 #
-# 版本号取自 desktop/package.json；要发新版本先升版本号（scripts\package.ps1 -Bump）并提交、推送。
-# 发布前要求：在 main 分支、没有没提交的修改、本地和 GitHub 上的 main 一致（本地多出的提交会问要不要先推送）、这个版本还没发布过。
+# 发布前要求在 main 分支、工作区干净、本地包含远程 main 的全部提交。
 param(
     [switch]$DryRun,
     [switch]$Yes,
@@ -16,6 +15,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+. (Join-Path $PSScriptRoot 'desktop-version.ps1')
 
 function Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host "`n✗ $text" -ForegroundColor Red; exit 1 }
@@ -65,33 +65,18 @@ function Ask([string]$question) {
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail '找不到 git：请先安装 Git，并加进 PATH' }
 
 # ---- 版本号和仓库
-$pkg = Join-Path $root 'desktop\package.json'
-$version = ([regex]'"version":\s*"([^"]+)"').Match([IO.File]::ReadAllText($pkg)).Groups[1].Value
-if (-not $version) { Fail "读不到 $pkg 里的版本号" }
-if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { Fail "正式版版本号应为 x.y.z：$version" }
-# 安装包名称取自 Tauri，Rust 和 npm 也各有版本记录，发布前必须全部一致。
-$lockText = [IO.File]::ReadAllText((Join-Path $root 'desktop\package-lock.json'))
-# Windows PowerShell 5.1 的 ConvertFrom-Json 不支持 packages[""]，只在内存里临时改名。
-$lockText = ([regex]'"packages"\s*:\s*\{\s*""\s*:').Replace($lockText, '"packages":{"__ferry_root__":', 1)
-$lock = $lockText | ConvertFrom-Json
-$conf = [IO.File]::ReadAllText((Join-Path $root 'desktop\src-tauri\tauri.conf.json')) | ConvertFrom-Json
-$cargo = [IO.File]::ReadAllText((Join-Path $root 'desktop\src-tauri\Cargo.toml'))
-$cargoLock = [IO.File]::ReadAllText((Join-Path $root 'desktop\src-tauri\Cargo.lock'))
-$versions = [ordered]@{
-    'package-lock.json' = $lock.version
-    'package-lock.json packages[""]' = $lock.packages.__ferry_root__.version
-    'tauri.conf.json' = $conf.version
-    'Cargo.toml' = ([regex]'(?ms)^\[package\]\s*.*?^version\s*=\s*"([^"]+)"').Match($cargo).Groups[1].Value
-    'Cargo.lock' = ([regex]'(?m)^name = "ferry-desktop"\r?\nversion = "([^"]+)"').Match($cargoLock).Groups[1].Value
+$versionFiles = @(Read-DesktopVersionFiles $root)
+$current = $versionFiles[0].Versions[0]
+$versionPattern = '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+if ($current -notmatch "^$versionPattern$") { Fail "正式版版本号应为 x.y.z：$current" }
+foreach ($entry in $versionFiles) {
+    foreach ($recorded in $entry.Versions) {
+        if ($recorded -ne $current) { Fail "$($entry.File) 的版本号（$recorded）与 package.json（$current）不一致：请先用 package.ps1 同步版本号并提交" }
+    }
 }
-foreach ($name in $versions.Keys) {
-    if ($versions[$name] -ne $version) { Fail "$name 的版本号（$($versions[$name])）与 package.json（$version）不一致：请先用 package.ps1 同步版本号并提交" }
-}
-$tag = "v$version"
 $remote = (Invoke-Git -GitArgs @('remote', 'get-url', 'origin')).Trim()
 $repo = ([regex]'github\.com[:/](.+?)(\.git)?$').Match($remote).Groups[1].Value
 if (-not $repo) { Fail "origin 不是 GitHub 仓库：$remote" }
-Step "要发布 Ferry $version（标签 $tag，仓库 $repo）"
 
 # ---- 分支、本地修改
 $branch = (Invoke-Git -GitArgs @('rev-parse', '--abbrev-ref', 'HEAD')).Trim()
@@ -108,18 +93,40 @@ $counts = (Invoke-Git -GitArgs @('rev-list', '--left-right', '--count', 'origin/
 $behind, $ahead = [int]$counts[0], [int]$counts[1]
 if ($behind -gt 0) { Fail "GitHub 上的 main 有 $behind 个本地没有的提交：先 git pull 合并，再发布" }
 
-$remoteTag = Invoke-Git -GitArgs @('ls-remote', '--tags', 'origin', "refs/tags/$tag")
-if ($remoteTag) {
+$head = (Invoke-Git -GitArgs @('rev-parse', 'HEAD')).Trim()
+$releaseTags = @{}
+foreach ($line in @(Invoke-Git -GitArgs @('ls-remote', '--tags', 'origin', 'refs/tags/v*'))) {
+    if ($line -match "^(?<oid>[0-9a-f]{40,64})\s+refs/tags/(?<tag>v$versionPattern)(?<peeled>\^\{\})?$") {
+        # 轻量标签直接指向提交，附注标签使用剥离后的提交。
+        if ($Matches['peeled'] -or -not $releaseTags.ContainsKey($Matches['tag'])) {
+            $releaseTags[$Matches['tag']] = $Matches['oid']
+        }
+    }
+}
+$tag = "v$current"
+if ($releaseTags[$tag] -eq $head) {
     Write-Host "`nGitHub 上已有标签 $tag，不再重复推送。请到 Actions 查看构建结果；构建失败时重新运行该工作流。" -ForegroundColor Yellow
     Write-Host "构建页面：https://github.com/$repo/actions/workflows/release.yml"
     Write-Host "Release 页面：https://github.com/$repo/releases/tag/$tag"
     exit 0
 }
+$version = $current
+$latest = $releaseTags.Keys | Sort-Object { [version]($_.Substring(1)) } -Descending | Select-Object -First 1
+if ($latest -and [version]$current -le [version]($latest.Substring(1))) {
+    $latestHead = $releaseTags[$latest]
+    if ($latestHead -eq $head) { Fail "当前提交已有发布标签 $latest，但文件里的版本号是 $current：请检查版本号" }
+    $outside = (Invoke-Git -GitArgs @('rev-list', '--count', "$head..$latestHead")).Trim()
+    if ($outside -ne '0') { Fail "当前 main 未包含已发布的 $latest：请先同步发布历史" }
+    $version = Next-DesktopVersion ($latest.Substring(1))
+    $tag = "v$version"
+}
+$bump = $version -ne $current
+Step "要发布 Ferry $version（标签 $tag，仓库 $repo）"
+if ($bump) { Write-Host "版本号将从 $current 自动更新到 $version，并提交到 main。" }
 $localTag = Invoke-Git -GitArgs @('tag', '--list', $tag)
 if ($localTag) {
     $tagCommit = (Invoke-Git -GitArgs @('rev-list', '-n', '1', $tag)).Trim()
-    $head = (Invoke-Git -GitArgs @('rev-parse', 'HEAD')).Trim()
-    if ($tagCommit -ne $head) { Fail "本地已有标签 $tag，但不在当前提交上：确认后用 git tag -d $tag 删掉再运行" }
+    if ($bump -or $tagCommit -ne $head) { Fail "本地标签 $tag 指向另一份发布内容：请先检查该标签" }
 }
 
 # ---- 要发布的内容
@@ -134,28 +141,46 @@ Write-Host ("提交：{0}" -f (Invoke-Git -GitArgs @('log', '-1', '--format=%h %
 if ($prev) { Write-Host "上次发布：$prev，之后有 $(@($log).Count) 个提交：" } else { Write-Host '最近的提交：' }
 $log | Select-Object -First 30 | ForEach-Object { Write-Host "  $_" }
 if (@($log).Count -gt 30) { Write-Host "  ……" }
-if ($ahead -gt 0) { Write-Host "`n本地有 $ahead 个提交还没推送到 GitHub，发布时会先推送 main。" -ForegroundColor Yellow }
+if ($ahead -gt 0) { Write-Host "`n本地有 $ahead 个提交还没推送到 GitHub，发布时会将 main 和标签一起推送。" -ForegroundColor Yellow }
 
 if ($DryRun) {
-    Write-Host "`n（只检查：-DryRun，没有打标签、没有推送）" -ForegroundColor Green
+    Write-Host "`n（只检查：-DryRun，未修改版本文件、未提交、未推送）" -ForegroundColor Green
     exit 0
 }
 if (-not (Ask "`n发布 Ferry $version 到 GitHub？")) {
     Write-Host '已取消'
     exit 0
 }
+if ((Invoke-Git -GitArgs @('rev-parse', '--abbrev-ref', 'HEAD')).Trim() -ne $branch -or
+    (Invoke-Git -GitArgs @('rev-parse', 'HEAD')).Trim() -ne $head) {
+    Fail '确认前后当前分支或提交发生了变化，请检查后重试'
+}
 
-# ---- 推送 main、打标签、推送标签
-if ($ahead -gt 0) {
-    Step '推送 main'
-    Git-Retry '推送 main' push --quiet origin main
+# ---- 提交版本号、打标签、推送
+if ($bump) {
+    Step "提交版本号 $version"
+    try {
+        Write-DesktopVersions $versionFiles $version
+        foreach ($entry in @(Read-DesktopVersionFiles $root)) {
+            if ($entry.Versions | Where-Object { $_ -ne $version }) { throw "$($entry.File) 的版本号没有同步到 $version" }
+        }
+        $paths = @($versionFiles | ForEach-Object { $_.File })
+        Invoke-Git -GitArgs (@('commit', '--only', '-m', "发布 Ferry $version", '--') + $paths)
+    } catch {
+        $reason = $_.Exception.Message
+        if ((Invoke-Git -GitArgs @('rev-parse', 'HEAD')).Trim() -eq $head) {
+            Write-DesktopVersions $versionFiles $version -Restore
+        }
+        Fail "无法提交版本号 $version：$reason"
+    }
+    $head = (Invoke-Git -GitArgs @('rev-parse', 'HEAD')).Trim()
 }
 if (-not $localTag) {
     Step "打标签 $tag"
-    Invoke-Git -GitArgs @('tag', '-a', $tag, '-m', "Ferry $version")
+    Invoke-Git -GitArgs @('tag', '-a', $tag, $head, '-m', "Ferry $version")
 }
-Step "推送标签 $tag"
-Git-Retry '推送标签' push --quiet origin $tag
+Step "推送 main 和标签 $tag"
+Git-Retry '推送发布' push --atomic --no-follow-tags --quiet origin "${head}:refs/heads/main" "refs/tags/${tag}:refs/tags/$tag"
 
 $actions = "https://github.com/$repo/actions/workflows/release.yml"
 Write-Host "`n已推送 $tag。GitHub 将构建各平台安装包，全部成功后建立 Release。" -ForegroundColor Green

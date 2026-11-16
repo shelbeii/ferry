@@ -48,6 +48,7 @@ function New-Fixture([string]$name) {
     $fixtureScript = Join-Path $repo 'scripts\release.ps1'
     New-Item -ItemType Directory -Force (Split-Path -Parent $fixtureScript) | Out-Null
     Copy-Item -LiteralPath $releaseScript -Destination $fixtureScript
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'desktop-version.ps1') -Destination (Join-Path $repo 'scripts\desktop-version.ps1')
     # get-url expands insteadOf, so emulate only its displayed URL; all real Git I/O stays local.
     $bootstrap = @'
 param([switch]$DryRun, [switch]$Yes, [switch]$NoOpen)
@@ -73,7 +74,7 @@ exit $LASTEXITCODE
     $runner = Join-Path $repo 'scripts\run-test-release.ps1'
     Write-TestFile $runner $bootstrap.Replace('__GIT__', $realGit)
     Write-TestFile (Join-Path $repo 'desktop\package.json') '{"version":"1.2.3"}'
-    Write-TestFile (Join-Path $repo 'desktop\package-lock.json') '{"version":"1.2.3","packages":{"":{"version":"1.2.3"}}}'
+    Write-TestFile (Join-Path $repo 'desktop\package-lock.json') '{"version":"1.2.3","packages":{"":{"version":"1.2.3"},"node_modules/example":{"version":"1.2.3"}}}'
     Write-TestFile (Join-Path $repo 'desktop\src-tauri\tauri.conf.json') '{"version":"1.2.3"}'
     Write-TestFile (Join-Path $repo 'desktop\src-tauri\Cargo.toml') "[package]`nname = `"ferry-desktop`"`nversion = `"1.2.3`"`n"
     Write-TestFile (Join-Path $repo 'desktop\src-tauri\Cargo.lock') "[[package]]`nname = `"ferry-desktop`"`nversion = `"1.2.3`"`n"
@@ -89,7 +90,7 @@ exit $LASTEXITCODE
     return @{ Repo = $repo; Bare = $bare; Script = $runner }
 }
 
-function Run-Release($fixture, [string[]]$ScriptArgs, [int]$want) {
+function Run-Release($fixture, [string[]]$ScriptArgs, [int]$want, [switch]$Capture) {
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -97,6 +98,12 @@ function Run-Release($fixture, [string[]]$ScriptArgs, [int]$want) {
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $savedPreference }
     if ($code -ne $want) { throw "Release returned $code, expected $want`n$($output -join "`n")" }
+    if ($Capture) { return $output -join "`n" }
+}
+
+function Publish-Previous($fixture, [string]$tag) {
+    Test-Git -GitArgs @('-C', $fixture.Repo, 'tag', '-a', $tag, 'HEAD~1', '-m', 'Previous release') | Out-Null
+    Test-Git -GitArgs @('-C', $fixture.Repo, 'push', 'origin', "refs/tags/$tag") | Out-Null
 }
 
 try {
@@ -164,6 +171,51 @@ try {
     Run-Release $f @('-Yes', '-NoOpen') 0
     Assert $true 'An existing remote tag is handled without recreating it'
 
+    $bump = New-Fixture 'bump'
+    Publish-Previous $bump 'v1.2.3'
+    $before = Test-Git -GitArgs @('-C', $bump.Repo, 'rev-parse', 'HEAD')
+    $preview = Run-Release $bump @('-DryRun') 0 -Capture
+    Assert ($preview -match 'Ferry 1\.2\.4') 'A published version with new commits previews the next version'
+    Assert ((Test-Git -GitArgs @('-C', $bump.Repo, 'rev-parse', 'HEAD')) -eq $before) 'An automatic bump preview does not commit'
+    Assert (-not (Test-Git -GitArgs @('-C', $bump.Repo, 'status', '--porcelain'))) 'An automatic bump preview does not modify the workspace'
+    Assert (-not (Test-Git -GitArgs @('-C', $bump.Repo, 'tag', '--list', 'v1.2.4'))) 'An automatic bump preview does not create a new tag'
+    $hook = Join-Path $bump.Bare 'hooks\update'
+    Write-TestFile $hook @'
+#!/bin/sh
+test "$1" != refs/tags/v1.2.4
+'@
+    Run-Release $bump @('-Yes', '-NoOpen') 1
+    Assert ((Test-Git -GitArgs @('--git-dir', $bump.Bare, 'rev-parse', 'refs/heads/main')) -eq $before) 'A rejected tag leaves the remote main unchanged'
+    Assert ((Test-Git -GitArgs @('-C', $bump.Repo, 'tag', '--list', 'v1.2.4')) -eq 'v1.2.4') 'A rejected push leaves a local release to retry'
+    Remove-Item -LiteralPath $hook
+    Run-Release $bump @('-Yes', '-NoOpen') 0
+    $head = Test-Git -GitArgs @('-C', $bump.Repo, 'rev-parse', 'HEAD')
+    $tagCommit = Test-Git -GitArgs @('--git-dir', $bump.Bare, 'rev-parse', 'refs/tags/v1.2.4^{}')
+    Assert ($head -eq $tagCommit -and (Test-Git -GitArgs @('--git-dir', $bump.Bare, 'rev-parse', 'refs/heads/main')) -eq $head) 'Automatic release pushes the version commit and matching tag'
+    Assert ((Test-Git -GitArgs @('-C', $bump.Repo, 'rev-parse', 'HEAD~1')) -eq $before) 'The version commit includes the new code'
+    . (Join-Path $PSScriptRoot 'desktop-version.ps1')
+    $files = @(Read-DesktopVersionFiles $bump.Repo)
+    $versions = @($files | ForEach-Object { $_.Versions })
+    Assert ($versions.Count -eq 6 -and -not ($versions | Where-Object { $_ -ne '1.2.4' })) 'All six version records are updated'
+    $lockText = [IO.File]::ReadAllText((Join-Path $bump.Repo 'desktop\package-lock.json'))
+    Assert ($lockText.Contains('"node_modules/example":{"version":"1.2.3"}')) 'Dependency lock entries are preserved during the bump'
+    Run-Release $bump @('-Yes', '-NoOpen') 0
+    Assert ((Test-Git -GitArgs @('-C', $bump.Repo, 'rev-parse', 'HEAD')) -eq $head) 'Rerunning the same release does not bump the version again'
+
+    $rollover = New-Fixture 'rollover'
+    Publish-Previous $rollover 'v1.2.9'
+    Publish-Previous $rollover 'v9.9.9-rc.1'
+    $preview = Run-Release $rollover @('-DryRun') 0 -Capture
+    Assert ($preview -match 'Ferry 1\.3\.0') 'The next version follows the latest stable remote tag and the packaging rollover'
+
+    $rejected = New-Fixture 'commit-rejected'
+    Publish-Previous $rejected 'v1.2.3'
+    $hook = Join-Path $rejected.Repo '.git\hooks\pre-commit'
+    Write-TestFile $hook "#!/bin/sh`nexit 1`n"
+    Run-Release $rejected @('-Yes', '-NoOpen') 1
+    Assert (-not (Test-Git -GitArgs @('-C', $rejected.Repo, 'status', '--porcelain'))) 'A rejected version commit restores the original files'
+    Assert (-not (Test-Git -GitArgs @('-C', $rejected.Repo, 'tag', '--list', 'v1.2.4'))) 'A rejected version commit never creates a tag'
+
     $ahead = New-Fixture 'ahead'
     Write-TestFile (Join-Path $ahead.Repo 'README.md') 'New local commit'
     Test-Git -GitArgs @('-C', $ahead.Repo, 'add', 'README.md') | Out-Null
@@ -171,7 +223,7 @@ try {
     Run-Release $ahead @('-Yes', '-NoOpen') 0
     $head = Test-Git -GitArgs @('-C', $ahead.Repo, 'rev-parse', 'HEAD')
     $remoteHead = Test-Git -GitArgs @('--git-dir', $ahead.Bare, 'rev-parse', 'refs/heads/main')
-    Assert ($head -eq $remoteHead) 'Release pushes outstanding main commits first'
+    Assert ($head -eq $remoteHead) 'Release also pushes outstanding main commits'
 
     $wrongTag = New-Fixture 'wrong-tag'
     Test-Git -GitArgs @('-C', $wrongTag.Repo, 'tag', '-a', 'v1.2.3', 'HEAD~1', '-m', 'Wrong commit') | Out-Null
