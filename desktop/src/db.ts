@@ -2,9 +2,9 @@
 import { reactive, ref, watch, type Ref } from 'vue'
 import { call, ferry, FerryError, isSecretKind, sessionEnv, type ErrorDetail, type Software } from './ferry'
 import { secretRequest, trustRequest } from './state'
-import { dbEndpoint, type Endpoint } from './softwareWeb'
+import { dbEndpoint, tcpListens, type Endpoint } from './softwareWeb'
 
-export type DbKind = 'mysql' | 'postgres' | 'redis'
+export type DbKind = 'mysql' | 'postgres' | 'redis' | 'sqlserver' | 'mongodb' | 'sqlite' | 'clickhouse'
 
 export interface DbVia {
   config: string
@@ -16,10 +16,13 @@ export interface DbConn {
   id: string
   name: string
   kind: DbKind
+  file?: string
   host: string
   port: number
   user: string
   database?: string
+  authSource?: string
+  direct?: boolean
   via?: DbVia | null
   container?: string
   software?: string
@@ -215,6 +218,7 @@ export const filterOps: { value: string; label: string; noValue?: boolean; two?:
 ]
 
 export interface DbReq {
+  mongo?: { filter?: string; skip?: number; limit?: number }
   schema?: string
   table?: string
   where?: string
@@ -250,6 +254,11 @@ export interface DbReq {
   edit?: RedisEdit
   line?: string
   confirm?: boolean
+}
+
+export interface MongoResult {
+  documents: { json: string; cut?: boolean }[]
+  more: boolean
 }
 
 // ---------------------------------------------------------------- Redis（dbx/redis.go）
@@ -361,9 +370,34 @@ export function formatReply(r: RedisReply, indent = ''): string[] {
   return []
 }
 
-export const kindLabel: Record<DbKind, string> = { mysql: 'MySQL / MariaDB', postgres: 'PostgreSQL', redis: 'Redis' }
-export const defaultPort: Record<DbKind, number> = { mysql: 3306, postgres: 5432, redis: 6379 }
-export const defaultUser: Record<DbKind, string> = { mysql: 'root', postgres: 'postgres', redis: '' }
+export const kindLabel: Record<DbKind, string> = {
+  mysql: 'MySQL / MariaDB', postgres: 'PostgreSQL', redis: 'Redis / Valkey', sqlserver: 'SQL Server', mongodb: 'MongoDB',
+  sqlite: 'SQLite', clickhouse: 'ClickHouse',
+}
+export const defaultPort: Record<DbKind, number> = { mysql: 3306, postgres: 5432, redis: 6379, sqlserver: 1433, mongodb: 27017, sqlite: 0, clickhouse: 9000 }
+export const defaultUser: Record<DbKind, string> = { mysql: 'root', postgres: 'postgres', redis: '', sqlserver: 'sa', mongodb: '', sqlite: '', clickhouse: 'default' }
+export const dbCapabilities: Record<DbKind, { sql: boolean; browseOnly: boolean }> = {
+  mysql: { sql: true, browseOnly: false },
+  postgres: { sql: true, browseOnly: false },
+  redis: { sql: false, browseOnly: false },
+  sqlserver: { sql: true, browseOnly: true },
+  mongodb: { sql: false, browseOnly: true },
+  sqlite: { sql: true, browseOnly: true },
+  clickhouse: { sql: true, browseOnly: true },
+}
+
+const softwareDbKind = new Map<string, DbKind>([
+  ['mysql', 'mysql'], ['mariadb', 'mysql'], ['postgresql', 'postgres'], ['redis', 'redis'], ['valkey', 'redis'],
+  ['sqlserver', 'sqlserver'], ['mongodb', 'mongodb'], ['clickhouse', 'clickhouse'],
+])
+
+/** ClickHouse 的 8123 是 HTTP。只有看到原生端口发布到主机时才用主机地址。 */
+function clickHouseEndpoint(sw: Software): Endpoint {
+  const listen = tcpListens(sw).filter(({ port }) => port === 9000 || port === 9440).map(({ host, port }) => host + ':' + port)
+  const inner = (sw.inner ?? []).filter((addr) => /:(9000|9440)$/.test(addr))
+  const pending = inner.find((addr) => addr.endsWith(':9000')) ?? inner[0]
+  return dbEndpoint({ ...sw, listen, inner: pending ? [pending] : sw.container ? ['*:9000'] : [] }, 9000)
+}
 
 /** 与 dbx.PasswordEnv 一致 */
 export function passwordEnv(id: string): string {
@@ -389,7 +423,7 @@ export const dbRequest = ref<(Partial<DbConn> & { from?: DbFrom }) | null>(null)
 export function dbRequestFromSoftware(sw: Software, via: DbVia, host: string): (Partial<DbConn> & { from: DbFrom }) | null {
   const c = connFromSoftware(sw, via, via.title || via.target)
   if (!c?.kind) return null
-  const endpoint = dbEndpoint(sw, defaultPort[c.kind])
+  const endpoint = c.kind === 'clickhouse' ? clickHouseEndpoint(sw) : dbEndpoint(sw, defaultPort[c.kind])
   return { ...c, from: { sw, via, host, endpoint } }
 }
 
@@ -401,8 +435,10 @@ export interface DbCred { user?: string; password?: string; found: boolean; veri
 export async function dbCreds(from: DbFrom): Promise<DbCred> {
   const { sw, via, endpoint } = from
   // 容器里的端口：试密码时直接连容器（端口映射到主机的也一样）
-  const inner = (sw.inner ?? []).map((l) => Number(l.slice(l.lastIndexOf(':') + 1))).filter((p) => p > 0)
-  const def = sw.kind ? defaultPort[sw.kind === 'postgresql' ? 'postgres' : sw.kind === 'redis' ? 'redis' : 'mysql'] : 0
+  let inner = (sw.inner ?? []).map((l) => Number(l.slice(l.lastIndexOf(':') + 1))).filter((p) => p > 0)
+  const kind = softwareDbKind.get(sw.kind ?? '')
+  const def = kind === 'clickhouse' && endpoint.ssh.port === 9440 ? 9440 : kind ? defaultPort[kind] : 0
+  if (kind === 'clickhouse') inner = inner.filter((p) => p === 9000 || p === 9440)
   // 不知道容器里的端口时（只读到了映射到主机的端口）按默认端口试：官方镜像都用默认端口
   const innerPort = sw.via === 'docker' && sw.container ? (inner.includes(def) ? def : inner[0] ?? def) : undefined
   const cred = { kind: sw.kind, container: sw.via === 'docker' ? sw.container : undefined, unit: sw.unit, pid: sw.pid,
@@ -554,11 +590,15 @@ export function closeDbSession(id: string, session: string) {
 
 /** 软件页的一项 → 新连接的默认值（经这台服务器连）。 */
 export function connFromSoftware(sw: Software, via: DbVia, server: string): Partial<DbConn> | null {
-  const kind: DbKind | null = sw.kind === 'mysql' || sw.kind === 'mariadb' ? 'mysql' : sw.kind === 'postgresql' ? 'postgres' : sw.kind === 'redis' ? 'redis' : null
+  const kind = softwareDbKind.get(sw.kind ?? '')
   if (!kind) return null
   const c: Partial<DbConn> = { kind, via, user: defaultUser[kind], name: `${sw.name} · ${server}`, savePassword: true }
   const l = sw.listen?.[0]
-  if (l) {
+  if (kind === 'clickhouse') {
+    const { ssh } = clickHouseEndpoint(sw)
+    Object.assign(c, ssh)
+    if (ssh.port === 9440) c.tls = 'verify'
+  } else if (l) {
     const i = l.lastIndexOf(':')
     const host = l.slice(0, i).replace(/^\[|\]$/g, '')
     c.port = Number(l.slice(i + 1)) || defaultPort[kind]
@@ -576,11 +616,12 @@ export function connFromSoftware(sw: Software, via: DbVia, server: string): Part
     c.software = sw.instance
     if (sw.account && kind !== 'redis') c.user = sw.account
   }
+  if (dbCapabilities[kind].browseOnly) c.readOnly = true
   return c
 }
 
 export function isDbSoftware(sw: Software): boolean {
-  return sw.kind === 'mysql' || sw.kind === 'mariadb' || sw.kind === 'postgresql' || sw.kind === 'redis'
+  return softwareDbKind.has(sw.kind ?? '')
 }
 
 /** 单元格的文字（显示、复制用） */

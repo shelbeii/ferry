@@ -1,5 +1,5 @@
-// Package dbx 数据库客户端（桌面版左下角的「数据库」）：保存的数据库连接，直接连或经一台服务器的 SSH 转发连；
-// 浏览库、表，查询，改数据，建表改表，导出。支持 MySQL / MariaDB、PostgreSQL 和 Redis（键的浏览、改值、命令行，见 redis.go）。
+// Package dbx 是桌面版数据库客户端，支持保存连接、直接连接和 SSH 转发。
+// MySQL / MariaDB、PostgreSQL、Redis / Valkey 支持浏览和编辑，其他类型提供只读查询和导出。
 package dbx
 
 import (
@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -20,22 +21,29 @@ import (
 
 // 数据库种类。
 const (
-	MySQL    = "mysql" // MySQL、MariaDB
-	Postgres = "postgres"
-	Redis    = "redis"
+	MySQL      = "mysql" // MySQL、MariaDB
+	Postgres   = "postgres"
+	Redis      = "redis"
+	SQLServer  = "sqlserver"
+	MongoDB    = "mongodb"
+	SQLite     = "sqlite"
+	ClickHouse = "clickhouse"
 )
 
 // Conn 一个保存的数据库连接。
 type Conn struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	Kind string `json:"kind"` // mysql | postgres | redis
+	Kind string `json:"kind"`
+	File string `json:"file,omitempty"` // SQLite 数据库文件的绝对路径
 	// Host、Port 数据库的地址；经服务器连时是从服务器上看的地址（通常 127.0.0.1）
 	Host string `json:"host"`
 	Port int    `json:"port"`
 	// User Redis 是 ACL 的用户名（一般不填）
-	User     string `json:"user"`
-	Database string `json:"database,omitempty"` // 默认库；PostgreSQL 没填时连 postgres；Redis 是库的编号（没填是 0）
+	User       string `json:"user"`
+	Database   string `json:"database,omitempty"`   // 默认库；PostgreSQL 没填时连 postgres；Redis 是库的编号（没填是 0）
+	AuthSource string `json:"authSource,omitempty"` // MongoDB 的认证库，默认 admin
+	Direct     bool   `json:"direct,omitempty"`     // MongoDB 只连填写的地址，不发现副本集其他节点
 	// Via 经这台服务器连（SSH 端口转发）；为空时这台电脑直接连
 	Via *Via `json:"via,omitempty"`
 	// Container 数据库在这个 Docker 容器里、端口没映射到服务器上：连接时查容器的 IP 再连（Host 不用）
@@ -57,6 +65,23 @@ type Conn struct {
 	AIUser  string `json:"aiUser,omitempty"`
 	Color   string `json:"color,omitempty"`
 	Created string `json:"created,omitempty"`
+}
+
+// BrowseOnly 只有浏览、查询和导出能力的连接。
+func (c *Conn) BrowseOnly() bool { return c.ReadOnlySQL() || c.Kind == MongoDB }
+
+// ReadOnlySQL 是否使用只读 SQL 查询、浏览和 CSV 导出。
+func (c *Conn) ReadOnlySQL() bool {
+	return c.Kind == SQLServer || c.Kind == SQLite || c.Kind == ClickHouse
+}
+
+func (c *Conn) applyCapabilities() {
+	if c.BrowseOnly() {
+		c.ReadOnly, c.AI, c.AIWrite, c.AIUser = true, false, false, ""
+	}
+	if c.Kind == SQLite {
+		c.SavePassword = false
+	}
 }
 
 // Via 经哪台服务器连。
@@ -84,18 +109,36 @@ func (c *Conn) Check() error {
 	c.Host = strings.TrimSpace(c.Host)
 	c.User = strings.TrimSpace(c.User)
 	switch c.Kind {
-	case MySQL, Postgres, Redis:
+	case MySQL, Postgres, Redis, SQLServer, MongoDB, SQLite, ClickHouse:
 	default:
-		return fmt.Errorf("不支持的数据库种类 %q（支持 mysql、postgres、redis）", c.Kind)
+		return fmt.Errorf("不支持的数据库种类 %q", c.Kind)
 	}
 	if c.Name == "" {
 		return errors.New("请填连接名")
 	}
+	c.applyCapabilities()
+	if c.Kind == SQLite {
+		if !filepath.IsAbs(c.File) {
+			return errors.New("请选择本机 SQLite 数据库文件（需要绝对路径）")
+		}
+		if c.Via != nil || c.Container != "" {
+			return errors.New("SQLite 连接使用本机文件")
+		}
+		c.Host, c.Port, c.User, c.Database, c.TLS = "", 0, "", "", TLSAuto
+		c.AuthSource, c.Direct, c.Software = "", false, ""
+		return nil
+	}
+	c.File = ""
 	if c.Port <= 0 || c.Port > 65535 {
 		return errors.New("端口应在 1–65535 之间")
 	}
-	if c.User == "" && c.Kind != Redis {
+	if c.User == "" && c.Kind != Redis && c.Kind != MongoDB {
 		return errors.New("请填用户名")
+	}
+	if c.Kind == MongoDB {
+		c.AuthSource = strings.TrimSpace(c.AuthSource)
+	} else {
+		c.AuthSource, c.Direct = "", false
 	}
 	if c.Kind == Redis {
 		c.Database = strings.TrimSpace(c.Database)
@@ -182,6 +225,9 @@ func load() ([]Conn, error) {
 	if f.Connections == nil {
 		f.Connections = []Conn{}
 	}
+	for i := range f.Connections {
+		f.Connections[i].applyCapabilities()
+	}
 	sort.SliceStable(f.Connections, func(i, j int) bool {
 		return strings.ToLower(f.Connections[i].Name) < strings.ToLower(f.Connections[j].Name)
 	})
@@ -231,10 +277,12 @@ func Save(c Conn, password, aiPassword *string) (*Conn, error) {
 		}
 	}
 	found := false
+	usesCredentials := c.Kind != SQLite
 	if c.ID != "" {
 		for i := range cs {
 			if cs[i].ID == c.ID {
 				c.Created = cs[i].Created
+				usesCredentials = usesCredentials || cs[i].Kind != SQLite
 				cs[i] = c
 				found = true
 			}
@@ -247,24 +295,26 @@ func Save(c Conn, password, aiPassword *string) (*Conn, error) {
 		c.Created = time.Now().Format(time.RFC3339)
 		cs = append(cs, c)
 	}
-	switch {
-	case !c.SavePassword:
-		if err := secret.Delete(PasswordAccount(c.ID)); err != nil {
-			return nil, err
+	if usesCredentials {
+		switch {
+		case !c.SavePassword:
+			if err := secret.Delete(PasswordAccount(c.ID)); err != nil {
+				return nil, err
+			}
+		case password != nil && *password != "":
+			if err := secret.SetLabeled(PasswordAccount(c.ID), *password, c.Name); err != nil {
+				return nil, err
+			}
 		}
-	case password != nil && *password != "":
-		if err := secret.SetLabeled(PasswordAccount(c.ID), *password, c.Name); err != nil {
-			return nil, err
-		}
-	}
-	switch {
-	case c.AIUser == "":
-		if err := secret.Delete(AIPasswordAccount(c.ID)); err != nil {
-			return nil, err
-		}
-	case aiPassword != nil:
-		if err := secret.SetLabeled(AIPasswordAccount(c.ID), *aiPassword, c.Name+"（AI）"); err != nil {
-			return nil, err
+		switch {
+		case c.AIUser == "":
+			if err := secret.Delete(AIPasswordAccount(c.ID)); err != nil {
+				return nil, err
+			}
+		case aiPassword != nil:
+			if err := secret.SetLabeled(AIPasswordAccount(c.ID), *aiPassword, c.Name+"（AI）"); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := write(cs); err != nil {
@@ -282,10 +332,12 @@ func Remove(id string) error {
 		return err
 	}
 	out := cs[:0]
+	kind := ""
 	found := false
 	for _, c := range cs {
 		if c.ID == id {
 			found = true
+			kind = c.Kind
 			continue
 		}
 		out = append(out, c)
@@ -295,6 +347,9 @@ func Remove(id string) error {
 	}
 	if err := write(out); err != nil {
 		return err
+	}
+	if kind == SQLite {
+		return nil
 	}
 	secret.Delete(AIPasswordAccount(id))
 	return secret.Delete(PasswordAccount(id))

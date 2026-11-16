@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/captain/ferry/internal/safe"
 )
@@ -65,6 +66,7 @@ type Client struct {
 	rsess        map[string]*rsession
 	rcmdRO       map[string]bool
 	redisCluster bool
+	mongo        *mongo.Client
 }
 
 type session struct {
@@ -196,8 +198,10 @@ func (m *Manager) Open(ctx context.Context, c *Conn, password string, open OpenT
 // connect 新建连接：经服务器时先打开通道，再连一次数据库（密码不对、连不上时现在就报错）。
 func connect(ctx context.Context, c *Conn, key, password string, open OpenTunnel) (*Client, error) {
 	cl := &Client{Conn: *c, key: key, password: password, dbs: map[string]*sql.DB{}, sessions: map[string]*session{}, users: 1, lastUsed: time.Now()}
-	cl.addr = c.Addr()
-	if c.Via != nil {
+	if c.Kind != SQLite {
+		cl.addr = c.Addr()
+	}
+	if c.Kind != SQLite && c.Via != nil {
 		tn, err := open(c.Via)
 		if err != nil {
 			return nil, err
@@ -213,9 +217,12 @@ func connect(ctx context.Context, c *Conn, key, password string, open OpenTunnel
 		}
 	}
 	var err error
-	if c.Kind == Redis {
+	switch c.Kind {
+	case Redis:
 		err = cl.redisPing(ctx)
-	} else {
+	case MongoDB:
+		err = cl.openMongo(ctx)
+	default:
 		var db *sql.DB
 		if db, err = cl.DB(ctx, ""); err == nil {
 			err = pingVersion(ctx, cl, db)
@@ -232,8 +239,23 @@ func pingVersion(ctx context.Context, cl *Client, db *sql.DB) error {
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout+5*time.Second)
 	defer cancel()
 	var v string
-	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&v); err != nil {
+	query := "SELECT VERSION()"
+	switch cl.Conn.Kind {
+	case SQLServer:
+		query = "SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion'))"
+	case SQLite:
+		query = "SELECT sqlite_version() WHERE (SELECT count(*) FROM main.sqlite_schema) >= 0"
+	}
+	if err := db.QueryRowContext(ctx, query).Scan(&v); err != nil {
 		return cl.explain(err)
+	}
+	switch cl.Conn.Kind {
+	case SQLServer:
+		v = "SQL Server " + v
+	case SQLite:
+		v = "SQLite " + v
+	case ClickHouse:
+		v = "ClickHouse " + v
 	}
 	cl.Version = v
 	cl.checkEncrypted(ctx, db)
@@ -329,21 +351,30 @@ func (cl *Client) close() {
 	for _, r := range cl.rdbs {
 		r.Close()
 	}
+	if cl.mongo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = cl.mongo.Disconnect(ctx)
+	}
 	if cl.tn != nil {
 		cl.tn.Close()
 	}
 }
 
 func (cl *Client) dial(ctx context.Context) (net.Conn, error) {
+	return cl.dialAddr(ctx, cl.addr)
+}
+
+func (cl *Client) dialAddr(ctx context.Context, addr string) (net.Conn, error) {
 	if cl.tn != nil {
-		c, err := cl.tn.Dial(ctx, cl.addr)
+		c, err := cl.tn.Dial(ctx, addr)
 		if err != nil {
 			return nil, err
 		}
 		return withDeadlines(c), nil
 	}
 	d := net.Dialer{Timeout: dialTimeout}
-	return d.DialContext(ctx, "tcp", cl.addr)
+	return d.DialContext(ctx, "tcp", addr)
 }
 
 // withDeadlines 经 SSH 转发的连接不支持读写超时（SetDeadline 报 ssh: tcpChan: deadline not supported），
@@ -399,9 +430,7 @@ func (cl *Client) DB(ctx context.Context, name string) (*sql.DB, error) {
 
 // pool 某个库某种用途的连接池（见 poolRole）。
 func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
-	if name == "" {
-		name = cl.Conn.Database
-	}
+	name = cl.databaseName(name)
 	key := name
 	if role != rolePlain {
 		key = name + "\x00" + strconv.Itoa(int(role))
@@ -476,6 +505,19 @@ func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 		cfg.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) { return cl.dial(ctx) }
 		cfg.LookupFunc = func(ctx context.Context, host string) ([]string, error) { return []string{host}, nil }
 		db = stdlib.OpenDB(*cfg)
+	case SQLServer, SQLite, ClickHouse:
+		var err error
+		switch cl.Conn.Kind {
+		case SQLServer:
+			db, err = cl.sqlServerPool(name)
+		case SQLite:
+			db, err = openSQLite(cl.Conn.File, name)
+		case ClickHouse:
+			db = cl.clickHousePool(name)
+		}
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("不支持的数据库种类 %q", cl.Conn.Kind)
 	}
@@ -494,6 +536,24 @@ func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 	}
 	cl.dbs[key] = db
 	return db, nil
+}
+
+func (cl *Client) databaseName(name string) string {
+	if name == "" {
+		name = cl.Conn.Database
+	}
+	if name != "" {
+		return name
+	}
+	switch cl.Conn.Kind {
+	case SQLServer:
+		return "master"
+	case SQLite:
+		return "main"
+	case ClickHouse:
+		return "default"
+	}
+	return ""
 }
 
 // Session 查询窗口的会话（同一个窗口里的语句用同一条连接：USE、SET、事务都保留）。sid 为空时临时取一条。
@@ -683,7 +743,7 @@ func authFailed(err error) bool {
 		return strings.HasPrefix(s, "NOAUTH") || strings.HasPrefix(s, "WRONGPASS") || strings.HasPrefix(s, "ERR invalid password") ||
 			strings.HasPrefix(s, "ERR invalid username-password")
 	}
-	return false
+	return sqlServerAuthFailed(err) || mongoAuthFailed(err) || clickHouseAuthFailed(err)
 }
 
 // ErrorCode 数据库返回的错误码（给界面显示）。
@@ -696,5 +756,8 @@ func ErrorCode(err error) string {
 	if errors.As(err, &pe) {
 		return pe.Code
 	}
-	return ""
+	if code := sqlServerErrorCode(err); code != "" {
+		return code
+	}
+	return clickHouseErrorCode(err)
 }

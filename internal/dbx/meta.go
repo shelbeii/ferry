@@ -13,6 +13,12 @@ func Quote(kind, id string) string {
 	if kind == MySQL {
 		return "`" + strings.ReplaceAll(id, "`", "``") + "`"
 	}
+	if kind == SQLServer {
+		return "[" + strings.ReplaceAll(id, "]", "]]") + "]"
+	}
+	if kind == ClickHouse {
+		return "`" + strings.NewReplacer("\\", "\\\\", "`", "\\`").Replace(id) + "`"
+	}
 	return `"` + strings.ReplaceAll(id, `"`, `""`) + `"`
 }
 
@@ -27,7 +33,7 @@ func Literal(kind, s string) string {
 
 // TableName 带库（MySQL）或模式（PostgreSQL）的表名。
 func TableName(kind, db, schema, table string) string {
-	if kind == MySQL {
+	if kind == MySQL || kind == ClickHouse {
 		if db == "" {
 			return Quote(kind, table)
 		}
@@ -35,6 +41,12 @@ func TableName(kind, db, schema, table string) string {
 	}
 	if schema == "" {
 		schema = "public"
+		switch kind {
+		case SQLServer:
+			schema = "dbo"
+		case SQLite:
+			schema = "main"
+		}
 	}
 	return Quote(kind, schema) + "." + Quote(kind, table)
 }
@@ -50,12 +62,21 @@ var mysqlSystem = map[string]bool{"mysql": true, "information_schema": true, "pe
 
 // Databases 列出库。
 func (cl *Client) Databases(ctx context.Context) ([]Database, error) {
-	if cl.Conn.Kind == Redis {
+	switch cl.Conn.Kind {
+	case Redis:
 		return cl.redisDatabases(ctx)
+	case MongoDB:
+		return cl.mongoDatabases(ctx)
+	case SQLite:
+		return []Database{{Name: "main"}}, nil
 	}
 	db, err := cl.DB(ctx, "")
 	if err != nil {
 		return nil, err
+	}
+	if cl.Conn.Kind == SQLServer {
+		dbs, err := sqlServerDatabases(ctx, db)
+		return dbs, cl.explain(err)
 	}
 	q := "SHOW DATABASES"
 	if cl.Conn.Kind == Postgres {
@@ -67,7 +88,14 @@ func (cl *Client) Databases(ctx context.Context) ([]Database, error) {
 	}
 	out := []Database{}
 	for _, n := range names {
-		out = append(out, Database{Name: n, System: cl.Conn.Kind == MySQL && mysqlSystem[strings.ToLower(n)]})
+		system := false
+		switch cl.Conn.Kind {
+		case MySQL:
+			system = mysqlSystem[strings.ToLower(n)]
+		case ClickHouse:
+			system = n == "system" || strings.EqualFold(n, "information_schema")
+		}
+		out = append(out, Database{Name: n, System: system})
 	}
 	return out, nil
 }
@@ -120,9 +148,23 @@ func (cl *Client) TablesDetail(ctx context.Context, dbName string) ([]Table, err
 }
 
 func (cl *Client) tables(ctx context.Context, dbName string, detail bool) ([]Table, error) {
+	if cl.Conn.Kind == MongoDB {
+		return cl.mongoCollections(ctx, dbName)
+	}
 	db, err := cl.DB(ctx, dbName)
 	if err != nil {
 		return nil, err
+	}
+	switch cl.Conn.Kind {
+	case SQLServer:
+		tables, err := sqlServerTables(ctx, db)
+		return tables, cl.explain(err)
+	case SQLite:
+		tables, err := sqliteTables(ctx, db)
+		return tables, cl.explain(err)
+	case ClickHouse:
+		tables, err := clickHouseTables(ctx, db, cl.databaseName(dbName))
+		return tables, cl.explain(err)
 	}
 	extra := ", NULL, NULL, NULL, '', '', '', ''"
 	var rows *sql.Rows
@@ -242,6 +284,17 @@ func (cl *Client) TableInfo(ctx context.Context, dbName, schema, table string) (
 	db, err := cl.DB(ctx, dbName)
 	if err != nil {
 		return nil, err
+	}
+	switch cl.Conn.Kind {
+	case SQLServer:
+		ti, err := sqlServerTable(ctx, db, schema, table)
+		return ti, cl.explain(err)
+	case SQLite:
+		ti, err := sqliteTable(ctx, db, table)
+		return ti, cl.explain(err)
+	case ClickHouse:
+		ti, err := clickHouseTable(ctx, db, cl.databaseName(dbName), table)
+		return ti, cl.explain(err)
 	}
 	var ti *TableInfo
 	if cl.Conn.Kind == MySQL {

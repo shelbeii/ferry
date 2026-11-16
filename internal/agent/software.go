@@ -48,6 +48,7 @@ var swRules = []swRule{
 	{kind: "mysql", name: "MySQL", exe: []string{"mysqld"}, images: []string{"mysql", "percona"}, units: []string{"mysqld", "mysql"}, verArg: "--version"},
 	{kind: "mariadb", name: "MariaDB", exe: []string{"mariadbd"}, images: []string{"mariadb"}, units: []string{"mariadb"}, verArg: "--version"},
 	{kind: "postgresql", name: "PostgreSQL", exe: []string{"postgres", "postmaster"}, images: []string{"postgres", "postgis"}, units: []string{"postgresql*"}, verArg: "--version"},
+	{kind: "sqlserver", name: "SQL Server", exe: []string{"sqlservr"}, images: []string{"mssql-server"}, units: []string{"mssql-server"}},
 	{kind: "mongodb", name: "MongoDB", exe: []string{"mongod"}, images: []string{"mongo"}, units: []string{"mongod"}, verArg: "--version"},
 	{kind: "dm", name: "达梦数据库", exe: []string{"dmserver"}, units: []string{"DmService*"}},
 	{kind: "kingbase", name: "人大金仓", exe: []string{"kingbase"}, units: []string{"kingbase*"}},
@@ -883,8 +884,12 @@ func splitImage(img string) (repo, tag string) {
 	if strings.HasPrefix(img, "sha256:") {
 		return "", ""
 	}
-	last := img[strings.LastIndexByte(img, '/')+1:]
+	slash := strings.LastIndexByte(img, '/')
+	last := img[slash+1:]
 	repo, tag, _ = strings.Cut(last, ":")
+	if repo == "server" && slash >= 0 && strings.EqualFold(img[:slash], "mcr.microsoft.com/mssql") {
+		repo = "mssql-server"
+	}
 	return repo, tag
 }
 

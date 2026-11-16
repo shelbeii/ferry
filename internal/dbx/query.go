@@ -66,7 +66,7 @@ func splitScan(kind, src, delim string, final bool) (out []string, used int, end
 			atLineStart = true
 			cur.WriteByte(c)
 			i++
-		case c == '\'' || c == '"' || (c == '`' && kind == MySQL):
+		case isSQLQuote(kind, c):
 			j := skipQuoted(kind, src, i)
 			cur.WriteString(src[i:j])
 			i = j
@@ -77,7 +77,7 @@ func splitScan(kind, src, delim string, final bool) (out []string, used int, end
 			}
 			cur.WriteString(src[i : i+j])
 			i += j
-		case c == '#' && kind == MySQL:
+		case c == '#' && (kind == MySQL || kind == ClickHouse):
 			j := strings.IndexByte(src[i:], '\n')
 			if j < 0 {
 				j = n - i
@@ -93,16 +93,20 @@ func splitScan(kind, src, delim string, final bool) (out []string, used int, end
 			}
 			cur.WriteString(src[i:j])
 			i = j
-		case c == '$' && kind == Postgres:
+		case c == '$' && (kind == Postgres || kind == ClickHouse):
 			if tag, ok := dollarTag(src[i:]); ok {
 				end := strings.Index(src[i+len(tag):], tag)
-				j := n
 				if end >= 0 {
-					j = i + len(tag) + end + len(tag)
+					j := i + len(tag) + end + len(tag)
+					cur.WriteString(src[i:j])
+					i = j
+					continue
 				}
-				cur.WriteString(src[i:j])
-				i = j
-				continue
+				if kind == Postgres {
+					cur.WriteString(src[i:])
+					i = n
+					continue
+				}
 			}
 			cur.WriteByte(c)
 			i++
@@ -122,12 +126,23 @@ func splitScan(kind, src, delim string, final bool) (out []string, used int, end
 	return out, used, delim
 }
 
+func isSQLQuote(kind string, c byte) bool {
+	return c == '\'' || c == '"' || (c == '`' && (kind == MySQL || kind == SQLite || kind == ClickHouse)) ||
+		(c == '[' && kind == SQLite)
+}
+
 func skipQuoted(kind, s string, i int) int {
 	q := s[i]
 	j := i + 1
+	if q == '[' {
+		if end := strings.IndexByte(s[j:], ']'); end >= 0 {
+			return j + end + 1
+		}
+		return len(s)
+	}
 	for j < len(s) {
 		c := s[j]
-		if c == '\\' && kind == MySQL && q != '`' {
+		if c == '\\' && (kind == ClickHouse || kind == MySQL && q != '`') {
 			j += 2
 			continue
 		}
@@ -162,11 +177,11 @@ func stripComments(kind, s string) string {
 	for i := 0; i < len(s); {
 		c := s[i]
 		switch {
-		case c == '\'' || c == '"' || (c == '`' && kind == MySQL):
+		case isSQLQuote(kind, c):
 			j := skipQuoted(kind, s, i)
 			b.WriteString(s[i:j])
 			i = j
-		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#' && kind == MySQL:
+		case c == '-' && i+1 < len(s) && s[i+1] == '-', c == '#' && (kind == MySQL || kind == ClickHouse):
 			j := strings.IndexByte(s[i:], '\n')
 			if j < 0 {
 				return b.String()
@@ -252,6 +267,9 @@ type QueryOptions struct {
 // Query 执行一段 SQL（可以有多条语句），每条一个结果。
 func (cl *Client) Query(ctx context.Context, dbName, src string, o QueryOptions) ([]Result, error) {
 	kind := cl.Conn.Kind
+	if cl.Conn.ReadOnlySQL() {
+		return cl.readOnlySQLQuery(ctx, dbName, src, o)
+	}
 	stmts := Split(kind, src)
 	if len(stmts) == 0 {
 		return nil, errors.New("没有要执行的语句")
@@ -390,7 +408,7 @@ func (cl *Client) runOne(ctx context.Context, conn *sql.Conn, dbName, id, stmt s
 
 // Exec 依次执行几条语句（结构设计、删表等确认过的改动），出错就停。
 func (cl *Client) Exec(ctx context.Context, dbName string, stmts []string) ([]Result, error) {
-	if cl.Conn.ReadOnly {
+	if cl.Conn.ReadOnly || cl.Conn.BrowseOnly() {
 		return nil, ErrReadOnly
 	}
 	conn, release, err := cl.Session(ctx, "", dbName)

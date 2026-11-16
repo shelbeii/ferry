@@ -25,7 +25,7 @@ import (
 
 // DBCredQuery 哪个数据库（「软件」页的一行）。
 type DBCredQuery struct {
-	Kind      string `json:"kind"` // mysql | mariadb | postgresql | redis
+	Kind      string `json:"kind"`
 	Container string `json:"container,omitempty"`
 	Unit      string `json:"unit,omitempty"`
 	PID       int    `json:"pid,omitempty"`
@@ -57,7 +57,7 @@ func (e *Engine) DBCredentials(target string, q DBCredQuery) (*DBCred, error) {
 	if q.Container != "" && !reSafeName.MatchString(q.Container) {
 		return nil, fmt.Errorf("容器名 %q 不合法", q.Container)
 	}
-	defUser := map[string]string{"mysql": "root", "mariadb": "root", "postgresql": "postgres"}[q.Kind]
+	defUser := map[string]string{"mysql": "root", "mariadb": "root", "postgresql": "postgres", "sqlserver": "sa", "clickhouse": "default"}[q.Kind]
 	var cands []dbCand
 	note := ""
 	if q.Instance != "" {
@@ -179,7 +179,8 @@ func (r *serverReach) try(fn func(ep reachEP) (bool, error)) (bool, error) {
 // tryLogin 经这台服务器登录数据库试一下（和「经服务器连」一样走 SSH 转发）。
 // 密码不对返回 (false, nil)；连不上数据库返回 (false, 错误)。
 func (e *Engine) tryLogin(s *session, q DBCredQuery, r *serverReach, c dbCand) (bool, error) {
-	kind := map[string]string{"mysql": dbx.MySQL, "mariadb": dbx.MySQL, "postgresql": dbx.Postgres, "redis": dbx.Redis}[q.Kind]
+	kind := map[string]string{"mysql": dbx.MySQL, "mariadb": dbx.MySQL, "postgresql": dbx.Postgres,
+		"redis": dbx.Redis, "valkey": dbx.Redis, "sqlserver": dbx.SQLServer, "mongodb": dbx.MongoDB, "clickhouse": dbx.ClickHouse}[q.Kind]
 	if kind == "" {
 		return false, errors.New("不认识的数据库")
 	}
@@ -190,6 +191,9 @@ func (e *Engine) tryLogin(s *session, q DBCredQuery, r *serverReach, c dbCand) (
 		defer m.Close("")
 		cn := &dbx.Conn{ID: "cred-try", Name: "试密码", Kind: kind, Host: p.host, Port: p.port, Container: p.container,
 			User: c.user, Via: &dbx.Via{Config: "-", Target: "-"}}
+		if kind == dbx.ClickHouse && p.port == 9440 {
+			cn.TLS = dbx.TLSRequire
+		}
 		ctx, cancel := context.WithTimeout(e.ctx(), 10*time.Second)
 		defer cancel()
 		_, release, err := m.Open(ctx, cn, c.password, open)
@@ -313,8 +317,12 @@ func dockerCands(q DBCredQuery, run func(string) (string, bool)) ([]dbCand, stri
 		if len(cands) == 0 {
 			return nil, "容器的环境变量里没有密码：请填写"
 		}
-	case "redis":
+	case "redis", "valkey":
 		fromDotenv("", "PANEL_REDIS_ROOT_PASSWORD", "REDIS_PASSWORD")
+		if q.Kind == "valkey" {
+			fromDotenv("", "PANEL_VALKEY_ROOT_PASSWORD", "VALKEY_PASSWORD")
+			fromEnv("", "VALKEY_PASSWORD")
+		}
 		args := append([]string{in.Path}, in.Args...)
 		if pw, ok := redisArgPass(args); ok {
 			add("", pw, "容器的启动命令（--requirepass）")
@@ -331,6 +339,23 @@ func dockerCands(q DBCredQuery, run func(string) (string, bool)) ([]dbCand, stri
 		}
 		if len(cands) == 0 {
 			add("", "", "启动命令和环境变量里都没有设密码")
+		}
+	case "sqlserver":
+		fromEnv("sa", "MSSQL_SA_PASSWORD")
+		fromEnv("sa", "SA_PASSWORD")
+	case "clickhouse":
+		user := firstNonEmptyStr(env["CLICKHOUSE_USER"], "default")
+		fromEnv(user, "CLICKHOUSE_PASSWORD")
+		if len(cands) == 0 {
+			add(user, "", "容器没有设置 CLICKHOUSE_PASSWORD")
+		}
+	case "mongodb":
+		if user := env["MONGO_INITDB_ROOT_USERNAME"]; user != "" {
+			fromEnv(user, "MONGO_INITDB_ROOT_PASSWORD")
+		} else if p := env["MONGO_INITDB_ROOT_USERNAME_FILE"]; p != "" {
+			if user, ok := cat(p); ok && strings.TrimSpace(user) != "" {
+				fromEnv(strings.TrimSpace(user), "MONGO_INITDB_ROOT_PASSWORD")
+			}
 		}
 	default:
 		return nil, "请填写账号密码"
@@ -378,7 +403,7 @@ func hostCands(q DBCredQuery, sshUser string, run func(string) (string, bool)) (
 		homes = append(homes, "/home/"+sshUser)
 	}
 	switch q.Kind {
-	case "redis":
+	case "redis", "valkey":
 		var args []string
 		if q.Unit != "" && reSafeName.MatchString(strings.TrimSuffix(q.Unit, ".service")) {
 			if out, ok := run("systemctl show -p ExecStart --no-pager " + shQuote(q.Unit)); ok {
@@ -405,6 +430,9 @@ func hostCands(q DBCredQuery, sshUser string, run func(string) (string, bool)) (
 			port = 6379
 		}
 		p := strconv.Itoa(port)
+		if q.Kind == "valkey" {
+			files = append(files, "/etc/valkey/"+p+".conf", "/etc/valkey/valkey-"+p+".conf", "/etc/valkey/valkey.conf", "/etc/valkey.conf", "/usr/local/etc/valkey.conf")
+		}
 		files = append(files, "/etc/redis/"+p+".conf", "/etc/redis/redis-"+p+".conf", "/etc/redis/redis_"+p+".conf",
 			"/etc/redis.conf", "/etc/redis/redis.conf", "/usr/local/etc/redis.conf", "/www/server/redis/redis.conf")
 		for _, f := range files {
@@ -415,7 +443,7 @@ func hostCands(q DBCredQuery, sshUser string, run func(string) (string, bool)) (
 		if len(cands) > 0 {
 			return cands, ""
 		}
-		return nil, "没找到 Redis 的配置文件（或没有权限读）：没设密码就留空，设了请填写"
+		return nil, "没找到配置文件（或没有权限读）：没设密码就留空，设了请填写"
 	case "mysql", "mariadb":
 		var cands []dbCand
 		for _, h := range homes {

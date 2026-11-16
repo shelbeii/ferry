@@ -5,6 +5,8 @@ import { ElCheckbox, ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Close, Search, Coin, Document, Grid, View, Folder, Connection, Lock, Key, Monitor, List, Box, EditPen, FolderOpened } from '@element-plus/icons-vue'
 import type Node from 'element-plus/es/components/tree/src/model/node'
 import DbTableView from './DbTableView.vue'
+import DbBrowseTable from './DbBrowseTable.vue'
+import DbMongoDocuments from './DbMongoDocuments.vue'
 import DbObjects from './DbObjects.vue'
 import DbQuery from './DbQuery.vue'
 import DbRoutineEditor from './DbRoutine.vue'
@@ -16,7 +18,7 @@ import DbSqlConfirm from './DbSqlConfirm.vue'
 import DbCsvImport from './DbCsvImport.vue'
 import {
   dbOpen, dbConns, closeOnOutside, dbOpened, isDbOpened, markDbOpened, refreshDbOpened, dbRequest, dbPasswordRequest, loadDbConns, dbCall, saveDbConn, removeDbConn, closeDbConn, confirmSql, passwordEnv,
-  humanSize, kindLabel, exportTo, routineCallSql, nextQueryTitle, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult, type DbFrom,
+  humanSize, kindLabel, dbCapabilities, exportTo, routineCallSql, nextQueryTitle, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult, type DbFrom,
   type DbRoutine, type DbFileItem, type DbObjItem, type DbObjWhat,
 } from '../../db'
 import { sessionEnv } from '../../ferry'
@@ -54,12 +56,18 @@ const tree = ref()
 const filter = ref('')
 const treeKey = ref(0)
 const roots = computed<TreeData[]>(() => dbConns.value.map((c) => ({ id: 'c:' + c.id, label: c.name, type: 'conn', conn: c })))
+const defaultSQLConn = computed(() => dbConns.value.find((c) => dbCapabilities[c.kind]?.sql))
+
+function kindMarker(c: DbConn) {
+  return c.kind === 'redis' || dbCapabilities[c.kind]?.browseOnly ? kindLabel[c.kind] : ''
+}
 
 function groupId(conn: DbConn, db: string, g: GroupKind, schema?: string) {
   return `g:${g}:${conn.id}:${db}:${perDb(g) ? '' : schema ?? ''}`
 }
 function groupNode(conn: DbConn, db: string, g: GroupKind, schema?: string): TreeData {
-  return { id: groupId(conn, db, g, schema), label: groupLabel[g], type: 'grp', group: g, conn, db, schema: perDb(g) ? undefined : schema }
+  const label = conn.kind === 'mongodb' && g === 'tables' ? '集合' : groupLabel[g]
+  return { id: groupId(conn, db, g, schema), label, type: 'grp', group: g, conn, db, schema: perDb(g) ? undefined : schema }
 }
 function none(d: TreeData, label: string): TreeData {
   return { id: `n:${d.id}`, label, type: 'none', conn: d.conn, leaf: true }
@@ -99,29 +107,33 @@ async function loadNode(node: Node, resolve: (d: TreeData[]) => void, reject: ()
       const dbs = [...r.databases].sort((a, b) => Number(!!a.system) - Number(!!b.system) || a.name.localeCompare(b.name))
       resolve(dbs.length ? dbs.map((x) => ({ id: `d:${d.conn.id}:${x.name}`, label: x.name, type: 'db', conn: d.conn, db: x.name, system: x.system })) : [none(d, '（没有库）')])
     } else if (d.type === 'db') {
-      // PostgreSQL 有别的模式时先列模式（表、视图、函数在模式下面），查询和备份按库
-      if (d.conn.kind === 'postgres') {
+      const kind = d.conn.kind
+      const groups: GroupKind[] = kind === 'mongodb' ? ['tables', 'views'] : dbCapabilities[kind].browseOnly ? ['tables', 'views', 'queries'] : ['tables', 'views', 'funcs', 'queries', 'backups']
+      // 有非默认模式时先列模式，保存的查询和备份按库。
+      if (kind === 'postgres' || kind === 'sqlserver') {
+        const defaultSchema = kind === 'postgres' ? 'public' : 'dbo'
         const r = await dbCall<{ tables: DbTable[] }>(d.conn, 'tables', d.db)
-        const schemas = [...new Set(r.tables.map((t) => t.schema ?? 'public'))]
+        const schemas = [...new Set(r.tables.map((t) => t.schema ?? defaultSchema))]
         markDbOpened(d.conn.id, d.db!)
-        if (schemas.length > 1 || (schemas.length === 1 && schemas[0] !== 'public')) {
+        if (schemas.some((s) => s !== defaultSchema)) {
           return resolve([
             ...schemas.map((s): TreeData => ({ id: `s:${d.conn.id}:${d.db}:${s}`, label: s, type: 'schema', conn: d.conn, db: d.db, schema: s })),
-            groupNode(d.conn, d.db!, 'queries'), groupNode(d.conn, d.db!, 'backups'),
+            ...groups.filter(perDb).map((g) => groupNode(d.conn, d.db!, g)),
           ])
         }
       }
       markDbOpened(d.conn.id, d.db!)
-      resolve((['tables', 'views', 'funcs', 'queries', 'backups'] as GroupKind[]).map((g) => groupNode(d.conn, d.db!, g)))
+      resolve(groups.map((g) => groupNode(d.conn, d.db!, g)))
     } else if (d.type === 'schema') {
-      resolve((['tables', 'views', 'funcs'] as GroupKind[]).map((g) => groupNode(d.conn, d.db!, g, d.schema)))
+      const groups: GroupKind[] = d.conn.kind === 'sqlserver' ? ['tables', 'views'] : ['tables', 'views', 'funcs']
+      resolve(groups.map((g) => groupNode(d.conn, d.db!, g, d.schema)))
     } else if (d.type === 'grp') {
       const inSchema = (s?: string) => !d.schema || (s || 'public') === d.schema
       if (d.group === 'tables' || d.group === 'views') {
         const r = await dbCall<{ tables: DbTable[] }>(d.conn, 'tables', d.db)
         const want = d.group === 'tables' ? 'table' : 'view'
         const ts = r.tables.filter((t) => t.type === want && inSchema(t.schema))
-        resolve(ts.length ? ts.map((t) => tableLeaf(d, t)) : [none(d, want === 'table' ? '（没有表）' : '（没有视图）')])
+        resolve(ts.length ? ts.map((t) => tableLeaf(d, t)) : [none(d, `（没有${d.label}）`)])
       } else if (d.group === 'funcs') {
         const r = await dbCall<{ routines: DbRoutine[] }>(d.conn, 'routines', d.db)
         const rs = r.routines.filter((x) => inSchema(x.schema))
@@ -267,7 +279,7 @@ function openObjItem(o: Tab, it: DbObjItem) {
 function openQuery(conn: DbConn, db = '', sql = '') {
   const sid = `q${Date.now().toString(36)}${++qn}`
   const key = 'q:' + sid
-  tabs.value.push({ key, kind: 'query', title: nextQueryTitle(tabs.value.map((t) => t.title)), conn, db: db || conn.database || '', sql, sid })
+  tabs.value.push({ key, kind: 'query', title: nextQueryTitle(tabs.value.map((t) => t.title)), conn, db: db || conn.database || (conn.kind === 'sqlite' ? 'main' : ''), sql, sid })
   active.value = key
   saveTabs()
 }
@@ -616,10 +628,32 @@ function onContext(e: MouseEvent, d: TreeData) {
   offMenu = closeOnOutside((t) => !!menuEl.value?.contains(t), () => { menu.value = null })
   void fitMenu()
 }
-const menuItems = computed(() => {
+const menuItems = computed<{ k: string; t: string; sep?: boolean; off?: boolean; danger?: boolean }[]>(() => {
   const d = menu.value?.d
   if (!d) return []
   const ro = d.conn.readOnly
+  const caps = dbCapabilities[d.conn.kind]
+  if (caps.browseOnly && d.type !== 'savedq' && !(d.type === 'grp' && d.group === 'queries')) {
+    const query = caps.sql ? [{ k: 'query', t: '新建查询' }] : []
+    switch (d.type) {
+      case 'conn':
+        return [
+          ...query, { k: 'refresh', t: '刷新' },
+          { k: 'edit', t: '修改连接…', sep: true }, { k: 'copy', t: '复制一份连接…' },
+          { k: 'close', t: '断开', off: !dbOpened[d.conn.id] }, { k: 'remove', t: '删除连接', danger: true, sep: true },
+        ]
+      case 'db':
+        return [...query, { k: 'refresh', t: '刷新' }, { k: 'close-db', t: '关闭库', off: !isDbOpened(d.conn.id, d.db!) }, { k: 'copy-name', t: '复制库名' }]
+      case 'schema':
+        return [...query, { k: 'refresh', t: '刷新' }, { k: 'copy-name', t: '复制模式名' }]
+      case 'grp':
+        return [{ k: 'refresh', t: '刷新' }]
+      default:
+        return [{ k: 'open', t: '打开' }, { k: 'copy-name', t: '复制名称' },
+          ...(caps.sql ? [{ k: 'select', t: '新建查询（SELECT）' }, { k: 'export-csv', t: '导出数据为 CSV' }] : []),
+        ]
+    }
+  }
   if (d.conn.kind === 'redis') {
     if (d.type === 'conn') {
       return [
@@ -688,10 +722,14 @@ const menuItems = computed(() => {
 })
 
 function quoteId(conn: DbConn, s: string) {
+  if (conn.kind === 'sqlserver') return '[' + s.replace(/]/g, ']]') + ']'
+  if (conn.kind === 'clickhouse') return '`' + s.replace(/\\/g, '\\\\').replace(/`/g, '\\`') + '`'
   return conn.kind === 'mysql' ? '`' + s.replace(/`/g, '``') + '`' : '"' + s.replace(/"/g, '""') + '"'
 }
 function qualified(d: TreeData) {
+  if (d.conn.kind === 'clickhouse') return `${quoteId(d.conn, d.db!)}.${quoteId(d.conn, d.name!)}`
   if (d.conn.kind === 'mysql') return quoteId(d.conn, d.name!)
+  if (d.conn.kind === 'sqlserver') return `${quoteId(d.conn, d.schema || 'dbo')}.${quoteId(d.conn, d.name!)}`
   return d.schema && d.schema !== 'public' ? `${quoteId(d.conn, d.schema)}.${quoteId(d.conn, d.name!)}` : quoteId(d.conn, d.name!)
 }
 
@@ -860,7 +898,8 @@ async function doAction(d: TreeData, k: string) {
     case 'restore': return restoreBackup(d)
     case 'delete-backup': return deleteBackup(d)
     case 'design': return openDesign(d.conn, d.db!, d.schema, d.name)
-    case 'select': return openQuery(d.conn, d.db, `SELECT * FROM ${qualified(d)} LIMIT 100;\n`)
+    case 'select': return openQuery(d.conn, d.db, d.conn.kind === 'sqlserver'
+      ? `SELECT TOP (100) * FROM ${qualified(d)};\n` : `SELECT * FROM ${qualified(d)} LIMIT 100;\n`)
     case 'export-csv': return exportNode(d, 'csv')
     case 'export-insert': return exportNode(d, 'insert')
     case 'export-struct': return exportNode(d, 'struct')
@@ -893,12 +932,11 @@ function parentId(d: TreeData) {
 
 const connDialog = ref<(Partial<DbConn> & { from?: DbFrom }) | null>(null)
 async function onSaved(c: DbConn) {
-  const fromSoftware = !!connDialog.value?.from && !connDialog.value.id
+  const openAfterSave = !connDialog.value?.id && (!!connDialog.value?.from || c.kind === 'sqlite')
   connDialog.value = null
   for (const t of tabs.value) if (t.conn.id === c.id) t.conn = c
   treeKey.value++
-  // 从「软件」页新建的：存好就打开
-  if (fromSoftware) {
+  if (openAfterSave) {
     await loadDbConns().catch(() => {})
     void nextTick(() => openConn(dbConns.value.find((x) => x.id === c.id) ?? c))
   }
@@ -908,7 +946,9 @@ async function onSaved(c: DbConn) {
 function openConn(c: DbConn) {
   tree.value?.getNode('c:' + c.id)?.expand()
   if (c.kind === 'redis') openRedis(c, c.database?.replace(/^db/i, '') || '0')
-  else openQuery(c)
+  else if (c.kind === 'sqlite') openObjects({ id: '', label: 'main', type: 'db', conn: c, db: 'main' }, 'all')
+  else if (dbCapabilities[c.kind].sql) openQuery(c)
+  else if (c.database) openObjects({ id: '', label: c.database, type: 'db', conn: c, db: c.database }, 'all')
 }
 
 const pw = reactive({ value: '', remember: false })
@@ -978,7 +1018,8 @@ function isLive(d: TreeData) {
 }
 function nodeTitle(d: TreeData) {
   if (d.type === 'conn') {
-    const where = `${kindLabel[d.conn.kind as 'mysql']} · ${d.conn.user ? d.conn.user + '@' : ''}${d.conn.container ? '容器 ' + d.conn.container : d.conn.host + ':' + d.conn.port}${d.conn.via ? ' · 经 ' + (d.conn.via.title || d.conn.via.target) : ''}`
+    if (d.conn.kind === 'sqlite') return d.conn.file ?? d.conn.name
+    const where = `${kindLabel[d.conn.kind]} · ${d.conn.user ? d.conn.user + '@' : ''}${d.conn.container ? '容器 ' + d.conn.container : d.conn.host + ':' + d.conn.port}${d.conn.via ? ' · 经 ' + (d.conn.via.title || d.conn.via.target) : ''}`
     return `${where}\n${dbOpened[d.conn.id] ? '已连接（10 分钟没用自动断开）' : '没有连接：展开时连接'}`
   }
   if (d.type === 'db') return isDbOpened(d.conn.id, d.db!) ? '已打开' : '没有打开：展开时打开'
@@ -1043,7 +1084,7 @@ function nodeIcon(d: TreeData) {
                 <span class="nl">{{ data.label }}</span>
                 <span v-if="data.type === 'conn' && dbOpened[data.conn.id]" class="dot" />
                 <span v-if="data.type === 'rdb' && !data.system" class="keys">{{ data.hint.replace(' 个键', '') }}</span>
-                <span v-if="data.type === 'conn' && data.conn.kind === 'redis'" class="kind-mark">Redis</span>
+                <span v-if="data.type === 'conn' && kindMarker(data.conn)" class="kind-mark">{{ kindMarker(data.conn) }}</span>
                 <el-icon v-if="data.type === 'conn' && data.conn.readOnly" class="ro" title="只读"><Lock /></el-icon>
                 <span v-if="data.type === 'conn' && data.conn.ai" class="ai-mark" :class="{ write: data.conn.aiWrite && !data.conn.readOnly }" :title="data.conn.aiWrite && !data.conn.readOnly ? '允许 AI 查询和修改（修改每次都要你确认）' : '允许 AI 查询（只读）'">{{ data.conn.aiWrite && !data.conn.readOnly ? 'AI 改' : 'AI' }}</span>
                 <el-icon v-if="data.type === 'conn' && data.conn.via" class="via" :title="'经服务器 ' + (data.conn.via.title || data.conn.via.target)"><Connection /></el-icon>
@@ -1059,7 +1100,7 @@ function nodeIcon(d: TreeData) {
           <p>经服务器连的数据库走 SSH 转发，不用在防火墙上开放数据库端口。</p>
           <div class="welcome-btns">
             <el-button type="primary" :icon="Plus" @click="connDialog = { kind: 'mysql', savePassword: true }">新建连接</el-button>
-            <el-button v-if="dbConns.some((c) => c.kind !== 'redis')" @click="openQuery(dbConns.find((c) => c.kind !== 'redis')!)">打开查询窗口</el-button>
+            <el-button v-if="defaultSQLConn" @click="openQuery(defaultSQLConn)">打开查询窗口</el-button>
           </div>
         </div>
         <el-tabs v-else v-model="active" type="card" closable class="tabs" @tab-remove="closeTab" @contextmenu="onTabsContext" @wheel="onTabsWheel">
@@ -1080,6 +1121,17 @@ function nodeIcon(d: TreeData) {
               @open="(x: DbObjItem) => openObjItem(t, x)"
               @action="(k: string, x: DbObjItem | null) => doAction(objNode(t, x), k)"
               @context="(e: MouseEvent, x: DbObjItem) => onContext(e, objNode(t, x))"
+            />
+            <DbBrowseTable
+              v-else-if="t.kind === 'table' && dbCapabilities[t.conn.kind].sql && dbCapabilities[t.conn.kind].browseOnly"
+              :ref="(el) => (refs[t.key] = el as never)"
+              :conn="t.conn" :db="t.db" :schema="t.schema" :table="t.table!"
+              @query="(sql: string) => openQuery(t.conn, t.db, sql + ';\n')"
+            />
+            <DbMongoDocuments
+              v-else-if="t.kind === 'table' && t.conn.kind === 'mongodb'"
+              :ref="(el) => (refs[t.key] = el as never)"
+              :conn="t.conn" :db="t.db" :collection="t.table!"
             />
             <DbTableView
               v-else-if="t.kind === 'table'"

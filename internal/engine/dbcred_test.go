@@ -48,6 +48,10 @@ func TestDockerCands(t *testing.T) {
 		{"Redis 配置文件", "redis", `[{"Path":"docker-entrypoint.sh","Args":["redis-server","/etc/redis/redis.conf"],"Config":{"Env":[]}}]`,
 			map[string]string{"'/etc/redis/redis.conf'": "bind 0.0.0.0\nrequirepass \"a b\\\"c\"\n"}, []string{`/a b"c`}, ""},
 		{"Redis 没设密码", "redis", `[{"Path":"docker-entrypoint.sh","Args":["redis-server"],"Config":{"Env":[]}}]`, nil, []string{"/"}, ""},
+		{"Valkey 命令行", "valkey", `[{"Path":"docker-entrypoint.sh","Args":["valkey-server","--requirepass","valkey-pw"]}]`, nil, []string{"/valkey-pw"}, ""},
+		{"SQL Server 环境变量", "sqlserver", `[{"Config":{"Env":["MSSQL_SA_PASSWORD=sql-pw"]}}]`, nil, []string{"sa/sql-pw"}, ""},
+		{"ClickHouse 环境变量", "clickhouse", `[{"Config":{"Env":["CLICKHOUSE_USER=analytics","CLICKHOUSE_PASSWORD=ch-pw"]}}]`, nil, []string{"analytics/ch-pw"}, ""},
+		{"MongoDB 环境变量", "mongodb", `[{"Config":{"Env":["MONGO_INITDB_ROOT_USERNAME=app","MONGO_INITDB_ROOT_PASSWORD=mongo-pw"]}}]`, nil, []string{"app/mongo-pw"}, ""},
 	}
 	for _, c := range cases {
 		out := map[string]string{"docker inspect 'db1'": c.inspect}
@@ -94,6 +98,11 @@ func TestPickCred(t *testing.T) {
 }
 
 func TestHostCands(t *testing.T) {
+	if c, _ := hostCands(DBCredQuery{Kind: "valkey"}, "root", fakeRun(map[string]string{
+		"cat '/etc/valkey/valkey.conf'": "requirepass valkey-pw\n",
+	})); len(c) != 1 || c[0].password != "valkey-pw" {
+		t.Errorf("Valkey：%s", candText(c))
+	}
 	// Redis：配置文件从单元的启动命令里找
 	run := fakeRun(map[string]string{
 		"systemctl show -p ExecStart --no-pager 'redis.service'": "ExecStart={ path=/usr/bin/redis-server ; argv[]=/usr/bin/redis-server /etc/redis.conf --supervised systemd ; }\n",

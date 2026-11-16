@@ -23,6 +23,7 @@ import (
 //	ferry db tables <连接> <库>
 //	ferry db table|rows|count|apply|design|op|exec|query|export|dump <连接> <库>
 //	ferry db redis-keys|redis-get|redis-edit|redis-cmd <连接> <库编号>（Redis）
+//	ferry db mongo-find|mongo-export <连接> <库>（MongoDB）
 //	ferry db routines|routine|routine-save|backup <连接> <库>（函数、存储过程；备份整个库）
 //	ferry db queries|query-load|query-save|query-rename|query-delete|backups|backup-delete <连接> <库>（这台电脑上存的查询、备份）
 //
@@ -53,11 +54,12 @@ type dbReq struct {
 	Max     int          `json:"max"`
 	Stop    bool         `json:"stop"`
 	// Redis
-	Scan    *dbx.RedisScan `json:"scan"`
-	Get     *dbx.RedisGet  `json:"get"`
-	Edit    *dbx.RedisEdit `json:"edit"`
-	Line    string         `json:"line"`    // redis-cmd：一行命令
-	Confirm bool           `json:"confirm"` // redis-cmd：用户已经确认了危险的命令
+	Scan    *dbx.RedisScan       `json:"scan"`
+	Get     *dbx.RedisGet        `json:"get"`
+	Edit    *dbx.RedisEdit       `json:"edit"`
+	Line    string               `json:"line"`    // redis-cmd：一行命令
+	Confirm bool                 `json:"confirm"` // redis-cmd：用户已经确认了危险的命令
+	Mongo   dbx.MongoFindOptions `json:"mongo"`
 	// 导入
 	File     string         `json:"file"`     // import-sql：SQL 文件
 	Continue bool           `json:"continue"` // import-sql：出错后接着执行
@@ -121,6 +123,9 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	}
 	// 密码：刚填的 → 这次运行里填过的 → 凭据库 → Ferry 装这个软件时保存的
 	password := func(cn *dbx.Conn, fresh bool) (string, bool, error) {
+		if cn.Kind == dbx.SQLite {
+			return "", false, nil
+		}
 		if fresh {
 			if v := cio.getenv("FERRY_DB_NEW_PASSWORD"); v != "" {
 				return v, true, nil
@@ -365,6 +370,9 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	if err != nil {
 		return fail(err)
 	}
+	if cn.BrowseOnly() && !browseDBCommand(cn, sub) {
+		return fail(fmt.Errorf("这个数据库连接支持浏览、查询和导出：不支持 %s", sub))
+	}
 	var cl *dbx.Client
 	var release func()
 	if sub == "ai-exec" || sub == "estimate" {
@@ -469,8 +477,10 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		return out(map[string]any{"count": n})
 	case "query":
 		rs, err := cl.Query(ctx, db, req.SQL, dbx.QueryOptions{Session: req.Session, Max: req.Max, Stop: req.Stop})
-		if writes := dbx.Writes(cn.Kind, req.SQL); len(writes) > 0 {
-			auditDB(strings.Join(writes, ";\n"), err)
+		if !cn.BrowseOnly() {
+			if writes := dbx.Writes(cn.Kind, req.SQL); len(writes) > 0 {
+				auditDB(strings.Join(writes, ";\n"), err)
+			}
 		}
 		if err != nil {
 			return fail(err)
@@ -580,6 +590,22 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		}
 		r, err := cl.Export(ctx, db, dbx.ExportOptions{Format: req.Format, Out: req.Out, Schema: req.Schema, Table: req.Table, Query: req.SQL, Browse: req.browse()},
 			func(n int64) { rep.Info("已导出 %d 行", n) })
+		if err != nil {
+			return fail(err)
+		}
+		return out(r)
+	case "mongo-find":
+		r, err := cl.MongoDocuments(ctx, db, req.Table, req.Mongo)
+		if err != nil {
+			return fail(err)
+		}
+		return out(r)
+	case "mongo-export":
+		if strings.TrimSpace(req.Out) == "" {
+			return fail(errors.New("没有选保存到哪里"))
+		}
+		r, err := cl.MongoExport(ctx, db, req.Table, req.Mongo.Filter, req.Out,
+			func(n int64) { rep.Info("已导出 %d 个文档", n) })
 		if err != nil {
 			return fail(err)
 		}
@@ -736,6 +762,18 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		return out(r)
 	}
 	return fail(fmt.Errorf("不认识的子命令 db %s", sub))
+}
+
+func browseDBCommand(cn *dbx.Conn, sub string) bool {
+	switch sub {
+	case "info", "databases", "tables":
+		return true
+	case "table", "rows", "query", "export":
+		return cn.ReadOnlySQL()
+	case "mongo-find", "mongo-export":
+		return cn.Kind == dbx.MongoDB
+	}
+	return false
 }
 
 // browse 表数据的筛选、排序、翻页。

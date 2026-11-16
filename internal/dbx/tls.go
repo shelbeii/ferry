@@ -37,7 +37,7 @@ func (cl *Client) tlsMode() string {
 	case TLSOff, TLSRequire, TLSVerify:
 		return m
 	}
-	if cl.tn != nil || cl.Conn.Kind == Redis {
+	if cl.tn != nil || cl.Conn.Kind == Redis || cl.Conn.Kind == MongoDB || cl.Conn.Kind == ClickHouse || cl.Conn.Kind == SQLite {
 		return TLSOff
 	}
 	return tlsPrefer
@@ -77,6 +77,16 @@ func (cl *Client) checkEncrypted(ctx context.Context, db *sql.DB) {
 		if db.QueryRowContext(ctx, "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&on) == nil {
 			cl.Encrypted = on
 		}
+	case SQLServer:
+		cl.Encrypted = cl.tlsMode() != TLSOff
+		if !cl.Encrypted {
+			var opt string
+			if db.QueryRowContext(ctx, "SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID").Scan(&opt) == nil {
+				cl.Encrypted = opt == "TRUE"
+			}
+		}
+	case ClickHouse:
+		cl.Encrypted = cl.tlsMode() != TLSOff
 	}
 }
 

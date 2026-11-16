@@ -68,10 +68,12 @@ func TestDockerHelpers(t *testing.T) {
 		t.Errorf("dockerPorts：%v", got)
 	}
 	for img, want := range map[string]string{
-		"mysql:8.4.11":                         "mysql 8.4.11",
-		"registry.local:5000/1panel/openresty": "openresty ",
-		"nacos/nacos-server:v2.3.2@sha256:ab":  "nacos-server v2.3.2",
-		"sha256:0123":                          " ",
+		"mcr.microsoft.com/mssql/server:2022-latest@sha256:ab": "mssql-server 2022-latest",
+		"registry.local/other/server:latest":                   "server latest",
+		"mysql:8.4.11":                                         "mysql 8.4.11",
+		"registry.local:5000/1panel/openresty":                 "openresty ",
+		"nacos/nacos-server:v2.3.2@sha256:ab":                  "nacos-server v2.3.2",
+		"sha256:0123":                                          " ",
 	} {
 		r, tag := splitImage(img)
 		if r+" "+tag != want {
@@ -89,6 +91,9 @@ func TestDockerHelpers(t *testing.T) {
 	}
 	if r := imageRule("mysql-server"); r < 0 || swRules[r].kind != "mysql" {
 		t.Errorf("mysql-server 没认出")
+	}
+	if r := imageRule("mssql-server"); r < 0 || swRules[r].kind != "sqlserver" {
+		t.Error("mssql-server 没认出")
 	}
 	if r := imageRule("mysqlx"); r >= 0 {
 		t.Errorf("mysqlx 不该认成 %s", swRules[r].kind)

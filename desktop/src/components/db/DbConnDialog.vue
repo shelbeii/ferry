@@ -8,7 +8,8 @@ import { Connection, Search } from '@element-plus/icons-vue'
 import GlassToggle from '../glass/GlassToggle.vue'
 import { call, type Inspect, type PortProbe, type SoftwareReport, type Software } from '../../ferry'
 import { projects, connections, connectionsPath } from '../../state'
-import { saveDbConn, testDbConn, connFromSoftware, isDbSoftware, defaultPort, defaultUser, kindLabel, dbCreds, type DbConn, type DbKind, type DbFrom } from '../../db'
+import { pickFile } from '../../platform'
+import { saveDbConn, testDbConn, connFromSoftware, isDbSoftware, defaultPort, defaultUser, kindLabel, dbCapabilities, dbCreds, type DbConn, type DbKind, type DbFrom } from '../../db'
 
 const props = defineProps<{ conn: (Partial<DbConn> & { from?: DbFrom }) | null }>()
 const emit = defineEmits<{ close: []; saved: [conn: DbConn] }>()
@@ -17,6 +18,7 @@ const editing = computed(() => !!props.conn?.id)
 const blank = () => ({
   name: '',
   kind: 'mysql' as DbKind,
+  file: '',
   via: false,
   server: '' as string, // config \n target
   host: '127.0.0.1',
@@ -25,6 +27,8 @@ const blank = () => ({
   password: '',
   savePassword: true,
   database: '',
+  authSource: '',
+  direct: false,
   readOnly: false,
   ai: false,
   aiWrite: false,
@@ -36,7 +40,6 @@ const blank = () => ({
   software: '',
 })
 const f = reactive(blank())
-const nameTouched = ref(false)
 const busy = ref(false)
 const testing = ref(false)
 const testMsg = ref<{ ok: boolean; text: string } | null>(null)
@@ -78,7 +81,7 @@ async function loadSoftware() {
   try {
     const r = await call<SoftwareReport>(['software', target, '-c', config])
     swItems.value = r.items.filter(isDbSoftware)
-    if (!swItems.value.length) swError.value = '这台服务器上没找到 MySQL、MariaDB、PostgreSQL、Redis'
+    if (!swItems.value.length) swError.value = '这台服务器上没找到可连接的数据库'
   } catch (e) {
     swError.value = (e as Error).message
   } finally {
@@ -100,13 +103,16 @@ function swLabel(sw: Software) {
 
 function fill(c: Partial<DbConn>) {
   if (c.kind) f.kind = c.kind
+  f.file = c.file ?? ''
   if (c.name !== undefined) f.name = c.name
   f.via = !!c.via
   f.server = c.via ? `${c.via.config}\n${c.via.target}` : f.server
   if (c.host !== undefined) f.host = c.host
   if (c.port) f.port = c.port
-  if (c.user) f.user = c.user
+  if (c.user !== undefined) f.user = c.user
   f.database = c.database ?? f.database
+  f.authSource = c.authSource ?? ''
+  f.direct = !!c.direct
   f.readOnly = c.readOnly ?? f.readOnly
   f.ai = c.ai ?? f.ai
   f.aiWrite = c.aiWrite ?? f.aiWrite
@@ -234,7 +240,6 @@ watch(() => props.conn, (c) => {
   serverVerified = false
   credSeq++
   f.password = ''
-  nameTouched.value = !!c?.id
   Object.assign(f, blank())
   if (c) fill(c)
   const fr = c && !c.id ? c.from : undefined
@@ -251,9 +256,16 @@ watch(() => props.conn, (c) => {
 watch(() => f.kind, (k, old) => {
   if (old && f.port === defaultPort[old]) f.port = defaultPort[k]
   if (old && f.user === defaultUser[old]) f.user = defaultUser[k]
-  if (old && (k === 'redis') !== (old === 'redis')) f.database = ''
-})
+  f.database = ''
+  f.file = ''
+  f.password = ''
+  f.tls = 'auto'
+}, { flush: 'sync' })
 const isRedis = computed(() => f.kind === 'redis')
+const isMongo = computed(() => f.kind === 'mongodb')
+const isSQLite = computed(() => f.kind === 'sqlite')
+const isClickHouse = computed(() => f.kind === 'clickhouse')
+const browseOnly = computed(() => dbCapabilities[f.kind].browseOnly)
 watch(() => f.server, () => {
   swItems.value = null
   swError.value = ''
@@ -269,43 +281,59 @@ watch(() => f.via, (v, old) => {
 })
 
 const autoName = computed(() => {
+  if (isSQLite.value) return f.file.split(/[\\/]/).pop() || 'SQLite'
   const where = f.container ? `容器 ${f.container}` : `${f.host || '127.0.0.1'}:${f.port}`
-  const who = isRedis.value ? (f.user ? `Redis ${f.user}@` : 'Redis ') : `${f.user}@`
+  const who = f.user ? `${f.user}@` : `${kindLabel[f.kind]} `
   return f.via && serverTitle.value ? `${who}${where} · ${serverTitle.value}` : `${who}${where}`
 })
 
 function payload(): Partial<DbConn> {
+  const common = {
+    id: props.conn?.id,
+    name: f.name.trim() || autoName.value,
+    kind: f.kind,
+    color: props.conn?.color,
+  }
+  if (isSQLite.value) return { ...common, file: f.file, readOnly: true }
   const [config, target] = f.server.split('\n')
   return {
-    id: props.conn?.id,
-    name: (nameTouched.value && f.name.trim()) || f.name.trim() || autoName.value,
-    kind: f.kind,
+    ...common,
     host: f.container ? '' : f.host.trim(),
     port: Number(f.port),
     user: f.user.trim(),
     database: f.database.trim() || undefined,
+    authSource: isMongo.value ? f.authSource.trim() || undefined : undefined,
+    direct: isMongo.value && (f.direct || !!f.container) || undefined,
     via: f.via && f.server ? { config, target, title: serverTitle.value } : null,
     container: f.via ? f.container || undefined : undefined,
     software: f.via ? f.software || undefined : undefined,
-    readOnly: f.readOnly,
-    ai: f.ai,
-    aiWrite: f.ai && !f.readOnly && f.aiWrite,
-    aiUser: f.ai && f.aiOwn ? f.aiUser.trim() : undefined,
+    readOnly: browseOnly.value || f.readOnly,
+    ai: !browseOnly.value && f.ai,
+    aiWrite: !browseOnly.value && f.ai && !f.readOnly && f.aiWrite,
+    aiUser: !browseOnly.value && f.ai && f.aiOwn ? f.aiUser.trim() : undefined,
     tls: f.tls === 'auto' ? undefined : f.tls,
     savePassword: f.savePassword,
-    color: props.conn?.color,
   }
 }
 
 function check(): string {
+  if (isSQLite.value) return f.file.trim() ? '' : '请选择 SQLite 文件'
   if (f.via && !f.server) return '请选经哪台服务器连'
   if (!f.container && !f.host.trim()) return '请填地址'
-  if (!f.user.trim() && !isRedis.value) return '请填用户名'
+  if (!f.user.trim() && !isRedis.value && (!isMongo.value || f.password)) return '请填用户名'
   if (isRedis.value && f.database.trim() && !/^(db)?\d+$/i.test(f.database.trim())) return '库编号要填数字（0、1、2……）'
   if (!(Number(f.port) > 0)) return '请填端口'
-  if (f.ai && f.aiOwn && !f.aiUser.trim()) return '请填 AI 用的账号'
-  if (f.ai && f.aiOwn && !f.aiPassword && !(editing.value && props.conn?.aiUser)) return '请填 AI 用的账号的密码'
+  if (!browseOnly.value && f.ai && f.aiOwn && !f.aiUser.trim()) return '请填 AI 用的账号'
+  if (!browseOnly.value && f.ai && f.aiOwn && !f.aiPassword && !(editing.value && props.conn?.aiUser)) return '请填 AI 用的账号的密码'
   return ''
+}
+
+async function chooseSQLiteFile() {
+  const file = await pickFile('打开 SQLite 数据库', 'SQLite 数据库', ['sqlite', 'sqlite3', 'db', 'db3'])
+  if (file) {
+    f.file = file
+    testMsg.value = null
+  }
 }
 
 async function test() {
@@ -314,10 +342,14 @@ async function test() {
   testing.value = true
   testMsg.value = null
   try {
-    const r = await testDbConn(payload(), f.password || undefined, (f.ai && f.aiOwn && f.aiPassword) || undefined)
+    const r = await testDbConn(payload(), !isSQLite.value && f.password || undefined, (!browseOnly.value && f.ai && f.aiOwn && f.aiPassword) || undefined)
+    if (isSQLite.value) {
+      testMsg.value = { ok: true, text: '已打开 ' + r.version + '（只读）' }
+      return
+    }
     const keys = r.databases.reduce((n, d) => n + (d.keys ?? 0), 0)
     const enc = r.viaSSH && !r.encrypted ? '经 SSH 加密' : r.encrypted ? '已加密' : '没加密'
-    const ai = f.ai && f.aiOwn ? `，AI 的账号 ${f.aiUser.trim()} 也能连上` : ''
+    const ai = !browseOnly.value && f.ai && f.aiOwn ? `，AI 的账号 ${f.aiUser.trim()} 也能连上` : ''
     testMsg.value = { ok: true, text: (isRedis.value ? `连上了：${r.version}，一共 ${keys.toLocaleString()} 个键` : `连上了：${r.version}，有 ${r.databases.length} 个库`) + `（${enc}）${ai}` }
   } catch (e) {
     testMsg.value = { ok: false, text: (e as Error).message }
@@ -331,7 +363,7 @@ async function save() {
   if (err) return (testMsg.value = { ok: false, text: err })
   busy.value = true
   try {
-    const saved = await saveDbConn(payload(), f.password || undefined, (f.ai && f.aiOwn && f.aiPassword) || undefined)
+    const saved = await saveDbConn(payload(), !isSQLite.value && f.password || undefined, (!browseOnly.value && f.ai && f.aiOwn && f.aiPassword) || undefined)
     ElMessage.success(editing.value ? '已保存' : '已添加')
     emit('saved', saved)
   } catch (e) {
@@ -346,10 +378,17 @@ async function save() {
   <el-dialog :model-value="!!conn" :title="editing ? '修改数据库连接' : '新建数据库连接'" width="600px" append-to-body :close-on-click-modal="false" @close="emit('close')">
     <el-form label-width="96px" size="default" @submit.prevent>
       <el-form-item label="数据库">
-        <el-radio-group v-model="f.kind">
-          <el-radio-button v-for="(l, k) in kindLabel" :key="k" :value="k">{{ l }}</el-radio-button>
-        </el-radio-group>
+        <el-select v-model="f.kind" class="grow">
+          <el-option v-for="(l, k) in kindLabel" :key="k" :value="k" :label="l" />
+        </el-select>
       </el-form-item>
+      <el-form-item v-if="isSQLite" label="数据库文件">
+        <div class="row">
+          <el-input v-model="f.file" class="grow" placeholder="选择现有的本机 SQLite 文件，或填写绝对路径" />
+          <el-button @click="chooseSQLiteFile">选择文件…</el-button>
+        </div>
+      </el-form-item>
+      <template v-else>
       <el-form-item label="怎么连">
         <el-radio-group v-model="f.via">
           <el-tooltip :disabled="!from || !!from.endpoint.direct" :content="from?.endpoint.why" placement="top">
@@ -419,7 +458,7 @@ async function save() {
         </div>
       </el-form-item>
       <el-form-item label="用户名">
-        <el-input ref="userInput" v-model="f.user" :placeholder="isRedis ? '一般不填（Redis 6 起设了 ACL 用户才填）' : ''" />
+        <el-input ref="userInput" v-model="f.user" :placeholder="isRedis ? '使用 ACL 用户时填写' : isMongo ? '未启用认证时留空' : ''" />
       </el-form-item>
       <el-form-item label="密码">
         <el-input ref="pwInput" v-model="f.password" type="password" show-password :placeholder="editing ? '不改就留空' : f.software && f.via ? '可以不填：用 Ferry 安装时保存的密码' : '没有密码就留空'" autocomplete="new-password" />
@@ -427,25 +466,37 @@ async function save() {
       </el-form-item>
       <el-form-item label="加密">
         <el-select v-model="f.tls" class="tls">
-          <el-option value="auto" :label="isRedis || f.via ? '自动（不加密）' : '自动（数据库支持就加密）'" />
+          <el-option value="auto" :label="f.via ? '自动（经 SSH 加密）' : isRedis || isMongo || isClickHouse ? '自动（不加密）' : f.kind === 'sqlserver' ? '自动（加密，不验证证书）' : '自动（数据库支持就加密）'" />
           <el-option value="off" label="不加密" />
           <el-option value="require" label="加密，不验证证书" />
           <el-option value="verify" label="加密并验证证书" />
         </el-select>
         <div class="note">
-          <template v-if="f.via">经服务器连时 SSH 已经加密了，一般不用再加。</template>
-          <template v-else-if="isRedis">Redis 要单独开加密端口（TLS），开了的话选「加密」并填那个端口。</template>
+          <template v-if="isClickHouse">请填写 ClickHouse 原生协议端口，默认 9000，启用 TLS 时通常是 9440。</template>
+          <template v-else-if="f.via">经服务器连时 SSH 已经加密了，一般不用再加。</template>
+          <template v-else-if="isRedis || isMongo">数据库启用了 TLS 时，请选择加密并填写对应端口。</template>
           <template v-else>直接连云数据库（比如开了强制 SSL 的）选「加密」；「验证证书」要数据库的证书是正规机构签的、和地址对得上。</template>
         </div>
       </el-form-item>
       <el-form-item :label="isRedis ? '默认库编号' : '默认库'">
-        <el-input v-model="f.database" :placeholder="isRedis ? '不填是 0（db0）' : f.kind === 'postgres' ? '不填连 postgres' : '可以不填'" />
+        <el-input v-model="f.database" :placeholder="isRedis ? '不填是 0（db0）' : f.kind === 'postgres' ? '不填连 postgres' : f.kind === 'sqlserver' ? '不填连 master' : isClickHouse ? '不填连 default' : '可以不填'" />
       </el-form-item>
-      <el-form-item label="只读">
+      <el-form-item v-if="isMongo" label="认证库">
+        <el-input v-model="f.authSource" placeholder="不填使用 admin" />
+      </el-form-item>
+      <el-form-item v-if="isMongo" label="副本集">
+        <GlassToggle :model-value="f.direct || !!f.container" :disabled="!!f.container" @update:model-value="f.direct = $event">只连填写的节点</GlassToggle>
+        <div class="note">发现副本集时，各节点地址须可从连接发起端访问。经 SSH 连接时由 SSH 服务器访问。</div>
+      </el-form-item>
+      </template>
+      <el-form-item v-if="browseOnly" label="权限">
+        <span class="note">{{ isSQLite ? '以只读方式打开，可浏览、查询和导出。' : '支持浏览、查询和导出。连接生产库时建议使用只读账号。' }}</span>
+      </el-form-item>
+      <el-form-item v-else label="只读">
         <GlassToggle v-model="f.readOnly">{{ isRedis ? '只许看，不许改键和值（命令行里也只能执行只读的命令）' : '只许查，不许改数据和表结构' }}</GlassToggle>
         <span v-if="serverOpt?.production" class="hint">（生产服务器，默认只读）</span>
       </el-form-item>
-      <el-form-item label="AI">
+      <el-form-item v-if="!browseOnly" label="AI">
         <GlassToggle v-model="f.ai">允许 AI 查询（编程软件经 MCP、Ferry 的 AI 助手）</GlassToggle>
         <div v-if="f.ai" class="note">
           <template v-if="isRedis">AI 能看有哪些键、执行只读的命令（GET、HGETALL、SCAN……，一次一条，最多 15 秒）；不能看配置和密码（CONFIG、ACL）。读到的数据会发给 AI 用的模型。</template>
@@ -467,7 +518,7 @@ async function save() {
         </div>
       </el-form-item>
       <el-form-item label="连接名">
-        <el-input v-model="f.name" :placeholder="autoName" @input="nameTouched = true" />
+        <el-input v-model="f.name" :placeholder="autoName" />
       </el-form-item>
     </el-form>
     <el-alert v-if="testMsg" :type="testMsg.ok ? 'success' : 'error'" :closable="false" :title="testMsg.text" class="msg" />

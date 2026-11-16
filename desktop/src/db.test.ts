@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connFromSoftware, formatReply, nextQueryTitle, passwordEnv, ttlText } from './db'
+import { connFromSoftware, dbRequestFromSoftware, formatReply, isDbSoftware, nextQueryTitle, passwordEnv, ttlText } from './db'
 import { statementAt } from './editor/sqlEditor'
 import type { Software } from './ferry'
 
@@ -28,8 +28,32 @@ describe('connFromSoftware', () => {
     const c = connFromSoftware({ kind: 'redis', name: 'Redis', state: 'running', via: 'systemd', instance: 'redis', account: 'x', listen: ['0.0.0.0:6380'] } as Software, via, 'p')!
     expect(c).toMatchObject({ kind: 'redis', port: 6380, host: '127.0.0.1', user: '', software: 'redis' })
   })
+  it('opens Valkey using the existing Redis connection type', () => {
+    const sw = { kind: 'valkey', name: 'Valkey', state: 'running', via: 'docker', container: 'cache', inner: ['*:6379'] } as Software
+    expect(isDbSoftware(sw)).toBe(true)
+    expect(connFromSoftware(sw, via, 'p')).toMatchObject({ kind: 'redis', container: 'cache', port: 6379, user: '' })
+  })
+  it('supplies SQL Server and MongoDB defaults', () => {
+    for (const [kind, port, user] of [['sqlserver', 1433, 'sa'], ['mongodb', 27017, '']] as const) {
+      const sw = { kind, name: kind, state: 'running', via: 'systemd' } as Software
+      expect(isDbSoftware(sw)).toBe(true)
+      expect(connFromSoftware(sw, via, 'p')).toMatchObject({ kind, port, user, readOnly: true, via })
+    }
+  })
   it('ignores other software', () => {
     expect(connFromSoftware({ kind: 'nacos', name: 'Nacos', state: 'running', via: 'systemd' } as Software, via, 'p')).toBeNull()
+  })
+  it('prefers a ClickHouse native port and skips the HTTP port', () => {
+    const sw = { kind: 'clickhouse', name: 'ClickHouse', state: 'running', via: 'systemd', listen: ['*:8123', '*:9000'] } as Software
+    expect(connFromSoftware(sw, via, 'p')).toMatchObject({ kind: 'clickhouse', port: 9000, user: 'default', readOnly: true })
+    expect(dbRequestFromSoftware(sw, via, 'db.example')?.from.endpoint.direct).toBe(9000)
+    expect(connFromSoftware({ ...sw, listen: ['*:8123', '*:9440'] }, via, 'p')).toMatchObject({ port: 9440, tls: 'verify' })
+  })
+  it('uses SSH to a Docker ClickHouse native port when only HTTP is published', () => {
+    const sw = { kind: 'clickhouse', name: 'ClickHouse', state: 'running', via: 'docker', container: 'analytics',
+      listen: ['*:18123'], inner: ['*:8123', '*:9000'] } as Software
+    expect(connFromSoftware(sw, via, 'p')).toMatchObject({ kind: 'clickhouse', container: 'analytics', port: 9000 })
+    expect(dbRequestFromSoftware(sw, via, 'db.example')?.from.endpoint.direct).toBeUndefined()
   })
 })
 

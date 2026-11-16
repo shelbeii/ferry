@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -32,7 +33,7 @@ type ExportResult struct {
 	Out    string `json:"out"`
 }
 
-// outFile 先写 <文件>.part，写完再改名：中途失败不会留下半个文件。
+// outFile 先写同目录下的临时文件，成功后替换目标。
 type outFile struct {
 	f   *os.File
 	w   *bufio.Writer
@@ -40,7 +41,7 @@ type outFile struct {
 }
 
 func createOut(out string) (*outFile, error) {
-	f, err := os.Create(out + ".part")
+	f, err := os.CreateTemp(filepath.Dir(out), ".ferry-db-*.part")
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +50,7 @@ func createOut(out string) (*outFile, error) {
 
 func (o *outFile) abort() {
 	o.f.Close()
-	os.Remove(o.out + ".part")
+	os.Remove(o.f.Name())
 }
 
 func (o *outFile) finish() (int64, error) {
@@ -59,11 +60,11 @@ func (o *outFile) finish() (int64, error) {
 	}
 	st, _ := o.f.Stat()
 	if err := o.f.Close(); err != nil {
-		os.Remove(o.out + ".part")
+		os.Remove(o.f.Name())
 		return 0, err
 	}
-	os.Remove(o.out)
-	if err := os.Rename(o.out+".part", o.out); err != nil {
+	if err := os.Rename(o.f.Name(), o.out); err != nil {
+		os.Remove(o.f.Name())
 		return 0, err
 	}
 	if st == nil {
@@ -75,6 +76,9 @@ func (o *outFile) finish() (int64, error) {
 // Export 把查询结果全部写进文件（不限行数，边读边写）。只读事务里执行。
 func (cl *Client) Export(ctx context.Context, dbName string, o ExportOptions, progress func(rows int64)) (*ExportResult, error) {
 	kind := cl.Conn.Kind
+	if cl.Conn.ReadOnlySQL() {
+		return cl.readOnlySQLExport(ctx, dbName, o, progress)
+	}
 	q := strings.TrimSpace(o.Query)
 	var args []any
 	if q == "" {

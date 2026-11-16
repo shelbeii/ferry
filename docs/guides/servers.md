@@ -40,4 +40,17 @@
 
 ## 数据库
 
-桌面版的「数据库」支持 MySQL、MariaDB 和 PostgreSQL，可以查看表、修改数据、执行查询、建表改表和导出。Redis 使用 SCAN 按组浏览键，可以编辑字符串、哈希、列表、集合、有序集合和流，也提供命令行。连接经服务器的 SSH 转发，数据库端口可以继续只对服务器本机或内网开放。
+桌面版的「数据库」可以打开本机 SQLite 文件，也支持直连数据库服务或经服务器 SSH 转发。使用 SSH 时，数据库端口可以继续只对服务器本机或内网开放。
+
+| 类型 | 可用操作 |
+| --- | --- |
+| MySQL / MariaDB、PostgreSQL | 浏览库表、SQL 查询、编辑数据、建表改表、导入导出 |
+| Redis / Valkey | 用 SCAN 浏览键，编辑字符串、哈希、列表、集合、有序集合和流，执行命令。集群只能浏览当前节点 |
+| SQL Server | 用 SQL Server 账号连接 TCP 端口（默认 1433），浏览库、模式、表、视图和列，执行只读 `SELECT`（支持 CTE），导出 CSV。多条查询用分号分隔 |
+| MongoDB | 浏览集合和视图，用 Extended JSON 过滤和导出文档。默认端口 27017，默认认证库 `admin`。发现副本集时，各节点地址须可达，经 SSH 时由 SSH 服务器访问。也可选择只连接填写的节点 |
+| SQLite | 选择现有的本机数据库文件。只读浏览表、视图和列，执行 SQL 查询，导出 CSV。服务器上的 SQLite 可先在服务器侧生成一致性快照，再下载到本机打开 |
+| ClickHouse | 浏览库、表、视图和列，执行只读查询，导出 CSV。使用原生 TCP 协议，默认端口 9000，启用 TLS 时通常使用 9440 |
+
+从服务器的「软件」列表可以创建 Valkey、SQL Server、MongoDB 和 ClickHouse 连接。使用 SQL Server、MongoDB 或 ClickHouse 连接生产库时，建议使用只读数据库账号。
+
+OceanBase 可在「MySQL / MariaDB」入口连接 MySQL 租户。已在 OceanBase CE 4.3.5.6 验证表结构、只读查询和 CSV 导出。TiDB 8.5.6 也可通过该入口连接，已验证表结构和普通 `SELECT`。Ferry 的只读查询和 CSV 导出依赖 `READ ONLY` 事务，该版本的 TiDB 默认拒绝此类事务。

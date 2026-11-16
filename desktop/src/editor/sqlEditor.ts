@@ -7,14 +7,14 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { bracketMatching, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete'
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
-import { sql, MySQL, PostgreSQL, type SQLNamespace } from '@codemirror/lang-sql'
+import { sql, MySQL, PostgreSQL, MSSQL, SQLite, type SQLNamespace } from '@codemirror/lang-sql'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { ferrySearch } from './searchPanel'
 
 export interface SqlEditorOptions {
   parent: HTMLElement
   doc: string
-  kind: 'mysql' | 'postgres'
+  kind: 'mysql' | 'postgres' | 'sqlserver' | 'sqlite' | 'clickhouse'
   dark: boolean
   readOnly?: boolean
   /** 补全用的表、列：{ 表: [列…] } 或 { 模式: { 表: [列…] } } */
@@ -47,6 +47,7 @@ const commonTheme = EditorView.theme({
   '.cm-scroller': { fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace", lineHeight: '1.55' },
   '.cm-tooltip.cm-tooltip-autocomplete > ul': { fontFamily: "'Cascadia Mono', Consolas, monospace" },
 })
+const dialects = { mysql: MySQL, postgres: PostgreSQL, sqlserver: MSSQL, sqlite: SQLite, clickhouse: MySQL }
 
 /** 光标所在的语句：从光标往前、往后找到分号（不细分引号，够用） */
 export function statementAt(text: string, pos: number): string {
@@ -69,11 +70,12 @@ export function createSqlEditor(o: SqlEditorOptions): SqlEditor {
   const langSlot = new Compartment()
   const themeOf = (dark: boolean): Extension => (dark ? oneDark : [lightTheme, syntaxHighlighting(defaultHighlightStyle, { fallback: true })])
   const langOf = (schema?: SQLNamespace) =>
-    sql({ dialect: o.kind === 'mysql' ? MySQL : PostgreSQL, schema, defaultTable: o.defaultTable, upperCaseKeywords: true })
+    sql({ dialect: dialects[o.kind], schema, defaultTable: o.defaultTable, upperCaseKeywords: true })
   let view: EditorView
   const run = (all: boolean) => {
     const sel = view.state.selection.main
-    const text = sel.empty ? (all ? view.state.doc.toString() : statementAt(view.state.doc.toString(), sel.head)) : view.state.sliceDoc(sel.from, sel.to)
+    const doc = view.state.doc.toString()
+    const text = sel.empty ? (all || o.kind !== 'mysql' && o.kind !== 'postgres' ? doc : statementAt(doc, sel.head)) : view.state.sliceDoc(sel.from, sel.to)
     o.onRun?.(text, all && sel.empty)
     return true
   }

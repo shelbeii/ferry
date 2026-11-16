@@ -5,7 +5,7 @@ import { computed, nextTick, onMounted, ref, watch, type Component } from 'vue'
 import {
   Refresh, Search, Grid, View, Plus, Delete, EditPen, Upload, Download, FolderOpened, ArrowDown, ArrowUp, VideoPlay, Document, Box, RefreshLeft, Folder,
 } from '@element-plus/icons-vue'
-import { dbCall, humanSize, exportLabels, type DbConn, type DbTable, type DbRoutine, type DbFileItem, type DbObjItem, type DbObjWhat } from '../../db'
+import { dbCall, dbCapabilities, humanSize, exportLabels, type DbConn, type DbTable, type DbRoutine, type DbFileItem, type DbObjItem, type DbObjWhat } from '../../db'
 
 const props = defineProps<{ conn: DbConn; db: string; schema?: string; what: DbObjWhat }>()
 const emit = defineEmits<{
@@ -24,6 +24,8 @@ const sort = ref<{ col: string; desc: boolean }>({ col: 'name', desc: false })
 const body = ref<HTMLElement>()
 
 const isPg = computed(() => props.conn.kind === 'postgres')
+const isMongo = computed(() => props.conn.kind === 'mongodb')
+const browseOnly = computed(() => dbCapabilities[props.conn.kind].browseOnly)
 const ro = computed(() => !!props.conn.readOnly)
 const isTables = computed(() => props.what === 'all' || props.what === 'table' || props.what === 'view')
 const inSchema = (s?: string) => !props.schema || (s || 'public') === props.schema
@@ -70,7 +72,8 @@ onMounted(() => {
 })
 
 /** PostgreSQL 点的是库、里面有好几个模式时多一列「模式」 */
-const showSchema = computed(() => isPg.value && !props.schema && new Set(all.value.map((x) => x.t?.schema || x.r?.schema || 'public')).size > 1)
+const showSchema = computed(() => !props.schema && (props.conn.kind === 'sqlserver'
+  || isPg.value && new Set(all.value.map((x) => x.t?.schema || x.r?.schema || 'public')).size > 1))
 
 interface Col { k: string; t: string; w: number; num?: boolean; tip?: string }
 const cols = computed<Col[]>(() => {
@@ -100,6 +103,7 @@ const cols = computed<Col[]>(() => {
         { k: 'size', t: '大小', w: 100, num: true },
       ]
   }
+  if (browseOnly.value) return [{ k: 'name', t: '名称', w: 240 }, ...schemaCol, { k: 'type', t: '类型', w: 100 }]
   if (isPg.value) {
     return [
       { k: 'name', t: '名', w: 220 },
@@ -165,12 +169,13 @@ const countText = computed(() => {
     case 'backup': return `${n} 个备份，共 ${humanSize(all.value.reduce((s, x) => s + (x.f?.size ?? 0), 0))}`
     default: {
       const v = all.value.filter((x) => x.kind === 'view').length
-      return props.what === 'view' ? `${v} 个视图` : `${n - v} 张表${v ? `，${v} 个视图` : ''}`
+      return props.what === 'view' ? `${v} 个视图` : `${n - v} ${isMongo.value ? '个集合' : '张表'}${v ? `，${v} 个视图` : ''}`
     }
   }
 })
 const emptyText = computed(() => {
   if (filter.value) return '没有对得上的'
+  if (isMongo.value && props.what !== 'view') return '这个库里没有集合'
   return {
     all: '这个库里还没有表', table: '还没有表', view: '还没有视图', func: '还没有函数和存储过程',
     query: '还没有保存的查询：在查询窗口里点「保存」（Ctrl+S）就会出现在这里',
@@ -189,7 +194,8 @@ function cell(it: DbObjItem, k: string): string {
     case 'size':
       return humanSize(v as number | undefined)
     case 'type':
-      return it.r ? (it.r.type === 'procedure' ? '存储过程' : '函数') : ''
+      if (it.r) return it.r.type === 'procedure' ? '存储过程' : '函数'
+      return it.kind === 'view' ? '视图' : isMongo.value ? '集合' : '表'
     default:
       return String(v ?? '')
   }
@@ -199,7 +205,7 @@ function cellTip(it: DbObjItem, k: string): string {
   if (t && (k === 'dataLen' || k === 'indexLen')) {
     return [t.dataLen !== undefined ? `数据 ${humanSize(t.dataLen)}` : '', t.indexLen !== undefined ? `索引 ${humanSize(t.indexLen)}` : ''].filter(Boolean).join('，')
   }
-  if (t && k === 'name') return [t.type === 'view' ? '视图' : '表', t.created ? `建于 ${t.created}` : '', t.collation ? `排序规则 ${t.collation}` : ''].filter(Boolean).join(' · ')
+  if (t && k === 'name') return [t.type === 'view' ? '视图' : isMongo.value ? '集合' : '表', t.created ? `建于 ${t.created}` : '', t.collation ? `排序规则 ${t.collation}` : ''].filter(Boolean).join(' · ')
   if (it.r && k === 'name') return [it.r.created ? `建于 ${it.r.created}` : '', it.r.updated ? `改于 ${it.r.updated}` : ''].filter(Boolean).join(' · ')
   if (it.f && k === 'name') return it.f.path
   if (k === 'comment' || k === 'args' || k === 'preview' || k === 'returns') return cell(it, k)
@@ -242,7 +248,11 @@ defineExpose({ reload: load })
 <template>
   <div class="objs">
     <div class="bar">
-      <template v-if="isTables">
+      <template v-if="isTables && browseOnly">
+        <el-button size="small" :icon="FolderOpened" :disabled="!current" @click="current && emit('open', current)">打开</el-button>
+        <el-button v-if="!isMongo" size="small" :icon="Download" :disabled="!current" @click="act('export-csv')">导出 CSV</el-button>
+      </template>
+      <template v-else-if="isTables">
         <el-button size="small" :icon="FolderOpened" :disabled="!current" @click="current && emit('open', current)">{{ what === 'view' ? '打开视图' : '打开表' }}</el-button>
         <template v-if="what !== 'view'">
           <el-button size="small" :icon="EditPen" :disabled="!current || current.kind !== 'table' || ro" @click="act('design')">设计表</el-button>

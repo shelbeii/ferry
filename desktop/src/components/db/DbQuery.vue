@@ -6,7 +6,7 @@ import { ElMessage } from 'element-plus'
 import { CaretRight, VideoPlay, CircleClose, Clock, Download, Delete, DocumentChecked } from '@element-plus/icons-vue'
 import DbGrid from './DbGrid.vue'
 import { createSqlEditor, type SqlEditor } from '../../editor/sqlEditor'
-import { dbCall, dbRun, confirmSql, sqlDangers, closeDbSession, type DbConn, type DbResult, type DbDatabase, type DbTable } from '../../db'
+import { dbCall, dbRun, confirmSql, sqlDangers, closeDbSession, dbCapabilities, type DbConn, type DbResult, type DbDatabase, type DbTable } from '../../db'
 import { startTask } from '../../state'
 import { pickSaveFile, reveal } from '../../platform'
 
@@ -23,6 +23,8 @@ function onKey(e: KeyboardEvent) {
 const host = ref<HTMLDivElement>()
 let editor: SqlEditor | null = null
 const dbName = ref(props.db)
+const readOnlySQL = computed(() => dbCapabilities[props.conn.kind].browseOnly)
+const resultDb = ref(props.db)
 const databases = ref<DbDatabase[]>([])
 const running = ref(false)
 const results = shallowRef<DbResult[]>([])
@@ -72,34 +74,38 @@ async function loadDatabases() {
 
 watch(dbName, (v) => {
   emit('update:db', v)
-  closeDbSession(props.conn.id, props.sid)
+  if (!readOnlySQL.value) closeDbSession(props.conn.id, props.sid)
   void loadCompletion()
 })
 
 async function run(text: string) {
   const sql = text.trim()
   if (!sql || running.value) return
-  let dangers: string[] = []
-  try {
-    dangers = await sqlDangers(props.conn, { sql })
-  } catch (e) {
-    error.value = (e as Error).message
-    return
+  if (!readOnlySQL.value) {
+    let dangers: string[]
+    try {
+      dangers = await sqlDangers(props.conn, { sql })
+    } catch (e) {
+      error.value = (e as Error).message
+      return
+    }
+    if (dangers.length && !(await confirmSql(props.conn, '确认执行', [sql], { note: '查询窗口里的语句直接执行，没有撤销。' }))) return
   }
-  if (dangers.length && !(await confirmSql(props.conn, '确认执行', [sql], { note: '查询窗口里的语句直接执行，没有撤销。' }))) return
   running.value = true
   error.value = ''
   const started = Date.now()
-  const r = dbRun<{ results: DbResult[] }>(props.conn, 'query', dbName.value, { sql, session: props.sid, max: 1000 })
+  const db = dbName.value
+  const r = dbRun<{ results: DbResult[] }>(props.conn, 'query', db, { sql, session: props.sid, max: 1000 })
   cancel = r.cancel
   try {
     const out = await r.done
     results.value = out.results
+    resultDb.value = db
     totalMs.value = Date.now() - started
     const firstRows = out.results.findIndex((x) => x.columns?.length)
     const firstErr = out.results.findIndex((x) => x.error)
     active.value = firstErr >= 0 ? 'msg' : firstRows >= 0 ? String(firstRows) : 'msg'
-    pushHistory({ sql, db: dbName.value, at: Date.now(), ok: firstErr < 0, ms: totalMs.value })
+    pushHistory({ sql, db, at: Date.now(), ok: firstErr < 0, ms: totalMs.value })
     // 改了结构：刷新补全
     if (out.results.some((x) => /^\s*(CREATE|DROP|ALTER|RENAME)\b/i.test(x.sql))) void loadCompletion()
   } catch (e) {
@@ -113,6 +119,7 @@ async function run(text: string) {
 
 function runCurrent() {
   if (!editor) return
+  if (readOnlySQL.value) return runAll()
   void run(editor.selection() || editor.current())
 }
 function runAll() {
@@ -132,9 +139,10 @@ function useHistory(h: Hist) {
 const rowResults = computed(() => results.value.map((r, i) => ({ r, i })).filter((x) => x.r.columns?.length))
 
 async function exportResult(r: DbResult, format: 'csv' | 'sql') {
+  const db = resultDb.value
   const out = await pickSaveFile('导出查询结果', `查询结果.${format}`, format === 'csv' ? 'CSV 表格' : 'SQL 文件', [format])
   if (!out) return
-  startTask(`导出 ${props.conn.name} 的查询结果`, ['db', 'export', props.conn.id, dbName.value], (t) => {
+  startTask(`导出 ${props.conn.name} 的查询结果`, ['db', 'export', props.conn.id, db], (t) => {
     if (t.status === 'ok') {
       ElMessage.success({ message: `已导出到 ${out}`, duration: 4000 })
       void reveal(out)
@@ -175,7 +183,7 @@ onMounted(() => {
   editor = createSqlEditor({
     parent: host.value!,
     doc: props.sql,
-    kind: props.conn.kind === 'postgres' ? 'postgres' : 'mysql',
+    kind: props.conn.kind === 'redis' || props.conn.kind === 'mongodb' ? 'mysql' : props.conn.kind,
     dark: isDark(),
     onChange: (t) => emit('update:sql', t),
     onRun: (t) => void run(t),
@@ -190,7 +198,7 @@ onBeforeUnmount(() => {
   observer?.disconnect()
   editor?.view.destroy()
   cancel?.()
-  closeDbSession(props.conn.id, props.sid)
+  if (!readOnlySQL.value) closeDbSession(props.conn.id, props.sid)
 })
 
 defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor) { const v = editor.view; v.dispatch(v.state.replaceSelection(s)); v.focus() } } })
@@ -199,14 +207,14 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
 <template>
   <div class="q" @keydown.capture="onKey">
     <div class="bar">
-      <el-select v-model="dbName" size="small" filterable class="dbsel" :placeholder="conn.kind === 'mysql' ? '选库' : '库'">
+      <el-select v-if="conn.kind !== 'sqlite'" v-model="dbName" size="small" filterable class="dbsel" :placeholder="conn.kind === 'mysql' ? '选库' : '库'">
         <el-option v-if="dbName && !databases.some((d) => d.name === dbName)" :value="dbName" :label="dbName" />
         <el-option v-for="d in databases" :key="d.name" :value="d.name" :label="d.name" />
       </el-select>
-      <el-button size="small" type="primary" :icon="CaretRight" :loading="running" @click="runCurrent">执行当前句</el-button>
-      <el-button size="small" :icon="VideoPlay" :disabled="running" @click="runAll">全部执行</el-button>
+      <el-button size="small" type="primary" :icon="CaretRight" :loading="running" @click="runCurrent">{{ readOnlySQL ? '执行查询' : '执行当前句' }}</el-button>
+      <el-button v-if="!readOnlySQL" size="small" :icon="VideoPlay" :disabled="running" @click="runAll">全部执行</el-button>
       <el-button v-if="running" size="small" type="danger" :icon="CircleClose" @click="stop">停止</el-button>
-      <span class="keys">Ctrl+Enter 执行光标所在的一条（或选中的），F9 执行全部</span>
+      <span class="keys">{{ readOnlySQL ? 'Ctrl+Enter 执行查询，可选中一段 SQL' : 'Ctrl+Enter 执行光标所在的一条（或选中的），F9 执行全部' }}</span>
       <span class="grow" />
       <el-tag v-if="conn.readOnly" size="small" type="info">只读</el-tag>
       <el-dropdown v-if="saved" split-button size="small" trigger="click" @click="emit('save', false)" @command="emit('save', true)">
@@ -254,7 +262,7 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item command="csv">导出为 CSV（重新执行，不限行数）</el-dropdown-item>
-                      <el-dropdown-item command="sql">导出为 SQL（INSERT 语句）</el-dropdown-item>
+                      <el-dropdown-item v-if="!readOnlySQL" command="sql">导出为 SQL（INSERT 语句）</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>

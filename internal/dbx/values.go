@@ -50,6 +50,7 @@ type Result struct {
 var binaryTypes = map[string]bool{
 	"BLOB": true, "TINYBLOB": true, "MEDIUMBLOB": true, "LONGBLOB": true, "BINARY": true, "VARBINARY": true,
 	"GEOMETRY": true, "POINT": true, "LINESTRING": true, "POLYGON": true, "BIT": true, "BYTEA": true,
+	"IMAGE": true, "GEOGRAPHY": true,
 }
 
 // IsBinaryType 这种类型的值按二进制显示。
@@ -114,6 +115,11 @@ func cell(v any, typ string) any {
 	case nil:
 		return nil
 	case []byte:
+		if typ == "UNIQUEIDENTIFIER" {
+			if id, ok := sqlServerUUID(x); ok {
+				return id
+			}
+		}
 		if IsBinaryType(typ) || !utf8.Valid(x) {
 			n := len(x)
 			if len(x) > MaxHex {
@@ -161,6 +167,10 @@ func formatTime(t time.Time, typ string) string {
 		return t.Format("15:04:05.999999")
 	case "TIMESTAMPTZ":
 		return t.Format("2006-01-02 15:04:05.999999Z07:00")
+	case "DATETIMEOFFSET":
+		return t.Format("2006-01-02 15:04:05.9999999Z07:00")
+	case "DATETIME2":
+		return t.Format("2006-01-02 15:04:05.9999999")
 	}
 	return t.Format("2006-01-02 15:04:05.999999")
 }

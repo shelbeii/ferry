@@ -13,14 +13,23 @@ import (
 //
 //	FERRY_REDIS_LIVE=127.0.0.1:63791 FERRY_REDIS_PASSWORD=… go test ./internal/dbx -run RedisLive
 func TestRedisLive(t *testing.T) {
-	addr := os.Getenv("FERRY_REDIS_LIVE")
+	testRedisLive(t, "FERRY_REDIS_LIVE", "FERRY_REDIS_PASSWORD", "Redis")
+}
+
+func TestValkeyLive(t *testing.T) {
+	testRedisLive(t, "FERRY_VALKEY_LIVE", "FERRY_VALKEY_PASSWORD", "Valkey")
+}
+
+func testRedisLive(t *testing.T, endpointEnv, passwordEnv, product string) {
+	t.Helper()
+	addr := os.Getenv(endpointEnv)
 	if addr == "" {
-		t.Skip("没有设置 FERRY_REDIS_LIVE")
+		t.Skip("没有设置 " + endpointEnv)
 	}
 	ctx := context.Background()
 	host, port, _ := strings.Cut(addr, ":")
 	pn, _ := strconv.Atoi(port)
-	pw := os.Getenv("FERRY_REDIS_PASSWORD")
+	pw := os.Getenv(passwordEnv)
 	c := &Conn{ID: "live-redis", Name: "redis", Kind: Redis, Host: host, Port: pn, Database: "9"}
 	m := &Manager{clients: map[string]*Client{}}
 
@@ -42,7 +51,7 @@ func TestRedisLive(t *testing.T) {
 	}
 	defer release()
 	t.Log("version", cl.Version)
-	if !strings.HasPrefix(cl.Version, "Redis ") {
+	if !strings.HasPrefix(cl.Version, product+" ") {
 		t.Errorf("版本：%q", cl.Version)
 	}
 	db := "" // 连接的默认库 9
