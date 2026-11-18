@@ -15,6 +15,8 @@ func diskFreeMB(string) int64 { return -1 }
 
 func diskInfo(string) (int64, int64, bool) { return -1, -1, false }
 
+func noExecMount(string) bool { return false }
+
 func ownershipOf(string) (Ownership, error) { return Ownership{}, errors.New("只支持 Linux") }
 
 func ownerOf(path string) (int, os.FileMode, error) {

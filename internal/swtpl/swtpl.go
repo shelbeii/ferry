@@ -41,6 +41,8 @@ type Template struct {
 	Origin   string    `yaml:"origin,omitempty" json:"origin,omitempty"`
 	Params   []Param   `yaml:"params,omitempty" json:"params"`
 	Variants []Variant `yaml:"variants" json:"variants"`
+	// Extras 安装时可以补充的配置项（参数没有覆盖到的设置），见 extra.go
+	Extras []Extra `yaml:"extras,omitempty" json:"extras,omitempty"`
 
 	Builtin bool   `yaml:"-" json:"builtin"`
 	File    string `yaml:"-" json:"file,omitempty"` // 用户模板的文件
@@ -109,18 +111,19 @@ type ConfigFile struct {
 
 // Package 上传到服务器的安装包。
 type Package struct {
-	URL      string   `yaml:"url,omitempty" json:"url,omitempty"`           // 下载地址；空 = 只能导入
-	File     string   `yaml:"file,omitempty" json:"file,omitempty"`         // 官方文件名（导入时按它认出是哪个模板、哪个版本）
-	GitHub   string   `yaml:"github,omitempty" json:"github,omitempty"`     // 最新版本看这个仓库的 releases/latest；下载走 GitHub 加速
-	Probe    string   `yaml:"probe,omitempty" json:"probe,omitempty"`       // 最新版本：从 fallback 起把最后一段加 1，试这个地址是否存在
-	Fallback string   `yaml:"fallback,omitempty" json:"fallback,omitempty"` // 查不到最新版本时用的版本
-	Mirrors  []string `yaml:"mirrors,omitempty" json:"mirrors,omitempty"`   // url 下载不到时依次试这些地址
-	Size     string   `yaml:"size,omitempty" json:"size,omitempty"`         // 大约多大
-	Format   string   `yaml:"format,omitempty" json:"format,omitempty"`     // tar.gz | tar.xz | zip | jar | binary；空 = 按文件名
-	Strip    int      `yaml:"strip,omitempty" json:"strip,omitempty"`       // 解压时去掉几层目录
-	Into     string   `yaml:"into,omitempty" json:"into,omitempty"`         // 解到安装目录下的哪里（jar / binary 为文件名）
-	Check    string   `yaml:"check,omitempty" json:"check,omitempty"`       // 压缩包里必须有的文件（去掉 strip 之后的路径）
-	MD5URL   string   `yaml:"md5,omitempty" json:"md5,omitempty"`           // 校验用的 md5 文件地址
+	URL         string   `yaml:"url,omitempty" json:"url,omitempty"`                 // 下载地址；空 = 只能导入
+	File        string   `yaml:"file,omitempty" json:"file,omitempty"`               // 官方文件名（导入时按它认出是哪个模板、哪个版本）
+	GitHub      string   `yaml:"github,omitempty" json:"github,omitempty"`           // 最新版本看这个仓库的 releases/latest；下载走 GitHub 加速
+	Probe       string   `yaml:"probe,omitempty" json:"probe,omitempty"`             // 最新版本：从 fallback 起把最后一段加 1，试这个地址是否存在
+	Fallback    string   `yaml:"fallback,omitempty" json:"fallback,omitempty"`       // 查不到最新版本时用的版本
+	Recommended string   `yaml:"recommended,omitempty" json:"recommended,omitempty"` // 安装时优先使用的已验证版本
+	Mirrors     []string `yaml:"mirrors,omitempty" json:"mirrors,omitempty"`         // url 下载不到时依次试这些地址
+	Size        string   `yaml:"size,omitempty" json:"size,omitempty"`               // 大约多大
+	Format      string   `yaml:"format,omitempty" json:"format,omitempty"`           // tar.gz | tar.xz | zip | jar | binary；空 = 按文件名
+	Strip       int      `yaml:"strip,omitempty" json:"strip,omitempty"`             // 解压时去掉几层目录
+	Into        string   `yaml:"into,omitempty" json:"into,omitempty"`               // 解到安装目录下的哪里（jar / binary 为文件名）
+	Check       string   `yaml:"check,omitempty" json:"check,omitempty"`             // 压缩包里必须有的文件（去掉 strip 之后的路径）
+	MD5URL      string   `yaml:"md5,omitempty" json:"md5,omitempty"`                 // 校验用的 md5 文件地址
 }
 
 // System 用服务器的软件源安装。
@@ -142,9 +145,10 @@ type File struct {
 
 // Props 修改配置文件里的项（key=value 或 key value）。
 type Props struct {
-	File string            `yaml:"file" json:"file"`
-	Sep  string            `yaml:"sep,omitempty" json:"sep,omitempty"` // 默认 =
-	Set  map[string]string `yaml:"set" json:"set"`
+	File           string            `yaml:"file" json:"file"`
+	Sep            string            `yaml:"sep,omitempty" json:"sep,omitempty"` // 默认 =
+	Set            map[string]string `yaml:"set" json:"set"`
+	VersionPattern string            `yaml:"versionPattern,omitempty" json:"versionPattern,omitempty"` // 只应用于匹配的版本
 }
 
 // Step 在服务器上执行的一步（root）。
@@ -162,9 +166,10 @@ type Step struct {
 
 // HTTP 就绪后调用的接口（如初始化管理员密码）。
 type HTTP struct {
-	Post  string            `yaml:"post" json:"post"`
-	Form  map[string]string `yaml:"form,omitempty" json:"form,omitempty"`
-	Retry int               `yaml:"retry,omitempty" json:"retry,omitempty"` // 重试秒数
+	Post          string            `yaml:"post" json:"post"`
+	Form          map[string]string `yaml:"form,omitempty" json:"form,omitempty"`
+	Retry         int               `yaml:"retry,omitempty" json:"retry,omitempty"`                 // 重试秒数
+	ResponseField string            `yaml:"responseField,omitempty" json:"responseField,omitempty"` // 必须有非空字符串的 JSON 字段
 }
 
 // Service 怎么运行（systemd 单元 ferry-<名称>.service）。
@@ -236,8 +241,12 @@ func (t *Template) Validate() error {
 		if v.Package == nil && v.System == nil {
 			return fmt.Errorf("%s：要写 package（上传安装包）或 system（系统软件源）", where)
 		}
-		if v.Service.Exec == "" || v.Service.Ready.Port == "" {
+		exec := strings.Fields(v.Service.Exec)
+		if len(exec) == 0 || v.Service.Ready.Port == "" {
 			return fmt.Errorf("%s：缺少 service.exec 或 service.ready.port", where)
+		}
+		if strings.HasSuffix(strings.Trim(exec[0], "'\""), "/") {
+			return fmt.Errorf("%s：service.exec 必须指向程序文件", where)
 		}
 		if v.User == "" || v.User == "root" {
 			return fmt.Errorf("%s：user 要写一个非 root 的运行用户", where)
@@ -248,7 +257,7 @@ func (t *Template) Validate() error {
 			}
 		}
 		if se := v.SELinux; se != nil {
-			for _, x := range []string{se.Files, se.Port} {
+			for _, x := range []string{se.Files, se.Port, se.Exec} {
 				if x != "" && !regexp.MustCompile(`^[a-z][a-z0-9_]*_t$`).MatchString(x) {
 					return fmt.Errorf("%s：selinux 的类型要写成 xxx_t：%q", where, x)
 				}
@@ -277,6 +286,11 @@ func (t *Template) Validate() error {
 				return fmt.Errorf("%s：步骤的 sets 要写参数名，没有参数 %s", where, s.Sets)
 			}
 		}
+		for _, p := range v.Props {
+			if _, err := regexp.Compile(p.VersionPattern); err != nil {
+				return fmt.Errorf("%s：props.versionPattern 无效：%w", where, err)
+			}
+		}
 		// 用到的变量都要有；随机串不能太长（AI 写错成很大的数时会一下子用掉大量内存）
 		var unknown, badRandom []string
 		walk(&v, func(s string) {
@@ -298,7 +312,7 @@ func (t *Template) Validate() error {
 			return fmt.Errorf("%s：用到了没有定义的变量 %s", where, strings.Join(dedupe(unknown), "、"))
 		}
 	}
-	return nil
+	return t.validateExtras(keys)
 }
 
 // maxRandom ${random:N} 最长多少。

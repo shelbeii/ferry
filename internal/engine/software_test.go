@@ -2,17 +2,74 @@ package engine
 
 import (
 	"debug/elf"
+	"encoding/base64"
 	"encoding/binary"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/swpkg"
 	"github.com/captain/ferry/internal/swtpl"
 )
+
+func TestLearnedUploadLimit(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		record           string
+		configured, want int
+	}{
+		{`{"streams":3,"until":"2026-11-17T12:15:00Z"}`, 6, 3},
+		{`{"streams":3,"until":"2026-11-17T12:15:00Z"}`, 2, 2},
+		{`{"streams":3,"until":"2026-11-17T11:59:00Z"}`, 6, 6},
+		{`{"streams":0,"until":"2026-11-17T12:15:00Z"}`, 6, 6},
+	} {
+		if got := limitUploadStreams([]byte(tc.record), tc.configured, now); got != tc.want {
+			t.Errorf("流数 %d，期望 %d", got, tc.want)
+		}
+	}
+}
+
+func TestNacosVersionedAuthPlan(t *testing.T) {
+	tpl, err := swtpl.Find(t.TempDir(), "nacos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &tpl.Variants[0]
+	if v.Package.Recommended != "3.2.4" {
+		t.Fatalf("推荐版本：%q", v.Package.Recommended)
+	}
+	for version, key := range map[string]string{
+		"3.2.4":   "nacos.core.auth.plugin.nacos.token.secret.key",
+		"3.3.0":   "nacos.plugin.auth.nacos.token.secret.key",
+		"v3.10.2": "nacos.plugin.auth.nacos.token.secret.key",
+	} {
+		t.Run(version, func(t *testing.T) {
+			plan, err := renderPlan(tpl, v, swtpl.Vars{
+				"name": "nacos", "dir": "/opt/qa/nacos", "host": "localhost",
+				"java": "/usr/bin/java", "port": "8848", "console": "8080",
+				"memory": "512m", "password": "test-password", "version": version,
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plan.Props) != 2 || len(plan.Props[1].Set) != 2 {
+				t.Fatalf("应只生成当前版本的设置：%d", len(plan.Props))
+			}
+			decoded, err := base64.StdEncoding.DecodeString(plan.Props[1].Set[key])
+			if err != nil || len(decoded) != 48 {
+				t.Fatal("鉴权签名键缺失或格式错误")
+			}
+			last := plan.Steps[len(plan.Steps)-1]
+			if last.Sets != "password" || last.HTTP.ResponseField != "accessToken" {
+				t.Fatal("密码可用性应通过实际登录检查")
+			}
+		})
+	}
+}
 
 // 每个内置模板的每种装法都能渲染出安装计划（没有漏掉的变量、端口是数字）。
 func TestRenderBuiltin(t *testing.T) {

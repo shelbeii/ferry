@@ -16,6 +16,7 @@ type AuditEntry struct {
 	Target  string    `json:"target,omitempty"`  // 目标（服务器）
 	Host    string    `json:"host,omitempty"`    // 服务器地址（本机那份里有）
 	Session string    `json:"session,omitempty"` // Ferry 的会话：同一次打开的终端的开、关是同一个
+	TaskID  string    `json:"taskId,omitempty"`  // 安装任务 ID
 	Kind    string    `json:"kind"`              // 做了什么，见 AuditKinds
 	Object  string    `json:"object,omitempty"`  // 对象：应用、文件路径、软件实例、端口、数据库……
 	Detail  string    `json:"detail,omitempty"`  // 细节：SQL（截到 2 KB）、大小、时长……（不记文件内容、查询结果、终端里敲的）
@@ -36,7 +37,8 @@ const AuditMaxDetail = 2048
 
 // AuditKinds 审计记录的类型和中文名。
 var AuditKinds = map[string]string{
-	"deploy": "部署", "rollback": "回滚", "control": "启停应用", "runjob": "运行定时任务", "runtime": "安装 JDK",
+	"deploy": "部署", "rollback": "回滚", "control": "启停应用", "runjob": "运行定时任务", "runtime": "安装 JDK", "runtime-remove": "卸载 JDK",
+	"runtime-install": "安装运行环境", "runtime-uninstall": "卸载运行环境",
 	"https-renew":   "续期 HTTPS 证书",
 	"secretset":     "更新应用密钥",
 	"terminal-open": "打开终端", "terminal-close": "关闭终端",
@@ -91,9 +93,19 @@ func AuditOf(cmd string, q *Request) (kind, object, detail string, ok bool) {
 		return "https-renew", apps(), "", true
 	case "runtime":
 		if q.Runtime != nil {
+			if q.Runtime.Kind != "" && q.Runtime.Kind != "nginx" {
+				return "runtime-install", q.Runtime.ID, q.Runtime.Dir, true
+			}
 			return "runtime", q.Runtime.ID, "", true
 		}
 		return "runtime", "", "", true
+	case "jdkremove":
+		if q.Runtime != nil {
+			return "runtime-remove", q.Runtime.ID, q.Runtime.Dir, true
+		}
+		return "runtime-remove", "", "", true
+	case "runtimeremove":
+		return "runtime-uninstall", q.RuntimePath, "", true
 	case "swinstall", "swupgrade":
 		k := map[string]string{"swinstall": "software-install", "swupgrade": "software-upgrade"}[cmd]
 		if p := q.Install; p != nil {

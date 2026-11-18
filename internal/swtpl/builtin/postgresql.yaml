@@ -82,3 +82,19 @@ variants:
     logs: *logs
     configs: *configs
     notes: *notes
+
+# 安装时可以补充的配置（参数没有的设置）：作为启动参数 -c 名称=值 传给 postgres
+extras:
+  - id: conf
+    label: PostgreSQL 配置（启动参数 -c）
+    format: args
+    prefix: "-c "
+    help: 作为启动参数传给 postgres，优先于 postgresql.conf：以后要改这些项，改服务单元里的启动命令
+    protect: [config_file, data_directory, hba_file, ident_file, external_pid_file, logging_collector, unix_socket_permissions]
+    suggest:
+      - {key: max_connections, example: "200", help: 最多同时连接数}
+      - {key: shared_buffers, example: 1GB, help: 共享缓存，一般设为内存的 25%}
+      - {key: effective_cache_size, example: 4GB, help: 估计系统能用来缓存的内存，影响执行计划}
+      - {key: work_mem, example: 16MB, help: 每个排序、哈希操作能用的内存}
+      - {key: timezone, example: Asia/Shanghai, help: 数据库的时区}
+      - {key: log_timezone, example: Asia/Shanghai, help: 日志里时间的时区}

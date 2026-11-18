@@ -131,3 +131,21 @@ variants:
     logrotate: true
     configs: *configs
     notes: *notes
+
+# 安装时可以补充的配置（参数没有的设置）：合并进 my.cnf 的 [mysqld]
+extras:
+  - id: mysqld
+    label: MariaDB 配置（my.cnf 的 [mysqld]）
+    format: ini
+    file: ${dir}/my.cnf
+    section: mysqld
+    help: 写 [mysqld] 段的选项，同名的替换模板里的值；只写选项名的（如 skip-name-resolve）值留空
+    protect: [user, skip-networking, skip-grant-tables, defaults-file, defaults-extra-file]
+    suggest:
+      - {key: innodb_buffer_pool_size, example: 1G, help: 缓存表数据和索引的内存，专用服务器一般设为内存的 50%～70%}
+      - {key: max_connections, example: "1000", help: 最多同时连接数}
+      - {key: default-time-zone, example: "+08:00", help: 数据库的时区}
+      - {key: sql_mode, example: "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION", help: SQL 模式}
+      - {key: collation-server, example: utf8mb4_general_ci, help: 默认排序规则}
+      - {key: max_allowed_packet, example: 64M, help: 单个语句、数据包的最大值}
+      - {key: skip-name-resolve, help: 不按客户端 IP 反查主机名（值留空）}

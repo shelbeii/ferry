@@ -123,6 +123,8 @@ const usage = `ferry —— 后端 / 前端部署工具
                                 团队里所有人的都在服务器上；--local 只看这台电脑上记的。ferry audit --local 看这台电脑上记的全部
   software <目标>               查看服务器上已有的软件（MySQL、Redis、Nacos……，包括 Docker / 1Panel 装的）；只读
   software install <目标> <模板> [选项]   按模板安装软件（ferry software 查看全部用法）
+  software jdk list|install|remove <目标>   查看、预装或卸载服务器上的 JDK
+  software runtime list|install|remove <目标>   管理服务器上的运行环境
   software start|stop|restart|remove|logs|password <目标> <名称>   Ferry 安装的软件
   software templates | template | latest | lib   软件模板、本机的安装包库
   port     <目标>               服务器上的端口（谁在用）和防火墙放行了哪些
@@ -187,9 +189,13 @@ type cli struct {
 
 var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": true, "limit": true, "offset": true, "tool": true, "client": true, "result": true, "since": true, "until": true, "q": true, "n": true, "expect": true, "key": true, "passphrase": true, "account": true,
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
-	"version": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
+	"version": true, "channel": true, "component": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
 	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "mem": true, "load": true, "ping": true, "keep-files": true, "query": true,
-	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true, "action": true, "snapshot": true, "app": true}
+	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true, "action": true, "snapshot": true, "app": true,
+	"conf": true}
+
+// repeatFlags 可以写几次的选项：值按行连起来
+var repeatFlags = map[string]bool{"conf": true}
 var boolFlags = map[string]bool{
 	"with-secrets": true,
 	"y":            true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
@@ -225,6 +231,9 @@ func parseArgs(argv []string) (*cli, error) {
 				}
 				i++
 				val = argv[i]
+			}
+			if old, ok := c.flags[name]; ok && repeatFlags[name] {
+				val = old + "\n" + val
 			}
 			c.flags[name] = val
 		case boolFlags[name]:
@@ -1760,6 +1769,12 @@ func settingsCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.S
 		next := settings.Defaults()
 		if err := json.Unmarshal([]byte(raw), &next); err != nil {
 			return fail(fmt.Errorf("设置格式错误：%w", err))
+		}
+		next.Runtime.Source = strings.TrimSpace(next.Runtime.Source)
+		if next.Runtime.Source != strings.TrimSpace(st.Runtime.Source) {
+			if err := jdk.ValidateSource(next.Runtime.Source); err != nil {
+				return fail(err)
+			}
 		}
 		var changes []settings.SecretChange
 		if c.has("with-secrets") {

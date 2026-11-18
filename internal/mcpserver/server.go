@@ -44,7 +44,7 @@ const instructions = `Ferry 是把后端（Java、Go 等原生程序、Python、
   list_projects 里的 machine 是这台电脑上缺的东西（别的电脑上的私钥、源码目录），要用户在 Ferry 的「本机设置」里补上。
 - 改动服务器：deploy 部署（先在本机构建；targets 一次部署到几台，可以分批、先发几台让用户确认、有一台失败就把已切换的回滚）、app_control 启动 / 停止 / 重启（定时任务的停止 = 关掉定时器、启动 = 打开）、rollback 回滚、run_job 现在运行一次定时任务。用户在 Ferry 设置里打开了「允许编程软件请求改动」才能用，
   每次都要用户确认（在 Ferry 桌面版弹窗，或者用户设置了在编程软件里确认时在这里），用户同意后由桌面版执行（最多等 5 分钟确认）；生产服务器不允许。用户拒绝后不要换个办法做同样的事，先问用户。
-  run_change_command 执行改动服务器的命令，write_file 写文件（改配置文件用它，确认时显示差异、自动备份原文件），software_templates / software_install 用模板装软件，software_upgrade 升级、software_restore 恢复卸载时保留了数据的、software_backup 给装好的数据库设置数据备份（Ferry 装的软件），
+  run_change_command 执行改动服务器的命令，write_file 写文件（改配置文件用它，确认时显示差异、自动备份原文件），software_templates / software_install 用模板装软件（模板参数没有的设置写在 software_install 的 extra 里，不要另写模板），software_upgrade 升级、software_restore 恢复卸载时保留了数据的、software_backup 给装好的数据库设置数据备份（Ferry 装的软件），
   template_guide / save_software_template 写、存软件模板；要用户提供密码、账号时用 ask_secret（用户在 Ferry 里填，你只拿到代号 {{secret:名字}}，
   命令里用环境变量 "$FERRY_SECRET_<名字大写>"，写文件、装软件的参数里写代号），不要让用户在对话里发密码。
   backup_run 现在备份一次（改数据库、数据目录前先备份），backup_fetch 把异地的一份备份取回服务器（服务器上的那份没了时；取回后恢复要用户在 Ferry 里做）。打开 / 关闭告警和数据备份、恢复备份只能由用户在 Ferry 里做。

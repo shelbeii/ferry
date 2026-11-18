@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/zipx"
@@ -39,15 +40,25 @@ func (a *Agent) swcheck() int {
 		out.Blocked = a.blockedDirs(c.User, c.Dir, false)
 		out.FreeMB, out.Inodes, out.ReadOnly = diskInfo(nearestDir(c.Dir))
 		out.StageFreeMB, _, _ = diskInfo(nearestDir(a.incomingDir()))
+		if c.ExecuteInDir && noExecMount(nearestDir(c.Dir)) {
+			return a.result(proto.CodeBadInput, "安装目录所在的挂载点设置了 noexec："+c.Dir+"。请选择允许执行程序的目录", nil)
+		}
 	}
 	if c.JavaDir != "" {
 		if err := validInstallDir(c.JavaDir); err != nil {
 			return a.result(proto.CodeBadInput, "JDK "+err.Error(), nil)
 		}
 		out.JavaHome = a.findJDK(c.JavaDir, c.Java)
+		javaPath := c.JavaDir
+		if out.JavaHome != "" {
+			javaPath = out.JavaHome
+		}
+		if noExecMount(nearestDir(javaPath)) {
+			return a.result(proto.CodeBadInput, "JDK 目录所在的挂载点设置了 noexec："+c.JavaDir, nil)
+		}
 		if c.User != "" {
-			_, err := os.Stat(c.JavaDir)
-			for _, b := range a.blockedDirs(c.User, c.JavaDir, err == nil) {
+			_, err := os.Stat(javaPath)
+			for _, b := range a.blockedDirs(c.User, javaPath, err == nil) {
 				if !blockedHas(out.Blocked, b.Path) {
 					out.Blocked = append(out.Blocked, b)
 				}
@@ -59,7 +70,69 @@ func (a *Agent) swcheck() int {
 			out.Cached = true
 		}
 	}
+	if c.NeedXZ {
+		if _, err := a.Sys.Shell("command -v xz", 10*time.Second); err != nil {
+			return a.result(proto.CodeBadInput, "服务器缺少 xz，不能解压这个安装包。请先安装 xz 或 xz-utils", nil)
+		}
+	}
+	if c.System != nil {
+		mgr := a.pkgManager()
+		if err := checkSystemBundle(mgr, c.System.Bundle); err != nil {
+			return a.result(proto.CodeBadInput, err.Error(), nil)
+		}
+		pkgs := systemPackages(c.System, mgr)
+		if len(pkgs) == 0 && c.System.Require != "" {
+			return a.result(proto.CodeBadInput, "当前服务器的软件包管理器不支持这套安装方案", nil)
+		}
+		_, want, alternatives := a.installedPackages(mgr, pkgs)
+		out.RequiredPackages = append(want, alternatives...)
+		out.MissingPackages = append(out.MissingPackages, out.RequiredPackages...)
+	}
+	if c.SELinux != nil && a.selinuxEnforcing() {
+		if _, err := a.Sys.Shell("command -v semanage", 10*time.Second); err != nil {
+			out.MissingPackages = append(out.MissingPackages, "semanage")
+		}
+	}
 	return a.result(proto.CodeOK, "", out)
+}
+
+// swresolve 模拟包事务。包管理器可以刷新索引，但不会安装或改动已装的软件包。
+func (a *Agent) swresolve() int {
+	spec := a.req.SwResolve
+	if spec == nil || len(spec.Packages) == 0 {
+		return a.result(proto.CodeBadInput, "没有要检查的软件包", nil)
+	}
+	if err := validatePackageNames(spec.Packages); err != nil {
+		return a.result(proto.CodeBadInput, err.Error(), nil)
+	}
+	mgr := a.pkgManager()
+	if mgr == "" {
+		return a.result(proto.CodeBadInput, "服务器没有可用的 dnf、yum 或 apt-get", nil)
+	}
+	pl := &proto.SoftwarePlan{Proxy: spec.Proxy, NoProxy: spec.NoProxy}
+	env := proxyEnvPrefix(pl)
+	if spec.Proxy != "" && env == "" {
+		return a.result(proto.CodeBadInput, "软件源代理地址无效", nil)
+	}
+	deadline := time.Now().Add(time.Minute)
+	run := func(_ string, cmd string, timeout time.Duration) (string, error) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return "", fmt.Errorf("软件包预检超时（1 分钟）")
+		}
+		return a.Sys.Shell(cmd, min(remaining, timeout))
+	}
+	_, want, alternatives := a.installedPackages(mgr, spec.Packages)
+	want = append(want, pickPackages(run, mgr, env, alternatives)...)
+	var changes []string
+	if len(want) > 0 {
+		var err error
+		changes, err = pkgChanges(run, mgr, env, want, nil)
+		if err != nil {
+			return a.result(proto.CodeFailed, err.Error(), nil)
+		}
+	}
+	return a.result(proto.CodeOK, "", proto.SwResolution{Packages: want, Changes: changes})
 }
 
 // nearestDir p 或它最近的已经存在的上级目录。

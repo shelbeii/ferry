@@ -4,11 +4,14 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/captain/ferry/internal/proto"
 )
@@ -51,6 +54,7 @@ func TestValidatePlan(t *testing.T) {
 		"包名":         func(p *proto.SoftwarePlan) { p.System = &proto.PlanSystem{DNF: []string{"redis; rm -rf /"}} },
 		"环境变量换行":     func(p *proto.SoftwarePlan) { p.Env["PW"] = "a\nb" },
 		"启动命令换行":     func(p *proto.SoftwarePlan) { p.Exec = "a\nExecStartPre=/bin/x" },
+		"启动命令是目录":    func(p *proto.SoftwarePlan) { p.Exec = "/opt/ferry-software/nacos/bin/ --flag" },
 		"既没安装包也没软件源": func(p *proto.SoftwarePlan) { p.Package = nil },
 		"账号带引号":      func(p *proto.SoftwarePlan) { p.Account = "a'b" },
 	}
@@ -60,6 +64,40 @@ func TestValidatePlan(t *testing.T) {
 		if err := validatePlan(p); err == nil {
 			t.Errorf("%s：应当拒绝", what)
 		}
+	}
+}
+
+func TestCheckResponseField(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"accessToken":"signed"}`:            true,
+		`{"accessToken":null}`:                false,
+		`{"accessToken":""}`:                  false,
+		`{"message":"authentication failed"}`: false,
+		`<html>gateway error</html>`:          false,
+	} {
+		if got := checkResponseField(strings.NewReader(body), "accessToken") == nil; got != want {
+			t.Errorf("响应 %s 验证结果 = %v", body, got)
+		}
+	}
+}
+
+func TestSoftwareELFDetectedArchitecture(t *testing.T) {
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("需要 Linux 的 ELF 测试可执行文件")
+	}
+	file, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkELFExecutable(file, runtime.GOARCH); err != nil {
+		t.Fatal(err)
+	}
+	other := "arm64"
+	if runtime.GOARCH == other {
+		other = "amd64"
+	}
+	if err := checkELFExecutable(file, other); err == nil || !strings.Contains(err.Error(), "不匹配") {
+		t.Fatalf("应拒绝另一种架构：%v", err)
 	}
 }
 
@@ -203,6 +241,50 @@ func TestSystemInstall(t *testing.T) {
 	}
 	if _, err := a.systemInstall("redis", &proto.PlanSystem{DNF: []string{"redis"}}, "", false); err == nil {
 		t.Error("没有包管理器时应当失败")
+	}
+}
+
+func TestSystemPackagePreviewOnlySimulates(t *testing.T) {
+	f := newFake(t)
+	f.shellFail["rpm -q --quiet 'nginx'"] = true
+	const dryRun = "LC_ALL=C dnf install --assumeno nginx 2>&1"
+	f.shellOut = map[string]string{dryRun: "Upgrading:\n openssl-libs x86_64 3.0.1\n\nTransaction Summary\n"}
+	req := &proto.Request{SwResolve: &proto.SwResolveSpec{Packages: []string{"nginx"}}}
+	result := exec1(t, f, "swresolve", req)
+	var plan proto.SwResolution
+	if result.code != proto.CodeOK || json.Unmarshal(result.result.Data, &plan) != nil ||
+		strings.Join(plan.Packages, ",") != "nginx" || strings.Join(plan.Changes, ",") != "openssl-libs（升级）" {
+		t.Fatal(result.dump())
+	}
+	if !slicesHas(f.calls, "sh "+dryRun) || slicesHas(f.calls, "sh dnf install -y nginx 2>&1") {
+		t.Fatalf("预检只能模拟安装：%v", f.calls)
+	}
+	req.SwResolve.Packages = []string{"nginx; id"}
+	if result := exec1(t, f, "swresolve", req); result.code != proto.CodeBadInput {
+		t.Fatal(result.dump())
+	}
+}
+
+func TestDependencyResolutionReportsRepositoryFailures(t *testing.T) {
+	for _, tc := range []struct {
+		manager, output, want string
+	}{
+		{"yum", "Cannot find a valid baseurl for repo: base/7/x86_64\nCould not retrieve mirrorlist http://mirrorlist.centos.org, HTTP 502\n", "旧镜像列表已停用"},
+		{"dnf", "Failed to download metadata for repo 'custom': Status code: 404\nNo match for argument: nginx\n", "Status code: 404"},
+		{"dnf", "No match for argument: nginx\n", "软件源里没有 nginx"},
+		{"dnf", "However, you do not have any GPG public keys installed.\nProblem repository: [custom]\n", "缺少签名公钥"},
+		{"apt-get", "E: Unable to locate package nginx\n", "APT 未能完整刷新软件包索引"},
+	} {
+		cmd := func(_ string, shell string, _ time.Duration) (string, error) {
+			if strings.Contains(shell, "apt-get update") {
+				return "W: Failed to fetch http://archive.example/debian/dists/x/InRelease\n", nil
+			}
+			return tc.output, errors.New("exit status 1")
+		}
+		_, err := pkgChanges(cmd, tc.manager, "", []string{"nginx"}, nil)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s：想要 %q，收到 %v", tc.manager, tc.want, err)
+		}
 	}
 }
 

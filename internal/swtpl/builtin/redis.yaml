@@ -81,3 +81,20 @@ variants:
     logrotate: true
     configs: *configs
     notes: *notes
+
+# 安装时可以补充的配置（参数没有的设置）：合并进 redis.conf
+extras:
+  - id: conf
+    label: Redis 配置（redis.conf）
+    format: keyvalue
+    file: ${dir}/redis.conf
+    help: 一行一项「名称 值」，同名的替换模板里的值
+    # 服务由 systemd 在前台运行；端口、目录、日志、密码用上面的参数
+    protect: [daemonize, supervised, pidfile, include, unixsocket]
+    suggest:
+      - {key: maxmemory, example: 2gb, help: 最多用多少内存，不设时不限制}
+      - {key: maxmemory-policy, example: allkeys-lru, help: 内存满了时删哪些键}
+      - {key: databases, example: "16", help: 库的个数}
+      - {key: timeout, example: "300", help: 客户端空闲多少秒后断开（0 = 不断开）}
+      - {key: appendfsync, example: everysec, help: AOF 多久写一次磁盘}
+      - {key: save, example: "900 1", help: RDB 快照条件；写 "" 关闭快照}

@@ -149,6 +149,7 @@ func (a *Agent) software() int {
 	addOSFamily(rep.OS, rep.PkgMgr)
 	rep.MemTotalMB, rep.MemAvailMB = memInfo("/proc/meminfo")
 	rep.Runtimes = a.installedRuntimes()
+	rep.JDKs = a.jdkInventory(rep.Runtimes)
 	rep.FerryDir = a.ferryDir()
 	for _, d := range []string{"/opt", "/data", "/home", "/srv", "/www"} {
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
@@ -983,10 +984,11 @@ func (sc *swScan) units(rep *proto.SoftwareReport, out string, err error, instVe
 		pids[it.PID] = true
 	}
 	type cand struct {
-		unit string
-		rule int
-		p    UnitProps
-		exe  string
+		unit    string
+		rule    int
+		p       UnitProps
+		exe     string
+		bundled bool
 	}
 	var cands []cand
 	for _, line := range splitLines(out) {
@@ -1011,13 +1013,15 @@ func (sc *swScan) units(rep *proto.SoftwareReport, out string, err error, instVe
 		if c.p = sc.unitProps(c.unit); c.p.Load == "not-found" {
 			return
 		}
-		if c.exe = sc.execStart(c.unit); c.exe != "" && instVer[c.unit] == "" {
+		c.exe = sc.execStart(c.unit)
+		c.bundled = sc.isInactiveNginxPackageUnit(c.unit, c.exe, c.p)
+		if !c.bundled && c.exe != "" && instVer[c.unit] == "" {
 			sc.version(swRules[c.rule], c.exe)
 		}
 	})
 	for _, c := range cands {
 		p := c.p
-		if p.Load == "not-found" || (p.PID > 0 && pids[p.PID]) {
+		if c.bundled || p.Load == "not-found" || (p.PID > 0 && pids[p.PID]) {
 			continue
 		}
 		it := proto.Software{Kind: swRules[c.rule].kind, Name: swRules[c.rule].name, State: "stopped", Via: "systemd", Unit: c.unit}
@@ -1043,6 +1047,22 @@ func (sc *swScan) units(rep *proto.SoftwareReport, out string, err error, instVe
 		}
 		rep.Items = append(rep.Items, it)
 	}
+}
+
+// isInactiveNginxPackageUnit 判断系统包附带的默认服务是否已经由共享同一程序的 Ferry 实例代替。
+func (sc *swScan) isInactiveNginxPackageUnit(unit, exe string, p UnitProps) bool {
+	if unit != "nginx.service" || exe == "" || p.Load != "loaded" || p.Active != "inactive" || p.PID != 0 || p.Enabled != "disabled" || p.DropInPaths != "" {
+		return false
+	}
+	if p.FragmentPath != "/usr/lib/systemd/system/nginx.service" && p.FragmentPath != "/lib/systemd/system/nginx.service" {
+		return false
+	}
+	for _, in := range sc.instances {
+		if in.Kind == "nginx" && in.Unit != "" && in.Unit != unit && in.Hosting != nil && !in.Hosting.System && in.Hosting.Binary == exe && sc.ferryUnit(in.Unit) {
+			return true
+		}
+	}
+	return false
 }
 
 // unitRule 单元名是哪种软件。

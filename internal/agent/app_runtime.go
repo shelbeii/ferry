@@ -73,7 +73,7 @@ func (a *Agent) appRuntimes() int {
 		a.programRuntimeChoices(s, &r)
 	}
 	if len(r.Choices) == 0 && r.CanSwitch {
-		r.Notes = append(r.Notes, "没有检测到可切换的运行环境；可先在软件中安装，或检查当前运行用户是否有访问权限后重新检测。")
+		r.Notes = append(r.Notes, "没有检测到可切换的运行环境；可先在「运行环境」中安装，或检查当前运行用户的权限。")
 	}
 	return a.result(proto.CodeOK, "", r)
 }
@@ -97,7 +97,21 @@ func (a *Agent) programRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoic
 	if fd == "" {
 		fd = "/usr/local/lib/ferry"
 	}
-	patterns := runtimePatterns(s.Type, fd)
+	var patterns []string
+	custom := map[string]bool{}
+	for _, item := range a.managedRuntimes() {
+		if item.Kind == s.Type {
+			patterns = append(patterns, shellQuote(item.Path))
+			custom[item.Path] = true
+		}
+	}
+	patterns = append(patterns, runtimePatterns(s.Type, fd)...)
+	if s.Type == proto.TypeJava {
+		for _, jdk := range a.customJDKs() {
+			patterns = append(patterns, shellQuote(jdk.Path))
+			custom[jdk.Path] = true
+		}
+	}
 	for _, candidate := range []string{s.Java, r.Current} {
 		if path.IsAbs(candidate) && !strings.HasSuffix(candidate, " (deleted)") && !strings.HasPrefix(candidate, a.appDir(s.Name)+"/") {
 			patterns = append(patterns, shellQuote(candidate))
@@ -125,8 +139,12 @@ func (a *Agent) programRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoic
 			break
 		}
 		seen[real] = true
-		choice := proto.AppRuntimeChoice{ID: s.Type + ":" + real, Path: real, Source: "服务器已安装", Current: real == r.Current || alias == r.Current}
-		if strings.HasPrefix(real, fd+"/") {
+		program := real
+		if custom[alias] && s.Type != proto.TypeJava {
+			program = alias // 保留安装清单中的入口，例如 bin/python3；它也用于创建 venv。
+		}
+		choice := proto.AppRuntimeChoice{ID: s.Type + ":" + program, Path: program, Source: "服务器已安装", Current: real == r.Current || alias == r.Current}
+		if strings.HasPrefix(real, fd+"/") || custom[alias] || custom[real] {
 			choice.Source = "Ferry 运行环境"
 		}
 		if allowed, err := a.Sys.AccessAs(s.User, real, 'x'); err != nil || !allowed {

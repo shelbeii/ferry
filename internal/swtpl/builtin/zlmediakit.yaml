@@ -58,9 +58,11 @@ variants:
 
           [rtsp]
           port=${rtsp}
+          sslport=0
 
           [rtmp]
           port=${rtmp}
+          sslport=0
 
           [rtp_proxy]
           port=${rtp}
@@ -113,3 +115,19 @@ variants:
       - RTSP ${rtsp}/TCP，RTMP ${rtmp}/TCP，WebRTC ${rtc}/TCP+UDP，RTP ${rtp}/TCP+UDP，SRT ${srt}/UDP
       - API secret 在「密码」中查看；首次生成自签名 TLS 证书，正式使用可替换证书后重启
       - 网页和媒体文件在 ${dir}/www，配置在 ${dir}/config.ini，日志在 ${dir}/logs
+
+# 安装时可以补充的配置（参数没有的设置）：合并进 config.ini，键写成「段.键」
+extras:
+  - id: ini
+    label: ZLMediaKit 配置（config.ini）
+    format: ini
+    file: ${dir}/config.ini
+    help: 键写成「段.键」，如 hook.enable；同名的替换模板里的值，没有的段会加上
+    # 这些会多占端口（安装时没有检查过）
+    protect: [rtsp.sslport, rtmp.sslport, shell.port, rtp_proxy.port_range, rtc.signalingPort, rtc.icePort, rtc.iceTcpPort]
+    suggest:
+      - {key: hook.enable, example: "1", help: 打开事件回调（推流鉴权、播放鉴权等）}
+      - {key: hook.on_publish, example: "http://127.0.0.1:8080/index/hook/on_publish", help: 推流时回调的地址}
+      - {key: protocol.enable_mp4, example: "1", help: 默认录制 MP4}
+      - {key: hls.segDur, example: "2", help: HLS 切片时长（秒）}
+      - {key: general.streamNoneReaderDelayMS, example: "20000", help: 没人观看多久后断开拉流（毫秒）}

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/artifact"
+	"github.com/captain/ferry/internal/flock"
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/remote"
 	"github.com/captain/ferry/internal/secret"
@@ -37,8 +40,11 @@ type SoftwareOptions struct {
 	FixParents bool
 	// AllowChanges 从软件源装包会顺带升级、删除已装的包时也继续（用户已同意）
 	AllowChanges bool
+	Preview      bool              // 只检查并返回安装计划
 	Params       map[string]string // 模板参数；password 不填时随机生成
-	PackageFile  string            // 用本机库里的这个安装包（没有下载地址的装法、自定义安装）
+	// Extra 附加配置：附加配置的 id → 键 → 值（模板只有一处附加配置时 id 可以写空）
+	Extra       map[string]map[string]string
+	PackageFile string // 用本机库里的这个安装包（没有下载地址的装法、自定义安装）
 	// Network 服务器上要下载东西（从软件源装包、模板步骤里的下载）时走谁的网络：
 	// local = 经这台电脑；server = 服务器自己的；空或 auto = 先看服务器连不连得上软件源，连不上的经这台电脑
 	Network string
@@ -47,8 +53,9 @@ type SoftwareOptions struct {
 // SoftwareResult 安装结果。
 type SoftwareResult struct {
 	proto.SoftwareInstance
-	Target   string `json:"target"`
-	Password string `json:"password,omitempty"`
+	Target   string           `json:"target"`
+	Plan     *SoftwarePreview `json:"plan,omitempty"`
+	Password string           `json:"password,omitempty"`
 	// Saved 密码已存进系统凭据库（以后在「密码」里能再看到）
 	Saved bool `json:"saved"`
 	// Public 其他机器能不能连：chosen = 选了「允许其他机器访问」；always = 模板没有这个选项（监听所有地址）；空 = 只有本机能连
@@ -56,6 +63,34 @@ type SoftwareResult struct {
 	// OpenPorts 其他机器要连时防火墙要放行的端口（含附加端口）；Public 为空时没有
 	OpenPorts []int `json:"openPorts,omitempty"`
 	OpenUDP   []int `json:"openUDP,omitempty"`
+}
+
+type SoftwarePreview struct {
+	Template        string   `json:"template"`
+	Variant         string   `json:"variant"`
+	Version         string   `json:"version,omitempty"`
+	Dir             string   `json:"dir"`
+	User            string   `json:"user"`
+	Java            int      `json:"java,omitempty"`
+	JavaHome        string   `json:"javaHome,omitempty"`
+	Network         string   `json:"network"`
+	MissingPackages []string `json:"missingPackages,omitempty"`
+	PackageChanges  []string `json:"packageChanges,omitempty"`
+	Package         string   `json:"package,omitempty"`
+	// Extras 这次会写进去的附加配置
+	Extras []ExtraPreview `json:"extras,omitempty"`
+}
+
+// ExtraPreview 一个附加配置会写进去的项。
+type ExtraPreview struct {
+	ID     string            `json:"id"`
+	Label  string            `json:"label"`
+	Format string            `json:"format"`
+	File   string            `json:"file,omitempty"`
+	Items  []swtpl.ExtraItem `json:"items"`
+	// Content 合并后的配置文件（模板写的文件；密码遮住）；Exec 加上参数后的启动命令（args）
+	Content string `json:"content,omitempty"`
+	Exec    string `json:"exec,omitempty"`
 }
 
 // SoftwareSources 下载源（设置 → 运行环境）。
@@ -69,7 +104,8 @@ func (e *Engine) Templates() ([]*swtpl.Template, []error) {
 }
 
 var (
-	reMemory = regexp.MustCompile(`^[1-9][0-9]{1,5}[mg]$`)
+	reMemory        = regexp.MustCompile(`^[1-9][0-9]{1,5}[mg]$`)
+	reInstallTaskID = regexp.MustCompile(`^[a-z0-9-]{6,64}$`)
 	// 账号：数据库、控制台都能用，写进 SQL、配置也不用转义
 	reAccount = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{2,31}$`)
 	rePass    = regexp.MustCompile(`^[A-Za-z0-9!@#%^*()_+=.,:~-]{8,64}$`)
@@ -78,6 +114,20 @@ var (
 // SoftwareInstall 按模板在服务器上安装软件：选出适合这台服务器的装法，准备安装包（本机库里没有就下载）、需要时装 JDK、上传，
 // 渲染成安装计划交给 agent。
 func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareResult, error) {
+	taskID := e.getenv("FERRY_TASK_ID")
+	if taskID == "" {
+		taskID = strings.ToLower(rand.Text())
+	}
+	if !reInstallTaskID.MatchString(taskID) {
+		return nil, errors.New("安装任务 ID 无效")
+	}
+	if !o.Preview && e.getenv("FERRY_TASK_ID") != "" {
+		unlock, err := flock.Lock(appdir.Path("install-locks", taskID+".lock"), 0, nil)
+		if err != nil {
+			return nil, fmt.Errorf("无法开始安装任务 %s：%w", taskID, err)
+		}
+		defer unlock()
+	}
 	var tpl *swtpl.Template
 	var err error
 	if len(o.TemplateYAML) > 0 {
@@ -97,6 +147,16 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		return nil, err
 	}
 	defer s.close()
+	if !o.Preview && e.getenv("FERRY_TASK_ID") != "" {
+		var previous *proto.SoftwareTask
+		if err := s.callData("swtask", &proto.Request{SoftwareTaskID: taskID}, &previous); err != nil {
+			return nil, err
+		}
+		if previous != nil {
+			e.Rep.Event(t.Name, proto.Event{Level: "info", Code: proto.EvInstallTask, App: previous.Name, Msg: taskID})
+			return nil, fmt.Errorf("安装任务 %s 已提交，请查询原任务结果", taskID)
+		}
+	}
 	e.Rep.Step("查看 %s 上已有的软件与端口", t.Name)
 	var rep proto.SoftwareReport
 	if err := s.callData("software", &proto.Request{}, &rep); err != nil {
@@ -134,12 +194,31 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	var pkg *swpkg.Meta
 	lib := e.Settings.SoftwareDir()
 	version := o.Version
+	var bundle string
+	if o.PackageFile != "" {
+		pkg = swpkg.FindFile(lib, o.PackageFile)
+		if pkg == nil {
+			return nil, fmt.Errorf("本机库里没有 %s：先导入", o.PackageFile)
+		}
+		if swtpl.FormatOf("", pkg.File) == "zip" {
+			preview, err := swpkg.InspectArchive(e.ctx(), filepath.Join(lib, pkg.File), "zip", 0)
+			if err != nil {
+				return nil, fmt.Errorf("读取 %s：%w", pkg.File, err)
+			}
+			bundle = preview.Bundle
+		}
+		switch {
+		case v.Package == nil && v.System != nil && bundle != "":
+			v.Package = &swtpl.Package{Format: "zip"}
+		case bundle != "":
+			return nil, fmt.Errorf("%s 是 %s 离线包集合，请选用软件的系统包安装方式", pkg.File, strings.ToUpper(bundle))
+		case v.Package == nil:
+			return nil, fmt.Errorf("%s 的系统包安装需要包含 RPM 或 DEB 的 ZIP 文件", tpl.Name)
+		}
+	}
 	if p := v.Package; p != nil {
 		switch {
 		case o.PackageFile != "":
-			if pkg = swpkg.FindFile(lib, o.PackageFile); pkg == nil {
-				return nil, fmt.Errorf("本机库里没有 %s：先导入", o.PackageFile)
-			}
 			if version == "" {
 				version = pkg.Version
 			}
@@ -148,6 +227,8 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 				return nil, fmt.Errorf("%s 没有下载地址：先在「导入安装包」里导入，再选它", tpl.Name)
 			}
 			version = pkg.Version
+		case version == "" && p.Recommended != "":
+			version = p.Recommended
 		case version == "":
 			latest, err := swpkg.Latest(e.ctx(), e.SoftwareSources(), p)
 			switch {
@@ -286,6 +367,13 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			return nil, fmt.Errorf("%s 没有参数 %s", tpl.Name, k)
 		}
 	}
+	extras, err := tpl.ResolveExtras(&v, o.Extra)
+	if err != nil {
+		return nil, err
+	}
+	if err := extrasWritten(&v, extras, vars); err != nil {
+		return nil, err
+	}
 
 	// 下载、上传之前先检查目录：有问题在这里就停下，服务器上不做任何改动
 	java := v.Java
@@ -300,7 +388,22 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		}
 	}
 	var chk proto.SwCheck
-	if err := s.callData("swcheck", &proto.Request{SwCheck: &proto.SwCheckSpec{Dir: dir, User: user, Java: java, JavaDir: javaDir}}, &chk); err != nil {
+	var sys *proto.PlanSystem
+	if v.System != nil {
+		sys = &proto.PlanSystem{DNF: v.System.DNF, APT: v.System.APT, Disable: v.System.Disable, Require: v.System.Require, AllowChanges: o.AllowChanges, Bundle: bundle}
+	}
+	var packageFormat string
+	if v.Package != nil {
+		file := v.Package.File
+		if pkg != nil {
+			file = pkg.File
+		}
+		packageFormat = swtpl.FormatOf(v.Package.Format, file)
+	}
+	check := &proto.SwCheckSpec{Dir: dir, User: user, Java: java, JavaDir: javaDir, System: sys,
+		NeedXZ: packageFormat == "tar.xz", ExecuteInDir: strings.HasPrefix(strings.TrimLeft(v.Service.Exec, " \t'\""), "${dir}/"), SELinux: v.SELinux}
+	e.Rep.Step("预检 %s 的安装目录、运行环境和系统依赖", tpl.Name)
+	if err := s.callData("swcheck", &proto.Request{SwCheck: check}, &chk); err != nil {
 		return nil, err
 	}
 	if chk.DirBusy {
@@ -321,6 +424,58 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		}
 		fix = true
 		e.Rep.Info("运行用户 %s 进不了 %s：安装时给它加上进入的权限", user, blockedPaths(chk.Blocked))
+	}
+
+	networkPlan := &proto.SoftwarePlan{}
+	if len(chk.MissingPackages) > 0 && bundle == "" {
+		e.Rep.Info("缺少系统软件包：%s", strings.Join(chk.MissingPackages, "、"))
+		networkPlan.System = &proto.PlanSystem{}
+	}
+	for _, step := range v.Steps {
+		if !tpl.Builtin && step.Run != "" && vars.Cond(step.If) {
+			networkPlan.Steps = []proto.PlanStep{{Run: step.Run}}
+			break
+		}
+	}
+	proxy, err := e.softwareNetwork(s, networkPlan, o.Network)
+	if err != nil {
+		return nil, err
+	}
+	if proxy != nil {
+		defer e.closeNetProxy(proxy)
+	}
+	var resolution proto.SwResolution
+	// 系统包安装本身先模拟事务。预检和需要先传程序/JDK 的安装也在这里检查，避免传完才发现依赖装不了。
+	if bundle == "" && len(chk.RequiredPackages) > 0 && (o.Preview || v.Package != nil || java > 0) {
+		e.Rep.Step("验证软件源与系统包依赖")
+		spec := &proto.SwResolveSpec{Packages: chk.RequiredPackages, Proxy: networkPlan.Proxy, NoProxy: networkPlan.NoProxy}
+		if err := s.callData("swresolve", &proto.Request{SwResolve: spec}, &resolution); err != nil {
+			return nil, err
+		}
+		if !o.Preview && len(resolution.Changes) > 0 && !o.AllowChanges {
+			msg := fmt.Sprintf("安装 %s 会顺带改动已装的软件包：%s", strings.Join(resolution.Packages, "、"), strings.Join(resolution.Changes, "、"))
+			return nil, &PkgChangesError{Target: t.Name, Packages: resolution.Packages, Changes: resolution.Changes, Msg: msg}
+		}
+	}
+	if o.Preview {
+		route := "none"
+		switch {
+		case bundle != "":
+			route = "offline"
+		case proxy != nil:
+			route = "local"
+		case len(chk.MissingPackages) > 0:
+			route = "server"
+		}
+		p := &SoftwarePreview{Template: tpl.ID, Variant: v.Label, Dir: dir, Version: version, User: user, Java: java,
+			JavaHome: chk.JavaHome, Network: route, MissingPackages: chk.MissingPackages, PackageChanges: resolution.Changes,
+			Extras: extrasRendered(tpl, &v, vars, extras, version, java, pkg)}
+		if pkg != nil {
+			p.Package = pkg.File
+		} else if v.Package != nil {
+			p.Package = strings.ReplaceAll(v.Package.File, "${version}", version)
+		}
+		return &SoftwareResult{Target: t.Name, Plan: p}, nil
 	}
 
 	// 安装包：本机库里没有就下载
@@ -408,12 +563,25 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	if err != nil {
 		return nil, err
 	}
+	if err := applyExtras(plan, extras, vars); err != nil {
+		return nil, err
+	}
+	for _, p := range extrasPreview(extras, vars) {
+		var kv []string
+		for _, it := range p.Items {
+			kv = append(kv, extraItemText(p.Format, it))
+		}
+		e.Rep.Info("附加配置「%s」：%s", p.Label, strings.Join(kv, "；"))
+	}
 	plan.Name, plan.Dir, plan.User, plan.Version, plan.Account = name, dir, user, version, account
+	plan.TaskID = taskID
 	plan.Variant, plan.Logrotate = vi, v.Logrotate
 	plan.Ports, plan.UDPPorts, plan.PortMap = ports, udpPorts, portMap
 	plan.FixParents = fix
+	plan.Proxy, plan.NoProxy = networkPlan.Proxy, networkPlan.NoProxy
 	if plan.System != nil {
 		plan.System.AllowChanges = o.AllowChanges
+		plan.System.Bundle = bundle
 	}
 	if javaHome != "" {
 		plan.Reach = []string{javaHome}
@@ -428,17 +596,10 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			return nil, fmt.Errorf("上传安装包失败：%w", err)
 		}
 	}
-	proxy, err := e.softwareNetwork(s, plan, o.Network)
-	if err != nil {
-		return nil, err
-	}
-	if proxy != nil {
-		defer e.closeNetProxy(proxy)
-	}
 	e.Rep.Step("在 %s 上安装 %s", t.Name, strings.TrimSpace(tpl.Name+" "+version))
 	var inst proto.SoftwareInstance
-	// 密码在动服务器之前就存进凭据库：连接断开、本机没拿到结果时，服务器上照样会装完，密码不会丢
-	pwKey := secret.SoftwareAccount(name, t.Host, t.Port)
+	// 先用任务 ID 存凭据，避免同一实例的第二次尝试覆盖第一次成功安装的密码。
+	pwKey := pendingSoftwareKey(taskID, t.Host, t.Port)
 	saved := false
 	if password != "" {
 		if err := secret.Set(pwKey, password); err != nil {
@@ -453,12 +614,16 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 		}
 	}
 	stageHandedOff = true // 交给 agent 后，断线也由它做完和清理，不能提前删除正在使用的上传。
+	e.Rep.Event(t.Name, proto.Event{Level: "info", Code: proto.EvInstallTask, App: name, Msg: taskID})
 	r, err := s.call("swinstall", &proto.Request{Stage: stage, Install: plan})
 	if err != nil {
 		if saved {
-			return nil, fmt.Errorf("%w。稍后在「软件」里刷新：出现 %s 就是装好了，密码已经先存进本机凭据库，点「密码」能看到", err, name)
+			return nil, fmt.Errorf("%w。稍后用安装任务 %s 查看结果并确认保存密码", err, taskID)
 		}
 		return nil, err
+	}
+	if r.RC != proto.CodeOK {
+		stageHandedOff = false
 	}
 	switch r.RC {
 	case proto.CodeOK:
@@ -478,14 +643,56 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	if res.Public != "" {
 		res.OpenPorts, res.OpenUDP = ports, udpPorts
 	}
-	res.Saved = saved
 	if password != "" && slices.Contains(inst.Unset, "password") {
 		// 设置密码的步骤没成功：这个密码用不了，不给用户、不保存（notes 里有怎么补设）
 		forget()
 		res.Password, res.Saved = "", false
 		e.Rep.Warn("%s 的密码没有设置成功：按安装结果里的说明自己设置", name)
+	} else if saved {
+		res.Saved = e.commitSoftwarePassword(pwKey, name, t.Host, t.Port)
+		if !res.Saved {
+			current, _, _ := secret.Get(secret.SoftwareAccount(name, t.Host, t.Port))
+			res.Saved = current == password
+		}
 	}
 	return res, nil
+}
+
+// SoftwareTask 查询同一次远端安装的状态；nil 表示 Agent 还没有接收或记录已经过期。
+func (e *Engine) SoftwareTask(target, id string) (*proto.SoftwareTask, error) {
+	var task *proto.SoftwareTask
+	err := e.withTarget(target, func(s *session) error {
+		if err := s.callData("swtask", &proto.Request{SoftwareTaskID: id}, &task); err != nil {
+			return err
+		}
+		if task != nil && task.Status != "running" {
+			key := pendingSoftwareKey(id, s.t.Host, s.t.Port)
+			if task.Current && !task.PasswordUnset {
+				e.commitSoftwarePassword(key, task.Name, s.t.Host, s.t.Port)
+			} else if task.Status != "interrupted" {
+				secret.Delete(key)
+			}
+		}
+		return nil
+	})
+	return task, err
+}
+
+func pendingSoftwareKey(id, host string, port int) string {
+	return secret.SoftwareAccount("pending:"+id, host, port)
+}
+
+func (e *Engine) commitSoftwarePassword(pending, name, host string, port int) bool {
+	value, _, err := secret.Get(pending)
+	if err != nil || value == "" {
+		return false
+	}
+	if err := secret.Set(secret.SoftwareAccount(name, host, port), value); err != nil {
+		e.Rep.Warn("保存 %s 的安装密码失败：%v，稍后可从安装任务重试", name, err)
+		return false
+	}
+	secret.Delete(pending)
+	return true
 }
 
 // portFree 端口参数 p 用 n 时，它要占的端口（含附加端口、按 TCP / UDP）都没被占用，也没和前面的端口参数重复。
@@ -688,6 +895,15 @@ func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swp
 		pl.Files = append(pl.Files, proto.PlanFile{Path: x(f.Path), Content: x(f.Content), Mode: mode, At: f.At})
 	}
 	for _, p := range v.Props {
+		if p.VersionPattern != "" {
+			match, err := regexp.MatchString(p.VersionPattern, vars["version"])
+			if err != nil {
+				return nil, fmt.Errorf("模板 %s：props.versionPattern：%w", tpl.ID, err)
+			}
+			if !match {
+				continue
+			}
+		}
 		set := map[string]string{}
 		for k, val := range p.Set {
 			set[k] = x(val)
@@ -704,7 +920,7 @@ func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swp
 			for k, val := range h.Form {
 				form[k] = x(val)
 			}
-			ps.HTTP = &proto.PlanHTTP{Post: x(h.Post), Form: form, Retry: h.Retry}
+			ps.HTTP = &proto.PlanHTTP{Post: x(h.Post), Form: form, Retry: h.Retry, ResponseField: h.ResponseField}
 		}
 		pl.Steps = append(pl.Steps, ps)
 	}
@@ -877,6 +1093,7 @@ func (e *Engine) softwareNetwork(s *session, plan *proto.SoftwarePlan, mode stri
 	if mode == "server" || (plan.System == nil && !(mode == "local" && steps)) {
 		return nil, nil
 	}
+	e.Rep.Step("检查服务器的软件源和下载路线")
 	var direct []string
 	if mode == "auto" {
 		var rp proto.RepoProbe
@@ -905,10 +1122,6 @@ func (e *Engine) softwareNetwork(s *session, plan *proto.SoftwarePlan, mode stri
 	}
 	p, err := startNetProxy(s.c)
 	if err != nil {
-		if mode == "auto" {
-			e.Rep.Warn("%v；改用服务器自己的网络", err)
-			return nil, nil
-		}
 		return nil, err
 	}
 	plan.Proxy, plan.NoProxy = p.URL, direct

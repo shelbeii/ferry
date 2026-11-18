@@ -67,7 +67,14 @@
 | 命令 | 说明 |
 | --- | --- |
 | `software <目标>` | 查看服务器上已有的软件（只读） |
-| `software install <目标> <模板> [选项]` | 按模板安装；`ferry software` 显示全部选项 |
+| `software jdk list <目标>` | 列出服务器上 Ferry 管理的 JDK、架构、路径及共享入口 |
+| `software jdk install <目标> --java N` 或 `--version V`，可加 `--java-dir <目录>` | 在服务器预装指定 JDK，可指定放置版本文件夹的父目录，如 `/opt/jdks` |
+| `software jdk remove <目标> <Java 绝对路径> --yes` | 按清单中的具体路径卸载 JDK。若此版本被服务器上的服务或运行进程使用，卸载会停下并提示原因 |
+| `software runtime list <目标>` | 列出目标服务器上 Ferry 管理的 JDK、Node.js、Python 和 .NET |
+| `software runtime install <目标> node\|python\|dotnet --channel <系列>` | 安装指定系列，如 Node.js 的 `24`、Python 的 `3.14` 或 .NET 的 `10.0`。也可改用 `--version <完整版本>` |
+| `software runtime install <目标> <类型> --version <版本> --package <本机.tar.gz>` | 使用本机 Linux 安装包。可用 `--dir <目录>` 指定安装父目录，.NET 可用 `--component aspnetcore\|runtime\|sdk` 选择组件，默认 `aspnetcore` |
+| `software runtime remove <目标> <程序绝对路径> --yes` | 按清单中的程序路径卸载对应的安装 |
+| `software install <目标> <模板> [选项]` | 按模板安装；`--conf 名称=值` 补充模板参数没有的配置（可写几次）；`ferry software` 显示全部选项 |
 | `software start\|stop\|restart\|remove\|logs\|password <目标> <名称>` | 管理 Ferry 装的软件；`remove --purge` 连数据一起删 |
 | `software start\|stop\|restart\|logs <目标> --unit <服务> \| --container <容器>` | 不是 Ferry 装的软件 |
 | `software templates` / `template show\|delete\|import\|save\|check` | 软件模板（内置 + 自己的） |

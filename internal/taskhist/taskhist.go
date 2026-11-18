@@ -37,6 +37,10 @@ type Record struct {
 	EndedAt   int64           `json:"endedAt,omitempty"`
 	Error     string          `json:"error,omitempty"`
 	Config    string          `json:"config,omitempty"`
+	Target    string          `json:"target,omitempty"`
+	InstallID string          `json:"installId,omitempty"`
+	Progress  json.RawMessage `json:"progress,omitempty"`
+	Step      json.RawMessage `json:"step,omitempty"`
 	Detail    json.RawMessage `json:"detail,omitempty"`
 	Data      json.RawMessage `json:"data,omitempty"`
 	Lines     json.RawMessage `json:"lines,omitempty"`
@@ -51,6 +55,8 @@ type Summary struct {
 	EndedAt   int64  `json:"endedAt,omitempty"`
 	Error     string `json:"error,omitempty"`
 	Config    string `json:"config,omitempty"`
+	Target    string `json:"target,omitempty"`
+	InstallID string `json:"installId,omitempty"`
 	Bytes     int64  `json:"bytes"`
 }
 
@@ -78,7 +84,9 @@ func Save(dir string, r *Record) error {
 		return err
 	}
 	ai.MakePrivate(dir)
-	b, err := json.Marshal(r)
+	record := *r
+	scrubTaskData(&record)
+	b, err := json.Marshal(&record)
 	if err != nil {
 		return err
 	}
@@ -93,8 +101,28 @@ func Save(dir string, r *Record) error {
 	return nil
 }
 
+// 安装结果的密码只在本次任务的内存和凭据库里使用。
+func scrubTaskData(r *Record) bool {
+	var data map[string]json.RawMessage
+	if json.Unmarshal(r.Data, &data) != nil || data["password"] == nil ||
+		data["target"] == nil || data["unit"] == nil || data["name"] == nil || data["saved"] == nil {
+		return false
+	}
+	delete(data, "password")
+	r.Data, _ = json.Marshal(data)
+	return true
+}
+
 // Load 读一个任务。
 func Load(dir, id string) (*Record, error) {
+	r, err := load(dir, id)
+	if err == nil {
+		scrubTaskData(r)
+	}
+	return r, err
+}
+
+func load(dir, id string) (*Record, error) {
 	p, err := path(dir, id)
 	if err != nil {
 		return nil, err
@@ -133,15 +161,19 @@ func List(dir string, interrupt bool) ([]Summary, error) {
 		if err != nil {
 			continue
 		}
-		r, err := Load(dir, id)
+		r, err := load(dir, id)
 		if err != nil || r.ID != id {
 			continue
 		}
+		changed := scrubTaskData(r)
 		if interrupt && r.Status == Running {
 			r.Status, r.EndedAt = Interrupted, fi.ModTime().UnixMilli() // 最后一次保存的时间
 			if r.Error == "" {
 				r.Error = InterruptedMsg
 			}
+			changed = true
+		}
+		if interrupt && changed {
 			if Save(dir, r) == nil {
 				if fi2, err := os.Stat(filepath.Join(dir, e.Name())); err == nil {
 					fi = fi2
@@ -149,7 +181,7 @@ func List(dir string, interrupt bool) ([]Summary, error) {
 			}
 		}
 		out = append(out, Summary{ID: id, Title: r.Title, Status: r.Status, StartedAt: r.StartedAt, EndedAt: r.EndedAt,
-			Error: r.Error, Config: r.Config, Bytes: fi.Size()})
+			Error: r.Error, Config: r.Config, Target: r.Target, InstallID: r.InstallID, Bytes: fi.Size()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt > out[j].StartedAt })
 	return out, nil

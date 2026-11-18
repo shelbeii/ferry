@@ -197,7 +197,7 @@ func (a *Agent) swrestore() int {
 		}
 	}()
 	if t := k.SELinux; t != nil && t.Types != nil {
-		pl := &proto.SoftwarePlan{Name: name, Dir: k.Dir, Ports: k.AllPorts, SELinux: t.Types}
+		pl := &proto.SoftwarePlan{Name: name, Dir: k.Dir, Ports: k.AllPorts, Exec: lastUnitValue(k.UnitText, "ExecStart"), SELinux: t.Types}
 		in.SELinux = a.swSELinux(pl)
 	}
 	in.Logrotate = ""

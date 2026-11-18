@@ -50,6 +50,7 @@ type swInstallIn struct {
 	JavaDir      string            `json:"java_dir,omitempty" jsonschema:"需要 JDK 的软件：JDK 装在这个目录下；不填 = Ferry 的公共目录"`
 	AllowChanges bool              `json:"allow_changes,omitempty" jsonschema:"从软件源装包会顺带升级、删除已装的包时也继续。只有上一次安装因此停下、你把要改动的包告诉用户并且用户同意后才填 true"`
 	Params       map[string]string `json:"params,omitempty" jsonschema:"模板参数（如 port、public）；密码不填时自动生成，用户要自己定密码时先用 ask_secret 让用户填，这里写代号 {{secret:名字}}"`
+	Extra        map[string]any    `json:"extra,omitempty" jsonschema:"附加配置：模板参数没有的设置，{\"名称\": \"值\"}（模板有几处 extras 时写成 {\"extras 的 id\": {\"名称\": \"值\"}}）；能写哪些、哪些不能改见 software_templates 的 extras；同名的替换模板里的值，没有的加上；密码写 ask_secret 的代号"`
 	Reason       string            `json:"reason" jsonschema:"为什么要装（显示在确认框里）"`
 }
 
@@ -129,7 +130,7 @@ func (s *server) addAITools(m *mcp.Server) {
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "software_templates", Title: "软件模板库",
-		Description: "Ferry 软件模板库里能装的软件（数据库、缓存、中间件等）：模板 ID、名称、说明、参数、各种装法（适用系统）。用 software_install 安装。",
+		Description: "Ferry 软件模板库里能装的软件（数据库、缓存、中间件等）：模板 ID、名称、说明、参数、各种装法（适用系统），以及 extras（参数没有的设置能补充到哪里、常用项、不能改的项）。用 software_install 安装。",
 		Annotations: readOnly},
 		logged(s, "software_templates", func(ctx context.Context, in targetIn) (any, error) {
 			return s.aiReadOnly(ctx, in, "software_templates")
@@ -144,7 +145,8 @@ func (s *server) addAITools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "software_install", Title: "用模板装软件",
 		Description: "用 Ferry 的软件模板在服务器上安装软件：自动按系统选装法、建 systemd 服务（ferry-<名称>.service）、检查端口；" +
-			"密码不填时随机生成并存进用户的凭据库（不会告诉你）。template 填模板库里的 ID；也可以用 template_yaml 直接给一个模板试装。" + how,
+			"密码不填时随机生成并存进用户的凭据库（不会告诉你）。template 填模板库里的 ID；也可以用 template_yaml 直接给一个模板试装。" +
+			"参数里没有的设置（如 MySQL 的 innodb_buffer_pool_size）写在 extra 里，不要为此另写模板。" + how,
 		Annotations: change()},
 		loggedReq(s, "software_install", func(ctx context.Context, req *mcp.CallToolRequest, in swInstallIn) (any, error) {
 			if in.Template == "" && strings.TrimSpace(in.TemplateYAML) == "" {
@@ -152,6 +154,9 @@ func (s *server) addAITools(m *mcp.Server) {
 			}
 			input := map[string]any{"template": in.Template, "template_yaml": in.TemplateYAML, "version": in.Version, "name": in.Name, "params": in.Params,
 				"in": in.In, "dir": in.Dir, "package": in.Package, "network": in.Network, "java_dir": in.JavaDir, "allow_changes": in.AllowChanges}
+			if len(in.Extra) > 0 {
+				input["extra"] = in.Extra
+			}
 			return s.aiChange(ctx, req, in.targetIn, "install", input, in.Reason)
 		}))
 

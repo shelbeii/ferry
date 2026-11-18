@@ -249,7 +249,11 @@ func (a *Agent) checkDirRuntimes(p *proto.Preflight) {
 				p.Problems = append(p.Problems, fmt.Sprintf("%s 要在服务器上建 venv 装依赖，但 %s 不能用（没装 Python 3，或 Debian / Ubuntu 上缺 python3-venv）", s.Name, py))
 			}
 		case proto.TypeNode:
-			if !has("npm") {
+			npm := "npm"
+			if s.Deps.Node != "" {
+				npm = filepath.Join(filepath.Dir(s.Deps.Node), "npm")
+			}
+			if !has(npm) {
 				p.Warnings = append(p.Warnings, fmt.Sprintf("%s 要在服务器上装依赖，服务器上没有 npm（用 yarn、pnpm 的话装上它们）", s.Name))
 			}
 		}

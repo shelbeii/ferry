@@ -4,6 +4,8 @@
 #
 #   test/e2e/run.sh          需要 docker、go；Windows 上用 Git Bash
 #   KEEP=1 test/e2e/run.sh   结束后保留容器（便于排查）
+#   E2E_JDK_ONLY=1 test/e2e/run.sh   只运行服务器 JDK 管理场景
+#   E2E_RUNTIME_ONLY=1 test/e2e/run.sh   用真实发行包测试 Node.js、Python、.NET，并回归 JDK
 #
 # 不会碰本机的 ferry 数据目录：运行时 FERRY_HOME 指向 out/home。
 set -uo pipefail
@@ -13,6 +15,15 @@ winpwd() { pwd -W 2>/dev/null || pwd; }
 E2E=$(winpwd)
 ROOT=$(cd ../.. && winpwd)
 OUT=$E2E/out
+runtimeOnly=${E2E_RUNTIME_ONLY:-0}
+focused=${E2E_JDK_ONLY:-0}
+[[ $runtimeOnly == 1 ]] && focused=1
+# 专项测试用独立的产物目录和动态 SSH 端口，方便和桌面预览同时运行。
+if [[ $runtimeOnly == 1 ]]; then
+  OUT=$OUT/runtime-only
+elif [[ $focused == 1 ]]; then
+  OUT=$OUT/jdk-only
+fi
 LOG=$OUT/e2e.log
 export MSYS_NO_PATHCONV=1
 IMAGE=ferry-e2e:ol9
@@ -26,6 +37,14 @@ mkdir -p "$OUT/web" "$OUT/site" "$OUT/home" "$OUT/agents"
 
 step() { printf '\n== %s\n' "$*"; }
 die() { echo "错误：$*" >&2; exit 2; }
+
+finish() {
+  if [[ ${KEEP:-} != 1 ]]; then
+    docker rm -f ferry-e2e-a ferry-e2e-b >/dev/null 2>&1
+  fi
+  printf '\n通过 %d，失败 %d（详细输出：%s）\n' "$PASS" "$FAILED" "$LOG"
+  (( FAILED == 0 ))
+}
 
 # t <描述> <ok|fail> <输出须包含（可空）> -- <命令…>
 t() {
@@ -85,6 +104,11 @@ docker info >/dev/null 2>&1 || die "docker 没有运行"
   EXE=$(go env GOEXE)
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$OUT/agents/ferry-agent-linux-amd64" ./cmd/ferry-agent || exit 1
   go build -o "$OUT/ferry$EXE" ./cmd/ferry || exit 1
+  if [[ $focused == 1 ]]; then
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$OUT/demo-v1" ./test/e2e/demo || exit 1
+    go run ./test/e2e/mkjar "$OUT/rt.jar" v1 || exit 1
+    exit 0
+  fi
   for v in v1 v2; do
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$v" -o "$OUT/demo-$v" ./test/e2e/demo || exit 1
   done
@@ -114,7 +138,7 @@ echo 'body{}' > "$OUT/web/assets/app.css"
 echo '<h1>site v1</h1>' > "$OUT/site/index.html"
 # 真实的静态 nginx（缓存在 .cache，只下载一次）
 NGX=$E2E/.cache/nginx-1.30.5-x86_64-linux
-if [[ ! -s $NGX ]]; then
+if [[ $focused != 1 && ! -s $NGX ]]; then
   mkdir -p "$E2E/.cache"
   curl -fsSL -o "$NGX.tmp" https://jirutka.github.io/nginx-binaries/nginx-1.30.5-x86_64-linux && mv "$NGX.tmp" "$NGX" || die "下载 nginx 失败"
 fi
@@ -124,9 +148,10 @@ step "启动容器"
 docker build -q -t "$IMAGE" "$E2E" >/dev/null || die "构建镜像失败"
 for spec in a:2222 b:2223; do
   n=${spec%%:*} port=${spec#*:}
+  [[ $focused == 1 ]] && port=
   docker rm -f "ferry-e2e-$n" >/dev/null 2>&1
   extra=()
-  [[ $n == a ]] && extra=(--tmpfs /data:rw,exec,mode=755,size=256m)  # 模拟另一个分区
+  [[ $n == a ]] && extra=(--tmpfs /data:rw,exec,mode=755,size=256m -p 127.0.0.1::18597)  # 模拟另一个分区，及本机 JDK 镜像地址
   docker run -d --name "ferry-e2e-$n" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     "${extra[@]}" -p "127.0.0.1:$port:22" "$IMAGE" >/dev/null || die "启动容器 $n 失败"
 done
@@ -142,6 +167,16 @@ for n in a b; do
   dx "$n" 'chmod 755 /usr/local/bin/demoserver'
 done
 echo "  容器就绪"
+
+source "$E2E/jdk.sh"
+if [[ $runtimeOnly == 1 ]]; then
+  source "$E2E/runtimes.sh"
+  source "$E2E/runtime-details.sh"
+fi
+if [[ $focused == 1 ]]; then
+  finish
+  exit $?
+fi
 
 # ---------------------------------------------------------------- 场景
 step "连接"
@@ -665,7 +700,7 @@ t "backup_run：没允许编程软件改动时不做" fail "允许编程软件" 
 t "run_change_command：只读命令直接执行" ok "e2e-mcp-readonly" -- MC run_change_command '{"target":"e2e-a","command":"echo e2e-mcp-readonly","reason":"e2e"}'
 t "run_change_command：改动的命令没允许时不做" fail "允许编程软件" -- MC run_change_command '{"target":"e2e-a","command":"touch /tmp/e2e-mcp-x","reason":"e2e"}'
 t "write_file：没允许时不做" fail "允许编程软件" -- MC write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-x","content":"x","reason":"e2e"}'
-t "software_templates：模板库" ok '"id": "redis"' -- MC software_templates '{"target":"e2e-a"}'
+t "software_templates：模板库" ok '"redis"' -- MC software_templates '{"target":"e2e-a"}'
 t "ask_secret：名字不对" fail "名字" -- MC ask_secret '{"target":"e2e-a","fields":[{"name":"Bad","label":"x"}],"purpose":"e2e"}'
 # 用户同意后桌面版用 ferry ai-exec 执行：写文件（先备份原文件）、执行命令；输出里遮住用户填的密码（这里没有）
 dx a 'printf "old\n" > /tmp/e2e-aiexec.conf'
@@ -1343,7 +1378,11 @@ t "改了名字的安装包当作自定义安装包" ok "没认出" -- F softwar
 t "模板列表里有本机的安装包" ok '"file":"sentinel-dashboard-1.8.10.jar"' -- F software templates --json
 t "内置模板" ok "postgresql" -- F software templates
 
-t "安装 Sentinel（用服务器上已有的 JDK 17）" ok "已安装 sentinel 1.8.10" -- swpw Sentinel-pw1 F software install e2e-a sentinel --version 1.8.10 --port 18858
+t "附加配置不能改由参数决定的项：装之前就停下" fail "由参数「端口」决定" -- F software install e2e-a sentinel --version 1.8.10 --port 18858 --conf server.port=19999
+t "被拒后服务器上没有改动" ok "gone" -- dx a 'test -e /etc/systemd/system/ferry-sentinel.service && echo left || echo gone'
+t "安装 Sentinel（用服务器上已有的 JDK 17）" ok "已安装 sentinel 1.8.10" -- swpw Sentinel-pw1 F software install e2e-a sentinel --version 1.8.10 --port 18858 --conf server.servlet.session.timeout=7200s --conf 'logging.pattern.console=%d [%t] $HOME "q"'
+t "附加配置作为启动参数：程序收到的和填的一样（空格、%、$、引号）" ok "found" -- dx a "grep -Fxq -- '--logging.pattern.console=%d [%t] \$HOME \"q\"' /tmp/fakejava-args-sentinel && echo found"
+t "附加配置的普通参数" ok "found" -- dx a "grep -Fxq -- '--server.servlet.session.timeout=7200s' /tmp/fakejava-args-sentinel && echo found"
 t "Sentinel 在运行" ok "UP" -- health a 18858
 t "以 sentinel 用户运行" ok "sentinel" -- dx a 'ps -o user= -p $(systemctl show -p MainPID --value ferry-sentinel)'
 t "密码不在单元文件里" ok "0" -- dx a 'grep -c Sentinel-pw1 /etc/systemd/system/ferry-sentinel.service; true'
@@ -1358,7 +1397,8 @@ t "停止后列表里是已停止" ok '"version":"1.8.10","state":"stopped","via
 t "启动并等到就绪" ok "start 完成" -- F software start e2e-a sentinel
 t "看日志（journald）" ok "listening 18858" -- F software logs e2e-a sentinel
 
-t "安装 Nacos" ok "已安装 nacos 3.2.4" -- swpw Nacos-pw123 F software install e2e-a nacos --version 3.2.4 --port 18848 --console-port 18088
+t "安装 Nacos" ok "已安装 nacos 3.2.4" -- swpw Nacos-pw123 F software install e2e-a nacos --version 3.2.4 --port 18848 --console-port 18088 --conf ferry.e2e.extra=on
+t "附加配置改进了安装包里的 application.properties" ok "1" -- dx a 'grep -c "^ferry.e2e.extra=on$" /opt/ferry-software/nacos-3.2.4/nacos/conf/application.properties'
 t "Nacos 在运行" ok "UP" -- health a 18848
 t "改好了端口与密钥" ok "1 1 1" -- dx a 'f=/opt/ferry-software/nacos-3.2.4/nacos/conf/application.properties; echo $(grep -c "^nacos.server.main.port=18848$" $f) $(grep -c "^nacos.console.port=18088$" $f) $(grep -c "^nacos.core.auth.plugin.nacos.token.secret.key=..*" $f)'
 t "替用户设置了 nacos 的密码" ok "nacos admin password set (11 chars)" -- dx a 'journalctl -u ferry-nacos --no-pager -o cat'
@@ -1373,7 +1413,7 @@ dx a 'cat > /usr/local/bin/dnf <<"EOS"
 echo "$@" >> /tmp/dnf-calls
 EOS
 chmod 755 /usr/local/bin/dnf; rm -f /tmp/dnf-calls'
-sw=$(swpw Mysql-pw123 F software install e2e-a mysql --version 8.4.10 --port 13306 --set account=app_user --network server 2>&1)
+sw=$(swpw Mysql-pw123 F software install e2e-a mysql --version 8.4.10 --port 13306 --set account=app_user --network server --conf max_connections=900 --conf innodb_buffer_pool_size=64M --conf skip-name-resolve= 2>&1)
 printf '\n### software install mysql\n%s\n' "$sw" >> "$LOG"
 has "安装 MySQL" "已安装 mysql 8.4.10" "$sw"
 has "MySQL 需要的系统库：没装的自动装，装着的直接用" "libaio" "$sw"
@@ -1403,6 +1443,8 @@ t "软件列表里有账号" ok '"account":"app_user"' -- F software e2e-a --jso
 t "登录检查用的是选的账号" ok "user=app_user" -- dx a 'cat /tmp/mysql-check-cnf'
 t "就绪后删掉了带密码的 init-file" ok "0 gone" -- dx a 'echo $(grep -c init-file /opt/ferry-software/mysql-8.4.10/my.cnf) $(test -e /opt/ferry-software/mysql-8.4.10/tmp/ferry-init.sql && echo left || echo gone)'
 t "默认只监听本机" ok "bind-address=127.0.0.1" -- dx a 'cat /opt/ferry-software/mysql-8.4.10/my.cnf'
+t "附加配置写进 [mysqld]（就绪后改写的 my.cnf 里也在）" ok "max_connections=900 innodb_buffer_pool_size=64M skip-name-resolve [client]" -- dx a 'sed -n "/^\[mysqld\]/,/^\[client\]/p" /opt/ferry-software/mysql-8.4.10/my.cnf | grep -E "^(max_connections|innodb_buffer_pool_size|skip-name-resolve|\[client\])" | tr "\n" " "'
+t "模板原来的 max_connections 换掉了" ok "0" -- dx a 'grep -c "^max_connections=500" /opt/ferry-software/mysql-8.4.10/my.cnf; true'
 t "数据目录归 mysql" ok "mysql" -- dx a 'stat -c %U /opt/ferry-software/mysql-8.4.10/data/ibdata1'
 t "装好后清掉留着的安装包" ok "gone" -- dx a 'test -e /usr/local/lib/ferry/software/.cache && echo left || echo gone'
 dx a 'touch /tmp/mysql-deny'
@@ -1445,7 +1487,8 @@ t "卸载后本机密码也删了" fail "没有保存" -- F software password e2
 t "卸载 Sentinel（保留数据）" ok "已卸载 sentinel" -- F software remove e2e-a sentinel
 t "保留了安装目录" ok "sentinel-dashboard.jar" -- dx a 'ls /opt/ferry-software/sentinel-1.8.10'
 t "目录不空时不能装进去" fail "已存在且不是空的" -- F software install e2e-a sentinel --version 1.8.10 --port 18858
-t "保留了数据的列在软件里" ok '"kept":[{"name":"sentinel"' -- F software e2e-a --json
+keptFirst() { F software e2e-a --json | grep -o '"kept":\[{[^{}]*'; }
+t "保留了数据的列在软件里" ok '"name":"sentinel"' -- keptFirst
 t "保留数据时本机密码还在" ok "Sentinel-pw1" -- F software password e2e-a sentinel
 t "同名的不能再装" fail "被卸载时保留了数据的软件占着" -- F software install e2e-a sentinel --version 1.8.10 --port 18859 --dir /opt/ferry-software/sentinel-x
 t "恢复" ok "已恢复 sentinel" -- F software restore e2e-a sentinel
@@ -1453,7 +1496,9 @@ t "恢复后在运行" ok "UP" -- health a 18858
 F software remove e2e-a sentinel >/dev/null 2>&1
 t "ai-exec software_restore：恢复" ok "已恢复并启动" -- AIX software_restore '{"name":"sentinel"}'
 F software remove e2e-a sentinel >/dev/null 2>&1
-t "ai-exec software_install：用模板安装（进度照常显示）" ok '"name": "sentinel-ai"' -- AIX software_install '{"template":"sentinel","version":"1.8.10","name":"sentinel-ai","params":{"port":"18861"}}'
+t "ai-exec software_install：用模板安装（进度照常显示）" ok '"name": "sentinel-ai"' -- AIX software_install '{"template":"sentinel","version":"1.8.10","name":"sentinel-ai","params":{"port":"18861"},"extra":{"server.servlet.session.timeout":"1800s","sentinel.dashboard.app.hideAppNoMachineMillis":60000}}'
+t "ai-exec software_install：附加配置（数字也行）作为启动参数" ok "found found" -- dx a "echo \$(grep -Fxq -- '--server.servlet.session.timeout=1800s' /tmp/fakejava-args-sentinel && echo found) \$(grep -Fxq -- '--sentinel.dashboard.app.hideAppNoMachineMillis=60000' /tmp/fakejava-args-sentinel && echo found)"
+t "ai-exec software_install：改由参数决定的项，装之前就交回模型" fail "由参数「端口」决定" -- AIX software_install '{"template":"sentinel","version":"1.8.10","name":"sentinel-ai2","params":{"port":"18862"},"extra":{"server.port":"1"}}'
 F software remove e2e-a sentinel-ai --purge >/dev/null 2>&1
 t "删除保留的数据" ok "已卸载 sentinel" -- F software remove e2e-a sentinel --purge
 t "数据删掉了、列表里没有了" ok "gone" -- dx a 'test -e /opt/ferry-software/sentinel-1.8.10 && echo left || echo gone'
@@ -1514,8 +1559,8 @@ F software remove e2e-a demo-b --purge >/dev/null 2>&1
 dx a 'cat > /usr/local/bin/dnf <<"EOS"
 #!/bin/sh
 [ "$1" = install ] || exit 1
-# 演练（--assumeno）：只有新装的包，没有要改动的已装包
-case "$*" in *--assumeno*) echo "Installing:"; echo " redis x86_64 6.2 appstream 1 M"; exit 1;; esac
+# 演练（--assumeno）：和真的 dnf 一样列出事务，以 Operation aborted. 结束、退出码 1；只有新装的包，没有要改动的已装包
+case "$*" in *--assumeno*) printf "Dependencies resolved.\nInstalling:\n redis x86_64 6.2 appstream 1 M\n\nTransaction Summary\nInstall  1 Package\n\nOperation aborted.\n"; exit 1;; esac
 cp /usr/local/bin/demoserver /usr/bin/redis-server
 printf "[Service]\nEnvironment=PORT=16380\nExecStart=/usr/local/bin/demoserver\n" > /etc/systemd/system/redis.service
 systemctl daemon-reload && systemctl start redis
@@ -1523,13 +1568,15 @@ echo "Installed: redis"
 EOS
 chmod 755 /usr/local/bin/dnf'
 dx a 'mkdir -p /etc/logrotate.d'
-sw=$(F software install e2e-a redis --port 16379 2>&1)
+t "安装计划里列出附加配置" ok "maxmemory = 64mb" -- F software plan e2e-a redis --port 16379 --conf maxmemory=64mb
+sw=$(F software install e2e-a redis --port 16379 --conf maxmemory=64mb --conf appendonly=no 2>&1)
 printf '\n### software install redis\n%s\n' "$sw" >> "$LOG"
 has "按服务器系统选了 dnf 的装法" "系统软件源（dnf / yum）" "$sw"
 has "从软件源装好并启动" "已安装 redis" "$sw"
 t "Ferry 运行的 Redis 在监听" ok "UP" -- health a 16379
 t "系统自带的 redis.service 被停掉" ok "inactive" -- dx a 'systemctl is-active redis; true'
 t "redis.conf 里是选的端口" ok "port 16379" -- dx a 'cat /opt/ferry-software/redis/redis.conf'
+t "附加配置合并进 redis.conf" ok "maxmemory 64mb appendonly no 0" -- dx a 'f=/opt/ferry-software/redis/redis.conf; echo $(grep "^maxmemory " $f) $(grep "^appendonly " $f) $(grep -c "^appendonly yes" $f)'
 t "日志按天轮转" ok "copytruncate" -- dx a 'cat /etc/logrotate.d/ferry-redis'
 t "卸载时说明软件源的包没删" ok "没有删除" -- F software remove e2e-a redis --purge
 t "卸载时删掉日志轮转" ok "gone" -- dx a 'test -e /etc/logrotate.d/ferry-redis && echo left || echo gone'
@@ -1537,7 +1584,7 @@ t "卸载时删掉日志轮转" ok "gone" -- dx a 'test -e /etc/logrotate.d/ferr
 dx a 'cat > /usr/local/bin/dnf <<"EOS"
 #!/bin/sh
 [ "$1" = install ] || exit 1
-case "$*" in *--assumeno*) printf "Installing:\n redis x86_64 6.2 appstream 1 M\nUpgrading:\n openssl-libs x86_64 1:3.2 baseos 2 M\n\nTransaction Summary\n"; exit 1;; esac
+case "$*" in *--assumeno*) printf "Dependencies resolved.\nInstalling:\n redis x86_64 6.2 appstream 1 M\nUpgrading:\n openssl-libs x86_64 1:3.2 baseos 2 M\n\nTransaction Summary\nInstall  1 Package\nUpgrade  1 Package\n\nOperation aborted.\n"; exit 1;; esac
 cp /usr/local/bin/demoserver /usr/bin/redis-server
 echo "Installed: redis"
 EOS
@@ -1556,8 +1603,8 @@ for i in $(seq 1 40); do curl -s -m 1 -o /dev/null http://127.0.0.2:18931/redis.
 dx a 'cat > /usr/local/bin/dnf <<"EOS"
 #!/bin/sh
 [ "$1" = install ] || exit 1
-# 演练（--assumeno）：只有新装的包，没有要改动的已装包
-case "$*" in *--assumeno*) echo "Installing:"; echo " redis x86_64 6.2 appstream 1 M"; exit 1;; esac
+# 演练（--assumeno）：和真的 dnf 一样列出事务，以 Operation aborted. 结束、退出码 1；只有新装的包，没有要改动的已装包
+case "$*" in *--assumeno*) printf "Dependencies resolved.\nInstalling:\n redis x86_64 6.2 appstream 1 M\n\nTransaction Summary\nInstall  1 Package\n\nOperation aborted.\n"; exit 1;; esac
 curl -fsS http://127.0.0.2:18931/redis.rpm -o /tmp/redis.rpm || { echo "下载失败"; exit 1; }
 grep -q rpm-via-ferry /tmp/redis.rpm || exit 1
 cp /usr/local/bin/demoserver /usr/bin/redis-server
@@ -2009,8 +2056,4 @@ source "$E2E/app_secrets.sh"
 source "$E2E/team_secrets.sh"
 
 # ---------------------------------------------------------------- 结束
-if [[ ${KEEP:-} != 1 ]]; then
-  docker rm -f ferry-e2e-a ferry-e2e-b >/dev/null 2>&1
-fi
-printf '\n通过 %d，失败 %d（详细输出：%s）\n' "$PASS" "$FAILED" "$LOG"
-(( FAILED == 0 ))
+finish

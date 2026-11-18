@@ -40,14 +40,14 @@ func appInfoUnitProperties(out string) map[string]string {
 	for _, line := range strings.Split(out, "\n") {
 		key, value, _ := strings.Cut(line, "=")
 		switch key {
-		case "LoadState", "FragmentPath", "DropInPaths", "ExecStart", "WorkingDirectory", "User", "Group", "EnvironmentFiles", "EnvironmentFile", "Restart", "NRestarts", "NeedDaemonReload":
-			props[key] = value
-		}
-	}
-	// systemd 219 将环境变量文件序列化为单数的 EnvironmentFile。
-	if _, ok := props["EnvironmentFiles"]; !ok {
-		if value, ok := props["EnvironmentFile"]; ok {
+		case "EnvironmentFiles", "EnvironmentFile":
+			// systemd 219 prints one EnvironmentFile property line per file.
+			if previous := props["EnvironmentFiles"]; previous != "" {
+				value = previous + "\n" + value
+			}
 			props["EnvironmentFiles"] = value
+		case "Id", "LoadState", "FragmentPath", "DropInPaths", "ExecStart", "WorkingDirectory", "User", "Group", "Restart", "NRestarts", "NeedDaemonReload":
+			props[key] = value
 		}
 	}
 	return props

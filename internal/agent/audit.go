@@ -286,6 +286,9 @@ func (a *Agent) auditRun(cmd string, code int) {
 		return
 	}
 	e := proto.AuditEntry{Kind: kind, Object: object, Detail: detail, Result: "ok"}
+	if cmd == "swinstall" && a.req.Install != nil {
+		e.TaskID = a.req.Install.TaskID
+	}
 	if code != proto.CodeOK {
 		e.Result, e.Error = "failed", a.lastMsg
 	}

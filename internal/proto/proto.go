@@ -14,7 +14,7 @@ import (
 )
 
 // Version 协议版本。引擎与 agent 版本不一致时 agent 拒绝执行（agent 按内容寻址上传，版本总是匹配的）。
-const Version = 17
+const Version = 18
 
 // 结果码（同时是 agent 的进程退出码）。
 const (
@@ -103,6 +103,8 @@ type Request struct {
 	FerryDir string `json:"ferryDir,omitempty"`
 	// runtime：安装上传目录里的 JDK
 	Runtime *RuntimeSpec `json:"runtime,omitempty"`
+	// RuntimePath 是需要卸载的运行环境的实际程序路径。
+	RuntimePath string `json:"runtimePath,omitempty"`
 
 	// preflight：自动修正权限。"plan" 列出将要做的修改（Fixable），"apply" 修改后重新检查（Fixed）
 	FixPerms string `json:"fixPerms,omitempty"`
@@ -125,7 +127,9 @@ type Request struct {
 	Purge          bool                   `json:"purge,omitempty"`   // swremove：连安装目录（数据）一起删除
 	LogMain        bool                   `json:"logMain,omitempty"` // swlogs：看软件自己的日志文件（否则看 journald）
 	// swcheck：安装前检查（上传之前发现问题，不用白传）
-	SwCheck *SwCheckSpec `json:"swCheck,omitempty"`
+	SwCheck        *SwCheckSpec   `json:"swCheck,omitempty"`
+	SwResolve      *SwResolveSpec `json:"swResolve,omitempty"`
+	SoftwareTaskID string         `json:"softwareTaskId,omitempty"`
 	// swunit：不是 Ferry 装的软件，按系统服务或 Docker 容器启停、看日志（Action 为 start / stop / restart / logs）
 	SwUnit      string `json:"swUnit,omitempty"`
 	SwContainer string `json:"swContainer,omitempty"`
@@ -560,33 +564,36 @@ type Event struct {
 
 // 事件码。
 const (
-	EvInfo     = "INFO"
-	EvWarn     = "WARN"
-	EvLock     = "LOCK"
-	EvCache    = "CACHE"
-	EvAssemble = "ASSEMBLE"
-	EvVerify   = "VERIFY"
-	EvRelease  = "RELEASE"
-	EvStop     = "STOP"
-	EvSwitch   = "SWITCH"
-	EvUnit     = "UNIT"
-	EvStart    = "START"
-	EvWait     = "WAIT"
-	EvReady    = "READY"
-	EvCrash    = "CRASH"
-	EvFail     = "FAIL"
-	EvDiag     = "DIAG"
-	EvRollback = "ROLLBACK"
-	EvAbort    = "ABORT"
-	EvPrune    = "PRUNE"
-	EvReload   = "RELOAD"
-	EvLogs     = "LOGS"
-	EvRuntime  = "RUNTIME"
-	EvSoftware = "SOFTWARE"
-	EvFirewall = "FIREWALL"
-	EvHook     = "HOOK"
-	EvCert     = "CERT"
-	EvKeep     = "KEEP"
+	EvInfo         = "INFO"
+	EvWarn         = "WARN"
+	EvLock         = "LOCK"
+	EvCache        = "CACHE"
+	EvAssemble     = "ASSEMBLE"
+	EvVerify       = "VERIFY"
+	EvRelease      = "RELEASE"
+	EvStop         = "STOP"
+	EvSwitch       = "SWITCH"
+	EvUnit         = "UNIT"
+	EvStart        = "START"
+	EvWait         = "WAIT"
+	EvReady        = "READY"
+	EvCrash        = "CRASH"
+	EvFail         = "FAIL"
+	EvDiag         = "DIAG"
+	EvRollback     = "ROLLBACK"
+	EvAbort        = "ABORT"
+	EvPrune        = "PRUNE"
+	EvReload       = "RELOAD"
+	EvLogs         = "LOGS"
+	EvRuntime      = "RUNTIME"
+	EvSoftware     = "SOFTWARE"
+	EvInstallPhase = "INSTALL_PHASE"
+	EvInstallTask  = "INSTALL_TASK"
+	EvHeartbeat    = "HEARTBEAT"
+	EvFirewall     = "FIREWALL"
+	EvHook         = "HOOK"
+	EvCert         = "CERT"
+	EvKeep         = "KEEP"
 )
 
 // Result agent 的最后一行输出。
@@ -631,20 +638,24 @@ type Preflight struct {
 
 // RuntimeSpec 要安装的运行环境：JDK（上传目录里的 tar.gz，装到 FerryDir）或 nginx（单个程序，装到部署根目录）。
 type RuntimeSpec struct {
-	Kind string `json:"kind,omitempty"` // 空 = JDK；nginx
+	Kind      string `json:"kind,omitempty"` // 空 = JDK；nginx
+	Arch      string `json:"arch,omitempty"`
+	Component string `json:"component,omitempty"` // .NET: aspnetcore、runtime、sdk
 	// nginx：链接名（nginx、nginx-1.30）与完整版本
 	Link    string `json:"link,omitempty"`
 	Version string `json:"version,omitempty"`
 	ID      string `json:"id"`   // 如 jdk-17.0.13_11-x64
 	Java    int    `json:"java"` // 大版本
-	// Dir JDK 装到这个目录下的 <ID> 文件夹（装软件时用户指定的）；空 = <FerryDir>/runtimes 下，java-N 指向它
+	// Dir JDK 装到这个目录下的 <ID> 文件夹；空 = <FerryDir>/runtimes。jdklist 用它限定查找目录。
 	Dir string `json:"dir,omitempty"`
 	// Pin 锁定版本：在 <FerryDir>/runtimes 下建这个名字的链接指向 <ID>（JavaPinLink），不动 java-N；
 	// 服务器上已有 <ID> 时不用上传（File 为空）
-	Pin    string `json:"pin,omitempty"`
-	File   string `json:"file"` // 上传目录里的文件名
-	SHA256 string `json:"sha256"`
-	Size   int64  `json:"size"`
+	Pin string `json:"pin,omitempty"`
+	// KeepDefault 独立安装时保留已有 java-N，或登记自定义位置。File 为空时使用服务器上已有的版本。
+	KeepDefault bool   `json:"keepDefault,omitempty"`
+	File        string `json:"file"` // 上传目录里的文件名
+	SHA256      string `json:"sha256"`
+	Size        int64  `json:"size"`
 }
 
 // Runtime 服务器上已安装的一个 JDK。
@@ -652,6 +663,31 @@ type Runtime struct {
 	ID      string `json:"id"`
 	Java    int    `json:"java"`
 	Version string `json:"version,omitempty"`
+}
+
+// InstalledJDK 是服务器上 Ferry 管理的一个 JDK 安装。
+type InstalledJDK struct {
+	Runtime
+	Arch   string `json:"arch"`
+	Path   string `json:"path"` // 版本目录下的 bin/java
+	Shared bool   `json:"shared"`
+	Custom bool   `json:"custom,omitempty"`
+}
+
+// InstalledRuntime 是服务器运行环境页中的一份安装。
+type InstalledRuntime struct {
+	Kind        string `json:"kind"`
+	Component   string `json:"component,omitempty"`
+	ID          string `json:"id"`
+	Version     string `json:"version"`
+	Arch        string `json:"arch"`
+	Home        string `json:"home"`
+	Path        string `json:"path"`
+	Java        int    `json:"java,omitempty"`
+	Shared      bool   `json:"shared,omitempty"`
+	Custom      bool   `json:"custom,omitempty"`
+	SHA256      string `json:"sha256,omitempty"`
+	Unavailable bool   `json:"unavailable,omitempty"`
 }
 
 // Java 服务器上的一个 java。
@@ -949,6 +985,7 @@ type SoftwareReport struct {
 	Arch     string          `json:"arch,omitempty"`     // amd64 / arm64
 	OS       *OSInfo         `json:"os,omitempty"`       // /etc/os-release
 	Runtimes map[int]Runtime `json:"runtimes,omitempty"` // 服务器上 Ferry 提供的 JDK
+	JDKs     []InstalledJDK  `json:"jdks,omitempty"`     // Ferry 管理的已安装版本
 	FerryDir string          `json:"ferryDir,omitempty"` // ferry 组件的目录（公共的 JDK 在它下面的 runtimes）
 	Disks    []Disk          `json:"disks,omitempty"`    // 常用目录所在分区的剩余空间
 	Ports    []int           `json:"ports,omitempty"`    // 已被占用的 TCP 端口（在监听的，和 Ferry 装的软件停着时也要用的）
@@ -983,6 +1020,7 @@ type Disk struct {
 
 // SoftwarePlan 按模板渲染好的安装计划（swinstall）：agent 照着做，不需要认识具体软件。
 type SoftwarePlan struct {
+	TaskID   string `json:"taskId,omitempty"`
 	Template string `json:"template"` // 模板 ID
 	Title    string `json:"title"`    // 软件的显示名（Nacos、MySQL……）
 	Name     string `json:"name"`     // 实例名：单元为 ferry-<名称>.service
@@ -1030,6 +1068,19 @@ type SoftwarePlan struct {
 	Hosting  *NginxHosting        `json:"hosting,omitempty"`
 }
 
+// SoftwareTask 安装任务的服务器记录。只保存阶段、结果码和实例名。
+type SoftwareTask struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Phase         string    `json:"phase"`
+	Status        string    `json:"status"`
+	Code          int       `json:"code"`
+	StartedAt     time.Time `json:"startedAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	Current       bool      `json:"current,omitempty"`
+	PasswordUnset bool      `json:"passwordUnset,omitempty"`
+}
+
 // PlanPackage 上传的安装包怎么放。
 type PlanPackage struct {
 	File   string `json:"file"` // 上传目录里的文件名
@@ -1045,11 +1096,15 @@ type PlanPackage struct {
 
 // SwCheckSpec swcheck 要检查的：安装目录、运行用户、装在别处的 JDK、服务器上有没有留着的安装包。不填的不查。
 type SwCheckSpec struct {
-	Dir        string `json:"dir,omitempty"`
-	User       string `json:"user,omitempty"`
-	Java       int    `json:"java,omitempty"`    // 要的 JDK 大版本
-	JavaDir    string `json:"javaDir,omitempty"` // 放 JDK 的目录（JDK 装在它下面以版本命名的文件夹里；空 = Ferry 的公共目录）
-	PackageSHA string `json:"packageSha,omitempty"`
+	Dir          string       `json:"dir,omitempty"`
+	User         string       `json:"user,omitempty"`
+	Java         int          `json:"java,omitempty"`    // 要的 JDK 大版本
+	JavaDir      string       `json:"javaDir,omitempty"` // 放 JDK 的目录（JDK 装在它下面以版本命名的文件夹里；空 = Ferry 的公共目录）
+	PackageSHA   string       `json:"packageSha,omitempty"`
+	System       *PlanSystem  `json:"system,omitempty"`
+	NeedXZ       bool         `json:"needXz,omitempty"`
+	ExecuteInDir bool         `json:"executeInDir,omitempty"`
+	SELinux      *PlanSELinux `json:"selinux,omitempty"`
 }
 
 // SwCheck swcheck 的结果。
@@ -1067,7 +1122,21 @@ type SwCheck struct {
 	Inodes   int64 `json:"inodes"`
 	ReadOnly bool  `json:"readOnly,omitempty"`
 	// StageFreeMB 上传安装包的目录（Ferry 组件目录下）所在分区的可用空间
-	StageFreeMB int64 `json:"stageFreeMB"`
+	StageFreeMB      int64    `json:"stageFreeMB"`
+	MissingPackages  []string `json:"missingPackages,omitempty"`
+	RequiredPackages []string `json:"requiredPackages,omitempty"` // 缺少的模板依赖，不含尽力安装的辅助工具
+}
+
+// SwResolveSpec 通过安装计划选中的下载线路模拟系统包事务。
+type SwResolveSpec struct {
+	Packages []string `json:"packages"`
+	Proxy    string   `json:"proxy,omitempty"`
+	NoProxy  []string `json:"noProxy,omitempty"`
+}
+
+type SwResolution struct {
+	Packages []string `json:"packages,omitempty"`
+	Changes  []string `json:"changes,omitempty"`
 }
 
 // BlockedDir 运行用户进不去的目录。
@@ -1079,6 +1148,7 @@ type BlockedDir struct {
 
 // PlanSystem 用服务器的软件源安装。
 type PlanSystem struct {
+	Bundle  string   `json:"bundle,omitempty"` // 安装包是要交给包管理器的 ZIP（rpm 或 deb）
 	DNF     []string `json:"dnf,omitempty"`
 	APT     []string `json:"apt,omitempty"`
 	Disable []string `json:"disable,omitempty"` // 装包时系统自带、被自动启动的服务：停掉并禁用（原来就在运行的不动）
@@ -1091,13 +1161,15 @@ type PlanSystem struct {
 type PlanSELinux struct {
 	Files string `json:"files,omitempty"`
 	Port  string `json:"port,omitempty"`
+	Exec  string `json:"exec,omitempty"` // 仅给安装目录内的启动程序设置标签
 }
 
 // SwSELinux 安装时加上的 SELinux 标签（卸载时去掉）：Files 为加了标签的目录；Types 为用的类型（恢复时重新加上）。
 type SwSELinux struct {
-	Files string       `json:"files,omitempty"`
-	Ports []int        `json:"ports,omitempty"`
-	Types *PlanSELinux `json:"types,omitempty"`
+	Files    string       `json:"files,omitempty"`
+	ExecPath string       `json:"execPath,omitempty"`
+	Ports    []int        `json:"ports,omitempty"`
+	Types    *PlanSELinux `json:"types,omitempty"`
 }
 
 // KeptSoftware 卸载时保留了安装目录（数据）的软件：以后可以恢复（swrestore），或连数据一起删掉。
@@ -1152,21 +1224,23 @@ type PlanStep struct {
 
 // PlanHTTP 就绪后调用的接口。
 type PlanHTTP struct {
-	Post  string            `json:"post"`
-	Form  map[string]string `json:"form,omitempty"`
-	Retry int               `json:"retry,omitempty"`
+	Post          string            `json:"post"`
+	Form          map[string]string `json:"form,omitempty"`
+	Retry         int               `json:"retry,omitempty"`
+	ResponseField string            `json:"responseField,omitempty"`
 }
 
 // SoftwareInstance Ferry 安装的一个软件（<ferryDir>/software/<名称>.json）。
 type SoftwareInstance struct {
-	Name    string         `json:"name"`
-	Kind    string         `json:"kind"`  // 模板 ID
-	Title   string         `json:"title"` // 显示名
-	Version string         `json:"version,omitempty"`
-	Dir     string         `json:"dir"`
-	Unit    string         `json:"unit"`
-	User    string         `json:"user"`
-	Ports   map[string]int `json:"ports,omitempty"`
+	InstallTaskID string         `json:"installTaskId,omitempty"`
+	Name          string         `json:"name"`
+	Kind          string         `json:"kind"`  // 模板 ID
+	Title         string         `json:"title"` // 显示名
+	Version       string         `json:"version,omitempty"`
+	Dir           string         `json:"dir"`
+	Unit          string         `json:"unit"`
+	User          string         `json:"user"`
+	Ports         map[string]int `json:"ports,omitempty"`
 	// AllPorts、UDPPorts 占用的全部 TCP、UDP 端口（含附加端口）：停着时别的软件也不能用
 	AllPorts    []int     `json:"allPorts,omitempty"`
 	UDPPorts    []int     `json:"udpPorts,omitempty"`
@@ -1335,33 +1409,36 @@ type PortInfo struct {
 
 // evLabels 事件代码给人看的名称（代码本身留在协议与 --json 输出里，程序按代码判断）。
 var evLabels = map[string]string{
-	EvInfo:     "信息",
-	EvWarn:     "注意",
-	EvLock:     "加锁",
-	EvCache:    "缓存",
-	EvAssemble: "组装",
-	EvVerify:   "校验",
-	EvRelease:  "新版本",
-	EvStop:     "停止",
-	EvSwitch:   "切换",
-	EvUnit:     "单元文件",
-	EvStart:    "启动",
-	EvWait:     "等待就绪",
-	EvReady:    "已就绪",
-	EvCrash:    "崩溃",
-	EvFail:     "失败",
-	EvDiag:     "诊断",
-	EvRollback: "回滚",
-	EvAbort:    "中止",
-	EvPrune:    "清理",
-	EvReload:   "重新加载",
-	EvLogs:     "日志",
-	EvRuntime:  "运行环境",
-	EvSoftware: "软件",
-	EvFirewall: "防火墙",
-	EvHook:     "部署命令",
-	EvCert:     "证书",
-	EvKeep:     "保留",
+	EvInfo:         "信息",
+	EvWarn:         "注意",
+	EvLock:         "加锁",
+	EvCache:        "缓存",
+	EvAssemble:     "组装",
+	EvVerify:       "校验",
+	EvRelease:      "新版本",
+	EvStop:         "停止",
+	EvSwitch:       "切换",
+	EvUnit:         "单元文件",
+	EvStart:        "启动",
+	EvWait:         "等待就绪",
+	EvReady:        "已就绪",
+	EvCrash:        "崩溃",
+	EvFail:         "失败",
+	EvDiag:         "诊断",
+	EvRollback:     "回滚",
+	EvAbort:        "中止",
+	EvPrune:        "清理",
+	EvReload:       "重新加载",
+	EvLogs:         "日志",
+	EvRuntime:      "运行环境",
+	EvSoftware:     "软件",
+	EvInstallPhase: "安装",
+	EvInstallTask:  "安装任务",
+	EvHeartbeat:    "进度",
+	EvFirewall:     "防火墙",
+	EvHook:         "部署命令",
+	EvCert:         "证书",
+	EvKeep:         "保留",
 }
 
 // EvLabel 事件代码的中文名称；不认识的代码原样返回。

@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/captain/ferry/internal/proto"
 )
@@ -63,7 +65,8 @@ func TestSystemInstallChanges(t *testing.T) {
 	f := newFake(t)
 	a := &Agent{Sys: f, Out: io.Discard, req: &proto.Request{}}
 	f.shellFail["rpm -q --quiet 'redis'"] = true
-	f.shellOut = map[string]string{"dnf install --assumeno redis 2>&1": "Upgrading:\n openssl-libs x86_64 3.2 baseos 2 M\n\nTransaction Summary\n"}
+	const simulation = "LC_ALL=C dnf install --assumeno redis 2>&1"
+	f.shellOut = map[string]string{simulation: "Upgrading:\n openssl-libs x86_64 3.2 baseos 2 M\n\nTransaction Summary\n\nOperation aborted.\n"}
 	_, err := a.systemInstall("redis", &proto.PlanSystem{DNF: []string{"redis"}}, "", false)
 	pc, ok := err.(*pkgChangesError)
 	if !ok || strings.Join(pc.changes, " ") != "openssl-libs（升级）" {
@@ -78,9 +81,35 @@ func TestSystemInstallChanges(t *testing.T) {
 		t.Fatalf("同意后：%v %v", got, err)
 	}
 	// 软件源里没有：说清楚
-	f.shellOut["dnf install --assumeno redis 2>&1"] = "No match for argument: redis\n"
+	f.shellOut[simulation] = "No match for argument: redis\n"
 	if _, err := a.systemInstall("redis", &proto.PlanSystem{DNF: []string{"redis"}}, "", false); err == nil || !strings.Contains(err.Error(), "软件源里没有 redis") {
 		t.Errorf("没有包：%v", err)
+	}
+	a.Sys = &offlineRepoSystem{fakeSys: f}
+	if _, err := a.systemInstall("redis", &proto.PlanSystem{DNF: []string{"redis"}}, "", false); err == nil || !strings.Contains(err.Error(), "解析软件源和依赖失败") {
+		t.Fatalf("仓库失败不能进入安装：%v", err)
+	}
+}
+
+type offlineRepoSystem struct{ *fakeSys }
+
+func (f *offlineRepoSystem) Shell(cmd string, timeout time.Duration) (string, error) {
+	if strings.Contains(cmd, "--assumeno") {
+		return "Failed to download metadata for repo: curl (6) Could not resolve host", errors.New("exit status 1")
+	}
+	return f.fakeSys.Shell(cmd, timeout)
+}
+
+func TestSoftwareAVCMatchesOnlyCurrentExecutable(t *testing.T) {
+	lines := []string{
+		`type=AVC msg=audit(100.010:1): avc: denied { execute } for comm="(mysqld)" permissive=0`,
+		`type=AVC msg=audit(199.010:1): avc: denied { execute } for comm="(mysqld)" permissive=0`,
+		`type=AVC msg=audit(200.010:1): avc: denied { execute } for comm="redis" permissive=0`,
+		`type=AVC msg=audit(201.010:1): avc: denied { execute } for comm="mysqld" permissive=1`,
+	}
+	got := softwareAVC(lines, "/home/test/mysqld", time.Unix(190, 0))
+	if len(got) != 1 || got[0] != lines[1] {
+		t.Fatalf("相关拒绝记录：%v", got)
 	}
 }
 

@@ -380,6 +380,12 @@ func (a *Agent) deployOne(s *proto.AppSpec, rel proto.ReleaseSpec, stage string)
 	if err := a.placeRelease(s, rel, stage, gid); err != nil {
 		return failNow(err)
 	}
+	if s.Type == proto.TypeDotnet {
+		if err := a.checkDotnetRelease(s.UnitText, a.runningDir(s.Name), a.releaseDir(s.Name, rel.ID)); err != nil {
+			a.markFailed(s.Name, rel.ID)
+			return failNow(err)
+		}
+	}
 	prev := a.current(s.Name)
 	a.info(proto.EvRelease, s.Name, "%s（上一版本 %s）", rel.ID, orNone(prev))
 	if s.Hooks != nil {
@@ -746,6 +752,12 @@ func (a *Agent) switchService(s *proto.AppSpec, id, prev string) (string, string
 
 // installUnit 写单元文件（内容变化时）并 daemon-reload。
 func (a *Agent) installUnit(app, unit string, text []byte) error {
+	unlock, err := a.lockUnitRuntimes(text)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	p := a.unitPath(unit)
 	if sameFile(p, text) {
 		return nil

@@ -60,6 +60,11 @@ func diskFreeMB(path string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize) / (1 << 20)
 }
 
+func noExecMount(path string) bool {
+	var st syscall.Statfs_t
+	return syscall.Statfs(path, &st) == nil && uint64(st.Flags)&8 != 0 // ST_NOEXEC
+}
+
 // ownershipOf 文件的属主、组（名字查不到时用数字）与权限。
 func ownershipOf(path string) (Ownership, error) {
 	fi, err := os.Stat(path)

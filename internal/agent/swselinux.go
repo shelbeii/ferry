@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ import (
 // SELinux（RHEL 系默认是 Enforcing）：从软件源装的程序（redis-server、mariadbd、postgres、nginx）带着自己的 SELinux 标签，
 // 由 systemd 启动后进入受限制的运行域，只能读写打了对应标签的目录、监听对应标签的端口。安装目录在 /opt 下（标签是 usr_t）时
 // 它写不进去，不是默认端口时也监听不了：按模板声明的类型给安装目录、端口加上标签（semanage），卸载、撤销时去掉。
-// 官方安装包里的程序（MySQL、Java 软件）没有这种标签，不受限制，不用管。
+// 官方安装包里的程序也可能继承安装目录的标签（如 /home 下的 user_home_t）。
 
 var reSELinuxType = regexp.MustCompile(`^[a-z][a-z0-9_]*_t$`)
 
@@ -27,13 +28,17 @@ func (a *Agent) selinuxEnforcing() bool {
 // 做不到时只提示，不算安装失败：服务起不来时会说明可能是 SELinux 拦截了。
 func (a *Agent) swSELinux(pl *proto.SoftwarePlan) *proto.SwSELinux {
 	se := pl.SELinux
-	if se == nil || (se.Files == "" && se.Port == "") || !a.selinuxEnforcing() {
+	if se == nil || (se.Files == "" && se.Port == "" && se.Exec == "") || !a.selinuxEnforcing() {
 		return nil
 	}
 	if _, err := a.Sys.Shell("command -v semanage", 10*time.Second); err != nil {
+		if pl.System != nil && pl.System.Bundle != "" {
+			a.warn(proto.EvWarn, pl.Name, "离线安装缺少 semanage，请将 SELinux 标签工具加入离线软件包")
+			return nil
+		}
 		a.info(proto.EvSoftware, pl.Name, "SELinux 开着：安装设置标签用的 semanage")
 		allow := pl.System != nil && pl.System.AllowChanges
-		tools := &proto.PlanSystem{DNF: []string{"policycoreutils-python-utils|policycoreutils-python"}, AllowChanges: allow}
+		tools := &proto.PlanSystem{DNF: []string{"policycoreutils-python-utils|policycoreutils-python"}, APT: []string{"policycoreutils-python-utils"}, AllowChanges: allow}
 		if _, err := a.systemInstall(pl.Name, tools, proxyEnvPrefix(pl), true); err != nil {
 			a.warn(proto.EvWarn, pl.Name, "装不上 semanage（%v）：没有给 %s 设置 SELinux 标签，服务可能起不来", err, pl.Dir)
 			return nil
@@ -44,8 +49,22 @@ func (a *Agent) swSELinux(pl *proto.SoftwarePlan) *proto.SwSELinux {
 		}
 	}
 	done := &proto.SwSELinux{}
+	if se.Exec != "" {
+		executable := commandExecutable(sdSplit(pl.Exec))
+		if resolved, err := filepath.EvalSymlinks(executable); err == nil && inDir(pl.Dir, resolved) && !a.hasSELinuxType(resolved, se.Exec) {
+			spec := shellQuote(regexp.QuoteMeta(resolved))
+			if _, err := a.Sys.Shell("semanage fcontext -a -t "+se.Exec+" "+spec+" 2>&1", 2*time.Minute); err != nil {
+				a.warn(proto.EvWarn, pl.Name, "无法为启动程序 %s 添加 SELinux 标签 %s：%v", resolved, se.Exec, err)
+			} else {
+				done.ExecPath = resolved
+				if _, err := a.Sys.Shell("restorecon "+shellQuote(resolved)+" 2>&1", time.Minute); err != nil {
+					a.warn(proto.EvWarn, pl.Name, "应用 SELinux 启动程序标签失败：%v", err)
+				}
+			}
+		}
+	}
 	if se.Files != "" {
-		spec := shellQuote(pl.Dir + "(/.*)?")
+		spec := shellQuote(regexp.QuoteMeta(pl.Dir) + "(/.*)?")
 		cmd := fmt.Sprintf("semanage fcontext -a -t %s %s 2>&1 || semanage fcontext -m -t %s %s 2>&1", se.Files, spec, se.Files, spec)
 		if out, err := a.Sys.Shell(cmd, 2*time.Minute); err != nil {
 			a.warn(proto.EvWarn, pl.Name, "给 %s 设置 SELinux 标签 %s 失败：%v %s", pl.Dir, se.Files, err, strings.TrimSpace(out))
@@ -75,7 +94,7 @@ func (a *Agent) swSELinux(pl *proto.SoftwarePlan) *proto.SwSELinux {
 			a.info(proto.EvSoftware, pl.Name, "SELinux 开着：给端口 %d 加上标签 %s（程序才能监听）", p, se.Port)
 		}
 	}
-	if done.Files == "" && len(done.Ports) == 0 {
+	if done.Files == "" && done.ExecPath == "" && len(done.Ports) == 0 {
 		return nil
 	}
 	return done
@@ -86,8 +105,13 @@ func (a *Agent) undoSELinux(name string, se *proto.SwSELinux) {
 	if se == nil {
 		return
 	}
+	if se.ExecPath != "" {
+		if _, err := a.Sys.Shell("semanage fcontext -d "+shellQuote(regexp.QuoteMeta(se.ExecPath))+" 2>&1", 2*time.Minute); err != nil {
+			a.warn(proto.EvWarn, name, "移除启动程序 SELinux 标签规则失败：%v", err)
+		}
+	}
 	if se.Files != "" {
-		if out, err := a.Sys.Shell("semanage fcontext -d "+shellQuote(se.Files+"(/.*)?")+" 2>&1", 2*time.Minute); err != nil {
+		if out, err := a.Sys.Shell("semanage fcontext -d "+shellQuote(regexp.QuoteMeta(se.Files)+"(/.*)?")+" 2>&1", 2*time.Minute); err != nil {
 			a.warn(proto.EvWarn, name, "去掉 %s 的 SELinux 标签失败：%v %s", se.Files, err, strings.TrimSpace(out))
 		}
 	}
@@ -127,4 +151,51 @@ func (a *Agent) selinuxHint(name string) {
 	if a.selinuxEnforcing() {
 		a.warn(proto.EvWarn, name, "这台服务器的 SELinux 开着（Enforcing），服务可能被它拦截了：用 ausearch -m avc -ts recent 查看被拦截的操作")
 	}
+}
+
+func (a *Agent) hasSELinuxType(path, expected string) bool {
+	out, err := a.Sys.Shell("ls -Zd -- "+shellQuote(path)+" 2>/dev/null", 10*time.Second)
+	fields := strings.Fields(out)
+	return err == nil && len(fields) > 0 && strings.Contains(fields[0], ":"+expected+":")
+}
+
+var auditStamp = regexp.MustCompile(`audit\(([0-9]+)\.`)
+
+func softwareAVC(lines []string, executable string, since time.Time) []string {
+	var out []string
+	base := filepath.Base(executable)
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "type=AVC ") || !strings.Contains(line, "denied") || !strings.Contains(line, "permissive=0") {
+			continue
+		}
+		if !strings.Contains(line, `comm="`+base+`"`) && !strings.Contains(line, `comm="(`+base+`)"`) {
+			continue
+		}
+		stamp := auditStamp.FindStringSubmatch(line)
+		if stamp == nil {
+			continue
+		}
+		seconds, _ := strconv.ParseInt(stamp[1], 10, 64)
+		if seconds >= since.Unix() {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func (a *Agent) softwareSELinuxDiag(pl *proto.SoftwarePlan, unit string) {
+	if a.Sys.UnitProps(unit).ExecMainStatus != 203 {
+		return
+	}
+	since := a.waitStart[unit].Add(-3 * time.Second)
+	if lines, err := tailFile("/var/log/audit/audit.log", 1500); err == nil {
+		denials := softwareAVC(lines, commandExecutable(sdSplit(pl.Exec)), since)
+		for _, line := range denials[max(0, len(denials)-3):] {
+			a.fail(proto.EvDiag, pl.Name, "SELinux 拒绝启动程序执行：%s", line)
+		}
+		if len(denials) > 0 {
+			return
+		}
+	}
+	a.selinuxHint(pl.Name)
 }

@@ -63,12 +63,20 @@ type Meta struct {
 	Format string `json:"format,omitempty"` // tar.gz / tar.xz / zip / jar / binary
 	Arch   string `json:"arch,omitempty"`   // binary 是 Linux 程序时：amd64 / arm64
 	Desc   string `json:"desc,omitempty"`   // 给人看的：Linux 程序（arm64）、tar.gz 压缩包……
+	Bundle string `json:"bundle,omitempty"` // ZIP 中的离线系统包类型（rpm / deb）
 }
 
 // describe 按文件内容补上格式、程序架构。
 func (m *Meta) describe() {
 	m.Format = swtpl.FormatOf("", m.File)
+	m.Bundle = ""
 	switch m.Format {
+	case "zip":
+		m.Desc = "zip 压缩包"
+		if preview, err := InspectArchive(context.Background(), m.FullPath, "zip", 0); err == nil && preview.Bundle != "" {
+			m.Bundle = preview.Bundle
+			m.Desc = strings.ToUpper(m.Bundle) + " 离线系统包"
+		}
 	case "jar":
 		m.Desc = "jar 包"
 	case "binary":
@@ -318,7 +326,7 @@ func save(dir string, m *Meta) error {
 	m.FullPath = filepath.Join(dir, m.File)
 	m.describe()
 	rec := *m
-	rec.FullPath, rec.Format, rec.Arch, rec.Desc = "", "", "", ""
+	rec.FullPath, rec.Format, rec.Arch, rec.Desc, rec.Bundle = "", "", "", "", ""
 	b, _ := json.MarshalIndent(rec, "", "  ")
 	os.MkdirAll(filepath.Join(dir, ".meta"), 0o755)
 	return os.WriteFile(metaFile(dir, m.File), b, 0o644)

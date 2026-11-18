@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/captain/ferry/internal/engine"
+	"github.com/captain/ferry/internal/rundist"
 	"github.com/captain/ferry/internal/settings"
 	"github.com/captain/ferry/internal/swpkg"
 	"github.com/captain/ferry/internal/swtpl"
@@ -19,11 +21,24 @@ import (
 
 var softwareUsage = errors.New(`用法：
   ferry software <目标>                              查看服务器上已有的软件
+  ferry software jdk list <目标>                     查看服务器上 Ferry 管理的 JDK
+  ferry software jdk install <目标> --java N | --version V [--java-dir 目录]    预装 JDK，大版本或完整版本二选一
+  ferry software jdk remove <目标> <Java 绝对路径> --yes    卸载该路径对应的 JDK
+  ferry software runtime list <目标>                   查看全部 Ferry 管理的运行环境
+  ferry software runtime install <目标> node|python|dotnet --channel 系列 | --version V
+      --dir 目录  指定安装父目录  --package 本机.tar.gz  使用离线安装包（需指定完整版本）
+      --component aspnetcore|runtime|sdk  .NET 组件（默认 aspnetcore）
+  ferry software runtime remove <目标> <程序绝对路径> --yes
+  ferry software status <目标> <任务ID>                查询服务器上的安装任务
+  ferry software plan <目标> <模板> [安装选项]         预检并显示安装计划
   ferry software install <目标> <模板> [选项]          按模板安装（模板见 ferry software templates）
       --name 名称  --version V  --user 运行用户  --variant N（第几种装法，默认按服务器自动选）
       --in 目录  装到这个目录下的「名称-版本」文件夹（默认 /opt/ferry-software）；--dir 目录  直接指定安装目录
       --java N  --java-dir 目录（JDK 装到这里，默认装到 Ferry 的公共目录）
       --package 文件名（本机库里的安装包）  --set 参数=值,参数=值
+      --conf 名称=值  附加配置：模板参数没有的设置（如 --conf innodb_buffer_pool_size=1G），可以写几次；
+                     模板有几处附加配置时写成 --conf 附加配置ID:名称=值。能写哪些见 ferry software template show <ID> 的 extras；
+                     也可以用环境变量 FERRY_SOFTWARE_EXTRA 给 JSON：{"附加配置ID": {"名称": "值"}} 或 {"名称": "值"}
       --fix-parents  运行用户进不了安装目录的上级目录时，给它加上进入的权限
       --allow-changes  从软件源装包会顺带升级、删除已装的包时也继续（不加时停下来说明会改动哪些）
       --network auto|local|server  服务器要下载东西（从软件源装包等）时走谁的网络：local 经这台电脑，
@@ -49,7 +64,7 @@ var softwareUsage = errors.New(`用法：
   ferry software templates                           全部模板（内置 + 自己的）
   ferry software template show <ID> | delete <ID> | import <文件> | save | check   save、check 从 FERRY_SOFTWARE_TEMPLATE 读
   ferry software latest <模板> [--variant N]          查最新版本
-  ferry software lib [list] | import <文件> | remove <文件名> | download <模板> [--version V]`)
+  ferry software lib [list] | import <文件> [rpm|deb|auto] | inspect <文件名> [剥离层数] | remove <文件名> | download <模板> [--version V]`)
 
 // 不需要 ferry.yaml 的子命令
 var softwareLocal = map[string]bool{"templates": true, "template": true, "latest": true, "lib": true}
@@ -113,7 +128,31 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 		return ok(nil)
 	}
 	switch sub {
-	case "install":
+	case "jdk":
+		if len(args) > 0 {
+			return softwareJDKCmd(c, args, e, js, con, fail)
+		}
+	case "runtime":
+		if len(args) > 0 {
+			return softwareRuntimeCmd(c, args, e, js, con, fail)
+		}
+	case "status":
+		if err := need(2); err != nil {
+			return fail(err)
+		}
+		task, err := e.SoftwareTask(args[0], args[1])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			if task == nil {
+				con.Info("服务器上没有该安装任务的记录")
+			} else {
+				con.Info("%s：%s · %s", task.Name, task.Status, task.Phase)
+			}
+		}
+		return ok(task)
+	case "install", "plan":
 		if err := need(2); err != nil {
 			return fail(err)
 		}
@@ -121,9 +160,32 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 		if err != nil {
 			return fail(err)
 		}
+		o.Preview = sub == "plan"
 		res, err := e.SoftwareInstall(args[0], o)
 		if err != nil {
 			return fail(err)
+		}
+		if res.Plan != nil {
+			if con != nil {
+				p := res.Plan
+				route := map[string]string{"none": "无需远端下载", "server": "服务器直连", "local": "经本机代理", "offline": "离线安装包"}[p.Network]
+				con.OK("%s %s · %s · %s · %s", p.Template, p.Version, p.Variant, p.Dir, route)
+				for _, x := range p.Extras {
+					where := x.File
+					if where == "" {
+						where = map[string]string{"env": "环境变量", "args": "启动参数"}[x.Format]
+					}
+					con.Info("附加配置「%s」（%s）：", x.Label, where)
+					for _, it := range x.Items {
+						k := it.Key
+						if it.Section != "" {
+							k = "[" + it.Section + "] " + k
+						}
+						con.Info("  %s = %s", k, it.Value)
+					}
+				}
+			}
+			return ok(res.Plan)
 		}
 		if js != nil {
 			return ok(res)
@@ -254,6 +316,111 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 	return 0
 }
 
+func softwareRuntimeCmd(c *cli, args []string, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(error) int) int {
+	if len(args) == 2 && args[0] == "list" {
+		rows, err := e.ServerRuntimes(args[1])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			if len(rows) == 0 {
+				con.Info("%s 还没有 Ferry 管理的运行环境", args[1])
+			}
+			for _, row := range rows {
+				con.Info("%s · %s", row.ID, row.Path)
+			}
+		}
+		return ok0(js, rows)
+	}
+	if len(args) != 3 {
+		return fail(softwareUsage)
+	}
+	target := args[1]
+	switch args[0] {
+	case "install":
+		choice := rundist.Selection{Kind: args[2], Component: c.flags["component"], Channel: c.flags["channel"], Version: c.flags["version"]}
+		row, err := e.InstallServerRuntime(target, choice, c.flags["dir"], c.flags["package"])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			con.OK("%s 上的 %s 已就绪（%s）", target, row.ID, row.Path)
+		}
+		return ok0(js, row)
+	case "remove":
+		if !c.has("yes") {
+			return fail(errors.New("请确认程序路径，添加 --yes 确认卸载"))
+		}
+		row, err := e.RemoveServerRuntime(target, args[2])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			con.OK("%s 上已卸载 %s（%s）", target, row.ID, row.Path)
+		}
+		return ok0(js, row)
+	}
+	return fail(softwareUsage)
+}
+
+func softwareJDKCmd(c *cli, args []string, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(error) int) int {
+	if len(args) == 3 && args[0] == "remove" {
+		if !c.has("yes") {
+			return fail(errors.New("请确认 Java 路径，添加 --yes 确认卸载"))
+		}
+		r, err := e.RemoveServerJDK(args[1], args[2])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			con.OK("%s 上已卸载 JDK %s（%s）", args[1], r.Version, r.Path)
+		}
+		return ok0(js, r)
+	}
+	if len(args) != 2 {
+		return fail(softwareUsage)
+	}
+	action, target := args[0], args[1]
+	switch action {
+	case "list":
+		list, err := e.JDKs(target)
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			if len(list) == 0 {
+				con.Info("%s 还没有 Ferry 管理的 JDK", target)
+			}
+			for _, r := range list {
+				shared := ""
+				if r.Shared {
+					shared = fmt.Sprintf("（共享 java-%d）", r.Java)
+				}
+				con.Info("JDK %s · %s · %s%s", r.Version, r.Arch, r.Path, shared)
+			}
+		}
+		return ok0(js, list)
+	case "install":
+		java := 0
+		if raw, exists := c.flags["java"]; exists {
+			var err error
+			java, err = strconv.Atoi(raw)
+			if err != nil || java < 8 || java > 99 {
+				return fail(errors.New("--java 要填 8–99 之间的 JDK 大版本"))
+			}
+		}
+		r, err := e.InstallServerJDK(target, java, c.flags["version"], c.flags["java-dir"])
+		if err != nil {
+			return fail(err)
+		}
+		if con != nil {
+			con.OK("%s 上已安装 JDK %s（%s）", target, r.Version, r.Path)
+		}
+		return ok0(js, r)
+	}
+	return fail(softwareUsage)
+}
+
 // installOptions 命令行参数 → 安装选项。
 func installOptions(c *cli, cio *cliIO, template string) (engine.SoftwareOptions, error) {
 	o := engine.SoftwareOptions{Template: template, Variant: -1, Name: c.flags["name"], Version: c.flags["version"], Dir: c.flags["dir"], In: c.flags["in"],
@@ -303,7 +470,54 @@ func installOptions(c *cli, cio *cliIO, template string) (engine.SoftwareOptions
 	if pw := cio.getenv("FERRY_SOFTWARE_PASSWORD"); pw != "" {
 		o.Params["password"] = pw
 	}
+	extra, err := installExtras(cio.getenv("FERRY_SOFTWARE_EXTRA"), c.flags["conf"])
+	if err != nil {
+		return o, err
+	}
+	o.Extra = extra
 	return o, nil
+}
+
+// installExtras 附加配置：环境变量 FERRY_SOFTWARE_EXTRA 的 JSON（{"ID": {"名称": "值"}}，或只有一处时 {"名称": "值"}），
+// 加上命令行的 --conf [ID:]名称=值（一行一项）。
+func installExtras(js, lines string) (map[string]map[string]string, error) {
+	out, err := engine.ParseExtras([]byte(js))
+	if err != nil {
+		return nil, fmt.Errorf("FERRY_SOFTWARE_EXTRA：%w", err)
+	}
+	if out == nil {
+		out = map[string]map[string]string{}
+	}
+	put := func(id, k, v string) error {
+		if out[id] == nil {
+			out[id] = map[string]string{}
+		}
+		if _, dup := out[id][k]; dup {
+			return fmt.Errorf("附加配置 %s 写了两次", k)
+		}
+		out[id][k] = v
+		return nil
+	}
+	for _, l := range strings.Split(lines, "\n") {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(l, "=")
+		if !ok {
+			return nil, fmt.Errorf("--conf 要写成 名称=值：%q", l)
+		}
+		id := ""
+		if i, key, found := strings.Cut(k, ":"); found {
+			id, k = strings.TrimSpace(i), key
+		}
+		if err := put(id, strings.TrimSpace(k), v); err != nil {
+			return nil, err
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 // softwareLocalCmd 不需要 ferry.yaml 的：templates、template、latest、lib。
@@ -450,15 +664,22 @@ func softwareLocalCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st setti
 			}
 			return 0
 		case "import":
-			if len(args) < 2 {
-				return fail(errors.New("用法：ferry software lib import <安装包文件>"))
+			if len(args) < 2 || len(args) > 3 {
+				return fail(errors.New("用法：ferry software lib import <安装包文件> [rpm|deb|auto]"))
+			}
+			if len(args) == 3 {
+				if err := swpkg.CheckSystemBundle(cio.ctx, args[1], args[2]); err != nil {
+					return fail(err)
+				}
 			}
 			m, err := swpkg.Import(args[1], lib, tpls)
 			if err != nil {
 				return fail(err)
 			}
 			if con != nil {
-				if m.Template != "" {
+				if m.Bundle != "" {
+					con.OK("已导入 %s 离线系统包 %s", strings.ToUpper(m.Bundle), m.File)
+				} else if m.Template != "" {
 					con.OK("已导入 %s %s", m.Template, m.Version)
 				} else {
 					con.OK("已导入 %s（没认出是哪个模板的官方安装包：自定义安装时可以选它）", m.File)
@@ -473,6 +694,33 @@ func softwareLocalCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st setti
 				return fail(err)
 			}
 			return ok(nil)
+		case "inspect":
+			if len(args) < 2 || len(args) > 3 {
+				return fail(errors.New("用法：ferry software lib inspect <文件名> [剥离层数]"))
+			}
+			m := swpkg.FindFile(lib, args[1])
+			if m == nil {
+				return fail(fmt.Errorf("本机库里没有 %s", args[1]))
+			}
+			strip := 0
+			if len(args) == 3 {
+				var err error
+				strip, err = strconv.Atoi(args[2])
+				if err != nil || strip < 0 || strip > 64 {
+					return fail(errors.New("剥离层数必须是 0 到 64"))
+				}
+			}
+			preview, err := swpkg.InspectArchive(cio.ctx, filepath.Join(lib, m.File), swtpl.FormatOf("", m.File), strip)
+			if err != nil {
+				return fail(err)
+			}
+			if con != nil {
+				con.Info("%d 个文件，离线包类型：%s", preview.Entries, preview.Bundle)
+				for _, file := range preview.Files {
+					con.Info("%s", file)
+				}
+			}
+			return ok(preview)
 		case "download":
 			if len(args) < 2 {
 				return fail(errors.New("用法：ferry software lib download <模板> [--version V] [--variant N]"))

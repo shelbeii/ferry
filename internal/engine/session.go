@@ -382,7 +382,11 @@ func (s *session) auditLocal(cmd string, req *proto.Request, r *proto.Result) {
 	if r.RC != proto.CodeOK {
 		err = errors.New(r.Msg)
 	}
-	saveLocalAudit(s.auditEntry(kind, object, detail, err))
+	entry := s.auditEntry(kind, object, detail, err)
+	if cmd == "swinstall" && req.Install != nil {
+		entry.TaskID = req.Install.TaskID
+	}
+	saveLocalAudit(entry)
 }
 
 // changingCmds 改动服务器的 agent 命令：本机取消或连接断开后，agent 在服务器上照常做完（不会停在半路）。
@@ -390,6 +394,7 @@ var changingCmds = map[string]string{
 	"secretset": "",
 	"deploy":    "（失败时自动回滚）", "rollback": "（失败时切回原版本）", "control": "", "runtime": "", "runjob": "（定时任务在服务器上照常跑完）",
 	"swinstall": "", "swcontrol": "", "swremove": "", "portset": "", "fwenable": "（3 分钟内没确认会自动关掉防火墙）", "fwdisable": "",
+	"jdkremove": "", "runtimeremove": "",
 }
 
 // continuesNote 改动服务器的操作没拿到结果时说明：服务器上会继续做完，到哪里看结果。
@@ -397,6 +402,9 @@ func continuesNote(cmd string, err error) error {
 	note, ok := changingCmds[cmd]
 	if !ok {
 		return err
+	}
+	if cmd == "jdkremove" || cmd == "runtimeremove" {
+		return fmt.Errorf("%w。请刷新服务器的运行环境清单或查看审计记录确认卸载结果", err)
 	}
 	return fmt.Errorf("%w。服务器上这次操作会继续做完%s，稍后看状态和部署历史确认结果", err, note)
 }
@@ -441,6 +449,9 @@ type AgentError struct {
 
 func (e *AgentError) Error() string {
 	if e.RC == proto.CodeLocked {
+		if e.Cmd == "swinstall" {
+			return e.Msg
+		}
 		return "另一个部署/回滚/启停正在进行，稍后再试"
 	}
 	return fmt.Sprintf("%s 失败：%s", e.Cmd, e.Msg)

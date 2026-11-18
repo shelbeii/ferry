@@ -107,7 +107,8 @@ type rollbackIn struct {
 }
 
 type statusTaskIn struct {
-	ID   string `json:"id" jsonschema:"deploy、app_control、rollback 返回的 id"`
+	targetIn
+	ID   string `json:"id" jsonschema:"改动工具返回的 id；软件安装也可查询服务器保留的任务"`
 	Wait int    `json:"wait,omitempty" jsonschema:"最多等多少秒看它结束，默认 30，最多 40"`
 }
 
@@ -192,12 +193,24 @@ func (s *server) addChangeTools(m *mcp.Server) {
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "task_status", Title: "改动的进展",
-		Description: "查 deploy、app_control、rollback、run_job 等改动的进展和结果（它们没在 40 秒内结束时返回的 id）。最多等 wait 秒看它结束。",
+		Description: "查改动工具返回的 id 和结果，最多等 wait 秒。查询 Ferry 重启前的软件安装时，带上 project 和 target，从服务器读同一个 id 的最新结果。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		loggedReq(s, "task_status", func(ctx context.Context, req *mcp.CallToolRequest, in statusTaskIn) (any, error) {
 			s.mu.Lock()
 			o := s.ops[in.ID]
 			s.mu.Unlock()
+			if in.Project != "" || in.Target != "" {
+				snapshot, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, target string) (any, error) {
+					task, err := e.SoftwareTask(target, in.ID)
+					if err != nil || task == nil {
+						return nil, err
+					}
+					return task, nil
+				})
+				if snapshot != nil || (err != nil && o == nil) {
+					return snapshot, err
+				}
+			}
 			if o == nil {
 				return nil, fmt.Errorf("没有这个 id：%s（ferry mcp 重启过的话，之前的记录就没了；可以用 deploy_history、app_status 看结果）", in.ID)
 			}

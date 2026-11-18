@@ -11,6 +11,7 @@ test/e2e/run.sh                                                               # 
 
 - agent 通过 `agent.System` 接口隔离了 systemd、符号链接、用户、锁等系统操作，单元测试用假实现，在任何平台上都能跑。
 - 端到端测试启动带 systemd + sshd + sudo 的 Oracle Linux 9 容器（一个 root 登录、一个普通用户 + sudo），用真实的 ferry 跑一遍：多目标部署、增量上传与缓存损坏重试、崩溃回滚与失败即停、手动回滚、启停、日志、接管与回到接管前、密码登录与 keygen、静态站点与 nginx、软件、数据目录与设置、互斥、文件权限等。不会改动本机的数据目录；`KEEP=1` 保留容器便于排查，详细输出在 `test/e2e/out/e2e.log`。
+- `E2E_JDK_ONLY=1 test/e2e/run.sh` 运行服务器 JDK 专项，覆盖下载安装、版本并存、校验失败、并发安装和部署复用。
 - 开发时运行 ferry 建议把 `FERRY_HOME` 设到临时目录，免得动到已安装的 Ferry 的数据。
 
 桌面版（需要 Go 1.26、Node 20+、Rust）：

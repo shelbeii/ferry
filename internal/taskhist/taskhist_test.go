@@ -4,9 +4,43 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestTaskHistoryRemovesSoftwarePasswordsAndKeepsProgress(t *testing.T) {
+	dir := t.TempDir()
+	r := &Record{
+		ID: "install-123", Status: Running, Title: "安装",
+		Target: "qa", InstallID: "install-123",
+		Data:     json.RawMessage(`{"name":"mysql","target":"qa","unit":"ferry-mysql.service","password":"memory-only","saved":true}`),
+		Progress: json.RawMessage(`{"done":123,"total":456}`),
+	}
+	if err := Save(dir, r); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir, r.ID)
+	if err != nil || got.Target != r.Target || got.InstallID != r.InstallID || string(got.Progress) != string(r.Progress) {
+		t.Fatalf("安装快照：%+v %v", got, err)
+	}
+	p, _ := path(dir, r.ID)
+	b, err := os.ReadFile(p)
+	if err != nil || strings.Contains(string(b), "memory-only") {
+		t.Fatalf("任务快照含密码或读取失败：%v", err)
+	}
+	legacy, _ := json.Marshal(r)
+	if err := os.WriteFile(p, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := List(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(p)
+	if err != nil || strings.Contains(string(b), "memory-only") {
+		t.Fatalf("旧任务脱敏或读取失败：%v", err)
+	}
+}
 
 func rec(id, status string, started int64) *Record {
 	return &Record{ID: id, Title: "部署 " + id, Status: status, StartedAt: started, Lines: json.RawMessage(`[{"kind":"step","msg":"构建"}]`)}

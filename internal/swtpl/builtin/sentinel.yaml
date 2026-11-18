@@ -52,3 +52,15 @@ variants:
     logs: ["${dir}/logs/csp/sentinel-dashboard.log"]
     notes:
       - 控制台：http://${host}:${port}/ ，账号 ${account}，密码见「密码」
+
+# 安装时可以补充的配置（参数没有的设置）：作为 Spring Boot 的启动参数 --名称=值
+extras:
+  - id: app
+    label: Sentinel 配置（启动参数 --）
+    format: args
+    prefix: "--"
+    help: 作为启动参数传给控制台（Spring Boot 的配置项），同名的优先于程序里的默认值
+    suggest:
+      - {key: server.servlet.session.timeout, example: 7200s, help: 登录多久后过期}
+      - {key: sentinel.dashboard.app.hideAppNoMachineMillis, example: "60000", help: 应用没有机器在线多久后在列表里隐藏（毫秒，0 = 不隐藏）}
+      - {key: logging.level.root, example: warn, help: 日志级别}

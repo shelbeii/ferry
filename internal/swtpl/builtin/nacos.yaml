@@ -33,6 +33,7 @@ variants:
       file: nacos-server-${version}.tar.gz
       github: alibaba/nacos
       fallback: 3.2.4
+      recommended: 3.2.4
       size: 约 220 MB
       format: tar.gz
       strip: 1
@@ -46,11 +47,19 @@ variants:
         set:
           nacos.server.main.port: ${port}
           nacos.console.port: ${console}
-          nacos.core.auth.plugin.nacos.token.secret.key: ${base64random:48}
           nacos.core.auth.server.identity.key: ferry-${random:8}
           nacos.core.auth.server.identity.value: ${random:24}
+      - file: ${dir}/nacos/conf/application.properties
+        versionPattern: '^v?3\.[0-2]\.'
+        set:
+          nacos.core.auth.plugin.nacos.token.secret.key: ${base64random:48}
           # 内置数据库（Derby）第一次启动要建库，Nacos 只等 10 秒：磁盘慢时超时（Login timeout exceeded），启动失败
           db.pool.config.connectionTimeout: "120000"
+      - file: ${dir}/nacos/conf/application.properties
+        versionPattern: '^v?(3\.([3-9]|[1-9][0-9]+)|[4-9]|[1-9][0-9]+)\.'
+        set:
+          nacos.plugin.auth.nacos.token.secret.key: ${base64random:48}
+          nacos.plugin.datasource.db.pool.config.connection-timeout: "120000"
     steps:
       - run: mkdir -p ${dir}/nacos/logs
       # 3.x：控制台第一次打开时要设置 nacos 用户的密码，这里替用户设置好
@@ -59,8 +68,15 @@ variants:
           post: http://127.0.0.1:${port}/nacos/v3/auth/user/admin
           form: {password: "${password}"}
           retry: 30
+        soft: 管理员初始化接口没有确认成功，继续校验实际登录
+      - at: ready
+        http:
+          post: http://127.0.0.1:${port}/nacos/v3/auth/user/login
+          form: {username: nacos, password: "${password}"}
+          retry: 15
+          responseField: accessToken
         sets: password
-        soft: 管理员密码没有设置成功：第一次打开控制台时按提示设置 nacos 用户的密码
+        soft: 管理员登录未通过校验：请在控制台检查 nacos 用户的密码和鉴权配置
     service:
       exec: >-
         ${java} -Xms${memory} -Xmx${memory} -Dnacos.standalone=true -Dnacos.member.list=
@@ -82,3 +98,18 @@ variants:
     notes:
       - 控制台：http://${host}:${console}/ ，用户 nacos，密码见「密码」
       - 应用连接 ${host}:${port}（还会用到 ${port+1000}）
+
+# 安装时可以补充的配置（参数没有的设置）：合并进 application.properties
+extras:
+  - id: app
+    label: Nacos 主配置（application.properties）
+    format: properties
+    file: ${dir}/nacos/conf/application.properties
+    help: 一行一项「名称=值」，同名的替换安装包里的值；如改用 MySQL 存储，填下面 db 开头的几项（库要先建好、导入 Nacos 的建表脚本）
+    protect: [server.port, nacos.standalone, nacos.home, spring.config.additional-location]
+    suggest:
+      - {key: spring.sql.init.platform, example: mysql, help: 用 MySQL 存储（不填时用内置存储）}
+      - {key: db.num, example: "1", help: 数据库个数}
+      - {key: db.url.0, example: "jdbc:mysql://127.0.0.1:3306/nacos?characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai", help: 数据库地址}
+      - {key: db.user.0, example: nacos, help: 数据库账号}
+      - {key: db.password.0, example: 数据库密码, help: 数据库密码（写在这个配置文件里）}

@@ -2,6 +2,26 @@
 
 在服务器「软件」列表中，每项软件都有「配置」入口；「连接」页也能打开软件列表，先安装软件，再创建部署项目。
 
+## 安装时补充配置
+
+模板参数只覆盖常用的设置（端口、密码、内存……）。其他设置在安装时用「附加配置」按「名称=值」补上，不用改模板，也不用装好后再改文件重启：
+
+| 软件 | 写到哪里 | 例子 |
+| --- | --- | --- |
+| MySQL、MariaDB | `my.cnf` 的 `[mysqld]` 段 | `innodb_buffer_pool_size=1G`、`default-time-zone=+08:00`、`skip-name-resolve`（只写名称、值留空） |
+| Redis | `redis.conf` | `maxmemory=2gb`、`maxmemory-policy=allkeys-lru` |
+| PostgreSQL | 启动参数 `-c 名称=值` | `shared_buffers=1GB`、`timezone=Asia/Shanghai` |
+| Nacos | 安装包里的 `application.properties` | `spring.sql.init.platform=mysql`、`db.url.0=jdbc:mysql://…` |
+| Sentinel | Spring Boot 启动参数 `--名称=值` | `server.servlet.session.timeout=7200s` |
+| MinIO | 服务的环境变量 | `MINIO_SERVER_URL=https://s3.example.com` |
+| ZLMediaKit | `config.ini`，名称写成「段.名称」 | `hook.enable=1`、`hls.segDur=2` |
+
+- 同名的项替换模板里的值，没有的加上；ini 文件里没有的段会新建。值原样写入，不展开 `${…}`，不能换行。
+- 由参数决定的项（端口、监听地址、密码、目录、日志位置）和会让 Ferry 管不了服务的项（如 MySQL 的 `daemonize`、Redis 的 `daemonize`）不能在这里改，提示里会说用哪个参数。
+- PostgreSQL、Sentinel 的附加配置是启动参数，优先于配置文件：以后要改，改服务单元里的启动命令。
+- 命令行：`ferry software install <目标> mysql --conf innodb_buffer_pool_size=1G --conf max_connections=1000`（可以写几次）；`ferry software plan` 先列出会写进去的项。
+- 自己写的模板用 `extras` 声明能补充哪些配置，格式见 AI 助手的模板说明（`template_guide`）。没有声明的模板不能用附加配置，装好后在「配置」里改。
+
 ## 查看、编辑与生效
 
 配置列表优先采用安装模板登记的文件，并结合启动参数、systemd 环境文件、常见配置目录和 nginx include 查找实际文件。Ferry 安装的软件还会列出 `ferry.env` 和服务单元。找不到的文件可以用「关联配置文件」补充：路径须位于该软件的安装目录、对应 `/etc` 目录或容器持久化挂载内。

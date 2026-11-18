@@ -43,15 +43,16 @@ type Agent struct {
 	// Plain 输出给人看的文字（定时器里运行时进 journald），不是 JSON 事件
 	Plain bool
 
-	mu         sync.Mutex
-	req        *proto.Request
-	appRoots   map[string]string    // 应用 → 单独设置的部署根目录
-	nginxLocks map[string]bool      // 当前事务已按实例名排序持有的 Nginx 锁。
-	waitStart  map[string]time.Time // 单元 → 最近一次开始等待就绪的时间（诊断只看这之后的日志）
-	readySec   int                  // 最近一次就绪用了几秒（部署时记下来，和上一次比）
-	errorLines int                  // 最近一次启动期间服务输出里的错误行数
-	cmd        string               // 正在执行的命令（deploy、rollback……）
-	lastMsg    string               // 最近一次返回结果的说明
+	mu          sync.Mutex
+	req         *proto.Request
+	appRoots    map[string]string    // 应用 → 单独设置的部署根目录
+	nginxLocks  map[string]bool      // 当前事务已按实例名排序持有的 Nginx 锁。
+	waitStart   map[string]time.Time // 单元 → 最近一次开始等待就绪的时间（诊断只看这之后的日志）
+	readySec    int                  // 最近一次就绪用了几秒（部署时记下来，和上一次比）
+	errorLines  int                  // 最近一次启动期间服务输出里的错误行数
+	cmd         string               // 正在执行的命令（deploy、rollback……）
+	lastMsg     string               // 最近一次返回结果的说明
+	installTask *proto.SoftwareTask
 }
 
 // Run 执行命令，返回退出码。内部出错（panic）时各步骤的撤销照常执行（defer），并返回失败的结果，
@@ -131,6 +132,16 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.logruns()
 	case "runtime":
 		return a.runtime()
+	case "jdklist":
+		return a.listJDKs()
+	case "jdkremove":
+		return a.removeJDK()
+	case "runtimelist":
+		return a.listServerRuntimes()
+	case "runtimecheck":
+		return a.checkRuntimeInstall()
+	case "runtimeremove":
+		return a.removeManagedRuntime()
 	case "logread":
 		return a.logread()
 	case "logtail":
@@ -143,6 +154,10 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.softwareConfig()
 	case "swcheck":
 		return a.swcheck()
+	case "swresolve":
+		return a.swresolve()
+	case "swtask":
+		return a.softwareTaskStatus()
 	case "swinstall":
 		return a.swinstall()
 	case "repoprobe":

@@ -186,4 +186,22 @@ func TestAITools(t *testing.T) {
 	if err := PrepareRequest(&r); err == nil || !strings.Contains(err.Error(), "对不上") {
 		t.Fatalf("操作和工具对不上：%v", err)
 	}
+
+	// 装软件时补充模板参数没有的设置：附加配置原样交给桌面版（确认框的内容要连上服务器才算得出，见 engine 的测试和 e2e）
+	hub.Prepare = func(*approve.Request) error { return nil }
+	t.Cleanup(func() { hub.Prepare = PrepareRequest })
+	go func() {
+		r := <-reqs
+		var in map[string]any
+		json.Unmarshal(r.Input, &in)
+		extra, _ := in["extra"].(map[string]any)
+		if r.Action != "install" || r.Tool != "software_install" || extra["innodb_buffer_pool_size"] != "1G" || extra["max_connections"] != float64(900) {
+			t.Errorf("装软件的请求：%+v", r)
+		}
+		hub.Decide(r.ID, approve.Decision{Note: "先不装"})
+	}()
+	install := map[string]any{"target": "test", "template": "mysql", "reason": "装数据库", "extra": map[string]any{"innodb_buffer_pool_size": "1G", "max_connections": 900}}
+	if text, isErr := callText(t, cs, "software_install", install); !isErr || !strings.Contains(text, "先不装") {
+		t.Fatalf("software_install：%v %s", isErr, text)
+	}
 }

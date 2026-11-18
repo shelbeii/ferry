@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -155,6 +157,9 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 	if err := validInstallDir(pl.Dir); err != nil {
 		return err
 	}
+	if execPath := commandExecutable(sdSplit(pl.Exec)); execPath == "" || strings.HasSuffix(execPath, "/") {
+		return errors.New("启动命令必须指向程序文件")
+	}
 	for _, r := range pl.Reach {
 		if err := validInstallDir(r); err != nil {
 			return err
@@ -186,12 +191,11 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 		}
 	}
 	if s := pl.System; s != nil {
-		for _, n := range append(append([]string{}, s.DNF...), s.APT...) {
-			for _, c := range strings.Split(n, "|") {
-				if !rePkgName.MatchString(c) {
-					return fmt.Errorf("软件包名无效：%q", n)
-				}
-			}
+		if s.Bundle != "" && ((s.Bundle != "rpm" && s.Bundle != "deb") || pl.Package == nil || pl.Package.Format != "zip") {
+			return errors.New("离线系统软件包必须是 RPM 或 DEB 的 ZIP 文件")
+		}
+		if err := validatePackageNames(s.DNF, s.APT); err != nil {
+			return err
 		}
 		for _, u := range s.Disable {
 			if !reUnitName.MatchString(u) {
@@ -226,10 +230,13 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 		}
 	}
 	if se := pl.SELinux; se != nil {
-		for _, x := range []string{se.Files, se.Port} {
+		for _, x := range []string{se.Files, se.Port, se.Exec} {
 			if x != "" && !reSELinuxType.MatchString(x) {
 				return fmt.Errorf("SELinux 类型无效：%q", x)
 			}
+		}
+		if se.Exec != "" && !inDir(pl.Dir, commandExecutable(sdSplit(pl.Exec))) {
+			return errors.New("SELinux 启动程序标签只能用于安装目录内的文件")
 		}
 	}
 	for k := range pl.Env {
@@ -307,8 +314,20 @@ func procPorts(dir string, files []string, state string) map[int]bool {
 
 // ---------------------------------------------------------------- 安装
 
-func (a *Agent) swinstall() int {
-	code := a.swinstallRun()
+func (a *Agent) swinstall() (code int) {
+	code = proto.CodeFailed
+	if pl := a.req.Install; pl != nil && pl.TaskID != "" {
+		if err := validatePlan(pl); err != nil {
+			return a.result(proto.CodeBadInput, err.Error(), nil)
+		}
+		unlock, err := a.beginSoftwareTask(pl)
+		if err != nil {
+			return a.result(proto.CodeFailed, err.Error(), nil)
+		}
+		defer unlock()
+		defer func() { a.finishSoftwareTask(code) }()
+	}
+	code = a.swinstallRun()
 	if pl := a.req.Install; pl != nil && code != proto.CodeConfirm {
 		a.saveLastInstall(pl.Name, code == proto.CodeOK, a.lastMsg)
 	}
@@ -331,6 +350,7 @@ func (a *Agent) swinstallRun() int {
 	if err := os.MkdirAll(a.swDir(), 0o755); err != nil {
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
+	a.installPhase(pl.Name, "等待服务器上的软件操作锁")
 	unlock, err := a.Sys.Lock(a.swLock(), 10*time.Minute)
 	if err != nil {
 		return a.result(proto.CodeLocked, "另一个安装 / 卸载正在进行："+err.Error(), nil)
@@ -404,8 +424,24 @@ func (a *Agent) swinstallRun() int {
 
 	var packages []string
 	if s := pl.System; s != nil {
+		var offline []string
+		if s.Bundle != "" {
+			if err := checkSystemBundle(a.pkgManager(), s.Bundle); err != nil {
+				return fail("%v", err)
+			}
+			a.installPhase(name, "检查并解包离线系统软件包")
+			dir, err := os.MkdirTemp(a.swDir(), ".bundle-")
+			if err != nil {
+				return fail("%v", err)
+			}
+			defer os.RemoveAll(dir)
+			offline, err = unpackSystemBundle(src, dir, s.Bundle)
+			if err != nil {
+				return fail("%v", err)
+			}
+		}
 		var err error
-		if packages, err = a.systemInstall(name, s, proxyEnvPrefix(pl), pl.Package != nil); err != nil {
+		if packages, err = a.systemInstall(name, s, proxyEnvPrefix(pl), pl.Package != nil && s.Bundle == "", offline...); err != nil {
 			var pc *pkgChangesError
 			if errors.As(err, &pc) {
 				a.warn(proto.EvWarn, name, "%v", err)
@@ -414,12 +450,13 @@ func (a *Agent) swinstallRun() int {
 			return fail("%v", err)
 		}
 	}
+	a.installPhase(name, "准备运行用户和安装目录")
 	uid, gid, err := a.ensureUser(pl.User, pl.Dir)
 	if err != nil {
 		return fail("%v", err)
 	}
 	// 上级目录 755（运行用户要能进去）；安装目录本身 750，交给运行用户
-	if err := os.MkdirAll(filepath.Dir(pl.Dir), 0o755); err != nil {
+	if err := mkdirInstallParents(filepath.Dir(pl.Dir)); err != nil {
 		return fail("创建安装目录失败：%v", err)
 	}
 	if err := os.Mkdir(pl.Dir, 0o750); err != nil && !os.IsExist(err) {
@@ -455,11 +492,13 @@ func (a *Agent) swinstallRun() int {
 		a.info(proto.EvSoftware, name, "已撤销这次安装")
 	}()
 
-	if pk := pl.Package; pk != nil {
+	if pk := pl.Package; pk != nil && (pl.System == nil || pl.System.Bundle == "") {
+		a.installPhase(name, "解压安装包")
 		if err := a.unpack(name, src, pl.Dir, pk); err != nil {
 			return fail("%v", err)
 		}
 	}
+	a.installPhase(name, "写入配置并准备运行环境")
 	if err := a.writeFiles(pl, "install"); err != nil {
 		return fail("%v", err)
 	}
@@ -478,6 +517,7 @@ func (a *Agent) swinstallRun() int {
 	if ok, err := a.Sys.AccessAs(pl.User, pl.Dir, 'x'); err == nil && !ok {
 		return fail("运行用户 %s 进不了 %s：它的上级目录不允许其他用户进入，换一个安装目录，或给上级目录加上 o+x 权限", pl.User, pl.Dir)
 	}
+	a.installPhase(name, "初始化")
 	if err := a.runSteps(pl, "init", nil, nil); err != nil {
 		return fail("%v", err)
 	}
@@ -503,7 +543,20 @@ func (a *Agent) swinstallRun() int {
 	if pl.Logrotate {
 		rotate = a.swLogrotate(name, pl.Logs)
 	}
-	if err := writeFileAtomic(a.unitPath(unit), []byte(swUnitText(pl)), 0o644); err != nil {
+	if err := a.checkSoftwareExec(pl); err != nil {
+		return fail("%v", err)
+	}
+	a.installPhase(name, "启动并验证服务")
+	unitText := swUnitText(pl)
+	if err := a.verifySoftwareUnit(unit, unitText); err != nil {
+		return fail("系统服务配置校验失败：%v", err)
+	}
+	unlockRuntime, err := a.lockUnitRuntimes([]byte(unitText))
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer unlockRuntime()
+	if err := writeFileAtomic(a.unitPath(unit), []byte(unitText), 0o644); err != nil {
 		return fail("写系统服务失败：%v", err)
 	}
 	if err := a.Sys.Systemctl("daemon-reload"); err != nil {
@@ -511,16 +564,19 @@ func (a *Agent) swinstallRun() int {
 	}
 	a.info(proto.EvStart, name, "启动 %s", unit)
 	if err := a.Sys.Systemctl("enable", "--now", unit); err != nil {
+		a.diag(readySpec(name, pl.Logs, pl.ReadyPort, pl.ReadyTimeout), unit)
 		return fail("%v", err)
 	}
 	spec := readySpec(name, pl.Logs, pl.ReadyPort, pl.ReadyTimeout)
+	spec.UnitText = unitText
 	if err := a.waitReady(spec, unit); err != nil {
 		a.diag(spec, unit)
-		a.selinuxHint(name)
+		a.softwareSELinuxDiag(pl, unit)
 		return a.result(proto.CodeFailed, "启动失败："+err.Error(), nil)
 	}
 	notes := append([]string{}, pl.Notes...)
 	var unset []string
+	a.installPhase(name, "验证并完成安装配置")
 	if err := a.writeFiles(pl, "ready"); err != nil {
 		return fail("%v", err)
 	}
@@ -528,9 +584,13 @@ func (a *Agent) swinstallRun() int {
 		return fail("%v", err)
 	}
 	if len(packages) > 0 {
-		notes = append(notes, "从软件源装了 "+strings.Join(packages, " ")+"（卸载时不会删除这些包）")
+		if pl.System.Bundle != "" {
+			notes = append(notes, fmt.Sprintf("从离线包安装了 %d 个系统软件包（卸载此次软件实例时保留）", len(packages)))
+		} else {
+			notes = append(notes, "从软件源装了 "+strings.Join(packages, " ")+"（卸载时不会删除这些包）")
+		}
 	}
-	inst := proto.SoftwareInstance{Name: name, Kind: pl.Template, Title: pl.Title, Version: pl.Version, Dir: pl.Dir, Unit: unit, User: pl.User,
+	inst := proto.SoftwareInstance{Name: name, Kind: pl.Template, Title: pl.Title, Version: pl.Version, Dir: pl.Dir, Unit: unit, User: pl.User, InstallTaskID: pl.TaskID,
 		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting, SELinux: se,
 		Variant: pl.Variant, Logrotate: rotate, Upgradable: pl.Package != nil && (pl.Package.Into != "" || pl.Package.Format == "jar" || pl.Package.Format == "binary")}
 	b, _ := json.MarshalIndent(inst, "", "  ")
@@ -540,6 +600,114 @@ func (a *Agent) swinstallRun() int {
 	ok, installed = true, true
 	a.info(proto.EvReady, name, "%s 已安装并启动", strings.TrimSpace(pl.Title+" "+pl.Version))
 	return a.result(proto.CodeOK, "", inst)
+}
+
+// 应用可能由继承了 0077 umask 的 sshd 启动。只为本次创建的上级目录设置通行权限。
+func mkdirInstallParents(dir string) error {
+	if info, err := os.Stat(dir); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s 不是目录", dir)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := mkdirInstallParents(filepath.Dir(dir)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil // 已被其他操作创建，后续 swReach 仍会检查
+		}
+		return err
+	}
+	return os.Chmod(dir, 0o755)
+}
+
+func (a *Agent) checkSoftwareExec(pl *proto.SoftwarePlan) error {
+	executable := commandExecutable(sdSplit(pl.Exec))
+	if !filepath.IsAbs(executable) {
+		return nil // systemd 按其默认搜索路径解析简单命令名
+	}
+	st, err := os.Stat(executable)
+	if err != nil {
+		return fmt.Errorf("启动程序 %s 不可用：%w", executable, err)
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("启动程序 %s 必须是可执行文件", executable)
+	}
+	if noExecMount(executable) {
+		return fmt.Errorf("启动程序 %s 所在挂载点设置了 noexec", executable)
+	}
+	if pl.SELinux != nil && pl.SELinux.Exec != "" && a.selinuxEnforcing() && !a.hasSELinuxType(executable, pl.SELinux.Exec) {
+		return fmt.Errorf("启动程序 %s 缺少 SELinux 标签 %s，请检查策略工具及安装目录", executable, pl.SELinux.Exec)
+	}
+	if ok, err := a.Sys.AccessAs(pl.User, executable, 'x'); err == nil && !ok {
+		return fmt.Errorf("运行用户 %s 无法执行 %s，请检查权限和上级目录", pl.User, executable)
+	}
+	if runtime.GOOS == "linux" {
+		if err := checkELFExecutable(executable, runtime.GOARCH); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkELFExecutable(executable, arch string) error {
+	f, err := elf.Open(executable)
+	if err != nil {
+		return nil // 有些服务用脚本作为启动入口
+	}
+	defer f.Close()
+	switch arch {
+	case "amd64":
+		if f.Machine != elf.EM_X86_64 && f.Machine != elf.EM_386 {
+			return fmt.Errorf("启动程序 %s 的架构 %s 与服务器 %s 不匹配", executable, f.Machine, arch)
+		}
+	case "arm64":
+		if f.Machine != elf.EM_AARCH64 && f.Machine != elf.EM_ARM {
+			return fmt.Errorf("启动程序 %s 的架构 %s 与服务器 %s 不匹配", executable, f.Machine, arch)
+		}
+	}
+	if interp := f.Section(".interp"); interp != nil && interp.Size < 4096 {
+		data, err := interp.Data()
+		if err == nil {
+			loader := strings.TrimRight(string(data), "\x00")
+			if _, err := os.Stat(loader); err != nil {
+				return fmt.Errorf("启动程序 %s 需要的动态加载器 %s 不可用：%w", executable, loader, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (a *Agent) verifySoftwareUnit(unit, text string) error {
+	if _, err := a.Sys.Shell("command -v systemd-analyze", 5*time.Second); err != nil {
+		return nil
+	}
+	dir, err := os.MkdirTemp(a.swDir(), ".unit-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	file := filepath.Join(dir, unit)
+	if err := os.WriteFile(file, []byte(text), 0o644); err != nil {
+		return err
+	}
+	out, err := a.Sys.Shell("LC_ALL=C systemd-analyze verify --man=no "+shellQuote(file)+" 2>&1", 20*time.Second)
+	if err == nil {
+		return nil
+	}
+	var relevant []string
+	for _, line := range splitLines(out) {
+		if strings.Contains(line, unit) {
+			relevant = append(relevant, line)
+		}
+	}
+	if len(relevant) > 0 {
+		return fmt.Errorf("%v：%s", err, strings.Join(relevant, " / "))
+	}
+	return fmt.Errorf("systemd-analyze verify 无法完成：%w", err)
 }
 
 func readySpec(name string, logs []string, port, timeout int) *proto.AppSpec {
@@ -564,24 +732,31 @@ func clearDir(dir string) {
 // systemInstall 用服务器的软件源装包；装包时被自动启动的系统自带服务停掉并禁用（原来就在运行的不动）。
 // env 不为空时下载经这台电脑（proxyEnvPrefix）。deps 为 true 时只是安装包需要的系统库：没有包管理器时跳过（后面的检查会说缺什么）。
 // 包名可以写几个候选（a|b）：用已经装着的，或软件源里有的第一个（不同发行版、版本包名不同，如 libaio1t64|libaio1）。
-func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps bool) ([]string, error) {
-	var pkgs []string
-	mgr := a.pkgManager()
+func systemPackages(s *proto.PlanSystem, mgr string) []string {
 	switch mgr {
 	case "dnf", "yum":
-		pkgs = s.DNF
+		return s.DNF
 	case "apt-get":
-		pkgs = s.APT
+		return s.APT
 	}
-	if mgr == "" || len(pkgs) == 0 {
-		if deps {
-			a.warn(proto.EvWarn, name, "服务器上没有 dnf / yum / apt：需要的系统库没有自动安装")
-			return nil, nil
+	return nil
+}
+
+func validatePackageNames(lists ...[]string) error {
+	for _, names := range lists {
+		for _, name := range names {
+			for _, candidate := range strings.Split(name, "|") {
+				if !rePkgName.MatchString(candidate) {
+					return fmt.Errorf("软件包名无效：%q", name)
+				}
+			}
 		}
-		return nil, errors.New("这种装法用不了这台服务器的软件包管理器（需要 dnf / yum / apt）：换一种装法")
 	}
+	return nil
+}
+
+func (a *Agent) installedPackages(mgr string, pkgs []string) (have, want, alts []string) {
 	// 已经装着的包不交给包管理器：apt install 会顺手把它升级，升级脚本还会重启正在用它的系统服务
-	var have, want, alts []string
 	for _, p := range pkgs {
 		cands := strings.Split(p, "|")
 		got := ""
@@ -600,13 +775,30 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 			alts = append(alts, p)
 		}
 	}
-	if len(alts) > 0 {
-		want = append(want, a.pickPackages(mgr, env, alts)...)
+	return have, want, alts
+}
+
+func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps bool, offline ...string) ([]string, error) {
+	mgr := a.pkgManager()
+	pkgs := systemPackages(s, mgr)
+	if len(pkgs) == 0 {
+		if deps {
+			a.warn(proto.EvWarn, name, "服务器上没有 dnf / yum / apt：需要的系统库没有自动安装")
+			return nil, nil
+		}
+		return nil, errors.New("这种装法用不了这台服务器的软件包管理器（需要 dnf / yum / apt）：换一种装法")
+	}
+	have, want, alts := a.installedPackages(mgr, pkgs)
+	run := func(phase, cmd string, timeout time.Duration) (string, error) {
+		return a.installShell(name, phase, cmd, timeout)
+	}
+	if len(alts) > 0 && len(offline) == 0 {
+		want = append(want, pickPackages(run, mgr, env, alts)...)
 	}
 	if len(have) > 0 {
 		a.info(proto.EvSoftware, name, "服务器上已经装着 %s：直接用，不升级", strings.Join(have, " "))
 	}
-	if len(want) == 0 {
+	if len(want)+len(alts) == 0 {
 		return nil, a.checkRequire(s)
 	}
 	pkgs = want
@@ -620,9 +812,16 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	if env != "" {
 		via = "下载经这台电脑"
 	}
+	if len(offline) > 0 {
+		via = "离线包"
+		pkgs = make([]string, 0, len(offline))
+		for _, file := range offline {
+			pkgs = append(pkgs, filepath.Base(file))
+		}
+	}
 	// 先演练一遍：软件源里没有这个包时说清楚；会顺带升级、删除已装的包时停下来问用户（升级会让用到它们的程序换版本）
-	a.info(proto.EvSoftware, name, "检查软件源里的 %s（%s，%s）", strings.Join(pkgs, " "), mgr, via)
-	changes, err := a.pkgChanges(mgr, env, pkgs)
+	a.installPhase(name, fmt.Sprintf("解析软件源和依赖（%s，%s）", mgr, via))
+	changes, err := pkgChanges(run, mgr, env, pkgs, offline)
 	if err != nil {
 		return nil, err
 	}
@@ -632,17 +831,16 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	if len(changes) > 0 {
 		a.warn(proto.EvWarn, name, "装 %s 会顺带改动已装的包：%s（已同意）", strings.Join(pkgs, " "), strings.Join(changes, "、"))
 	}
-	a.info(proto.EvSoftware, name, "从软件源安装 %s（%s，%s，可能要几分钟）", strings.Join(pkgs, " "), mgr, via)
-	cmd := env + mgr + " install -y " + strings.Join(pkgs, " ")
+	if len(offline) > 0 {
+		a.installPhase(name, fmt.Sprintf("安装离线系统软件包（%s）", mgr))
+	} else {
+		a.installPhase(name, fmt.Sprintf("下载并安装系统软件包（%s，%s）", mgr, via))
+	}
+	cmd := env + packageManagerArgs(mgr, offline, false) + " install -y " + packageArguments(pkgs, offline)
 	if mgr == "apt-get" {
-		cmd = env + "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade " + strings.Join(pkgs, " ")
+		cmd = env + "DEBIAN_FRONTEND=noninteractive " + packageManagerArgs(mgr, offline, false) + " install -y --no-upgrade " + packageArguments(pkgs, offline)
 	}
-	out, err := a.Sys.Shell(cmd+" 2>&1", 20*time.Minute)
-	if err != nil && mgr == "apt-get" {
-		// 软件包索引太旧时先更新再试
-		a.Sys.Shell(env+"DEBIAN_FRONTEND=noninteractive apt-get update 2>&1", 10*time.Minute)
-		out, err = a.Sys.Shell(cmd+" 2>&1", 20*time.Minute)
-	}
+	out, err := a.installShell(name, "安装系统软件包", cmd+" 2>&1", 20*time.Minute)
 	if err != nil {
 		lines := splitLines(out)
 		if len(lines) > 8 {
@@ -652,7 +850,10 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 		if env != "" {
 			hint = "下载经这台电脑：这台电脑也要能访问这些软件源"
 		}
-		return nil, fmt.Errorf("从软件源安装 %s 失败（%s）：%v %s", strings.Join(pkgs, " "), hint, err, strings.Join(lines, " / "))
+		if len(offline) > 0 {
+			hint = "检查离线包的发行版、架构和依赖是否齐全"
+		}
+		return nil, fmt.Errorf("安装系统软件包 %s 失败（%s）：%v %s", strings.Join(pkgs, " "), hint, err, safePackageOutput(strings.Join(lines, " / ")))
 	}
 	for _, u := range s.Disable {
 		if before[u] {
@@ -684,26 +885,64 @@ func (e *pkgChangesError) Error() string {
 		strings.Join(e.pkgs, " "), strings.Join(e.changes, "、"))
 }
 
+type packageShell func(phase, cmd string, timeout time.Duration) (string, error)
+
 // pkgChanges 演练装包（dnf --assumeno、apt-get -s）：会升级、降级、删除的已装包（新装的不算）。
-// 软件源里没有要装的包时返回错误；演练本身不成功（如连不上软件源）时返回空，交给真正安装时报错。
-func (a *Agent) pkgChanges(mgr, env string, pkgs []string) ([]string, error) {
-	list := strings.Join(pkgs, " ")
-	cmd := env + mgr + " install --assumeno " + list + " 2>&1"
+// 演练必须得出事务结果；仓库错误或超时不能当作没有包变更。
+func pkgChanges(run packageShell, mgr, env string, pkgs, offline []string) ([]string, error) {
+	list := packageArguments(pkgs, offline)
+	base := packageManagerArgs(mgr, offline, true)
+	cmd := env + "LC_ALL=C " + base + " install --assumeno " + list + " 2>&1"
 	if mgr == "apt-get" {
-		cmd = "DEBIAN_FRONTEND=noninteractive apt-get -s install --no-upgrade " + list + " 2>&1"
+		cmd = env + "LC_ALL=C DEBIAN_FRONTEND=noninteractive " + base + " -s install --no-upgrade " + list + " 2>&1"
 	}
-	out, _ := a.Sys.Shell(cmd, 20*time.Minute) // dnf --assumeno 总是返回 1
+	out, err := run("解析软件源和依赖", cmd, 8*time.Minute)
 	missing := missingPkgs(out, pkgs)
-	if len(missing) > 0 && mgr == "apt-get" {
+	if len(missing) > 0 && mgr == "apt-get" && len(offline) == 0 {
 		// 软件包索引太旧时先更新再试
-		a.Sys.Shell(env+"DEBIAN_FRONTEND=noninteractive apt-get update 2>&1", 10*time.Minute)
-		out, _ = a.Sys.Shell(cmd, 20*time.Minute)
+		updated, updateErr := run("刷新 APT 软件包索引", env+"LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update 2>&1", 8*time.Minute)
+		if updateErr != nil {
+			return nil, packageResolutionError(updated, updateErr)
+		}
+		out, err = run("解析软件源和依赖", cmd, 8*time.Minute)
 		missing = missingPkgs(out, pkgs)
+		if (err != nil || len(missing) > 0) && (strings.Contains(updated, "Failed to fetch") || strings.Contains(updated, "Some index files failed to download")) {
+			return nil, packageResolutionError(updated, errors.New("APT 未能完整刷新软件包索引"))
+		}
 	}
 	if len(missing) > 0 {
+		if err != nil && (strings.Contains(out, "Failed to download metadata for repo") || strings.Contains(out, "Cannot find a valid baseurl for repo:")) {
+			return nil, packageResolutionError(out, err)
+		}
 		return nil, fmt.Errorf("服务器的软件源里没有 %s：这个系统的软件源可能不提供它（或改了名字），换一种装法，或先给服务器加上提供它的软件源", strings.Join(missing, " "))
 	}
+	refused := strings.Contains(out, "Operation aborted") || strings.Contains(out, "Exiting on user command")
+	if err != nil && !((mgr == "dnf" || mgr == "yum") && strings.Contains(out, "Transaction Summary") && refused) {
+		return nil, packageResolutionError(out, err)
+	}
 	return parsePkgChanges(out), nil
+}
+
+func packageResolutionError(output string, err error) error {
+	if strings.Contains(output, "you do not have any GPG public keys installed") {
+		return errors.New("解析软件源和依赖失败：启用的软件源要求 GPG 校验，但缺少签名公钥。请按软件源提供方的说明配置仓库的签名密钥，再重新预检")
+	}
+	hint := ""
+	if strings.Contains(output, "mirrorlist.centos.org") && strings.Contains(output, "Cannot find a valid baseurl for repo:") {
+		hint = "CentOS 的旧镜像列表已停用。请配置可用的归档软件源及目标软件包的来源，或使用 RPM 离线 ZIP。"
+	}
+	lines := splitLines(output)
+	if len(lines) > 8 {
+		lines = lines[len(lines)-8:]
+	}
+	return fmt.Errorf("解析软件源和依赖失败：%s%v %s", hint, err, safePackageOutput(strings.Join(lines, " / ")))
+}
+
+// 代理 URL 包含此会话的凭据，包管理器可能把它写进错误输出。
+var packageProxyInOutput = regexp.MustCompile(`(?i)https?://[^/\s@]+@[^\s"'<>]+`)
+
+func safePackageOutput(output string) string {
+	return packageProxyInOutput.ReplaceAllString(output, "[代理地址已隐藏]")
 }
 
 // missingPkgs 演练输出里说找不到的包。
@@ -766,13 +1005,13 @@ func parsePkgChanges(out string) []string {
 }
 
 // pickPackages 候选包名里软件源中有的第一个（apt 的索引里一个都没有时先更新索引）；都查不到时用第一个，装的时候报错。
-func (a *Agent) pickPackages(mgr, env string, alts []string) []string {
+func pickPackages(run packageShell, mgr, env string, alts []string) []string {
 	exists := func(p string) bool {
 		cmd := env + mgr + " -q list " + shellQuote(p) + " >/dev/null 2>&1"
 		if mgr == "apt-get" {
 			cmd = "apt-cache show " + shellQuote(p) + " 2>/dev/null | grep -q '^Package:'"
 		}
-		_, err := a.Sys.Shell(cmd, 5*time.Minute)
+		_, err := run("查询候选软件包", cmd, 5*time.Minute)
 		return err == nil
 	}
 	var out []string
@@ -787,7 +1026,7 @@ func (a *Agent) pickPackages(mgr, env string, alts []string) []string {
 				}
 			}
 			if got == "" && round == 0 && mgr == "apt-get" {
-				a.Sys.Shell(env+"DEBIAN_FRONTEND=noninteractive apt-get update 2>&1", 10*time.Minute)
+				run("刷新 APT 软件包索引", env+"DEBIAN_FRONTEND=noninteractive apt-get update 2>&1", 10*time.Minute)
 				continue
 			}
 			break
@@ -1129,22 +1368,41 @@ func (a *Agent) stepHTTP(h *proto.PlanHTTP) error {
 	for k, v := range h.Form {
 		form.Set(k, v)
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
 	deadline := a.Sys.Now().Add(time.Duration(h.Retry) * time.Second)
 	for {
 		resp, err := client.PostForm(h.Post, form)
 		if err == nil {
-			resp.Body.Close()
 			if resp.StatusCode/100 == 2 {
+				err = checkResponseField(resp.Body, h.ResponseField)
+			} else {
+				err = fmt.Errorf("%s 返回 %d", h.Post, resp.StatusCode)
+			}
+			resp.Body.Close()
+			if err == nil {
 				return nil
 			}
-			err = fmt.Errorf("%s 返回 %d", h.Post, resp.StatusCode)
 		}
 		if !a.Sys.Now().Before(deadline) {
 			return err
 		}
 		a.Sys.Sleep(2 * time.Second)
 	}
+}
+
+func checkResponseField(body io.Reader, field string) error {
+	if field == "" {
+		return nil
+	}
+	var response map[string]json.RawMessage
+	var value string
+	if err := json.NewDecoder(io.LimitReader(body, 64<<10)).Decode(&response); err != nil ||
+		json.Unmarshal(response[field], &value) != nil || value == "" {
+		return fmt.Errorf("接口未返回有效的 %s 字段", field)
+	}
+	return nil
 }
 
 // swUnitText 软件的 systemd 单元。
@@ -1165,9 +1423,11 @@ func swUnitText(pl *proto.SoftwarePlan) string {
 		fmt.Fprintf(&b, "ExecReload=/bin/kill -HUP $MAINPID\n")
 	}
 	lowPort := pl.Hosting != nil // 共享 nginx 后续添加的站点可能使用 80 / 443。
-	for _, port := range pl.Ports {
-		if port < 1024 {
-			lowPort = true
+	for _, ports := range [][]int{pl.Ports, pl.UDPPorts} {
+		for _, port := range ports {
+			if port < 1024 {
+				lowPort = true
+			}
 		}
 	}
 	if lowPort {

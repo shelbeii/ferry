@@ -246,6 +246,106 @@ func TestSoftwareScan(t *testing.T) {
 	}
 }
 
+func TestSoftwareScanNginxPackageUnit(t *testing.T) {
+	const managedUnit = "ferry-nginx.service"
+	const stockUnit = "nginx.service"
+	const binary = "/usr/sbin/nginx"
+	stock := parseProps("LoadState=loaded\nActiveState=inactive\nMainPID=0\nUnitFileState=disabled\nFragmentPath=/usr/lib/systemd/system/nginx.service\nDropInPaths=\n")
+	for _, tc := range []struct {
+		name               string
+		managed, running   bool
+		wantStock          bool
+		changeStock        func(*UnitProps)
+		differentBinary    bool
+		missingManagedFile bool
+	}{
+		{name: "package unit beside running instance", managed: true, running: true},
+		{name: "package unit beside stopped instance", managed: true},
+		{name: "system only", wantStock: true},
+		{name: "active system instance", managed: true, running: true, wantStock: true, changeStock: func(p *UnitProps) { p.Active, p.PID = "active", 301 }},
+		{name: "failed system instance", managed: true, running: true, wantStock: true, changeStock: func(p *UnitProps) { p.Active = "failed" }},
+		{name: "enabled system instance", managed: true, running: true, wantStock: true, changeStock: func(p *UnitProps) { p.Enabled = "enabled" }},
+		{name: "independent unit file", managed: true, running: true, wantStock: true, changeStock: func(p *UnitProps) { p.FragmentPath = "/etc/systemd/system/nginx.service" }},
+		{name: "drop-in configuration", managed: true, running: true, wantStock: true, changeStock: func(p *UnitProps) { p.DropInPaths = "/etc/systemd/system/nginx.service.d/conf.conf" }},
+		{name: "different executable", managed: true, running: true, differentBinary: true, wantStock: true},
+		{name: "installation record without unit", managed: true, missingManagedFile: true, wantStock: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProc{dir: t.TempDir(), links: map[string]string{}}
+			unitDir := t.TempDir()
+			managedBinary := binary
+			if tc.differentBinary {
+				managedBinary = "/opt/ferry-software/nginx/bin/nginx"
+			}
+			if tc.managed && !tc.missingManagedFile {
+				if err := os.WriteFile(filepath.Join(unitDir, managedUnit), []byte(ManagedMarker+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.running {
+				fp.add(t, 200, 1, managedBinary, "0::/system.slice/"+managedUnit+"\n", "net:[1]")
+			}
+			system := stock
+			if tc.changeStock != nil {
+				tc.changeStock(&system)
+			}
+			sc := &swScan{
+				proc: fp.dir, unitDir: unitDir,
+				run: func(cmd string, _ time.Duration) (string, error) {
+					switch cmd {
+					case "systemctl list-unit-files --type=service --no-legend --no-pager":
+						return stockUnit + " " + system.Enabled + " enabled\n" + managedUnit + " enabled enabled\n", nil
+					case "systemctl show -p ExecStart --no-pager 'nginx.service'":
+						return "ExecStart={ path=" + binary + " ; argv[]=" + binary + " ; }\n", nil
+					case "'/usr/sbin/nginx' -v 2>&1":
+						return "nginx version: nginx/1.24.0\n", nil
+					}
+					return "", errors.New("not found")
+				},
+				unitProps: func(unit string) UnitProps {
+					if unit == stockUnit {
+						return system
+					}
+					return UnitProps{Load: "loaded", Active: "inactive"}
+				},
+				readlink: func(path string) (string, error) {
+					if v, ok := fp.links[path]; ok {
+						return v, nil
+					}
+					return "", os.ErrNotExist
+				},
+				listening: func(pid int) []string {
+					if pid == 200 {
+						return []string{"*:80", "*:8000", "*:8888"}
+					}
+					return nil
+				},
+			}
+			if tc.managed {
+				sc.instances = []proto.SoftwareInstance{{Name: "nginx", Kind: "nginx", Title: "Nginx", Version: "1.24.0", Unit: managedUnit, Hosting: &proto.NginxHosting{Binary: managedBinary}}}
+			}
+			items := sc.scan().Items
+			var seenStock, seenManaged bool
+			for _, it := range items {
+				switch it.Unit {
+				case stockUnit:
+					seenStock = true
+				case managedUnit:
+					seenManaged = true
+					if it.Instance != "nginx" || it.Manager != "Ferry" || tc.running && (it.PID != 200 || len(it.Listen) != 3) {
+						t.Fatalf("实例信息丢失：%+v", it)
+					}
+				default:
+					t.Fatalf("多余的服务：%+v", it)
+				}
+			}
+			if seenStock != tc.wantStock || seenManaged != tc.managed {
+				t.Fatalf("软件列表：%+v", items)
+			}
+		})
+	}
+}
+
 func TestSoftwareDockerDown(t *testing.T) {
 	sc := &swScan{proc: t.TempDir(), unitDir: t.TempDir(),
 		run: func(cmd string, _ time.Duration) (string, error) {

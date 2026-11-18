@@ -834,38 +834,11 @@ func (e *Engine) installRuntimes(p *targetPlan) error {
 // installJDK 把 JDK n 装到服务器上（部署、安装软件都用）。
 // dir 不为空时装到这个目录（装软件时用户指定的），否则装到 Ferry 的公共目录。
 func (e *Engine) installJDK(s *session, n int, dir string) (proto.Runtime, error) {
-	arch := jdk.ArchOf(s.arch)
-	lib := e.Settings.RuntimeDir()
-	m := jdk.Find(lib, n, arch)
-	if m == nil {
-		src := e.Settings.Runtime.Source
-		if src == "" {
-			src = jdk.DefaultSource
-		}
-		e.Rep.Step("下载 JDK %d（linux/%s，%s）", n, arch, src)
-		var err error
-		m, err = jdk.Download(e.ctx(), src, n, arch, lib, func(done, total int64) { e.Rep.Progress("JDK "+fmt.Sprint(n), done, total) })
-		if err != nil {
-			return proto.Runtime{}, fmt.Errorf("下载 JDK %d 失败：%w（可以在设置 → 运行环境里换下载源，或手动导入下载好的压缩包）", n, err)
-		}
-		e.Rep.Info("已下载 %s（%s），存放在 %s", m.Version, humanBytes(m.Size), lib)
-	}
-	e.Rep.Step("上传 JDK %s 到 %s", m.Version, s.t.Name)
-	var prep proto.Prepared
-	if err := s.callData("prepare", &proto.Request{}, &prep); err != nil {
+	m, err := e.jdkPackage(s, n, "")
+	if err != nil {
 		return proto.Runtime{}, err
 	}
-	item := remote.UploadItem{Local: filepath.Join(lib, m.File), Remote: remote.Join(prep.Stage, m.File), Mode: 0o640, Size: m.Size}
-	if err := e.uploadItems(s, []remote.UploadItem{item}, m.Size, m.Size); err != nil {
-		s.discardStage(prep.Stage)
-		return proto.Runtime{}, fmt.Errorf("上传 JDK 失败：%w", err)
-	}
-	var r proto.Runtime
-	spec := &proto.RuntimeSpec{ID: m.ID, Java: n, Version: m.Version, File: m.File, SHA256: m.SHA256, Size: m.Size, Dir: dir}
-	if err := s.callData("runtime", &proto.Request{Stage: prep.Stage, Runtime: spec}, &r); err != nil {
-		return proto.Runtime{}, fmt.Errorf("安装 JDK 失败：%w", err)
-	}
-	return r, nil
+	return e.uploadJDK(s, m, proto.RuntimeSpec{Dir: dir})
 }
 
 // installPin 锁定版本的 JDK：服务器上装过就只建链接，否则上传这个版本（本机没有就按版本下载）。
@@ -878,37 +851,12 @@ func (e *Engine) installPin(s *session, pn pinNeed) error {
 		}
 		return nil
 	}
-	arch := jdk.ArchOf(s.arch)
-	lib := e.Settings.RuntimeDir()
-	m := jdk.FindVersion(lib, pn.version, arch)
-	if m == nil {
-		src := e.Settings.Runtime.Source
-		if src == "" {
-			src = jdk.DefaultSource
-		}
-		e.Rep.Step("下载 JDK %s（linux/%s，%s）", pn.version, arch, src)
-		var err error
-		m, err = jdk.DownloadVersion(e.ctx(), src, pn.version, arch, lib, func(done, total int64) { e.Rep.Progress("JDK "+pn.version, done, total) })
-		if err != nil {
-			return fmt.Errorf("下载 JDK %s 失败：%w（可以在设置 → 运行环境里换下载源，或手动导入这个版本的压缩包）", pn.version, err)
-		}
-		e.Rep.Info("已下载 %s（%s），存放在 %s", m.Version, humanBytes(m.Size), lib)
-	}
-	e.Rep.Step("上传 JDK %s 到 %s", m.Version, s.t.Name)
-	var prep proto.Prepared
-	if err := s.callData("prepare", &proto.Request{}, &prep); err != nil {
+	m, err := e.jdkPackage(s, pn.java, pn.version)
+	if err != nil {
 		return err
 	}
-	item := remote.UploadItem{Local: filepath.Join(lib, m.File), Remote: remote.Join(prep.Stage, m.File), Mode: 0o640, Size: m.Size}
-	if err := e.uploadItems(s, []remote.UploadItem{item}, m.Size, m.Size); err != nil {
-		s.discardStage(prep.Stage)
-		return fmt.Errorf("上传 JDK 失败：%w", err)
-	}
-	spec := &proto.RuntimeSpec{ID: m.ID, Java: pn.java, Version: m.Version, Pin: link, File: m.File, SHA256: m.SHA256, Size: m.Size}
-	if err := s.callData("runtime", &proto.Request{Stage: prep.Stage, Runtime: spec}, nil); err != nil {
-		return fmt.Errorf("安装 JDK %s 失败：%w", pn.version, err)
-	}
-	return nil
+	_, err = e.uploadJDK(s, m, proto.RuntimeSpec{Pin: link})
+	return err
 }
 
 // runBuilds 执行构建。built 记录本次已执行过的构建（命令、目录、环境完全相同的不再执行），值为开始时间。

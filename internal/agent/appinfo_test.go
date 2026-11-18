@@ -250,6 +250,23 @@ func TestAppInfoOldSystemdKeepsSupportedProperties(t *testing.T) {
 	}
 }
 
+func TestRuntimeReferenceInFirstLegacyEnvironmentFile(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "runtime.env")
+	last := filepath.Join(dir, "other.env")
+	const runtimePath = "/opt/ferry/runtime/bin/node"
+	if err := os.WriteFile(first, []byte("NODE="+runtimePath+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(last, []byte("ENV=production\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	props := appInfoUnitProperties("EnvironmentFile=" + first + " (ignore_errors=no)\nEnvironmentFile=" + last + " (ignore_errors=no)\n")
+	if !runtimeEnvUsesPath(props["EnvironmentFiles"], func(value string) bool { return value == runtimePath }) {
+		t.Fatal("旧版 systemd 输出多个环境文件时，前面的文件也必须检查")
+	}
+}
+
 func TestAppInfoSystemdFailureShowsActualReason(t *testing.T) {
 	for _, test := range []struct{ out, reason string }{
 		{"Failed to connect to bus: Access denied", "Access denied"},

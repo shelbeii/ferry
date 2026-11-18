@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/captain/ferry/internal/jdk"
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/zipx"
 )
@@ -85,16 +87,9 @@ func (a *Agent) installedJDKs(links []string) ([]proto.Runtime, map[string]strin
 		if !e.IsDir() || !reRuntimeID.MatchString(n) {
 			continue
 		}
-		var m proto.Runtime
-		b, err := os.ReadFile(filepath.Join(dir, n, ".ferry-runtime.json"))
-		if err != nil || json.Unmarshal(b, &m) != nil || m.Java == 0 {
-			continue
+		if m, ok := readInstalledJDK(filepath.Join(dir, n)); ok {
+			jdks = append(jdks, m)
 		}
-		if _, err := os.Stat(filepath.Join(dir, n, "bin", "java")); err != nil {
-			continue
-		}
-		m.ID = n
-		jdks = append(jdks, m)
 	}
 	pins := map[string]string{}
 	for _, l := range links {
@@ -112,6 +107,28 @@ func (a *Agent) installedJDKs(links []string) ([]proto.Runtime, map[string]strin
 	return jdks, pins
 }
 
+func (a *Agent) jdkInventory(shared map[int]proto.Runtime) []proto.InstalledJDK {
+	installed, _ := a.installedJDKs(nil)
+	list := make([]proto.InstalledJDK, 0, len(installed))
+	for _, r := range installed {
+		item := installedJDK(filepath.Join(a.runtimesDir(), r.ID), r)
+		item.Shared = shared[r.Java].ID == r.ID
+		list = append(list, item)
+	}
+	list = append(list, a.customJDKs()...)
+	sortJDKs(list)
+	return list
+}
+
+func sortJDKs(list []proto.InstalledJDK) {
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].Java != list[j].Java {
+			return list[i].Java > list[j].Java
+		}
+		return jdk.VersionLess(list[j].Version, list[i].Version)
+	})
+}
+
 // reJavaPin 锁定版本的链接名（proto.JavaPinLink）：java-25.0.4.1_1、java-21_35。java-17 这种只有大版本的不算。
 var reJavaPin = regexp.MustCompile(`^java-[0-9]+[._][0-9][0-9._]*$`)
 
@@ -121,19 +138,28 @@ func (a *Agent) runtime() int {
 	if r != nil && r.Kind == "nginx" {
 		return a.installNginx(r)
 	}
+	if r != nil && r.Kind != "" {
+		return a.installManagedRuntime(r)
+	}
 	if r != nil && r.Pin != "" {
 		return a.pinRuntime(r)
 	}
-	if r == nil || !reRuntimeID.MatchString(r.ID) || !reSafe.MatchString(r.File) || !zipx.IsSHA256(r.SHA256) || r.Java < 8 {
+	if r == nil || !reRuntimeID.MatchString(r.ID) || r.Java < 8 || r.File == "" && !r.KeepDefault {
 		return a.result(proto.CodeBadInput, "运行环境信息无效", nil)
 	}
-	stage := filepath.Clean(a.req.Stage)
-	if filepath.Dir(stage) != a.incomingDir() {
-		return a.result(proto.CodeBadInput, "上传目录不在 "+a.incomingDir()+" 下", nil)
+	stage := ""
+	if r.File != "" {
+		if !reSafe.MatchString(r.File) || !zipx.IsSHA256(r.SHA256) {
+			return a.result(proto.CodeBadInput, "运行环境信息无效", nil)
+		}
+		stage = filepath.Clean(a.req.Stage)
+		if filepath.Dir(stage) != a.incomingDir() {
+			return a.result(proto.CodeBadInput, "上传目录不在 "+a.incomingDir()+" 下", nil)
+		}
+		defer a.finishUpload(stage)
 	}
-	defer a.finishUpload(stage)
 	dir := a.runtimesDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirInstallParents(dir); err != nil {
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
 	// 同一台服务器上多个项目可能同时安装：互斥
@@ -145,6 +171,9 @@ func (a *Agent) runtime() int {
 
 	// 装软件时指定了放 JDK 的目录：装到它下面以版本命名的文件夹（如 jdk-17.0.13_11-x64），不动 java-N 链接
 	if r.Dir != "" {
+		if r.KeepDefault {
+			return a.installCustomJDK(r, stage)
+		}
 		if err := validInstallDir(r.Dir); err != nil {
 			return a.result(proto.CodeBadInput, "JDK "+err.Error(), nil)
 		}
@@ -156,7 +185,7 @@ func (a *Agent) runtime() int {
 		if ents, err := os.ReadDir(final); err == nil && len(ents) > 0 {
 			return a.result(proto.CodeFailed, "JDK 安装目录 "+filepath.ToSlash(final)+" 已存在且不是 Ferry 装的 JDK：删掉它，或换一个目录", nil)
 		}
-		if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+		if err := mkdirInstallParents(r.Dir); err != nil {
 			return a.result(proto.CodeFailed, "创建 JDK 安装目录失败："+err.Error(), nil)
 		}
 		os.Remove(final) // 空目录：解好后整个换上
@@ -167,16 +196,30 @@ func (a *Agent) runtime() int {
 		return a.result(proto.CodeOK, "", proto.Runtime{ID: r.ID, Java: r.Java})
 	}
 	final := filepath.Join(dir, r.ID)
+	if stage == "" && !a.ferryJDKAt(final, r.Java) {
+		return a.result(proto.CodeFailed, "服务器上没有可用的 "+r.ID, nil)
+	}
 	if _, err := os.Stat(filepath.Join(final, "bin", "java")); err != nil {
+		if stage == "" {
+			return a.result(proto.CodeFailed, "服务器上没有可用的 "+r.ID, nil)
+		}
 		if code, msg := a.unpackJDK(r, stage, final); code != proto.CodeOK {
 			return a.result(code, msg, nil)
 		}
 	}
-	if err := a.Sys.SwitchLink(filepath.Join(dir, fmt.Sprintf("java-%d", r.Java)), r.ID); err != nil {
+	link := filepath.Join(dir, fmt.Sprintf("java-%d", r.Java))
+	if r.KeepDefault {
+		if _, err := os.Lstat(link); err == nil {
+			return a.result(proto.CodeOK, "", proto.Runtime{ID: r.ID, Java: r.Java, Version: r.Version})
+		} else if !os.IsNotExist(err) {
+			return a.result(proto.CodeFailed, "读取共享 JDK 链接失败："+err.Error(), nil)
+		}
+	}
+	if err := a.Sys.SwitchLink(link, r.ID); err != nil {
 		return a.result(proto.CodeFailed, "更新 java-"+strconv.Itoa(r.Java)+" 链接失败："+err.Error(), nil)
 	}
 	a.info(proto.EvRuntime, "", "JDK %d 已安装：%s", r.Java, final)
-	return a.result(proto.CodeOK, "", proto.Runtime{ID: r.ID, Java: r.Java})
+	return a.result(proto.CodeOK, "", proto.Runtime{ID: r.ID, Java: r.Java, Version: r.Version})
 }
 
 // pinRuntime 锁定版本的 JDK：服务器上还没有 <ID> 就装上传来的，然后让这个版本自己的链接（r.Pin）指向它。
@@ -198,7 +241,7 @@ func (a *Agent) pinRuntime(r *proto.RuntimeSpec) int {
 		defer a.finishUpload(stage)
 	}
 	dir := a.runtimesDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirInstallParents(dir); err != nil {
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
 	unlock, err := a.Sys.Lock(filepath.Join(dir, ".lock"), 10*time.Minute)
@@ -232,15 +275,19 @@ func (a *Agent) unpackJDK(r *proto.RuntimeSpec, stage, final string) (int, strin
 		return proto.CodeVerify, "上传的 JDK 校验失败（传输中损坏），请重试"
 	}
 	a.info(proto.EvRuntime, "", "解压 %s", r.ID)
-	tmp := filepath.Join(filepath.Dir(final), ".tmp-"+filepath.Base(final))
-	os.RemoveAll(tmp)
+	tmp, err := os.MkdirTemp(filepath.Dir(final), ".ferry-jdk-")
+	if err != nil {
+		return proto.CodeFailed, err.Error()
+	}
+	defer os.RemoveAll(tmp)
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return proto.CodeFailed, err.Error()
+	}
 	if err := extractJDK(src, tmp); err != nil {
-		os.RemoveAll(tmp)
 		return proto.CodeFailed, "解压 JDK 失败：" + err.Error()
 	}
 	// （Windows 上只跑单元测试，文件没有可执行位）
 	if fi, err := os.Stat(filepath.Join(tmp, "bin", "java")); err != nil || fi.Mode()&0o111 == 0 && goruntime.GOOS != "windows" {
-		os.RemoveAll(tmp)
 		return proto.CodeFailed, "压缩包里没有可执行的 bin/java"
 	}
 	ver := r.Version // 完整版本（如 25.0.4.1+1-LTS）；以前的引擎不传，用 ID 代替
@@ -248,10 +295,13 @@ func (a *Agent) unpackJDK(r *proto.RuntimeSpec, stage, final string) (int, strin
 		ver = strings.TrimPrefix(r.ID, "jdk-")
 	}
 	meta, _ := json.Marshal(proto.Runtime{ID: r.ID, Java: r.Java, Version: ver})
-	os.WriteFile(filepath.Join(tmp, ".ferry-runtime.json"), meta, 0o644)
-	os.RemoveAll(final)
+	if err := os.WriteFile(filepath.Join(tmp, ".ferry-runtime.json"), meta, 0o644); err != nil {
+		return proto.CodeFailed, "记录 JDK 版本失败：" + err.Error()
+	}
+	if r.Dir == "" || !r.KeepDefault {
+		os.RemoveAll(final)
+	}
 	if err := os.Rename(tmp, final); err != nil {
-		os.RemoveAll(tmp)
 		return proto.CodeFailed, err.Error()
 	}
 	return proto.CodeOK, ""
@@ -268,7 +318,7 @@ func extractJDK(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	if err := mkdirInstallParents(dst); err != nil {
 		return err
 	}
 	tr := tar.NewReader(gz)
@@ -296,11 +346,11 @@ func extractJDK(src, dst string) error {
 		mode := os.FileMode(h.Mode).Perm()&0o755 | 0o600
 		switch h.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(p, 0o755); err != nil {
+			if err := mkdirInstallParents(p); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			if err := mkdirInstallParents(filepath.Dir(p)); err != nil {
 				return err
 			}
 			out, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
@@ -330,7 +380,7 @@ func extractJDK(src, dst string) error {
 			if !within(dst, resolved) {
 				return fmt.Errorf("压缩包里有指向外部的链接：%s → %s", h.Name, target)
 			}
-			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			if err := mkdirInstallParents(filepath.Dir(p)); err != nil {
 				return err
 			}
 			if h.Typeflag == tar.TypeSymlink {

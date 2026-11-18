@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/user"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -228,7 +229,10 @@ func (p progressSteps) Step(f string, a ...any) {
 func (p progressSteps) Info(f string, a ...any) { p.out("    " + fmt.Sprintf(f, a...)) }
 
 // Event 服务器上 agent 报的进展（安装、启动、就绪……）
-func (p progressSteps) Event(_ string, ev proto.Event) {
+func (p progressSteps) Event(target string, ev proto.Event) {
+	if ev.Code == proto.EvInstallTask || ev.Code == proto.EvInstallPhase {
+		p.Reporter.Event(target, ev)
+	}
 	line := time.Now().Format("15:04:05") + " " + proto.EvLabel(ev.Code)
 	if ev.App != "" {
 		line += " " + ev.App
@@ -250,7 +254,8 @@ func (e *Engine) aiSystemPrompt(s *session, t *config.Target, mode string) strin
 1. 先查清楚现状再动手。动手前用一两句话说明计划（分几步、每步做什么）。
 2. 优先用 Ferry 的现成操作，比自己拼命令可靠：` + map[bool]string{
 			true: "这台服务器是「新建连接」登录的，没有 Ferry 的服务器端组件，只能用 run_command、write_file。",
-			false: "装软件先用 software_templates 看模板库里有没有，有就用 software_install（自动选安装方式、建 systemd 服务、检查端口、生成密码）；启停项目里的应用用 app_control，回滚用 app_rollback，部署用 deploy，不要自己 systemctl；" +
+			false: "装软件先用 software_templates 看模板库里有没有，有就用 software_install（自动选安装方式、建 systemd 服务、检查端口、生成密码）；" +
+				"用户要的设置模板参数里没有时写在 software_install 的 extra 里（看模板的 extras），不要另写模板，也不要装好后再去改配置文件；启停项目里的应用用 app_control，回滚用 app_rollback，部署用 deploy，不要自己 systemctl；" +
 				"放行 / 关闭端口用 port_control、打开防火墙用 firewall_enable，不要自己 firewall-cmd、ufw；改数据库、数据目录前先 backup_run。没有现成操作时才用 run_command。",
 		}[t.Plain] + `
 3. 命令不能需要交互：加 -y 之类的参数；不能用 vi、less、top 这类交互程序；不要在前台运行长期服务（交给 systemd）。改动命令最多运行 30 分钟，用户可以随时停止。
@@ -679,7 +684,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 		},
 	}, ai.Tool{
 		Name:        "software_templates",
-		Description: "Ferry 软件模板库里能装的软件（数据库、缓存、中间件等）：模板 ID、名称、说明、参数、各种装法（适用系统）。",
+		Description: "Ferry 软件模板库里能装的软件（数据库、缓存、中间件等）：模板 ID、名称、说明、参数、各种装法（适用系统），以及 extras（参数没有的设置能补充到哪里：常用项 suggest、不能改的 locked）。",
 		Schema:      schema(map[string]any{}),
 		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
 			list, _ := e.Templates()
@@ -694,12 +699,16 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 				Name     string        `json:"name"`
 				Desc     string        `json:"desc"`
 				Params   []swtpl.Param `json:"params,omitempty"`
+				Extras   []extraBrief  `json:"extras,omitempty"` // software_install 的 extra 能补充的配置
 				Variants []v           `json:"variants"`
 				Mine     bool          `json:"mine,omitempty"`
 			}
 			var out []tp
 			for _, x := range list {
 				it := tp{ID: x.ID, Name: x.Name, Desc: x.Desc, Params: x.Params, Mine: !x.Builtin}
+				for _, ex := range x.Extras {
+					it.Extras = append(it.Extras, briefExtra(ex))
+				}
 				for _, va := range x.Variants {
 					it.Variants = append(it.Variants, v{Label: va.Label, OS: va.OS, Arch: va.Arch, Note: va.Note})
 				}
@@ -716,7 +725,9 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			for _, m := range swpkg.List(e.Settings.SoftwareDir()) {
 				lib = append(lib, pk{File: m.File, Template: m.Template, Version: m.Version, Desc: m.Desc})
 			}
-			return toJSON(map[string]any{"templates": out, "library": lib}), nil
+			// 不缩进：模板多了也不超过结果的长度上限（超过时中间会被省略，模型就看不到部分模板）
+			b, _ := json.Marshal(map[string]any{"templates": out, "library": lib})
+			return string(b), nil
 		},
 	})
 	tools = append(tools, e.aiMoreTools(t, change)...)
@@ -797,7 +808,9 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 	}, ai.Tool{
 		Name: "software_install",
 		Description: "用 Ferry 的软件模板在这台服务器上安装软件：自动按系统选装法、建 systemd 服务（ferry-<名称>.service）、检查端口、" +
-			"密码不填时随机生成并存进用户的凭据库（不会告诉你）。template 填模板库里的 ID；也可以用 template_yaml 直接给一个模板试装（格式见 template_guide）。",
+			"密码不填时随机生成并存进用户的凭据库（不会告诉你）。template 填模板库里的 ID；也可以用 template_yaml 直接给一个模板试装（格式见 template_guide）。" +
+			"参数里没有的设置（如 MySQL 的 innodb_buffer_pool_size、Redis 的 maxmemory）写在 extra 里，不要为此另写模板：" +
+			"software_templates 里每个模板的 extras 写了能补充到哪里、常用项（suggest）和不能改的项（locked，端口、密码等用 params）。",
 		Schema: schema(map[string]any{
 			"template":      str("模板 ID（software_templates 里的）"),
 			"template_yaml": str("直接给出的模板内容（试装自己写的模板时用）"),
@@ -810,6 +823,8 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			"java_dir":      str("需要 JDK 的软件：JDK 装在这个目录下；不填 = Ferry 的公共目录（多个软件、应用共用）"),
 			"allow_changes": map[string]any{"type": "boolean", "description": "从软件源装包会顺带升级、删除已装的包时也继续。只有上一次安装因此停下、你把要改动的包告诉用户并且用户同意后才填 true"},
 			"params":        map[string]any{"type": "object", "description": "模板参数（如 port、public）；密码不填时自动生成，用户要自己定密码时先用 ask_secret 让用户填，这里写代号 {{secret:名字}}", "additionalProperties": map[string]any{"type": "string"}},
+			"extra": map[string]any{"type": "object", "description": "附加配置：模板参数没有的设置，{\"名称\": \"值\"}（模板有几处 extras 时写成 {\"extras 的 id\": {\"名称\": \"值\"}}）。" +
+				"同名的替换模板里的值，没有的加上；值原样写入。要写密码时先用 ask_secret，这里写代号 {{secret:名字}}"},
 		}),
 		Approve: func(ctx context.Context, in json.RawMessage) *ai.Approval {
 			var a softwareArgs
@@ -817,6 +832,10 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			tpl, err := a.parse(e)
 			if err != nil {
 				return nil // 模板不对：执行时报错交回模型，不用打扰用户
+			}
+			extras, err := a.extras(tpl)
+			if err != nil {
+				return nil // 附加配置不对：执行时报错交回模型
 			}
 			var d strings.Builder
 			fmt.Fprintf(&d, "软件：%s（模板 %s%s）\n", tpl.Name, tpl.ID, map[bool]string{true: "，模型写的模板", false: ""}[a.TemplateYAML != ""])
@@ -845,6 +864,16 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 				}
 				fmt.Fprintf(&d, "%s = %s\n", k, v)
 			}
+			for _, x := range extras {
+				fmt.Fprintf(&d, "附加配置「%s」：\n", x.Extra.Label)
+				for _, it := range x.Items {
+					v := it.Value
+					if secretExtraKey(it.Key) && !strings.Contains(v, "{{secret:") {
+						v = "******"
+					}
+					fmt.Fprintf(&d, "  %s\n", extraItemText(x.Extra.Format, swtpl.ExtraItem{Section: it.Section, Key: it.Key, Value: v}))
+				}
+			}
 			if a.TemplateYAML != "" {
 				d.WriteString("\n" + a.TemplateYAML)
 			}
@@ -866,9 +895,21 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 				}
 				params[k] = v
 			}
+			extra, err := ParseExtras(a.Extra)
+			if err != nil {
+				return "", err
+			}
+			for id, kv := range extra {
+				for k, v := range kv {
+					if kv[k], err = ai.FillSecrets(conv, v); err != nil {
+						return "", err
+					}
+				}
+				extra[id] = kv
+			}
 			r, err := withProgress(e, ctx, func() (any, error) {
 				return e.SoftwareInstall(t.Name, SoftwareOptions{Template: a.Template, TemplateYAML: []byte(a.TemplateYAML),
-					Variant: -1, Name: a.Name, Version: a.Version, Params: params,
+					Variant: -1, Name: a.Name, Version: a.Version, Params: params, Extra: extra,
 					In: a.In, Dir: a.Dir, PackageFile: a.Package, Network: a.Network, JavaDir: a.JavaDir, AllowChanges: a.AllowChanges})
 			})
 			if err != nil {
@@ -926,6 +967,60 @@ type softwareArgs struct {
 	JavaDir      string            `json:"java_dir"`
 	AllowChanges bool              `json:"allow_changes"`
 	Params       map[string]string `json:"params"`
+	Extra        json.RawMessage   `json:"extra"`
+}
+
+// extras 检查附加配置：至少一种装法能用（装哪种要连上服务器才知道，执行时再按选中的装法检查一次）；返回给确认框看的。
+func (a *softwareArgs) extras(tpl *swtpl.Template) ([]swtpl.ExtraSet, error) {
+	in, err := ParseExtras(a.Extra)
+	if err != nil || in == nil {
+		return nil, err
+	}
+	var first error
+	for i := range tpl.Variants {
+		sets, err := tpl.ResolveExtras(&tpl.Variants[i], in)
+		if err == nil {
+			return sets, nil
+		}
+		if first == nil {
+			first = err
+		}
+	}
+	return nil, first
+}
+
+// extraBrief 模板库里给模型看的附加配置（简短：模板多了也不超过结果的长度上限）。
+// 不能改的项不一一列出：填了会报错，并说明用哪个参数。
+type extraBrief struct {
+	ID      string   `json:"id"`
+	Label   string   `json:"label"`
+	Where   string   `json:"where"`
+	Suggest []string `json:"suggest,omitempty"` // 常用项：名称=例子
+}
+
+func briefExtra(x swtpl.Extra) extraBrief {
+	file := path.Base(x.File)
+	where := map[string]string{"ini": file + " [" + x.Section + "]", "keyvalue": file + "（名称 值）", "properties": file,
+		"env": "环境变量", "args": "启动参数 " + strings.TrimSpace(x.Prefix) + "名称=值"}[x.Format]
+	if x.Format == "ini" && x.Section == "" {
+		where = file + "（名称写成 段.名称）"
+	}
+	b := extraBrief{ID: x.ID, Label: x.Label, Where: where}
+	for _, sg := range x.Suggest {
+		b.Suggest = append(b.Suggest, sg.Key+"="+sg.Example)
+	}
+	return b
+}
+
+// secretExtraKey 附加配置里像密码的项：确认框里遮住（应该用 ask_secret 的代号）。
+func secretExtraKey(k string) bool {
+	k = strings.ToLower(k)
+	for _, w := range []string{"pass", "secret", "token", "credential"} {
+		if strings.Contains(k, w) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *softwareArgs) parse(e *Engine) (*swtpl.Template, error) {
@@ -1180,6 +1275,11 @@ const templateGuide = `# Ferry 软件模板（YAML）
     数据库等有密码的软件，在 ready 阶段加一步用密码登录一次（如 mysql -e 'select 1'），密码不对时安装失败
   - service：exec（前台运行的启动命令，不能自己转后台）、workdir、env（写进只有 root 能读的文件，密码放这里）、ready: {port: "${port}", timeout: 秒}
   - logs：日志文件（第一个为主日志）；notes：装好后给用户看的说明（如连接地址）
+- extras（可选）：安装时用户能补充的配置（参数没有覆盖到的设置），按「名称=值」填，每项有 id、label、format、help、protect（不能改的名称）、suggest（[{key, example, help}] 常用项）：
+  - format: ini —— file（files 写出的文件）、section（合并进哪一段；不写时名称写成「段.名称」）
+  - format: keyvalue（一行「名称 值」，如 redis.conf）、properties（一行「名称=值」）—— file（files 写出的，或 props 改过的安装包里的文件）
+  - format: env —— 服务的环境变量；format: args —— 加在启动命令末尾，prefix 是每项前面加的（"-c " → -c 名称=值，"--" → --名称=值）
+  模板里引用了变量的项（${port} 等）自动不能改；会让服务转后台、换数据目录等的项写进 protect。
 
 字符串里可以用变量：${name} 实例名、${dir} 安装目录、${user} 运行用户、${version} 版本、${java} JDK 目录、${package} 上传的安装包、${host} 服务器地址、
 ${参数} 参数值、${参数?是|否} bool 参数为 true 时取「是」、${参数+1000} 数字参数加上一个数、${random:24} 随机串。用到的变量必须有定义。

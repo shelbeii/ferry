@@ -39,3 +39,16 @@ variants:
       ready: {port: "${port}", timeout: 60}
     notes:
       - API：${host}:${port}；控制台：http://${host}:${console}/ ，账号 ${account}，密码见「密码」
+
+# 安装时可以补充的配置（参数没有的设置）：作为服务的环境变量
+extras:
+  - id: env
+    label: MinIO 环境变量
+    format: env
+    help: 写进只有 root 能读的 ferry.env，MinIO 启动时读取；账号、密码用上面的参数
+    protect: [MINIO_VOLUMES, MINIO_OPTS, MINIO_ROOT_USER_FILE, MINIO_ROOT_PASSWORD_FILE]
+    suggest:
+      - {key: MINIO_SERVER_URL, example: "https://s3.example.com", help: 经反向代理访问时，对外的 API 地址}
+      - {key: MINIO_BROWSER_REDIRECT_URL, example: "https://console.example.com", help: 经反向代理访问时，对外的控制台地址}
+      - {key: MINIO_SITE_REGION, example: cn-east-1, help: 区域名}
+      - {key: MINIO_DOMAIN, example: s3.example.com, help: 用虚拟主机方式访问存储桶时的域名}
