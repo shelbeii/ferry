@@ -23,7 +23,7 @@ function onKey(e: KeyboardEvent) {
 const host = ref<HTMLDivElement>()
 let editor: SqlEditor | null = null
 const dbName = ref(props.db)
-const readOnlySQL = computed(() => dbCapabilities[props.conn.kind].browseOnly)
+const limitedSQL = computed(() => dbCapabilities[props.conn.kind].limitedDesktop)
 const resultDb = ref(props.db)
 const databases = ref<DbDatabase[]>([])
 const running = ref(false)
@@ -74,14 +74,14 @@ async function loadDatabases() {
 
 watch(dbName, (v) => {
   emit('update:db', v)
-  if (!readOnlySQL.value) closeDbSession(props.conn.id, props.sid)
+  closeDbSession(props.conn.id, props.sid)
   void loadCompletion()
 })
 
 async function run(text: string) {
   const sql = text.trim()
   if (!sql || running.value) return
-  if (!readOnlySQL.value) {
+  if (!props.conn.readOnly) {
     let dangers: string[]
     try {
       dangers = await sqlDangers(props.conn, { sql })
@@ -119,7 +119,7 @@ async function run(text: string) {
 
 function runCurrent() {
   if (!editor) return
-  if (readOnlySQL.value) return runAll()
+  if (limitedSQL.value) return runAll()
   void run(editor.selection() || editor.current())
 }
 function runAll() {
@@ -198,7 +198,7 @@ onBeforeUnmount(() => {
   observer?.disconnect()
   editor?.view.destroy()
   cancel?.()
-  if (!readOnlySQL.value) closeDbSession(props.conn.id, props.sid)
+  closeDbSession(props.conn.id, props.sid)
 })
 
 defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor) { const v = editor.view; v.dispatch(v.state.replaceSelection(s)); v.focus() } } })
@@ -211,10 +211,10 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
         <el-option v-if="dbName && !databases.some((d) => d.name === dbName)" :value="dbName" :label="dbName" />
         <el-option v-for="d in databases" :key="d.name" :value="d.name" :label="d.name" />
       </el-select>
-      <el-button size="small" type="primary" :icon="CaretRight" :loading="running" @click="runCurrent">{{ readOnlySQL ? '执行查询' : '执行当前句' }}</el-button>
-      <el-button v-if="!readOnlySQL" size="small" :icon="VideoPlay" :disabled="running" @click="runAll">全部执行</el-button>
+      <el-button size="small" type="primary" :icon="CaretRight" :loading="running" @click="runCurrent">{{ limitedSQL ? '执行 SQL' : '执行当前句' }}</el-button>
+      <el-button v-if="!limitedSQL" size="small" :icon="VideoPlay" :disabled="running" @click="runAll">全部执行</el-button>
       <el-button v-if="running" size="small" type="danger" :icon="CircleClose" @click="stop">停止</el-button>
-      <span class="keys">{{ readOnlySQL ? 'Ctrl+Enter 执行查询，可选中一段 SQL' : 'Ctrl+Enter 执行光标所在的一条（或选中的），F9 执行全部' }}</span>
+      <span class="keys">{{ limitedSQL ? 'Ctrl+Enter 执行选中或全部 SQL' : 'Ctrl+Enter 执行光标所在的一条（或选中的），F9 执行全部' }}</span>
       <span class="grow" />
       <el-tag v-if="conn.readOnly" size="small" type="info">只读</el-tag>
       <el-dropdown v-if="saved" split-button size="small" trigger="click" @click="emit('save', false)" @command="emit('save', true)">
@@ -262,7 +262,7 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item command="csv">导出为 CSV（重新执行，不限行数）</el-dropdown-item>
-                      <el-dropdown-item v-if="!readOnlySQL" command="sql">导出为 SQL（INSERT 语句）</el-dropdown-item>
+                      <el-dropdown-item v-if="!limitedSQL" command="sql">导出为 SQL（INSERT 语句）</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>

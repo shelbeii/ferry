@@ -2,7 +2,7 @@ package dbx
 
 // 给 AI 用的只读查询（编程软件经 ferry mcp、Ferry 自己的 AI 助手）：比只读连接更严——
 // 只能是一条查询；不许写文件、读服务器上的文件、踢别人的连接、加锁、睡眠、读账号密码表；
-// 在只读事务里执行，数据库那边设了超时，返回的行数、单元格长度、总长度都有上限。
+// 执行时按引擎使用只读事务、只读连接或查询校验，返回的行数、单元格长度、总长度都有上限。
 //
 // 能不能给 AI 用由连接的「允许 AI 查询」（Conn.AI）决定，默认关着：查出来的数据会发给 AI 的模型。
 
@@ -55,36 +55,103 @@ var reUnicodeEscape = regexp.MustCompile(`(?i)\bU&\s*['"]`)
 // aiFlatten 去掉引号、反引号和注释符号，换成空格，再转大写：`pg_sleep`(1)、SLEEP/**/(1) 这类写法也能认出来。
 var aiFlatten = strings.NewReplacer("'", " ", `"`, " ", "`", " ", "/*", " ", "*/", " ", "--", " ", "#", " ", "\n", " ", "\r", " ", "\t", " ")
 
+var aiKingbasePrefix = regexp.MustCompile(`\bSYS_`)
+
+func aiSQLText(kind, stmt string) string {
+	text := strings.ToUpper(aiFlatten.Replace(stmt))
+	if kind == Kingbase {
+		// 金仓同时提供 sys_ 名称和 pg_ 兼容名称，两者使用同样的拦截规则。
+		return aiKingbasePrefix.ReplaceAllString(text, "PG_")
+	}
+	return text
+}
+
+var aiExternalSQL = regexp.MustCompile(`\b(OPENQUERY|OPENROWSET|OPENDATASOURCE|BULK|XP_\w+|SP_OA\w+|UTL_\w+|DBMS_\w+|NEXTVAL|ATTACH|LOAD_EXTENSION)\b`)
+
+var aiClickHouseExternal = regexp.MustCompile(`\b(FILE|URL|S3\w*|AZUREBLOBSTORAGE\w*|HDFS\w*|REMOTE\w*|CLUSTER\w*|MYSQL|POSTGRESQL|ODBC|JDBC|MONGODB|REDIS|EXECUTABLE\w*|INPUT|DICTIONARY\w*|ICEBERG\w*|DELTALAKE\w*)\s*\(|\b(SYSTEM|INFORMATION_SCHEMA)\s*\.|` +
+	`\b(ON\s+CLUSTER|SETTINGS|OUTFILE|NAMED\s+COLLECTION|DICTGET\w*\s*\()`)
+
+var aiPrivateCatalog = regexp.MustCompile(`\b(SQL_LOGINS|SERVER_PRINCIPALS|SYSLOGINS|SYSXLOGINS|SYSAUTH|SYSUSER\w*|DBA_USERS)\b`)
+
+// TiDB 的 READ ONLY 事务语法不限制写入，复用 AI 查询规则并额外禁止写入关键字、会话变量。
+var tiDBReadWords = regexp.MustCompile(`\b(INSERT|UPDATE|DELETE|REPLACE|MERGE|CREATE|ALTER|DROP|TRUNCATE|RENAME|IMPORT|LOAD|ADMIN|DO|CALL|SET|GRANT|REVOKE|LOCK|UNLOCK)\b|@`)
+
+func checkTiDBRead(dbName, stmt string) error {
+	if err := CheckAIQuery(MySQL, dbName, stmt); err != nil {
+		return err
+	}
+	if tiDBReadWords.MatchString(strings.ToUpper(aiFlatten.Replace(stmt))) {
+		return errors.New("TiDB 的只读查询不允许写语句、锁表或会话变量")
+	}
+	return nil
+}
+
 // CheckAIQuery 检查 AI 发来的查询，不行时说明原因。dbName 是要在哪个库里查。
 func CheckAIQuery(kind, dbName, src string) error {
+	if kind == MongoDB {
+		_, err := parseAIMongoFind(dbName, src)
+		return err
+	}
+	_, err := aiQueryStatement(kind, dbName, src)
+	return err
+}
+
+func aiQueryStatement(kind, dbName, src string) (string, error) {
 	stmts := Split(kind, src)
+	if kind == SQLServer {
+		var err error
+		stmts, err = sqlServerStatements(src)
+		if err != nil {
+			return "", err
+		}
+	}
 	if len(stmts) == 0 {
-		return errors.New("没有要执行的查询")
+		return "", errors.New("没有要执行的查询")
 	}
 	if len(stmts) > 1 {
-		return errors.New("一次只能执行一条查询")
+		return "", errors.New("一次只能执行一条查询")
 	}
 	s := stmts[0]
 	switch w := FirstWord(kind, s); {
 	case w == "":
-		return errors.New("没有要执行的查询")
+		return "", errors.New("没有要执行的查询")
 	case !aiStartWords[w]:
-		return fmt.Errorf("只能执行查询（SELECT、WITH、SHOW、EXPLAIN 等），不能执行 %s", w)
+		return "", fmt.Errorf("只能执行查询（SELECT、WITH、SHOW、EXPLAIN 等），不能执行 %s", w)
 	}
-	if kind == MySQL && strings.Contains(s, "/*!") {
-		return errors.New("不能用 MySQL 的 /*! … */ 注释（里面的内容会被执行）")
+	if kind == MySQL && mySQLDirective(s) {
+		return "", errors.New("不能用 MySQL 的 /*! … */ 或 TiDB 的 /*T! … */ 执行指令注释")
 	}
 	if reUnicodeEscape.MatchString(s) {
-		return errors.New("不能用 U&'…' 转义写法")
+		return "", errors.New("不能用 U&'…' 转义写法")
 	}
 	if kind == MySQL && strings.EqualFold(dbName, "mysql") {
-		return errors.New("不能在 mysql 系统库里查（里面有账号的密码）")
+		return "", errors.New("不能在 mysql 系统库里查（里面有账号的密码）")
 	}
-	flat := strings.ToUpper(aiFlatten.Replace(s))
+	flat := aiSQLText(kind, s)
+	if err := checkAdapterAISQL(kind, dbName, flat); err != nil {
+		return "", err
+	}
+	if !postgresProtocol(kind) && FirstWord(kind, s) == "EXPLAIN" && strings.Contains(flat, "ANALYZE") {
+		return "", errors.New("不能用 EXPLAIN ANALYZE（会执行语句）")
+	}
 	for _, b := range aiBanned {
 		if m := b.re.FindString(flat); m != "" {
-			return fmt.Errorf("%s：%s", b.why, strings.TrimSpace(strings.TrimSuffix(m, "(")))
+			return "", fmt.Errorf("%s：%s", b.why, strings.TrimSpace(strings.TrimSuffix(m, "(")))
 		}
+	}
+	return s, nil
+}
+
+func mySQLDirective(s string) bool {
+	return strings.Contains(s, "/*!") || strings.Contains(strings.ToUpper(s), "/*T!")
+}
+
+func checkAdapterAISQL(kind, dbName, text string) error {
+	if adapterSQL(kind) && (aiExternalSQL.MatchString(text) || aiPrivateCatalog.MatchString(text)) {
+		return errors.New("AI 不能执行外部访问函数或访问账号密码目录")
+	}
+	if kind == ClickHouse && (aiClickHouseExternal.MatchString(text) || strings.EqualFold(dbName, "system") || strings.EqualFold(dbName, "information_schema")) {
+		return errors.New("AI 不能访问 ClickHouse 外部数据源、系统库或修改查询设置")
 	}
 	return nil
 }
@@ -103,20 +170,28 @@ type AIResult struct {
 // AIQuery 执行 AI 的查询（先用 CheckAIQuery 检查）。max 是最多返回多少行。
 func (cl *Client) AIQuery(ctx context.Context, dbName, src string, max int) (*AIResult, error) {
 	kind := cl.Conn.Kind
-	if err := CheckAIQuery(kind, dbName, src); err != nil {
+	if kind == MongoDB {
+		return cl.aiMongoQuery(ctx, dbName, src, max)
+	}
+	stmt, err := aiQueryStatement(kind, cl.databaseName(dbName), src)
+	if err != nil {
 		return nil, err
 	}
-	stmt := Split(kind, src)[0]
+	if cl.isTiDB() {
+		if err := checkTiDBRead(cl.databaseName(dbName), stmt); err != nil {
+			return nil, err
+		}
+	}
 	if max <= 0 {
 		max = AIDefaultRows
 	}
 	max = min(max, AIMaxRows)
-	db, err := cl.DB(ctx, dbName)
+	db, err := cl.pool(dbName, roleRead)
 	if err != nil {
 		return nil, err
 	}
-	// 数据库那边的超时先到；这边多等几秒兜底
-	ctx, cancel := context.WithTimeout(ctx, AITimeout+5*time.Second)
+	// 取连接、执行和读取结果共用同一个超时。
+	ctx, cancel := context.WithTimeout(ctx, AITimeout)
 	defer cancel()
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -152,18 +227,18 @@ func (cl *Client) aiRun(ctx context.Context, conn *sql.Conn, dbName, stmt string
 			}()
 		}
 	}
-	tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	q, release, err := cl.beginReadQuery(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	if cl.Conn.Kind == Postgres {
+	defer release()
+	if tx, ok := q.(*sql.Tx); ok && postgresProtocol(cl.Conn.Kind) {
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", ms)); err != nil {
 			return nil, err
 		}
 		tx.ExecContext(ctx, "SET LOCAL lock_timeout = 5000")
 	}
-	rows, err := tx.QueryContext(ctx, stmt)
+	rows, err := q.QueryContext(ctx, stmt)
 	if err != nil {
 		return nil, err
 	}

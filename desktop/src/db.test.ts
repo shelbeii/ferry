@@ -33,8 +33,8 @@ describe('connFromSoftware', () => {
     expect(isDbSoftware(sw)).toBe(true)
     expect(connFromSoftware(sw, via, 'p')).toMatchObject({ kind: 'redis', container: 'cache', port: 6379, user: '' })
   })
-  it('supplies SQL Server and MongoDB defaults', () => {
-    for (const [kind, port, user] of [['sqlserver', 1433, 'sa'], ['mongodb', 27017, '']] as const) {
+  it('supplies SQL Server, MongoDB, Dameng and Kingbase defaults', () => {
+    for (const [kind, port, user] of [['sqlserver', 1433, 'sa'], ['mongodb', 27017, ''], ['dm', 5236, 'SYSDBA'], ['kingbase', 54321, 'system']] as const) {
       const sw = { kind, name: kind, state: 'running', via: 'systemd' } as Software
       expect(isDbSoftware(sw)).toBe(true)
       expect(connFromSoftware(sw, via, 'p')).toMatchObject({ kind, port, user, readOnly: true, via })

@@ -57,6 +57,15 @@ func (cl *Client) openMongo(ctx context.Context) error {
 	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "buildInfo", Value: 1}}).Decode(&info); err == nil && info.Version != "" {
 		cl.Version += " " + info.Version
 	}
+	if cl.Conn.AI && cl.Conn.AIWrite && !cl.Conn.ReadOnly {
+		var topology struct {
+			SetName string `bson:"setName"`
+			Msg     string
+		}
+		if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Decode(&topology); err == nil {
+			cl.mongoTransactions = topology.SetName != "" || topology.Msg == "isdbgrid"
+		}
+	}
 	return nil
 }
 

@@ -24,19 +24,23 @@ CURSOR NEXT OPENQUERY OPENROWSET OPENDATASOURCE READTEXT RECEIVE UPDLOCK XLOCK T
 }()
 
 func sqlServerStatements(src string) ([]string, error) {
+	return scanSQLServer(src, false)
+}
+
+func scanSQLServer(src string, write bool) ([]string, error) {
 	var stmts []string
 	start, depth := 0, 0
 	first, previous := "", ""
-	foundSelect := false
+	foundSelect, foundSet, foundAlter := false, false, false
 	finish := func(end int) error {
 		if first == "" {
 			return nil
 		}
-		if !foundSelect || depth != 0 {
+		if depth != 0 || (!write || first == "WITH") && !foundSelect {
 			return errors.New("SQL Server 只接受完整的 SELECT 查询")
 		}
 		stmts = append(stmts, strings.TrimSpace(src[start:end]))
-		first, previous, foundSelect = "", "", false
+		first, previous, foundSelect, foundSet, foundAlter = "", "", false, false, false
 		return nil
 	}
 	for i := 0; i < len(src); {
@@ -119,14 +123,28 @@ func sqlServerStatements(src string) ([]string, error) {
 			}
 			word := strings.ToUpper(src[i:j])
 			if first == "" {
-				if word != "SELECT" && word != "WITH" {
+				if word != "SELECT" && word != "WITH" && !(write && sqlServerWriteStart(word)) {
 					return nil, errors.New("SQL Server 查询必须以 SELECT 或 WITH 开头")
 				}
 				first = word
+				switch word {
+				case "SELECT", "WITH":
+				default:
+					i, previous = j, word
+					continue
+				}
 			}
 			// NEXT 是分页语法的一部分，也用于会改变序列的 NEXT VALUE FOR。
 			if sqlServerBlocked[word] && (word != "NEXT" || previous != "FETCH") {
-				return nil, fmt.Errorf("SQL Server 只读查询不支持 %s；同名列请用方括号引用", word)
+				switch {
+				case write && depth == 0 && first == "UPDATE" && word == "SET" && !foundSet:
+					foundSet = true
+				case write && depth == 0 && first == "INSERT" && (word == "INTO" && previous == "INSERT" || word == "WITH"):
+				case write && depth == 0 && first == "ALTER" && (word == "ADD" || word == "DROP" || word == "ALTER") && !foundAlter:
+					foundAlter = true
+				default:
+					return nil, fmt.Errorf("SQL Server 不允许 %s；同名列请用方括号引用", word)
+				}
 			}
 			if depth == 0 && word == "SELECT" {
 				if foundSelect && previous != "UNION" && previous != "ALL" && previous != "INTERSECT" && previous != "EXCEPT" {
@@ -158,6 +176,14 @@ func sqlServerStatements(src string) ([]string, error) {
 		return nil, errors.New("没有要执行的 SQL Server 查询")
 	}
 	return stmts, nil
+}
+
+func sqlServerWriteStart(word string) bool {
+	switch word {
+	case "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE":
+		return true
+	}
+	return false
 }
 
 func sqlServerWordChar(c rune) bool {

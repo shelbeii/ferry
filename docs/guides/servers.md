@@ -46,11 +46,17 @@
 | --- | --- |
 | MySQL / MariaDB、PostgreSQL | 浏览库表、SQL 查询、编辑数据、建表改表、导入导出 |
 | Redis / Valkey | 用 SCAN 浏览键，编辑字符串、哈希、列表、集合、有序集合和流，执行命令。集群只能浏览当前节点 |
-| SQL Server | 用 SQL Server 账号连接 TCP 端口（默认 1433），浏览库、模式、表、视图和列，执行只读 `SELECT`（支持 CTE），导出 CSV。多条查询用分号分隔 |
+| SQL Server | 连接 TCP 端口（默认 1433），浏览库、模式、表、视图和列，执行 SQL，导出 CSV。多条查询用分号分隔 |
 | MongoDB | 浏览集合和视图，用 Extended JSON 过滤和导出文档。默认端口 27017，默认认证库 `admin`。发现副本集时，各节点地址须可达，经 SSH 时由 SSH 服务器访问。也可选择只连接填写的节点 |
-| SQLite | 选择现有的本机数据库文件。只读浏览表、视图和列，执行 SQL 查询，导出 CSV。服务器上的 SQLite 可先在服务器侧生成一致性快照，再下载到本机打开 |
-| ClickHouse | 浏览库、表、视图和列，执行只读查询，导出 CSV。使用原生 TCP 协议，默认端口 9000，启用 TLS 时通常使用 9440 |
+| SQLite | 选择现有的本机数据库文件，浏览表、视图和列，执行 SQL，导出 CSV。服务器上的 SQLite 可先在服务器侧生成一致性快照，再下载到本机打开 |
+| ClickHouse | 浏览库、表、视图和列，执行 SQL，导出 CSV。使用原生 TCP 协议，默认端口 9000，启用 TLS 时通常使用 9440 |
+| 达梦 DM8 | 连接实例（默认端口 5236），按模式浏览表和视图，执行 SQL，导出 CSV |
+| 人大金仓 | 通过 PostgreSQL 协议连接，端口默认 54321，库名默认 `test`。支持浏览表结构、执行 SQL 和导出 CSV。已在 KingbaseES V009R001C010B0004 的 PG 和 Oracle 兼容模式验证只读、AI 查询、独立账号和审批写入 |
 
-从服务器的「软件」列表可以创建 Valkey、SQL Server、MongoDB 和 ClickHouse 连接。使用 SQL Server、MongoDB 或 ClickHouse 连接生产库时，建议使用只读数据库账号。
+导入 MySQL / MariaDB、PostgreSQL 的 `.sql` 文件时，可以在「执行 SQL 文件」里勾选「快速导入」。它把连续写入同一张表和相同列的简单单行 `INSERT` 合并成多行，减少数据库往返和自动提交次数。合并后的语句按批执行，出错时会显示文件里的语句范围。依赖单条 `INSERT` 边界的脚本，或需要跳过错误继续执行的文件，使用默认模式。
 
-OceanBase 可在「MySQL / MariaDB」入口连接 MySQL 租户。已在 OceanBase CE 4.3.5.6 验证表结构、只读查询和 CSV 导出。TiDB 8.5.6 也可通过该入口连接，已验证表结构和普通 `SELECT`。Ferry 的只读查询和 CSV 导出依赖 `READ ONLY` 事务，该版本的 TiDB 默认拒绝此类事务。
+新建 SQL Server、MongoDB、SQLite、ClickHouse、达梦和人大金仓连接时默认只读。允许 AI 查询和允许 AI 修改均需单独开启，并且每次修改都要确认。网络数据库可以为 AI 配置独立的数据库账号。SQLite 使用本机文件权限，开启 AI 查询后，MCP 和 Ferry 的 AI 助手都可以访问该文件。
+
+MongoDB 的 AI 查询使用集合名和 Extended JSON 筛选，AI 修改每次确认一条文档或集合操作。副本集和分片集群对批量更新、删除使用事务。单机对多个文档的改动失败时可能部分生效。ClickHouse 每次确认一条语句，取消等待后后台改动可能仍在执行。达梦的建表改表单独确认。
+
+OceanBase 的 MySQL 租户和 TiDB 都从「MySQL / MariaDB」入口连接。已在 OceanBase CE 4.3.5.6 和 TiDB 8.5.6 验证表结构、只读查询、CSV 导出，以及 AI 查询和数据修改。TiDB 的 `READ ONLY` 事务语法无法提供只读保障，Ferry 对它的只读执行路径限制允许的语句。

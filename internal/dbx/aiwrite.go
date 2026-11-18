@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2"
 )
 
 const (
@@ -67,7 +69,19 @@ func CheckAIWrite(kind, dbName, src string) ([]string, error) {
 	if len(src) > aiMaxSQL {
 		return nil, fmt.Errorf("SQL 太长（%d KB）：一次最多 %d KB，分几次执行", len(src)>>10, aiMaxSQL>>10)
 	}
-	stmts := Split(kind, src)
+	var stmts []string
+	switch kind {
+	case MongoDB:
+		stmts = []string{strings.TrimSpace(src)}
+	case SQLServer:
+		var err error
+		stmts, err = scanSQLServer(src, true)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		stmts = Split(kind, src)
+	}
 	switch {
 	case len(stmts) == 0:
 		return nil, errors.New("没有要执行的语句")
@@ -91,12 +105,43 @@ func CheckAIWriteStmts(kind, dbName string, stmts []string) error {
 	if len(stmts) == 0 || len(stmts) > AIMaxStmts {
 		return fmt.Errorf("语句的条数不对：%d", len(stmts))
 	}
+	size := 0
+	for _, s := range stmts {
+		size += len(s)
+		if size > aiMaxSQL {
+			return errors.New("AI 改动的内容太长")
+		}
+	}
+	if kind == MongoDB {
+		if len(stmts) != 1 {
+			return errors.New("MongoDB 每次确认一条改动")
+		}
+		_, err := parseAIMongoWrite(dbName, stmts[0])
+		return err
+	}
+	if kind == ClickHouse && len(stmts) != 1 {
+		return errors.New("ClickHouse 每次确认一条改动")
+	}
 	if kind == MySQL && strings.EqualFold(dbName, "mysql") {
 		return errors.New("不能改 mysql 系统库")
 	}
 	for i, s := range stmts {
-		if len(Split(kind, s)) != 1 {
+		parts := Split(kind, s)
+		if kind == SQLServer {
+			var err error
+			parts, err = scanSQLServer(s, true)
+			if err != nil {
+				return err
+			}
+		}
+		if len(parts) != 1 {
 			return fmt.Errorf("第 %d 条不是一条语句", i+1)
+		}
+		if kind == Dameng && len(stmts) > 1 && reDDL.MatchString(stmtFlat(kind, s)) {
+			return errors.New("达梦的建表改表需要单独确认")
+		}
+		if err := checkAdapterAISQL(kind, dbName, aiSQLText(kind, s)); err != nil {
+			return err
 		}
 		if err := checkAIWriteStmt(kind, s); err != nil {
 			if len(stmts) > 1 {
@@ -114,15 +159,21 @@ func checkAIWriteStmt(kind, s string) error {
 		return fmt.Errorf("不能执行 %s：只能插入、修改、删除数据（INSERT、UPDATE、DELETE），建表改表（CREATE、ALTER、DROP、TRUNCATE、RENAME）和查询；"+
 			"事务由 Ferry 管（不要写 BEGIN、COMMIT），账号权限（GRANT）、SET、CALL、LOAD DATA、COPY 这类不行", w)
 	}
-	if kind == MySQL && strings.Contains(s, "/*!") {
-		return errors.New("不能用 MySQL 的 /*! … */ 注释（里面的内容会被执行）")
+	if kind == MySQL && mySQLDirective(s) {
+		return errors.New("不能用 MySQL / TiDB 的 /*! 或 /*T! 指令注释")
 	}
 	if reUnicodeEscape.MatchString(s) {
 		return errors.New("不能用 U&'…' 转义写法")
 	}
-	flat := strings.TrimSpace(strings.ToUpper(aiFlatten.Replace(stripComments(kind, s))))
+	flat := strings.TrimSpace(aiSQLText(kind, stripComments(kind, s)))
 	flat = strings.TrimLeft(flat, "( ")
-	whole := strings.ToUpper(aiFlatten.Replace(s)) // 注释里的也查：MySQL 的 /*! */ 之外，宁可多拒绝
+	if adapterSQL(kind) && reDDL.MatchString(flat) && !aiAdapterDDL.MatchString(flat) {
+		return errors.New("AI 只能创建、修改或删除表、视图和索引")
+	}
+	if kind == ClickHouse && (aiClickHouseEngine.MatchString(flat) || aiClickHouseClause.MatchString(flat)) {
+		return errors.New("AI 只能使用本地 ClickHouse 表引擎和本地表改动")
+	}
+	whole := aiSQLText(kind, s) // 注释里的也查：MySQL 的 /*! */ 之外，宁可多拒绝
 	for _, b := range aiWriteBanned {
 		m := b.re.FindString(flat)
 		if m == "" {
@@ -136,14 +187,17 @@ func checkAIWriteStmt(kind, s string) error {
 }
 
 var (
-	reDropAll  = regexp.MustCompile(`^(DROP\s+TABLE|TRUNCATE)\b`)
-	reDropAny  = regexp.MustCompile(`^DROP\b`)
-	reNoWhere  = regexp.MustCompile(`^(DELETE|UPDATE)\b`)
-	reAlterDel = regexp.MustCompile(`^ALTER\b.*\bDROP\b`)
-	reDDL      = regexp.MustCompile(`^(CREATE|ALTER|DROP|TRUNCATE|RENAME)\b`)
-	reRoutine  = regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+\s+)?(CONSTRAINT\s+)?(TRIGGER|FUNCTION|PROCEDURE|RULE|AGGREGATE)\b`)
-	reDefiner  = regexp.MustCompile(`\bSECURITY\s+DEFINER\b`)
-	reOwner    = regexp.MustCompile(`\bOWNER\s+TO\b`)
+	aiAdapterDDL       = regexp.MustCompile(`^(?:(?:CREATE(?:\s+OR\s+REPLACE)?(?:\s+(?:UNIQUE|CLUSTERED|NONCLUSTERED))*|ALTER|DROP)\s+(?:TABLE|VIEW|INDEX)|TRUNCATE\s+TABLE)\b`)
+	aiClickHouseEngine = regexp.MustCompile(`\bENGINE\s*=\s*(?:[^A-Z\s]|FILE\w*|URL\w*|S3\w*|AZURE\w*|HDFS\w*|REMOTE\w*|DISTRIBUTED\w*|MYSQL\w*|POSTGRESQL\w*|ODBC\w*|JDBC\w*|MONGODB\w*|REDIS\w*|EXECUTABLE\w*|ICEBERG\w*|DELTALAKE\w*)\b`)
+	aiClickHouseClause = regexp.MustCompile(`\b(ATTACH|DETACH|FREEZE|UNFREEZE|FETCH\s+PARTITION|MOVE\s+PARTITION)\b`)
+	reDropAll          = regexp.MustCompile(`^(DROP\s+TABLE|TRUNCATE)\b`)
+	reDropAny          = regexp.MustCompile(`^DROP\b`)
+	reNoWhere          = regexp.MustCompile(`^(DELETE|UPDATE)\b`)
+	reAlterDel         = regexp.MustCompile(`^ALTER\b.*\bDROP\b`)
+	reDDL              = regexp.MustCompile(`^(CREATE|ALTER|DROP|TRUNCATE|RENAME)\b`)
+	reRoutine          = regexp.MustCompile(`^CREATE\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+\s+)?(CONSTRAINT\s+)?(TRIGGER|FUNCTION|PROCEDURE|RULE|AGGREGATE)\b`)
+	reDefiner          = regexp.MustCompile(`\bSECURITY\s+DEFINER\b`)
+	reOwner            = regexp.MustCompile(`\bOWNER\s+TO\b`)
 )
 
 // stmtFlat 去掉注释、字符串内容后的大写文本（判断危险用，不用来放行）。
@@ -175,6 +229,9 @@ func stmtFlat(kind, s string) string {
 func AIWriteDanger(kind string, stmts []string) string {
 	if kind == Redis {
 		return AIRedisDanger(stmts)
+	}
+	if kind == MongoDB {
+		return aiMongoDanger(stmts)
 	}
 	return strings.Join(Dangers(kind, stmts, true), "；")
 }
@@ -247,6 +304,15 @@ func AIWriteNotes(kind string, stmts []string) []string {
 	if kind == Redis {
 		return AIRedisNotes()
 	}
+	if kind == MongoDB {
+		return []string{"每次执行一条 MongoDB 操作。副本集和分片集群用事务执行批量更新、删除；单机实例修改多个文档时，失败可能部分生效。"}
+	}
+	if kind == ClickHouse {
+		return []string{"每次执行一条 ClickHouse 语句。ClickHouse 的写入和建表改表不提供整批回滚，取消等待后后台改动也可能继续。"}
+	}
+	if kind == Dameng && len(stmts) == 1 && reDDL.MatchString(stmtFlat(kind, stmts[0])) {
+		return []string{"达梦的建表、改表和删表单独执行，生效后可能无法回滚。"}
+	}
 	if kind != MySQL {
 		return []string{"全部语句在一个事务里执行：有一条失败就全部撤回（建表改表也能撤回）"}
 	}
@@ -256,6 +322,15 @@ func AIWriteNotes(kind string, stmts []string) []string {
 		}
 	}
 	return []string{"全部语句在一个事务里执行：有一条失败就全部撤回"}
+}
+
+func AIWriteText(kind string, stmts []string) string {
+	switch kind {
+	case Redis, MongoDB:
+		return strings.Join(stmts, "\n")
+	default:
+		return strings.Join(stmts, ";\n\n") + ";"
+	}
 }
 
 // AIStmtResult 一条语句的结果。
@@ -297,8 +372,12 @@ func (cl *Client) AIExec(ctx context.Context, dbName string, stmts []string) (*A
 	case !cl.Conn.AI || !cl.Conn.AIWrite:
 		return nil, ErrAIWriteNotAllowed
 	}
+	dbName = cl.databaseName(dbName)
 	if err := CheckAIWriteStmts(kind, dbName, stmts); err != nil {
 		return nil, err
+	}
+	if kind == MongoDB {
+		return cl.aiMongoExec(ctx, dbName, stmts[0])
 	}
 	db, err := cl.DB(ctx, dbName)
 	if err != nil {
@@ -306,6 +385,19 @@ func (cl *Client) AIExec(ctx context.Context, dbName string, stmts []string) (*A
 	}
 	ctx, cancel := context.WithTimeout(ctx, AIWriteTimeout)
 	defer cancel()
+	if kind == ClickHouse || kind == Dameng && reDDL.MatchString(stmtFlat(kind, stmts[0])) {
+		if kind == ClickHouse {
+			ctx = clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{"mutations_sync": 1}))
+		}
+		start := time.Now()
+		one := cl.aiExecOne(ctx, db, stmts[0])
+		ok := one.Error == ""
+		r := &AIExecResult{OK: ok, Committed: ok, Results: []AIStmtResult{one}, Ms: time.Since(start).Milliseconds()}
+		if !ok {
+			r.Note = "执行失败，已生效的改动可能无法撤回"
+		}
+		return r, nil
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, cl.explain(err)
@@ -328,7 +420,7 @@ func (cl *Client) AIExec(ctx context.Context, dbName string, stmts []string) (*A
 		return nil, cl.explain(err)
 	}
 	defer tx.Rollback()
-	if kind == Postgres {
+	if postgresProtocol(kind) {
 		tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", AIWriteTimeout.Milliseconds()))
 		tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", aiLockWait.Milliseconds()))
 	}
@@ -360,7 +452,12 @@ func (cl *Client) AIExec(ctx context.Context, dbName string, stmts []string) (*A
 	return r, nil
 }
 
-func (cl *Client) aiExecOne(ctx context.Context, tx *sql.Tx, s string) AIStmtResult {
+type sqlExecutor interface {
+	querier
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func (cl *Client) aiExecOne(ctx context.Context, tx sqlExecutor, s string) AIStmtResult {
 	start := time.Now()
 	r := AIStmtResult{SQL: s}
 	fail := func(err error) AIStmtResult {

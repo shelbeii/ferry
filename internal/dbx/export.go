@@ -76,7 +76,7 @@ func (o *outFile) finish() (int64, error) {
 // Export 把查询结果全部写进文件（不限行数，边读边写）。只读事务里执行。
 func (cl *Client) Export(ctx context.Context, dbName string, o ExportOptions, progress func(rows int64)) (*ExportResult, error) {
 	kind := cl.Conn.Kind
-	if cl.Conn.ReadOnlySQL() {
+	if adapterSQL(kind) {
 		return cl.readOnlySQLExport(ctx, dbName, o, progress)
 	}
 	q := strings.TrimSpace(o.Query)
@@ -104,16 +104,17 @@ func (cl *Client) Export(ctx context.Context, dbName string, o ExportOptions, pr
 	default:
 		return nil, fmt.Errorf("不支持的格式 %q", o.Format)
 	}
-	db, err := cl.DB(ctx, dbName)
-	if err != nil {
-		return nil, err
+	if cl.isTiDB() {
+		if err := checkTiDBRead(cl.databaseName(dbName), q); err != nil {
+			return nil, err
+		}
 	}
 	start := time.Now()
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, release, err := cl.readSession(ctx, dbName)
 	if err != nil {
 		return nil, cl.explain(err)
 	}
-	defer tx.Rollback()
+	defer release()
 	of, err := createOut(o.Out)
 	if err != nil {
 		return nil, err

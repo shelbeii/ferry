@@ -36,8 +36,8 @@ func TestSQLiteFile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c, err := Save(Conn{Name: "本机", Kind: SQLite, File: path, SavePassword: true, AI: true}, nil, nil)
-	if err != nil || !c.ReadOnly || c.SavePassword || c.AI {
+	c, err := Save(Conn{Name: "本机", Kind: SQLite, File: path, SavePassword: true, ReadOnly: true, AI: true, AIWrite: true, AIUser: "ignored"}, nil, nil)
+	if err != nil || !c.ReadOnly || c.SavePassword || !c.AI || c.AIWrite || c.AIUser != "" {
 		t.Fatalf("保存 SQLite：%+v, %v", c, err)
 	}
 	c, err = Get(c.ID)
@@ -112,6 +112,15 @@ func TestSQLiteFile(t *testing.T) {
 	if after, err := os.ReadFile(csv); err != nil || !bytes.Equal(data, after) {
 		t.Fatalf("失败的导出覆盖了原来的 CSV：%v", err)
 	}
+	if r, err := cl.AIQuery(ctx, "", "SELECT title FROM [work;items] ORDER BY id", 1); err != nil || !r.More || r.Rows[0][0] != "第一条" {
+		t.Fatalf("只读 AI 查询：%+v %v", r, err)
+	}
+	if _, err := cl.AIExec(ctx, "", []string{"DELETE FROM [work;items] WHERE id=1"}); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("只读连接允许 AI 改动：%v", err)
+	}
+	c.ReadOnly, c.AIWrite = false, true
+	rw := openLiveAdapter(t, ctx, *c, "", false)
+	verifySQLAIWrite(t, rw, "", "[work;items]", "title")
 	if err := Remove(c.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +186,7 @@ func TestClickHouseLive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c.Database = database
+	c.Database, c.ReadOnly, c.AI = database, true, true
 	via := openLiveAdapter(t, ctx, c, pw, true)
 	dbs, err := via.Databases(ctx)
 	if err != nil || !slices.Contains(dbs, Database{Name: database}) || !slices.Contains(dbs, Database{Name: "system", System: true}) {
@@ -217,5 +226,23 @@ func TestClickHouseLive(t *testing.T) {
 	data, err := os.ReadFile(out)
 	if err != nil || !bytes.Contains(data, []byte("18446744073709551615")) {
 		t.Fatalf("CSV 内容：%q, %v", data, err)
+	}
+	if ai, err := via.AIQuery(ctx, "", "SELECT label FROM "+qtable+" ORDER BY id", 1); err != nil || !ai.More || ai.Rows[0][0] != "one" {
+		t.Fatalf("ClickHouse AI 查询：%+v, %v", ai, err)
+	}
+	c.ReadOnly, c.AIWrite = false, true
+	writer := openLiveAdapter(t, ctx, c, pw, false)
+	for _, s := range []string{
+		"CREATE TABLE ai_rows (id UInt64, value String) ENGINE=MergeTree ORDER BY id",
+		"INSERT INTO ai_rows VALUES (1, 'before')",
+		"ALTER TABLE ai_rows UPDATE value='after' WHERE id=1",
+		"ALTER TABLE ai_rows ADD COLUMN added UInt64 DEFAULT 0",
+		"DELETE FROM ai_rows WHERE id=1",
+		"DROP TABLE ai_rows",
+	} {
+		r, err := writer.AIExec(ctx, "", []string{s})
+		if err != nil || !r.OK {
+			t.Fatalf("ClickHouse 改动 %q：%+v, %v", s, r, err)
+		}
 	}
 }

@@ -61,8 +61,10 @@ func liveDumpRestore(t *testing.T, name, addr string) {
 			"CREATE TABLE log (id INT PRIMARY KEY AUTO_INCREMENT, msg VARCHAR(100))",
 			"CREATE VIEW z_base AS SELECT id, name, qty FROM b_parent",
 			"CREATE VIEW a_top AS SELECT * FROM z_base WHERE qty > 1",
+			"CREATE TABLE prefix_pk (event_id VARBINARY(24) NOT NULL, payload INT, PRIMARY KEY (event_id(8)))",
 		)
 		must(src,
+			"INSERT INTO prefix_pk (event_id, payload) VALUES ('abcdefgh-tail', 7), ('ijklmnop-tail', 9)",
 			"INSERT INTO b_parent (name, price, qty, data, born, flag) VALUES ('它''s \\\\ \"q\"\n第二行', 1.50, 3, 0x00FF10, '2026-01-02 03:04:05.678', b'1'), ('空', NULL, NULL, NULL, NULL, b'0')",
 			"INSERT INTO a_child (parent_id, note) VALUES (1, 'x'), (1, NULL), (2, '😀')",
 			"CREATE TRIGGER trg AFTER INSERT ON a_child FOR EACH ROW INSERT INTO log (msg) VALUES (CONCAT('child ', NEW.id))",
@@ -147,6 +149,9 @@ func liveDumpRestore(t *testing.T, name, addr string) {
 	same("SELECT * FROM log ORDER BY id")
 	same("SELECT * FROM a_top ORDER BY id")
 	same("SELECT twice(21)")
+	if kind == MySQL {
+		same("SELECT event_id, payload FROM prefix_pk ORDER BY event_id")
+	}
 	if kind == Postgres {
 		same("SELECT * FROM mv ORDER BY parent_id")
 	}

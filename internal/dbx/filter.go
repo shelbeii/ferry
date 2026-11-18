@@ -191,7 +191,7 @@ func selectSQL(kind, dbName, schema, table string, o BrowseOptions) (string, []a
 
 // Rows 读表数据的一页。
 func (cl *Client) Rows(ctx context.Context, dbName, schema, table string, o BrowseOptions) (*Result, error) {
-	if cl.Conn.ReadOnlySQL() {
+	if adapterSQL(cl.Conn.Kind) {
 		return cl.readOnlySQLRows(ctx, dbName, schema, table, o)
 	}
 	q, args, err := selectSQL(cl.Conn.Kind, dbName, schema, table, o)

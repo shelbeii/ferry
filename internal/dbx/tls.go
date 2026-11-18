@@ -24,6 +24,9 @@ const (
 )
 
 func checkTLS(c *Conn) error {
+	if c.Kind == Dameng && c.TLS != TLSAuto && c.TLS != TLSOff {
+		return errors.New("达梦连接暂不支持配置 TLS 证书，请使用自动或 SSH 转发")
+	}
 	switch c.TLS {
 	case TLSAuto, TLSOff, TLSRequire, TLSVerify:
 		return nil
@@ -37,7 +40,7 @@ func (cl *Client) tlsMode() string {
 	case TLSOff, TLSRequire, TLSVerify:
 		return m
 	}
-	if cl.tn != nil || cl.Conn.Kind == Redis || cl.Conn.Kind == MongoDB || cl.Conn.Kind == ClickHouse || cl.Conn.Kind == SQLite {
+	if cl.tn != nil || cl.Conn.Kind == Redis || cl.Conn.Kind == MongoDB || cl.Conn.Kind == ClickHouse || cl.Conn.Kind == SQLite || cl.Conn.Kind == Dameng {
 		return TLSOff
 	}
 	return tlsPrefer
@@ -72,7 +75,7 @@ func (cl *Client) checkEncrypted(ctx context.Context, db *sql.DB) {
 		if db.QueryRowContext(ctx, "SHOW SESSION STATUS LIKE 'Ssl_cipher'").Scan(&name, &v) == nil {
 			cl.Encrypted = v != ""
 		}
-	case Postgres:
+	case Postgres, Kingbase:
 		var on bool
 		if db.QueryRowContext(ctx, "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&on) == nil {
 			cl.Encrypted = on

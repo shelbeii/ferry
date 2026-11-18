@@ -1,16 +1,214 @@
 package mcpserver
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/approve"
+	"github.com/captain/ferry/internal/dbx"
+	"github.com/captain/ferry/internal/engine"
 	"github.com/captain/ferry/internal/settings"
+	sqlite "github.com/ncruces/go-sqlite3/driver"
+	"github.com/zalando/go-keyring"
 )
+
+func mcpDatabaseTestHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("FERRY_HOME", home)
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+	return home
+}
+
+func TestSQLiteMCPApproval(t *testing.T) {
+	home := mcpDatabaseTestHome(t)
+	dbFile := filepath.Join(home, "probe.sqlite")
+	db, err := sqlite.Open(filepath.ToSlash(dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE items(id INT, value INT); INSERT INTO items VALUES (1, 3)"); err != nil {
+		t.Fatal(err)
+	}
+	cn, err := dbx.Save(dbx.Conn{Kind: dbx.SQLite, Name: "本机文件", File: dbFile, AI: true, AIWrite: true}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyMCPDatabaseApproval(t, home, cn, db, "items", dbFile)
+}
+
+// FERRY_KINGBASE_LIVE 指向专用测试实例，账号需能创建临时表和登录角色。
+func TestKingbaseMCPApproval(t *testing.T) {
+	addr := os.Getenv("FERRY_KINGBASE_LIVE")
+	if addr == "" {
+		t.Skip("没有设置 FERRY_KINGBASE_LIVE")
+	}
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := mcpDatabaseTestHome(t)
+	keyring.MockInit()
+	t.Cleanup(keyring.MockInit)
+	user := os.Getenv("FERRY_KINGBASE_USER")
+	if user == "" {
+		user = "system"
+	}
+	c := dbx.Conn{Kind: dbx.Kingbase, Name: "金仓测试库", Host: host, Port: port, User: user, Database: os.Getenv("FERRY_KINGBASE_DATABASE")}
+	ctx := t.Context()
+	client, release, err := (&dbx.Manager{}).Open(ctx, &c, os.Getenv("FERRY_KINGBASE_PASSWORD"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if !strings.Contains(strings.ToLower(client.Version), "kingbase") {
+		t.Fatalf("实例不是 KingbaseES：%s", client.Version)
+	}
+	db, err := client.DB(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("ferry_mcp_%d", time.Now().UnixNano())
+	table := dbx.TableName(dbx.Kingbase, "", "public", name)
+	aiUser := name + "_ai"
+	role := dbx.Quote(dbx.Kingbase, aiUser)
+	aiPassword := "Ferry@Mcp-18!fixture"
+	if _, err := db.ExecContext(ctx, "CREATE ROLE "+role+" LOGIN PASSWORD "+dbx.Literal(dbx.Kingbase, aiPassword)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(cleanup, "DROP TABLE IF EXISTS "+table); err != nil {
+			t.Error(err)
+		}
+		if _, err := db.ExecContext(cleanup, "REVOKE USAGE ON SCHEMA public FROM "+role); err != nil {
+			t.Error(err)
+		}
+		if _, err := db.ExecContext(cleanup, "DROP ROLE "+role); err != nil {
+			t.Error(err)
+		}
+	}()
+	for _, stmt := range []string{
+		"CREATE TABLE " + table + " (id INT PRIMARY KEY, value INT)",
+		"INSERT INTO " + table + " VALUES (1, 3)",
+		"GRANT USAGE ON SCHEMA public TO " + role,
+		"GRANT SELECT, UPDATE ON " + table + " TO " + role,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.AI, c.AIWrite, c.AIUser = true, true, aiUser
+	cn, err := dbx.Save(c, nil, &aiPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyMCPDatabaseApproval(t, home, cn, db, table, addr)
+}
+
+func verifyMCPDatabaseApproval(t *testing.T, home string, cn *dbx.Conn, db *sql.DB, table, location string) {
+	t.Helper()
+	file := filepath.Join(home, "approver.json")
+	oldFile := approverFile
+	approverFile = func() string { return file }
+	t.Cleanup(func() { approverFile = oldFile })
+	st := settings.Defaults()
+	st.MCP.AllowChanges = true
+	if err := settings.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	cs := connect(t, home)
+	if cn.AIUser != "" {
+		text, failed := callText(t, cs, "db_query", map[string]any{
+			"connection": cn.ID, "sql": "SELECT current_user, value FROM " + table + " WHERE id=1",
+		})
+		if failed || !strings.Contains(text, fmt.Sprintf("%q", cn.AIUser)) {
+			t.Fatalf("查询未使用独立 AI 账号：%s", text)
+		}
+	}
+	hub := approve.NewHub(file)
+	hub.Prepare = PrepareRequest
+	requests := make(chan approve.Request, 2)
+	unsub, err := hub.Subscribe(func(kind string, v any) {
+		if kind == "request" {
+			requests <- v.(approve.Request)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsub()
+	query := "UPDATE " + table + " SET value=4 WHERE id=1"
+	if cn.AIUser != "" {
+		query += " AND current_user = " + dbx.Literal(cn.Kind, cn.AIUser)
+	}
+	review := func(accept bool) {
+		var r approve.Request
+		select {
+		case r = <-requests:
+		case <-t.Context().Done():
+			return
+		}
+		if r.DBKind != cn.Kind || r.DBCheck != cn.ApprovalKey() || len(r.Detail) != 2 ||
+			!strings.Contains(r.Detail[0], location) || (cn.AIUser != "" && !strings.Contains(r.Detail[0], cn.AIUser)) ||
+			r.Detail[1] != query+";" {
+			t.Errorf("确认请求缺少完整 SQL、位置或 AI 账号：%+v", r)
+		}
+		hub.Decide(r.ID, approve.Decision{Approve: accept})
+		if accept {
+			e := &engine.Engine{Ctx: t.Context()}
+			result, err := e.AIDBExec(t.Context(), cn, r.Database, r.Stmts)
+			if err != nil || !result.OK {
+				t.Errorf("同意后写入：%+v, %v", result, err)
+				hub.Done(r.ID, approve.Outcome{OK: false})
+				return
+			}
+			data, _ := json.Marshal(result)
+			hub.Done(r.ID, approve.Outcome{OK: true, Data: data})
+		}
+	}
+	for _, tc := range []struct {
+		accept bool
+		value  int
+	}{{false, 3}, {true, 4}} {
+		go review(tc.accept)
+		text, failed := callText(t, cs, "db_execute", map[string]any{"connection": cn.ID, "sql": query, "reason": "验证数据库的 AI 权限"})
+		if failed == tc.accept {
+			t.Fatalf("确认结果：%s", text)
+		}
+		var n int
+		if err := db.QueryRow("SELECT value FROM " + table + " WHERE id=1").Scan(&n); err != nil || n != tc.value {
+			t.Fatalf("数据库写入结果：%d, %v", n, err)
+		}
+	}
+	cn.ReadOnly = true
+	if _, err := dbx.Save(*cn, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if text, failed := callText(t, cs, "db_execute", map[string]any{"connection": cn.ID, "sql": query, "reason": "验证只读限制"}); !failed || !strings.Contains(text, "只读") {
+		t.Fatalf("只读连接未拒绝修改：%s", text)
+	}
+	if text, failed := callText(t, cs, "db_query", map[string]any{"connection": cn.ID, "sql": "SELECT value FROM " + table}); failed || !strings.Contains(text, "\"4\"") {
+		t.Fatalf("只读查询：%s", text)
+	}
+}
 
 func TestDBExecute(t *testing.T) {
 	home := t.TempDir()

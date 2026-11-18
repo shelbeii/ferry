@@ -46,6 +46,8 @@ func TableName(kind, db, schema, table string) string {
 			schema = "dbo"
 		case SQLite:
 			schema = "main"
+		case Dameng:
+			return Quote(kind, table)
 		}
 	}
 	return Quote(kind, schema) + "." + Quote(kind, table)
@@ -69,6 +71,8 @@ func (cl *Client) Databases(ctx context.Context) ([]Database, error) {
 		return cl.mongoDatabases(ctx)
 	case SQLite:
 		return []Database{{Name: "main"}}, nil
+	case Dameng:
+		return []Database{{Name: dmDatabase}}, nil
 	}
 	db, err := cl.DB(ctx, "")
 	if err != nil {
@@ -79,7 +83,7 @@ func (cl *Client) Databases(ctx context.Context) ([]Database, error) {
 		return dbs, cl.explain(err)
 	}
 	q := "SHOW DATABASES"
-	if cl.Conn.Kind == Postgres {
+	if postgresProtocol(cl.Conn.Kind) {
 		q = "SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY 1"
 	}
 	names, err := strings1(ctx, db, q)
@@ -165,6 +169,9 @@ func (cl *Client) tables(ctx context.Context, dbName string, detail bool) ([]Tab
 	case ClickHouse:
 		tables, err := clickHouseTables(ctx, db, cl.databaseName(dbName))
 		return tables, cl.explain(err)
+	case Dameng:
+		tables, err := damengTables(ctx, db)
+		return tables, cl.explain(err)
 	}
 	extra := ", NULL, NULL, NULL, '', '', '', ''"
 	var rows *sql.Rows
@@ -188,8 +195,9 @@ func (cl *Client) tables(ctx context.Context, dbName string, detail bool) ([]Tab
 				COALESCE(obj_description(c.oid, 'pg_class'), ''), ''`+extra+`
 			FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 			WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+				AND (NOT $1 OR n.nspname NOT IN ('sys_catalog', 'sys'))
 				AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%' AND NOT c.relispartition
-			ORDER BY n.nspname <> 'public', n.nspname, c.relname`)
+			ORDER BY n.nspname <> 'public', n.nspname, c.relname`, cl.Conn.Kind == Kingbase)
 	}
 	if err != nil {
 		return nil, cl.explain(err)
@@ -200,10 +208,14 @@ func (cl *Client) tables(ctx context.Context, dbName string, detail bool) ([]Tab
 		var t Table
 		var typ string
 		var n, size, auto, dataLen, indexLen sql.NullInt64
-		if err := rows.Scan(&t.Schema, &t.Name, &typ, &n, &size, &t.Comment, &t.Engine,
-			&auto, &dataLen, &indexLen, &t.Created, &t.Updated, &t.Collation, &t.Owner); err != nil {
+		// KingbaseES Oracle 兼容模式会把元数据中的空字符串返回为 NULL。
+		var comment, engine, created, updated, collation, owner sql.NullString
+		if err := rows.Scan(&t.Schema, &t.Name, &typ, &n, &size, &comment, &engine,
+			&auto, &dataLen, &indexLen, &created, &updated, &collation, &owner); err != nil {
 			return nil, err
 		}
+		t.Comment, t.Engine, t.Created, t.Updated, t.Collation, t.Owner =
+			comment.String, engine.String, created.String, updated.String, collation.String, owner.String
 		t.Type = "table"
 		switch typ {
 		case "VIEW", "SYSTEM VIEW", "v", "m":
@@ -294,6 +306,9 @@ func (cl *Client) TableInfo(ctx context.Context, dbName, schema, table string) (
 		return ti, cl.explain(err)
 	case ClickHouse:
 		ti, err := clickHouseTable(ctx, db, cl.databaseName(dbName), table)
+		return ti, cl.explain(err)
+	case Dameng:
+		ti, err := damengTable(ctx, db, schema, table)
 		return ti, cl.explain(err)
 	}
 	var ti *TableInfo
@@ -444,15 +459,15 @@ func mysqlTable(ctx context.Context, db *sql.DB, dbName, table string, maria boo
 		} else {
 			ix.Columns = append(ix.Columns, col)
 		}
+		if ix.Primary && col != "" {
+			ti.PrimaryKey = append(ti.PrimaryKey, col)
+		}
 	}
 	if err := irows.Err(); err != nil {
 		return nil, err
 	}
 	for _, n := range order {
 		ix := byName[n]
-		if ix.Primary {
-			ti.PrimaryKey = ix.Columns
-		}
 		ti.Indexes = append(ti.Indexes, *ix)
 	}
 
@@ -515,20 +530,22 @@ func pgTable(ctx context.Context, db *sql.DB, schema, table string) (*TableInfo,
 	ti := &TableInfo{Schema: schema, Name: table, Type: "table", Columns: []ColumnInfo{}, Indexes: []IndexInfo{}, Foreign: []ForeignKey{}, PrimaryKey: []string{}}
 	reg := TableName(Postgres, "", schema, table)
 	var kind string
-	err := db.QueryRowContext(ctx, `SELECT c.relkind::text, COALESCE(obj_description(c.oid, 'pg_class'), '')
-		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&kind, &ti.Comment)
+	var comment sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT c.relkind::text, obj_description(c.oid, 'pg_class')
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&kind, &comment)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("模式 %s 里没有表 %s", schema, table)
 	}
 	if err != nil {
 		return nil, err
 	}
+	ti.Comment = comment.String
 	if kind == "v" || kind == "m" {
 		ti.Type = "view"
 	}
 	rows, err := db.QueryContext(ctx, `SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
-			pg_get_expr(d.adbin, d.adrelid), COALESCE(col_description(a.attrelid, a.attnum), ''),
-			a.attidentity::text, a.attgenerated::text, COALESCE(co.collname, '')
+			pg_get_expr(d.adbin, d.adrelid), col_description(a.attrelid, a.attnum),
+			a.attidentity::text, a.attgenerated::text, co.collname
 		FROM pg_attribute a
 		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 		LEFT JOIN pg_collation co ON co.oid = a.attcollation AND a.attcollation <> (SELECT typcollation FROM pg_type WHERE oid = a.atttypid)
@@ -539,20 +556,20 @@ func pgTable(ctx context.Context, db *sql.DB, schema, table string) (*TableInfo,
 	defer rows.Close()
 	for rows.Next() {
 		var c ColumnInfo
-		var def sql.NullString
-		var ident, gen string
-		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable, &def, &c.Comment, &ident, &gen, &c.Collation); err != nil {
+		var def, comment, ident, gen, collation sql.NullString
+		if err := rows.Scan(&c.Name, &c.Type, &c.Nullable, &def, &comment, &ident, &gen, &collation); err != nil {
 			return nil, err
 		}
-		if gen != "" {
+		c.Comment, c.Collation = comment.String, collation.String
+		if gen.String != "" {
 			c.Generated = true
 			if def.Valid { // 计算列的表达式（建表语句里要带上）
 				c.Extra = "GENERATED ALWAYS AS (" + def.String + ") STORED"
 			}
 		}
-		if ident != "" {
+		if ident.String != "" {
 			c.Auto = true
-			if ident == "a" {
+			if ident.String == "a" {
 				c.Extra = "GENERATED ALWAYS AS IDENTITY"
 			}
 		}
@@ -573,7 +590,7 @@ func pgTable(ctx context.Context, db *sql.DB, schema, table string) (*TableInfo,
 	irows, err := db.QueryContext(ctx, `SELECT i.relname, ix.indisunique, ix.indisprimary, am.amname, pg_get_indexdef(ix.indexrelid),
 			array_to_string(ARRAY(SELECT pg_get_indexdef(ix.indexrelid, k + 1, true) FROM generate_subscripts(ix.indkey, 1) k ORDER BY k), chr(31)),
 			ix.indexprs IS NOT NULL OR ix.indpred IS NOT NULL,
-			COALESCE((SELECT conname FROM pg_constraint WHERE conindid = ix.indexrelid AND conrelid = ix.indrelid LIMIT 1), '')
+			(SELECT conname FROM pg_constraint WHERE conindid = ix.indexrelid AND conrelid = ix.indrelid LIMIT 1)
 		FROM pg_index ix JOIN pg_class i ON i.oid = ix.indexrelid JOIN pg_am am ON am.oid = i.relam
 		WHERE ix.indrelid = $1::regclass ORDER BY ix.indisprimary DESC, i.relname`, reg)
 	if err != nil {
@@ -582,13 +599,14 @@ func pgTable(ctx context.Context, db *sql.DB, schema, table string) (*TableInfo,
 	defer irows.Close()
 	for irows.Next() {
 		var ix IndexInfo
-		var def, cols, con string
+		var def string
+		var cols, con sql.NullString
 		var expr bool
 		if err := irows.Scan(&ix.Name, &ix.Unique, &ix.Primary, &ix.Method, &def, &cols, &expr, &con); err != nil {
 			return nil, err
 		}
 		ix.Columns = []string{}
-		for _, c := range strings.Split(cols, "\x1f") {
+		for _, c := range strings.Split(cols.String, "\x1f") {
 			if c != "" {
 				ix.Columns = append(ix.Columns, strings.Trim(c, `"`))
 			}
@@ -598,9 +616,9 @@ func pgTable(ctx context.Context, db *sql.DB, schema, table string) (*TableInfo,
 		}
 		if ix.Primary {
 			ti.PrimaryKey = ix.Columns
-			ti.PKName = con
-		} else if con != "" {
-			ix.Method += "（约束 " + con + "）"
+			ti.PKName = con.String
+		} else if con.String != "" {
+			ix.Method += "（约束 " + con.String + "）"
 		}
 		ti.Indexes = append(ti.Indexes, ix)
 	}

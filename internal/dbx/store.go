@@ -1,5 +1,5 @@
 // Package dbx 是桌面版数据库客户端，支持保存连接、直接连接和 SSH 转发。
-// MySQL / MariaDB、PostgreSQL、Redis / Valkey 支持浏览和编辑，其他类型提供只读查询和导出。
+// 数据库连接可以限制为只读，单独授权 AI 查询和修改。
 package dbx
 
 import (
@@ -28,6 +28,8 @@ const (
 	MongoDB    = "mongodb"
 	SQLite     = "sqlite"
 	ClickHouse = "clickhouse"
+	Dameng     = "dm"
+	Kingbase   = "kingbase"
 )
 
 // Conn 一个保存的数据库连接。
@@ -67,20 +69,30 @@ type Conn struct {
 	Created string `json:"created,omitempty"`
 }
 
-// BrowseOnly 只有浏览、查询和导出能力的连接。
-func (c *Conn) BrowseOnly() bool { return c.ReadOnlySQL() || c.Kind == MongoDB }
+// LimitedDesktop 使用浏览、查询和导出界面，没有图形化表设计、导入或备份。
+func (c *Conn) LimitedDesktop() bool { return adapterSQL(c.Kind) || c.Kind == MongoDB }
 
-// ReadOnlySQL 是否使用只读 SQL 查询、浏览和 CSV 导出。
-func (c *Conn) ReadOnlySQL() bool {
-	return c.Kind == SQLServer || c.Kind == SQLite || c.Kind == ClickHouse
+func adapterSQL(kind string) bool {
+	switch kind {
+	case SQLServer, SQLite, ClickHouse, Dameng, Kingbase:
+		return true
+	}
+	return false
 }
 
-func (c *Conn) applyCapabilities() {
-	if c.BrowseOnly() {
-		c.ReadOnly, c.AI, c.AIWrite, c.AIUser = true, false, false, ""
-	}
+func postgresProtocol(kind string) bool { return kind == Postgres || kind == Kingbase }
+
+func (c *Conn) normalizePermissions() {
 	if c.Kind == SQLite {
 		c.SavePassword = false
+		c.AIUser = ""
+	}
+	if !c.AI || c.ReadOnly {
+		c.AIWrite = false
+	}
+	c.AIUser = strings.TrimSpace(c.AIUser)
+	if !c.AI {
+		c.AIUser = ""
 	}
 }
 
@@ -109,14 +121,14 @@ func (c *Conn) Check() error {
 	c.Host = strings.TrimSpace(c.Host)
 	c.User = strings.TrimSpace(c.User)
 	switch c.Kind {
-	case MySQL, Postgres, Redis, SQLServer, MongoDB, SQLite, ClickHouse:
+	case MySQL, Postgres, Redis, SQLServer, MongoDB, SQLite, ClickHouse, Dameng, Kingbase:
 	default:
 		return fmt.Errorf("不支持的数据库种类 %q", c.Kind)
 	}
 	if c.Name == "" {
 		return errors.New("请填连接名")
 	}
-	c.applyCapabilities()
+	c.normalizePermissions()
 	if c.Kind == SQLite {
 		if !filepath.IsAbs(c.File) {
 			return errors.New("请选择本机 SQLite 数据库文件（需要绝对路径）")
@@ -151,13 +163,6 @@ func (c *Conn) Check() error {
 	}
 	if c.Via != nil && (c.Via.Config == "" || c.Via.Target == "") {
 		return errors.New("经服务器连时要选服务器")
-	}
-	if !c.AI || c.ReadOnly {
-		c.AIWrite = false
-	}
-	c.AIUser = strings.TrimSpace(c.AIUser)
-	if !c.AI {
-		c.AIUser = ""
 	}
 	if c.Container != "" && c.Via == nil {
 		return errors.New("连容器里的数据库要经服务器连")
@@ -226,7 +231,7 @@ func load() ([]Conn, error) {
 		f.Connections = []Conn{}
 	}
 	for i := range f.Connections {
-		f.Connections[i].applyCapabilities()
+		f.Connections[i].normalizePermissions()
 	}
 	sort.SliceStable(f.Connections, func(i, j int) bool {
 		return strings.ToLower(f.Connections[i].Name) < strings.ToLower(f.Connections[j].Name)

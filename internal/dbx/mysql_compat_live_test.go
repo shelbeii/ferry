@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -60,35 +59,29 @@ func TestMySQLCompatibleLive(t *testing.T) {
 			if err != nil || len(results) != 1 || len(results[0].Rows) != 1 || results[0].Rows[0][0] != "兼容测试" {
 				t.Fatalf("查询：%+v, %v", results, err)
 			}
-			isReadOnlyUnsupported := func(msg string) bool {
-				return product.name == "TiDB" && strings.Contains(msg, "function READ ONLY has only noop implementation")
-			}
+			c.AI = true
 			c.ReadOnly = true
 			readOnly := openLiveAdapter(t, ctx, c, pw, false)
 			results, err = readOnly.Query(ctx, name, q, QueryOptions{})
 			if err != nil || len(results) != 1 {
 				t.Fatalf("只读查询：%+v, %v", results, err)
 			}
-			if results[0].Error != "" {
-				if !isReadOnlyUnsupported(results[0].Error) {
-					t.Fatal(results[0].Error)
-				}
-				t.Log("该 TiDB 实例拒绝 READ ONLY 事务。")
-			} else if len(results[0].Rows) != 1 || results[0].Rows[0][0] != "兼容测试" {
+			if results[0].Error != "" || len(results[0].Rows) != 1 || results[0].Rows[0][0] != "兼容测试" {
 				t.Fatalf("只读查询：%+v", results)
+			}
+			if r, err := readOnly.AIQuery(ctx, name, q, 100); err != nil || len(r.Rows) != 1 || r.Rows[0][0] != "兼容测试" {
+				t.Fatalf("AI 只读查询：%+v, %v", r, err)
 			}
 			csv := filepath.Join(t.TempDir(), "compat.csv")
 			if _, err := cl.Export(ctx, name, ExportOptions{Query: q, Format: "csv", Out: csv}, nil); err != nil {
-				if isReadOnlyUnsupported(err.Error()) {
-					t.Log("CSV 导出同样依赖 READ ONLY 事务。")
-					return
-				}
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(csv)
 			if err != nil || !bytes.Contains(data, []byte("兼容测试")) {
 				t.Fatalf("CSV：%q, %v", data, err)
 			}
+			c.ReadOnly, c.AIWrite = false, true
+			verifySQLAIWrite(t, openLiveAdapter(t, ctx, c, pw, false), name, qtable, "value")
 		})
 	}
 }

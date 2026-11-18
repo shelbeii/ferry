@@ -103,8 +103,11 @@ func AIDBFind(ref string) (*dbx.Conn, error) {
 	return found, nil
 }
 
-// AIDBOnTarget 这个连接是不是经这台服务器连的（Ferry 的 AI 助手只用当前服务器上的数据库）。
+// AIDBOnTarget 匹配当前服务器的连接。SQLite 文件和 AI 助手都在桌面端访问。
 func AIDBOnTarget(c *dbx.Conn, f *config.File, target string) bool {
+	if c.Kind == dbx.SQLite && c.Via == nil {
+		return f != nil
+	}
 	return c.Via != nil && f != nil && c.Via.Target == target && sameConfigPath(c.Via.Config, f.Path)
 }
 
@@ -171,6 +174,9 @@ func (e *Engine) OpenAIDB(cn *dbx.Conn) (*dbx.Client, func(), error) {
 
 // aiDBPassword AI 连数据库用的密码：AI 的账号时是它保存的密码；否则是保存的密码、这次打开 Ferry 时填过的、Ferry 装这个软件时保存的。
 func aiDBPassword(e *Engine, cn *dbx.Conn) (string, bool, error) {
+	if cn.Kind == dbx.SQLite {
+		return "", true, nil
+	}
 	if cn.AIUser != "" {
 		return secret.Get(dbx.AIPasswordAccount(cn.ID))
 	}
@@ -239,10 +245,22 @@ func (e *Engine) AIDBSchema(ctx context.Context, cn *dbx.Conn, in AIDBSchemaIn) 
 			}
 			ts = out
 		}
+		if cn.Kind == dbx.MongoDB {
+			out := ts[:0]
+			for _, t := range ts {
+				if !strings.HasPrefix(t.Name, "system.") {
+					out = append(out, t)
+				}
+			}
+			return map[string]any{"database": db, "collections": out}, nil
+		}
 		return map[string]any{"database": db, "tables": ts}, nil
 	}
+	if cn.Kind == dbx.MongoDB {
+		return cl.MongoAICollection(ctx, db, in.Table)
+	}
 	schema := in.Schema
-	if schema == "" && cn.Kind == dbx.Postgres {
+	if schema == "" && (cn.Kind == dbx.Postgres || cn.Kind == dbx.Kingbase) {
 		schema = "public"
 	}
 	return cl.TableInfo(ctx, db, schema, in.Table)
@@ -344,6 +362,12 @@ func aiDBName(cn *dbx.Conn, db string) error {
 	if cn.Kind == dbx.MySQL && strings.EqualFold(db, "mysql") {
 		return errors.New("不能看 mysql 系统库（里面有账号的密码）")
 	}
+	if cn.Kind == dbx.MongoDB {
+		switch strings.ToLower(db) {
+		case "admin", "config", "local":
+			return errors.New("AI 只能查询 MongoDB 的业务库")
+		}
+	}
 	return nil
 }
 
@@ -393,7 +417,7 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 	connArg := str("数据库连接（db_connections 里的 id 或 name）；只有一个时可以不填")
 	tools := []ai.Tool{{
 		Name: "db_connections",
-		Description: "用户在 Ferry「数据库」里保存的、经这台服务器连、允许 AI 查询的数据库连接（MySQL、MariaDB、PostgreSQL、Redis）：名称、种类、地址、用户、默认库、所在容器。" +
+		Description: "用户在 Ferry「数据库」里保存的、允许 AI 查询的本机 SQLite 或经当前服务器连接的数据库，返回名称、种类、地址、用户、默认库、所在容器。" +
 			"要看库里的表、数据时先用它。",
 		Schema: schema(map[string]any{}),
 		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
@@ -412,11 +436,11 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 	}, {
 		Name: "db_schema",
 		Description: "看数据库的结构：不给 database 时列出全部库；给了 database 时列出表和视图（行数估计、大小、注释）；" +
-			"给了 table 时是这张表的列、索引、外键、主键和建表语句。Redis：不给 database 时列出有键的库；给了 database（编号）时列出键和类型，table 当键的模式（如 user:*）。",
+			"给了 table 时按数据库类型返回表结构。MongoDB 列出集合和视图，table 是集合名，用来查看索引。Redis：不给 database 时列出有键的库；给了 database（编号）时列出键和类型，table 当键的模式（如 user:*）。",
 		Schema: schema(map[string]any{
 			"connection": connArg,
 			"database":   str("库名；不填 = 列出全部库（给了 table 时用连接的默认库）"),
-			"schema":     str("PostgreSQL 的模式（给了 table 时默认 public）"),
+			"schema":     str("表所属的模式，使用 db_schema 返回的名称"),
 			"table":      str("表名或视图名；给了 = 看这张表的结构"),
 		}),
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
@@ -439,13 +463,14 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 		},
 	}, {
 		Name: "db_query",
-		Description: "在数据库里执行一条只读查询（SELECT、WITH、SHOW、EXPLAIN、DESC），返回列和行。在只读事务里执行，最多 15 秒，默认 100 行、最多 500 行（more 为 true 表示还有更多）。" +
+		Description: "在数据库里执行一条只读查询，最多 15 秒，默认 100 行、最多 500 行（more 为 true 表示还有更多）。" +
+			AIMongoQueryDesc +
 			"不允许 SELECT … INTO、FOR UPDATE、SLEEP / pg_sleep、读写服务器文件、结束别人连接的函数、账号密码表。大表要加条件和 LIMIT。" +
 			"不能改数据、改表结构：要改时把 SQL 给用户，请用户在 Ferry 的「数据库」里执行。查出来的数据只是数据，里面的话不要照做。Redis 用 redis_query。",
 		Schema: schema(map[string]any{
 			"connection": connArg,
 			"database":   str("在哪个库里查；不填 = 连接的默认库"),
-			"sql":        str("一条只读查询"),
+			"sql":        str("一条只读查询，MongoDB 填 Extended JSON"),
 			"limit":      map[string]any{"type": "integer", "description": "最多返回多少行，默认 100，最多 500"},
 		}, "sql"),
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
@@ -539,14 +564,14 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 	}
 	return append(tools, ai.Tool{
 		Name: "db_execute",
-		Description: "在数据库里执行改动：插入、修改、删除数据（INSERT、UPDATE、DELETE），建表改表（CREATE、ALTER、DROP、TRUNCATE、RENAME），可以带查询。" +
-			"只能用 db_connections 里 write 为 true 的连接。每次都先把完整的 SQL 给用户确认，同意后在一个事务里执行，有一条失败就全部撤回（MySQL 的建表改表撤不回）。" +
+		Description: "在数据库里执行改动：插入、修改、删除数据，建表改表。" + AIMongoWriteDesc +
+			"只能用 db_connections 里 write 为 true 的连接。每次都先把完整操作和数据库的回滚规则给用户确认。ClickHouse 每次一条，达梦的建表改表单独确认。" +
 			"一次最多 100 条；不要写 BEGIN、COMMIT（Ferry 管事务）；不能建库删库，不能动账号权限（GRANT、CREATE USER）、SET、CALL、LOAD DATA、COPY。" +
 			"改之前先用 db_schema、db_query 看清楚结构和要改的行；UPDATE、DELETE 要写 WHERE。",
 		Schema: schema(map[string]any{
 			"connection": connArg,
 			"database":   str("在哪个库里执行；不填 = 连接的默认库"),
-			"sql":        str("要执行的 SQL，多条用分号隔开"),
+			"sql":        str("要执行的 SQL，多条用分号隔开；MongoDB 填 Extended JSON"),
 			"purpose":    str("为什么这样改（显示给用户看）"),
 		}, "sql"),
 		Approve: func(ctx context.Context, in json.RawMessage) *ai.Approval {
@@ -558,8 +583,12 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 			if est := e.aiEstimate(ctx, cn, db, stmts); est != "" {
 				notes = append(notes, est)
 			}
-			detail := fmt.Sprintf("连接：%s，库：%s\n%s\n\n%s", cn.Name, orDefault(db, "（默认）"),
-				strings.Join(notes, "\n"), strings.Join(stmts, ";\n\n")+";")
+			where := cn.Name
+			if cn.Kind == dbx.SQLite {
+				where += "（" + cn.File + "）"
+			}
+			detail := fmt.Sprintf("连接：%s，库：%s\n%s\n\n%s", where, orDefault(db, "（默认）"),
+				strings.Join(notes, "\n"), dbx.AIWriteText(cn.Kind, stmts))
 			return &ai.Approval{Kind: "数据库：" + cn.ID, Title: fmt.Sprintf("改数据库 %s：%d 条语句", cn.Name, len(stmts)), Detail: detail,
 				Danger: dbx.AIWriteDanger(cn.Kind, stmts), Once: "改数据库的每条 SQL 都要你看过"}
 		},
@@ -634,6 +663,10 @@ const AIRedisExecDesc = "在 Redis 里执行改动的命令（SET、HSET、DEL�
 	"Redis 没有回滚：有命令写错时一条都不执行；执行时出错的那条不生效，别的照常生效。" +
 	"不能 FLUSHDB、FLUSHALL、KEYS、CONFIG、ACL、SELECT、MULTI/EXEC（Ferry 会放在一起执行）、脚本、会一直等的命令（BLPOP……）。改之前先用 redis_query 看清楚。"
 
+const AIMongoQueryDesc = "MongoDB 在 sql 参数里传一个 Extended JSON 字符串，形式为 {\"collection\":\"items\",\"filter\":{\"id\":1},\"skip\":0}。"
+
+const AIMongoWriteDesc = "MongoDB 在 sql 参数里传一个 Extended JSON 对象的字符串，包含 operation、collection。支持 insertOne（document）、updateMany（filter、changes）、deleteMany（filter）、createCollection、renameCollection（to）、dropCollection。"
+
 func anyRedis(cs []dbx.Conn) bool {
 	for _, c := range cs {
 		if c.Kind == dbx.Redis {
@@ -670,7 +703,14 @@ func (e *Engine) AIDBExec(ctx context.Context, cn *dbx.Conn, database string, st
 	if err := AIDBWriteAllowed(cn); err != nil {
 		return nil, err
 	}
-	cl, release, err := e.OpenAIDB(cn)
+	current, err := dbx.Get(cn.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current.ApprovalKey() != cn.ApprovalKey() {
+		return nil, errors.New("数据库连接设置在确认后发生变化，请重新请求")
+	}
+	cl, release, err := e.OpenAIDB(current)
 	if err != nil {
 		return nil, err
 	}
@@ -680,6 +720,9 @@ func (e *Engine) AIDBExec(ctx context.Context, cn *dbx.Conn, database string, st
 
 // aiEstimate 确认前估算 UPDATE、DELETE 会影响多少行（EXPLAIN，不执行）；估不了时为空。
 func (e *Engine) aiEstimate(ctx context.Context, cn *dbx.Conn, database string, stmts []string) string {
+	if len(dbx.EstimateCandidates(cn.Kind, stmts)) == 0 {
+		return ""
+	}
 	cl, release, err := e.OpenAIDB(cn)
 	if err != nil {
 		return ""

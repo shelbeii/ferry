@@ -6,6 +6,7 @@ toolchain go1.26.9
 
 require (
 	filippo.io/age v1.2.1
+	gitee.com/chunanyong/dm v1.8.23
 	github.com/ClickHouse/clickhouse-go/v2 v2.51.0
 	github.com/anthropics/anthropic-sdk-go v1.82.0
 	github.com/go-sql-driver/mysql v1.10.1
@@ -40,6 +41,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
+	github.com/golang/snappy v0.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

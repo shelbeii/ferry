@@ -83,7 +83,7 @@ func (cl *Client) EstimateRows(ctx context.Context, dbName string, stmts []strin
 // EstimateCandidates 要估算的语句（UPDATE、DELETE）是第几条。
 func EstimateCandidates(kind string, stmts []string) []int {
 	var out []int
-	if kind == Redis {
+	if kind != MySQL && kind != Postgres {
 		return out
 	}
 	for i, s := range stmts {

@@ -50,7 +50,7 @@ const instructions = `Ferry 是把后端（Java、Go 等原生程序、Python、
   backup_run 现在备份一次（改数据库、数据目录前先备份），backup_fetch 把异地的一份备份取回服务器（服务器上的那份没了时；取回后恢复要用户在 Ferry 里做）。打开 / 关闭告警和数据备份、恢复备份只能由用户在 Ferry 里做。
   这几个工具最多等 40 秒：没结束时返回 id 和进展，用 task_status 接着查，直到结束。部署失败时看返回的构建输出、日志找原因。
   动手前先用查看的工具确认现状，reason 里写清楚为什么要做。
-- 数据库：db_connections 看用户允许 AI 查询的数据库连接（Ferry「数据库」里保存的 MySQL、MariaDB、PostgreSQL，经服务器的 SSH 转发连），
+- 数据库：db_connections 看 Ferry「数据库」里保存的、用户允许 AI 查询的连接，
   db_schema 看库、表和表结构，db_query 执行一条只读查询（有超时和行数上限）。写 SQL、实体类、排查数据问题时先看结构再查。
   db_execute 改数据、建表改表：只能用 write 为 true 的连接，和上面的改动一样要用户在 Ferry 里确认（看完整的 SQL），经生产服务器连的不行。
   Redis 连接（kind 为 redis）：db_schema 看有哪些库和键，redis_query 执行一条只读的命令，redis_execute 执行改动的命令（一行一条，同样要用户确认）。

@@ -4,7 +4,7 @@ import { call, ferry, FerryError, isSecretKind, sessionEnv, type ErrorDetail, ty
 import { secretRequest, trustRequest } from './state'
 import { dbEndpoint, tcpListens, type Endpoint } from './softwareWeb'
 
-export type DbKind = 'mysql' | 'postgres' | 'redis' | 'sqlserver' | 'mongodb' | 'sqlite' | 'clickhouse'
+export type DbKind = 'mysql' | 'postgres' | 'redis' | 'sqlserver' | 'mongodb' | 'sqlite' | 'clickhouse' | 'dm' | 'kingbase'
 
 export interface DbVia {
   config: string
@@ -372,23 +372,25 @@ export function formatReply(r: RedisReply, indent = ''): string[] {
 
 export const kindLabel: Record<DbKind, string> = {
   mysql: 'MySQL / MariaDB', postgres: 'PostgreSQL', redis: 'Redis / Valkey', sqlserver: 'SQL Server', mongodb: 'MongoDB',
-  sqlite: 'SQLite', clickhouse: 'ClickHouse',
+  sqlite: 'SQLite', clickhouse: 'ClickHouse', dm: '达梦', kingbase: '人大金仓',
 }
-export const defaultPort: Record<DbKind, number> = { mysql: 3306, postgres: 5432, redis: 6379, sqlserver: 1433, mongodb: 27017, sqlite: 0, clickhouse: 9000 }
-export const defaultUser: Record<DbKind, string> = { mysql: 'root', postgres: 'postgres', redis: '', sqlserver: 'sa', mongodb: '', sqlite: '', clickhouse: 'default' }
-export const dbCapabilities: Record<DbKind, { sql: boolean; browseOnly: boolean }> = {
-  mysql: { sql: true, browseOnly: false },
-  postgres: { sql: true, browseOnly: false },
-  redis: { sql: false, browseOnly: false },
-  sqlserver: { sql: true, browseOnly: true },
-  mongodb: { sql: false, browseOnly: true },
-  sqlite: { sql: true, browseOnly: true },
-  clickhouse: { sql: true, browseOnly: true },
+export const defaultPort: Record<DbKind, number> = { mysql: 3306, postgres: 5432, redis: 6379, sqlserver: 1433, mongodb: 27017, sqlite: 0, clickhouse: 9000, dm: 5236, kingbase: 54321 }
+export const defaultUser: Record<DbKind, string> = { mysql: 'root', postgres: 'postgres', redis: '', sqlserver: 'sa', mongodb: '', sqlite: '', clickhouse: 'default', dm: 'SYSDBA', kingbase: 'system' }
+export const dbCapabilities: Record<DbKind, { sql: boolean; limitedDesktop: boolean }> = {
+  mysql: { sql: true, limitedDesktop: false },
+  postgres: { sql: true, limitedDesktop: false },
+  redis: { sql: false, limitedDesktop: false },
+  sqlserver: { sql: true, limitedDesktop: true },
+  mongodb: { sql: false, limitedDesktop: true },
+  sqlite: { sql: true, limitedDesktop: true },
+  clickhouse: { sql: true, limitedDesktop: true },
+  dm: { sql: true, limitedDesktop: true },
+  kingbase: { sql: true, limitedDesktop: true },
 }
 
 const softwareDbKind = new Map<string, DbKind>([
   ['mysql', 'mysql'], ['mariadb', 'mysql'], ['postgresql', 'postgres'], ['redis', 'redis'], ['valkey', 'redis'],
-  ['sqlserver', 'sqlserver'], ['mongodb', 'mongodb'], ['clickhouse', 'clickhouse'],
+  ['sqlserver', 'sqlserver'], ['mongodb', 'mongodb'], ['clickhouse', 'clickhouse'], ['dm', 'dm'], ['kingbase', 'kingbase'],
 ])
 
 /** ClickHouse 的 8123 是 HTTP。只有看到原生端口发布到主机时才用主机地址。 */
@@ -616,7 +618,7 @@ export function connFromSoftware(sw: Software, via: DbVia, server: string): Part
     c.software = sw.instance
     if (sw.account && kind !== 'redis') c.user = sw.account
   }
-  if (dbCapabilities[kind].browseOnly) c.readOnly = true
+  if (dbCapabilities[kind].limitedDesktop) c.readOnly = true
   return c
 }
 

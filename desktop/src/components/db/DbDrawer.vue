@@ -59,7 +59,7 @@ const roots = computed<TreeData[]>(() => dbConns.value.map((c) => ({ id: 'c:' + 
 const defaultSQLConn = computed(() => dbConns.value.find((c) => dbCapabilities[c.kind]?.sql))
 
 function kindMarker(c: DbConn) {
-  return c.kind === 'redis' || dbCapabilities[c.kind]?.browseOnly ? kindLabel[c.kind] : ''
+  return c.kind === 'redis' || dbCapabilities[c.kind]?.limitedDesktop ? kindLabel[c.kind] : ''
 }
 
 function groupId(conn: DbConn, db: string, g: GroupKind, schema?: string) {
@@ -108,10 +108,10 @@ async function loadNode(node: Node, resolve: (d: TreeData[]) => void, reject: ()
       resolve(dbs.length ? dbs.map((x) => ({ id: `d:${d.conn.id}:${x.name}`, label: x.name, type: 'db', conn: d.conn, db: x.name, system: x.system })) : [none(d, '（没有库）')])
     } else if (d.type === 'db') {
       const kind = d.conn.kind
-      const groups: GroupKind[] = kind === 'mongodb' ? ['tables', 'views'] : dbCapabilities[kind].browseOnly ? ['tables', 'views', 'queries'] : ['tables', 'views', 'funcs', 'queries', 'backups']
+      const groups: GroupKind[] = kind === 'mongodb' ? ['tables', 'views'] : dbCapabilities[kind].limitedDesktop ? ['tables', 'views', 'queries'] : ['tables', 'views', 'funcs', 'queries', 'backups']
       // 有非默认模式时先列模式，保存的查询和备份按库。
-      if (kind === 'postgres' || kind === 'sqlserver') {
-        const defaultSchema = kind === 'postgres' ? 'public' : 'dbo'
+      if (kind === 'postgres' || kind === 'sqlserver' || kind === 'kingbase' || kind === 'dm') {
+        const defaultSchema = kind === 'sqlserver' ? 'dbo' : kind === 'dm' ? d.conn.user : 'public'
         const r = await dbCall<{ tables: DbTable[] }>(d.conn, 'tables', d.db)
         const schemas = [...new Set(r.tables.map((t) => t.schema ?? defaultSchema))]
         markDbOpened(d.conn.id, d.db!)
@@ -125,7 +125,7 @@ async function loadNode(node: Node, resolve: (d: TreeData[]) => void, reject: ()
       markDbOpened(d.conn.id, d.db!)
       resolve(groups.map((g) => groupNode(d.conn, d.db!, g)))
     } else if (d.type === 'schema') {
-      const groups: GroupKind[] = d.conn.kind === 'sqlserver' ? ['tables', 'views'] : ['tables', 'views', 'funcs']
+      const groups: GroupKind[] = dbCapabilities[d.conn.kind].limitedDesktop ? ['tables', 'views'] : ['tables', 'views', 'funcs']
       resolve(groups.map((g) => groupNode(d.conn, d.db!, g, d.schema)))
     } else if (d.type === 'grp') {
       const inSchema = (s?: string) => !d.schema || (s || 'public') === d.schema
@@ -633,7 +633,7 @@ const menuItems = computed<{ k: string; t: string; sep?: boolean; off?: boolean;
   if (!d) return []
   const ro = d.conn.readOnly
   const caps = dbCapabilities[d.conn.kind]
-  if (caps.browseOnly && d.type !== 'savedq' && !(d.type === 'grp' && d.group === 'queries')) {
+  if (caps.limitedDesktop && d.type !== 'savedq' && !(d.type === 'grp' && d.group === 'queries')) {
     const query = caps.sql ? [{ k: 'query', t: '新建查询' }] : []
     switch (d.type) {
       case 'conn':
@@ -766,12 +766,15 @@ async function importSql(d: TreeData) {
   const file = await pickFile('选择要执行的 SQL 文件', 'SQL 文件', ['sql', 'txt'])
   if (!file) return
   const cont = ref(false)
+  const batch = ref(false)
   try {
     await ElMessageBox.confirm(() => h('div', { class: 'import-sql' }, [
       h('p', `在 ${d.conn.name} 的库 ${d.db} 里执行：`),
       h('p', { class: 'mono', style: 'word-break: break-all' }, file),
-      h('p', { style: 'margin-top: 8px' }, '文件里的语句一条条直接执行，执行了的不能撤销（Ferry 导出的文件会先删掉同名的表再重建）。'),
-      h(ElCheckbox, { modelValue: cont.value, 'onUpdate:modelValue': (v: unknown) => (cont.value = !!v) }, () => '有语句出错时接着执行后面的（默认停下）'),
+      h('p', { style: 'margin-top: 8px' }, '已提交的改动会保留。Ferry 导出的结构 SQL 会先删掉同名的表再重建。'),
+      h('div', [h(ElCheckbox, { disabled: batch.value, modelValue: cont.value, 'onUpdate:modelValue': (v: unknown) => (cont.value = !!v) }, () => '有语句出错时接着执行后面的（默认停下）')]),
+      h('div', [h(ElCheckbox, { disabled: cont.value, modelValue: batch.value, 'onUpdate:modelValue': (v: unknown) => (batch.value = !!v) }, () => '快速导入（合并连续的单行 INSERT）')]),
+      batch.value ? h('p', '合并后的语句按批执行和报错。依赖单条 INSERT 语句边界的脚本请使用默认模式。') : null,
     ]), '执行 SQL 文件', { confirmButtonText: '执行', cancelButtonText: '取消', type: 'warning' })
   } catch {
     return
@@ -779,7 +782,7 @@ async function importSql(d: TreeData) {
   startTask(`执行 SQL 文件：${d.conn.name} / ${d.db}`, ['db', 'import-sql', d.conn.id, d.db ?? ''], (t) => {
     if (t.status === 'ok') ElMessage.success({ message: '执行完了', duration: 3000 })
     refreshNode(d.id)
-  }, { FERRY_DB_REQ: JSON.stringify({ file, continue: cont.value }) })
+  }, { FERRY_DB_REQ: JSON.stringify({ file, continue: cont.value, batchInserts: batch.value }) })
 }
 
 const csvTarget = ref<{ conn: DbConn; db: string; schema?: string; table: string } | null>(null)
@@ -1123,7 +1126,7 @@ function nodeIcon(d: TreeData) {
               @context="(e: MouseEvent, x: DbObjItem) => onContext(e, objNode(t, x))"
             />
             <DbBrowseTable
-              v-else-if="t.kind === 'table' && dbCapabilities[t.conn.kind].sql && dbCapabilities[t.conn.kind].browseOnly"
+              v-else-if="t.kind === 'table' && dbCapabilities[t.conn.kind].sql && dbCapabilities[t.conn.kind].limitedDesktop"
               :ref="(el) => (refs[t.key] = el as never)"
               :conn="t.conn" :db="t.db" :schema="t.schema" :table="t.table!"
               @query="(sql: string) => openQuery(t.conn, t.db, sql + ';\n')"

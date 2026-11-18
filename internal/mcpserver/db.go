@@ -24,14 +24,14 @@ type dbConnsIn struct {
 type dbSchemaIn struct {
 	Connection string `json:"connection" jsonschema:"数据库连接（db_connections 里的 id 或 name）"`
 	Database   string `json:"database,omitempty" jsonschema:"库名；不填 = 列出全部库（给了 table 时用连接的默认库）"`
-	Schema     string `json:"schema,omitempty" jsonschema:"PostgreSQL 的模式（给了 table 时默认 public；列表时只看这个模式）"`
-	Table      string `json:"table,omitempty" jsonschema:"表名或视图名；给了 = 看这张表的结构"`
+	Schema     string `json:"schema,omitempty" jsonschema:"表所属的模式，使用 db_schema 返回的名称"`
+	Table      string `json:"table,omitempty" jsonschema:"表名、视图名或 MongoDB 集合名"`
 }
 
 type dbQueryIn struct {
 	Connection string `json:"connection" jsonschema:"数据库连接（db_connections 里的 id 或 name）"`
 	Database   string `json:"database,omitempty" jsonschema:"在哪个库里查；不填 = 连接的默认库"`
-	SQL        string `json:"sql" jsonschema:"一条只读查询：SELECT、WITH、SHOW、EXPLAIN、DESC 等"`
+	SQL        string `json:"sql" jsonschema:"一条只读查询，MongoDB 填 Extended JSON"`
 	Limit      int    `json:"limit,omitempty" jsonschema:"最多返回多少行，默认 100，最多 500"`
 }
 
@@ -51,7 +51,7 @@ type redisExecIn struct {
 type dbExecIn struct {
 	Connection string `json:"connection" jsonschema:"数据库连接（db_connections 里 write 为 true 的 id 或 name）"`
 	Database   string `json:"database,omitempty" jsonschema:"在哪个库里执行；不填 = 连接的默认库"`
-	SQL        string `json:"sql" jsonschema:"要执行的 SQL，多条用分号隔开（最多 100 条）"`
+	SQL        string `json:"sql" jsonschema:"要执行的 SQL，多条用分号隔开；MongoDB 填 Extended JSON"`
 	Reason     string `json:"reason" jsonschema:"为什么这样改（显示在 Ferry 的确认框里）"`
 }
 
@@ -64,7 +64,7 @@ func (s *server) dbEngine(ctx context.Context) *engine.Engine {
 func (s *server) addDBTools(m *mcp.Server) {
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(true)}
 	addTool(s, m, &mcp.Tool{Name: "db_connections", Title: "数据库连接",
-		Description: "Ferry「数据库」里保存的、用户允许 AI 查询的数据库连接（MySQL、MariaDB、PostgreSQL、Redis）：名称、种类、经哪个项目的哪台服务器连（SSH 转发）、地址、用户、默认库。" +
+		Description: "Ferry「数据库」里保存的、用户允许 AI 查询的数据库连接：名称、种类、经哪个项目的哪台服务器连（SSH 转发）、地址、用户、默认库。" +
 			"db_schema、db_query（Redis 用 redis_query）的 connection 参数从这里取。没列出来的连接要用户在 Ferry 里勾选「允许 AI 查询」。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		logged(s, "db_connections", func(ctx context.Context, in dbConnsIn) (any, error) {
@@ -97,7 +97,7 @@ func (s *server) addDBTools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "db_schema", Title: "数据库结构",
 		Description: "看数据库的结构：不给 database 时列出全部库（system 是系统库）；给了 database 时列出表和视图（行数估计、大小、注释）；" +
-			"给了 table 时是这张表的列（类型、能否为空、默认值、注释）、索引、外键、主键和建表语句。写 SQL、实体类前先用它看结构。" +
+			"给了 table 时按数据库类型返回表结构。MongoDB 列出集合和视图，table 是集合名，用来查看索引。" +
 			"Redis：不给 database 时列出有键的库；给了 database（编号）时列出键和类型（最多 200 个），table 当键的模式（如 user:*）。",
 		Annotations: readOnly},
 		logged(s, "db_schema", func(ctx context.Context, in dbSchemaIn) (any, error) {
@@ -110,7 +110,7 @@ func (s *server) addDBTools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "db_query", Title: "数据库查询",
 		Description: "在数据库里执行一条只读查询，返回列和行（单元格是文本或 null，二进制、很长的文本会注明长度并截断）。" +
-			"只能是一条 SELECT、WITH、SHOW、EXPLAIN、DESC；在只读事务里执行，最多 15 秒，默认返回 100 行、最多 500 行（more 为 true 表示还有更多）。" +
+			"最多 15 秒，默认返回 100 行、最多 500 行（more 为 true 表示还有更多）。" + engine.AIMongoQueryDesc +
 			"不允许 SELECT … INTO、FOR UPDATE 等加锁、SLEEP / pg_sleep、读写服务器文件、结束别人连接的函数，也不能查账号密码表。" +
 			"大表先用 db_schema 看结构和行数，查询加上条件和 LIMIT。改数据、改表结构不能用它：请用户在 Ferry 的「数据库」里做。",
 		Annotations: readOnly},
@@ -135,9 +135,9 @@ func (s *server) addDBTools(m *mcp.Server) {
 // addDBChangeTools 改数据库：交给 Ferry 桌面版确认后执行（和部署、启停一样）。
 func (s *server) addDBChangeTools(m *mcp.Server) {
 	addTool(s, m, &mcp.Tool{Name: "db_execute", Title: "改数据库",
-		Description: "在数据库里执行改动：插入、修改、删除数据（INSERT、UPDATE、DELETE），建表改表（CREATE、ALTER、DROP、TRUNCATE、RENAME），可以带查询。" +
+		Description: "在数据库里执行改动：插入、修改、删除数据，建表改表。" + engine.AIMongoWriteDesc +
 			"只能用 db_connections 里 write 为 true 的连接（用户在连接上勾选了「允许 AI 修改」），要用户在 Ferry 设置里允许编程软件请求改动；经生产服务器连的不行。" +
-			"每次都把完整的 SQL 交给用户在 Ferry 里确认，同意后在一个事务里执行，有一条失败就全部撤回（MySQL 的建表改表撤不回）。" +
+			"每次都把完整操作和数据库的回滚规则交给用户在 Ferry 里确认。ClickHouse 每次一条，达梦的建表改表单独确认。" +
 			"一次最多 100 条；不要写 BEGIN、COMMIT；不能建库删库，不能动账号权限（GRANT、CREATE USER）、SET、CALL、LOAD DATA、COPY。" +
 			"改之前先用 db_schema、db_query 看清楚结构和要改的行；UPDATE、DELETE 要写 WHERE。最多等 40 秒：没结束返回 id，再用 task_status 查。",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
@@ -216,8 +216,12 @@ func DBChangeAllowed(st settings.Settings, cn *dbx.Conn) (*config.File, *config.
 // fillDB 补上给人看的：连接、服务器、要执行的 SQL、危险的地方。
 func fillDB(r *approve.Request, cn *dbx.Conn, f *config.File, t *config.Target) {
 	r.DB, r.DBName, r.DBKind = cn.ID, cn.Name, cn.Kind
+	r.DBCheck = cn.ApprovalKey()
 	r.Project, r.Config, r.Target, r.Host = "", "", "", ""
 	where := "这台电脑直接连 " + cn.Addr()
+	if cn.Kind == dbx.SQLite {
+		where = cn.File
+	}
 	if f != nil && t != nil {
 		r.Project, r.Config, r.Target, r.Host = f.Project, f.Path, t.Name, t.Host
 		where = "经服务器 " + t.Name + " 连"
@@ -237,22 +241,32 @@ func fillDB(r *approve.Request, cn *dbx.Conn, f *config.File, t *config.Target) 
 		account = "，用 AI 的账号 " + cn.AIUser
 	}
 	head := fmt.Sprintf("数据库 %s（%s，%s%s），库 %s。%s", cn.Name, kindName(cn.Kind), where, account, db, strings.Join(dbx.AIWriteNotes(cn.Kind, r.Stmts), "；"))
-	body := strings.Join(r.Stmts, ";\n\n") + ";"
-	if cn.Kind == dbx.Redis {
-		body = strings.Join(r.Stmts, "\n")
-	}
-	r.Detail = []string{head, body}
+	r.Detail = []string{head, dbx.AIWriteText(cn.Kind, r.Stmts)}
 	r.Danger = dbx.AIWriteDanger(cn.Kind, r.Stmts)
 }
 
 func kindName(k string) string {
 	switch k {
+	case dbx.MySQL:
+		return "MySQL / MariaDB"
 	case dbx.Postgres:
 		return "PostgreSQL"
 	case dbx.Redis:
-		return "Redis"
+		return "Redis / Valkey"
+	case dbx.SQLServer:
+		return "SQL Server"
+	case dbx.MongoDB:
+		return "MongoDB"
+	case dbx.SQLite:
+		return "SQLite"
+	case dbx.ClickHouse:
+		return "ClickHouse"
+	case dbx.Dameng:
+		return "达梦"
+	case dbx.Kingbase:
+		return "人大金仓"
 	}
-	return "MySQL / MariaDB"
+	return k
 }
 
 func orZero(s string) string {
@@ -271,6 +285,9 @@ func prepareDB(r *approve.Request) error {
 	cn, err := dbx.Get(r.DB)
 	if err != nil {
 		return err
+	}
+	if r.DBKind != "" && r.DBKind != cn.Kind {
+		return errors.New("数据库连接类型已改动，请重新提交")
 	}
 	if !cn.AI {
 		return fmt.Errorf("数据库连接「%s」没有允许 AI 查询", cn.Name)

@@ -14,7 +14,7 @@ import { ferrySearch } from './searchPanel'
 export interface SqlEditorOptions {
   parent: HTMLElement
   doc: string
-  kind: 'mysql' | 'postgres' | 'sqlserver' | 'sqlite' | 'clickhouse'
+  kind: 'mysql' | 'postgres' | 'sqlserver' | 'sqlite' | 'clickhouse' | 'dm' | 'kingbase'
   dark: boolean
   readOnly?: boolean
   /** 补全用的表、列：{ 表: [列…] } 或 { 模式: { 表: [列…] } } */
@@ -47,7 +47,7 @@ const commonTheme = EditorView.theme({
   '.cm-scroller': { fontFamily: "'Cascadia Mono', Consolas, 'Courier New', monospace", lineHeight: '1.55' },
   '.cm-tooltip.cm-tooltip-autocomplete > ul': { fontFamily: "'Cascadia Mono', Consolas, monospace" },
 })
-const dialects = { mysql: MySQL, postgres: PostgreSQL, sqlserver: MSSQL, sqlite: SQLite, clickhouse: MySQL }
+const dialects = { mysql: MySQL, postgres: PostgreSQL, sqlserver: MSSQL, sqlite: SQLite, clickhouse: MySQL, dm: PostgreSQL, kingbase: PostgreSQL }
 
 /** 光标所在的语句：从光标往前、往后找到分号（不细分引号，够用） */
 export function statementAt(text: string, pos: number): string {

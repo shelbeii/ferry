@@ -2,6 +2,7 @@ package dbx
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,7 +26,7 @@ func readOnlySQLStatements(kind, src string) ([]string, error) {
 				continue
 			}
 		case "SHOW", "DESCRIBE", "DESC", "EXISTS":
-			if kind == ClickHouse {
+			if kind == ClickHouse || kind == MySQL {
 				continue
 			}
 		}
@@ -56,7 +57,7 @@ func (cl *Client) readOnlySQLRows(ctx context.Context, db, schema, table string,
 	}
 	page := func(limit int) string {
 		offset := max(0, o.Offset)
-		if kind == SQLServer {
+		if kind == SQLServer || kind == Dameng {
 			return fmt.Sprintf("%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", base, offset, limit)
 		}
 		return fmt.Sprintf("%s LIMIT %d OFFSET %d", base, limit, offset)
@@ -72,11 +73,12 @@ func (cl *Client) readOnlySQL(ctx context.Context, database, query string, limit
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	err := func() error {
-		db, err := cl.DB(ctx, database)
+		q, release, err := cl.readSession(ctx, database)
 		if err != nil {
 			return err
 		}
-		rows, err := db.QueryContext(ctx, query)
+		defer release()
+		rows, err := q.QueryContext(ctx, query)
 		if err != nil {
 			return err
 		}
@@ -98,6 +100,13 @@ func (cl *Client) readOnlySQLQuery(ctx context.Context, db, src string, o QueryO
 	stmts, err := readOnlySQLStatements(cl.Conn.Kind, src)
 	if err != nil {
 		return nil, err
+	}
+	if cl.isTiDB() {
+		for _, stmt := range stmts {
+			if err := checkTiDBRead(cl.databaseName(db), stmt); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if o.Max <= 0 || o.Max > 1000 {
 		o.Max = 1000
@@ -139,17 +148,18 @@ func (cl *Client) readOnlySQLExport(ctx context.Context, dbName string, o Export
 		}
 		q = stmts[0]
 	}
-	db, err := cl.DB(ctx, dbName)
+	qr, release, err := cl.readSession(ctx, dbName)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	start := time.Now()
 	f, err := createOut(o.Out)
 	if err != nil {
 		return nil, err
 	}
 	defer f.abort()
-	n, err := writeCSV(ctx, db, f.w, q, nil, false, progress)
+	n, err := writeCSV(ctx, qr, f.w, q, nil, false, progress)
 	if err != nil {
 		return nil, cl.explain(err)
 	}
@@ -161,4 +171,40 @@ func (cl *Client) readOnlySQLExport(ctx context.Context, dbName string, o Export
 		return nil, err
 	}
 	return &ExportResult{Rows: n, Bytes: size, Ms: time.Since(start).Milliseconds(), Out: o.Out}, nil
+}
+
+func (cl *Client) isTiDB() bool {
+	return cl.Conn.Kind == MySQL && strings.Contains(strings.ToLower(cl.Version), "tidb-")
+}
+
+func (cl *Client) readSession(ctx context.Context, db string) (querier, func(), error) {
+	pool, err := cl.pool(db, roleRead)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := pool.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	q, rollback, err := cl.beginReadQuery(ctx, conn)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	return q, func() { rollback(); conn.Close() }, nil
+}
+
+func (cl *Client) beginReadQuery(ctx context.Context, conn *sql.Conn) (querier, func(), error) {
+	switch cl.Conn.Kind {
+	case SQLServer, SQLite, ClickHouse:
+		return conn, func() {}, nil
+	}
+	if cl.isTiDB() {
+		return conn, func() {}, nil
+	}
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	return tx, func() { tx.Rollback() }, nil
 }

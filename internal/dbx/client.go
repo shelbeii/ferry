@@ -48,6 +48,7 @@ type Client struct {
 	password string
 	tn       Tunnel
 	addr     string // 实际连的地址（容器时是查到的容器 IP）
+	dmRoute  string // 达梦驱动拨号时使用的地址键
 
 	mu       sync.Mutex
 	dbs      map[string]*sql.DB
@@ -62,11 +63,12 @@ type Client struct {
 	Encrypted bool
 
 	// Redis：各个库的连接池、命令行窗口的连接、命令是否只读（COMMAND INFO 查过的）
-	rdbs         map[int]*redis.Client
-	rsess        map[string]*rsession
-	rcmdRO       map[string]bool
-	redisCluster bool
-	mongo        *mongo.Client
+	rdbs              map[int]*redis.Client
+	rsess             map[string]*rsession
+	rcmdRO            map[string]bool
+	redisCluster      bool
+	mongo             *mongo.Client
+	mongoTransactions bool
 }
 
 type session struct {
@@ -134,6 +136,9 @@ func clientKey(c *Conn, password string) string {
 	h := sha256.Sum256(append(b, []byte("\x00"+password)...))
 	return hex.EncodeToString(h[:])
 }
+
+// ApprovalKey 绑定确认框所展示的连接配置和实际执行，避免确认期间连接被改到另一台库。
+func (c *Conn) ApprovalKey() string { return clientKey(c, "") }
 
 // Open 取得打开着的连接（复用或新建）；用完调用 release。
 func (m *Manager) Open(ctx context.Context, c *Conn, password string, open OpenTunnel) (*Client, func(), error) {
@@ -245,6 +250,8 @@ func pingVersion(ctx context.Context, cl *Client, db *sql.DB) error {
 		query = "SELECT CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion'))"
 	case SQLite:
 		query = "SELECT sqlite_version() WHERE (SELECT count(*) FROM main.sqlite_schema) >= 0"
+	case Dameng:
+		query = "SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1"
 	}
 	if err := db.QueryRowContext(ctx, query).Scan(&v); err != nil {
 		return cl.explain(err)
@@ -345,6 +352,9 @@ func (cl *Client) close() {
 	for _, db := range cl.dbs {
 		db.Close()
 	}
+	if cl.dmRoute != "" {
+		dmRoutes.Delete(cl.dmRoute)
+	}
 	for _, s := range cl.rsess {
 		s.close()
 	}
@@ -407,17 +417,20 @@ type pipeConn struct {
 func (p *pipeConn) LocalAddr() net.Addr  { return p.local }
 func (p *pipeConn) RemoteAddr() net.Addr { return p.remote }
 
-// 每个库分三个连接池，互不占用：
+// 每个库按用途分开连接池：
 //   - 普通的（浏览表、读结构、AI 查询……）：用完就还，最多 4 条；
 //   - 查询窗口的会话：一个窗口一直占一条（USE、SET、事务都留在上面），关掉窗口时这条连接也关掉，
 //     不还给别人用（不然别的请求会拿到切过库、改过会话变量的连接）；
 //   - 停止语句（KILL QUERY、pg_cancel_backend）：查询窗口、普通的池都占满时也要能马上停。
+//   - 导入 SQL 文件：脚本可以修改会话状态，执行完关闭连接。
 type poolRole int
 
 const (
 	rolePlain poolRole = iota
 	roleSession
 	roleControl
+	roleRead
+	roleImport
 )
 
 // maxSessionsPerDB 一个库最多同时开着几个查询窗口的会话。
@@ -443,8 +456,8 @@ func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 	if db := cl.dbs[key]; db != nil {
 		return db, nil
 	}
-	if cl.Conn.Kind == Redis {
-		return nil, errors.New("Redis 不能执行 SQL")
+	if cl.Conn.Kind == Redis || cl.Conn.Kind == MongoDB {
+		return nil, errors.New("这个连接不支持 SQL")
 	}
 	var db *sql.DB
 	switch cl.Conn.Kind {
@@ -476,7 +489,7 @@ func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 			return nil, err
 		}
 		db = sql.OpenDB(cn)
-	case Postgres:
+	case Postgres, Kingbase:
 		if name == "" {
 			name = "postgres"
 		}
@@ -505,15 +518,18 @@ func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 		cfg.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) { return cl.dial(ctx) }
 		cfg.LookupFunc = func(ctx context.Context, host string) ([]string, error) { return []string{host}, nil }
 		db = stdlib.OpenDB(*cfg)
-	case SQLServer, SQLite, ClickHouse:
+	case SQLServer, SQLite, ClickHouse, Dameng:
 		var err error
+		readOnly := cl.Conn.ReadOnly || role == roleRead
 		switch cl.Conn.Kind {
 		case SQLServer:
 			db, err = cl.sqlServerPool(name)
 		case SQLite:
-			db, err = openSQLite(cl.Conn.File, name)
+			db, err = openSQLite(cl.Conn.File, name, readOnly)
 		case ClickHouse:
-			db = cl.clickHousePool(name)
+			db = cl.clickHousePool(name, readOnly)
+		case Dameng:
+			db, err = cl.damengPool(name)
 		}
 		if err != nil {
 			return nil, err
@@ -525,6 +541,9 @@ func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 	case roleSession:
 		db.SetMaxOpenConns(maxSessionsPerDB)
 		db.SetMaxIdleConns(0) // 会话关了连接就关
+	case roleImport:
+		db.SetMaxOpenConns(4)
+		db.SetMaxIdleConns(0)
 	case roleControl:
 		db.SetMaxOpenConns(2)
 		db.SetMaxIdleConns(1)
@@ -552,6 +571,10 @@ func (cl *Client) databaseName(name string) string {
 		return "main"
 	case ClickHouse:
 		return "default"
+	case Dameng:
+		return dmDatabase
+	case Kingbase:
+		return "test"
 	}
 	return ""
 }
@@ -639,7 +662,7 @@ func (cl *Client) sessionID(sid string) string {
 // connID 这条连接在数据库里的编号：MySQL 的 CONNECTION_ID()、PostgreSQL 的进程号。拿不到时为空。
 func (cl *Client) connID(ctx context.Context, conn *sql.Conn) string {
 	switch cl.Conn.Kind {
-	case Postgres:
+	case Postgres, Kingbase:
 		var pid uint32
 		conn.Raw(func(dc any) error {
 			if c, ok := dc.(*stdlib.Conn); ok {
@@ -672,7 +695,7 @@ func (cl *Client) stopStmt(dbName, id string) {
 		return
 	}
 	q := "KILL QUERY " + id
-	if cl.Conn.Kind == Postgres {
+	if postgresProtocol(cl.Conn.Kind) {
 		q = "SELECT pg_cancel_backend(" + id + ")"
 	}
 	db.ExecContext(ctx, q)
@@ -743,7 +766,7 @@ func authFailed(err error) bool {
 		return strings.HasPrefix(s, "NOAUTH") || strings.HasPrefix(s, "WRONGPASS") || strings.HasPrefix(s, "ERR invalid password") ||
 			strings.HasPrefix(s, "ERR invalid username-password")
 	}
-	return sqlServerAuthFailed(err) || mongoAuthFailed(err) || clickHouseAuthFailed(err)
+	return sqlServerAuthFailed(err) || mongoAuthFailed(err) || clickHouseAuthFailed(err) || damengErrorCode(err) == "-2501"
 }
 
 // ErrorCode 数据库返回的错误码（给界面显示）。
@@ -759,5 +782,8 @@ func ErrorCode(err error) string {
 	if code := sqlServerErrorCode(err); code != "" {
 		return code
 	}
-	return clickHouseErrorCode(err)
+	if code := clickHouseErrorCode(err); code != "" {
+		return code
+	}
+	return damengErrorCode(err)
 }

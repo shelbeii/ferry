@@ -44,6 +44,7 @@ type dbReq struct {
 	Session string       `json:"session"`
 	SQL     string       `json:"sql"`
 	Stmts   []string     `json:"stmts"`
+	DBCheck string       `json:"dbCheck"` // 审批时展示的连接配置
 	Changes []dbx.Change `json:"changes"`
 	Design  *dbx.Design  `json:"design"`
 	Op      string       `json:"op"`
@@ -61,9 +62,10 @@ type dbReq struct {
 	Confirm bool                 `json:"confirm"` // redis-cmd：用户已经确认了危险的命令
 	Mongo   dbx.MongoFindOptions `json:"mongo"`
 	// 导入
-	File     string         `json:"file"`     // import-sql：SQL 文件
-	Continue bool           `json:"continue"` // import-sql：出错后接着执行
-	CSV      *dbx.CSVImport `json:"csv"`      // csv-preview、import-csv
+	File         string         `json:"file"`         // import-sql：SQL 文件
+	Continue     bool           `json:"continue"`     // import-sql：出错后接着执行
+	BatchInserts bool           `json:"batchInserts"` // import-sql：合并连续的单行 INSERT
+	CSV          *dbx.CSVImport `json:"csv"`          // csv-preview、import-csv
 	// creds：从服务器上读数据库的账号密码（「软件」页连数据库时替用户填好）
 	Via  *dbx.Via            `json:"via"`
 	Cred *engine.DBCredQuery `json:"cred"`
@@ -370,8 +372,23 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	if err != nil {
 		return fail(err)
 	}
-	if cn.BrowseOnly() && !browseDBCommand(cn, sub) {
-		return fail(fmt.Errorf("这个数据库连接支持浏览、查询和导出：不支持 %s", sub))
+	if cn.LimitedDesktop() && !limitedDBCommand(cn, sub) {
+		return fail(fmt.Errorf("这个数据库连接不支持 %s", sub))
+	}
+	if sub == "ai-exec" {
+		if req.DBCheck != "" && req.DBCheck != cn.ApprovalKey() {
+			return fail(errors.New("数据库连接设置在确认后发生变化，请重新请求"))
+		}
+		if err := engine.AIDBWriteAllowed(cn); err != nil {
+			return fail(err)
+		}
+		db := dbArg()
+		if db == "" {
+			db = cn.Database
+		}
+		if err := dbx.CheckAIWriteStmts(cn.Kind, db, req.Stmts); err != nil {
+			return fail(err)
+		}
 	}
 	var cl *dbx.Client
 	var release func()
@@ -477,7 +494,7 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 		return out(map[string]any{"count": n})
 	case "query":
 		rs, err := cl.Query(ctx, db, req.SQL, dbx.QueryOptions{Session: req.Session, Max: req.Max, Stop: req.Stop})
-		if !cn.BrowseOnly() {
+		if !cn.LimitedDesktop() || !cn.ReadOnly {
 			if writes := dbx.Writes(cn.Kind, req.SQL); len(writes) > 0 {
 				auditDB(strings.Join(writes, ";\n"), err)
 			}
@@ -558,13 +575,12 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(err)
 		}
 		return out(map[string]any{"estimates": est, "text": dbx.EstimateText(req.Stmts, est), "candidates": len(dbx.EstimateCandidates(cn.Kind, req.Stmts))})
-	case "ai-exec": // 执行编程软件请求、用户在桌面版同意了的改动（在一个事务里，失败全部撤回）
-		if err := engine.AIDBWriteAllowed(cn); err != nil {
-			return fail(err)
-		}
+	case "ai-exec": // 执行编程软件请求、用户在桌面版同意了的改动。
 		unit := "语句"
 		if cn.Kind == dbx.Redis {
 			unit = "命令"
+		} else if cn.Kind == dbx.MongoDB {
+			unit = "操作"
 		}
 		rep.Step("在 %s 执行 %d 条%s", cn.Name, len(req.Stmts), unit)
 		r, err := cl.AIExec(ctx, db, req.Stmts)
@@ -678,22 +694,27 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(errors.New("没有选 SQL 文件"))
 		}
 		rep.Step("在 %s 执行 %s", cn.Name, req.File)
-		r, err := cl.ImportSQL(ctx, db, dbx.ImportSQLOptions{File: req.File, Continue: req.Continue}, func(done, total, n int64) {
+		opts := dbx.ImportSQLOptions{File: req.File, Continue: req.Continue, BatchInserts: req.BatchInserts}
+		r, err := cl.ImportSQL(ctx, db, opts, func(done, total, n int64) {
 			rep.Progress(fmt.Sprintf("已执行 %d 条语句", n), done, total)
 		})
 		if err == nil && r.Stopped {
 			err = errors.New("中途出错停下了")
 		}
 		auditDB("执行 SQL 文件 "+req.File, err)
+		var stopped *dbx.ImportSQLStoppedError
+		if errors.As(err, &stopped) {
+			return fail(err)
+		}
 		if err != nil && !(r != nil && r.Stopped) {
 			return fail(err)
 		}
 		for _, e := range r.Errors {
-			rep.Warn("第 %d 条（%s）出错：%s", e.N, e.SQL, e.Error)
+			rep.Warn("%s（%s）出错：%s", e.StatementLabel(), e.SQL, e.Error)
 		}
 		if r.Stopped {
 			e := r.Errors[len(r.Errors)-1]
-			return fail(fmt.Errorf("第 %d 条语句出错，停下了（前面 %d 条已经执行、生效）：%s\n%s", e.N, e.N-1, e.Error, e.SQL))
+			return fail(&dbx.ImportSQLStoppedError{Result: *r, Cause: fmt.Errorf("%s出错：%s", e.StatementLabel(), e.Error)})
 		}
 		rep.Info("执行了 %d 条语句%s", r.Stmts, map[bool]string{true: fmt.Sprintf("，%d 条出错", r.Failed), false: ""}[r.Failed > 0])
 		return out(r)
@@ -764,12 +785,12 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	return fail(fmt.Errorf("不认识的子命令 db %s", sub))
 }
 
-func browseDBCommand(cn *dbx.Conn, sub string) bool {
+func limitedDBCommand(cn *dbx.Conn, sub string) bool {
 	switch sub {
-	case "info", "databases", "tables":
+	case "info", "databases", "tables", "ai-exec", "estimate":
 		return true
 	case "table", "rows", "query", "export":
-		return cn.ReadOnlySQL()
+		return cn.Kind != dbx.MongoDB
 	case "mongo-find", "mongo-export":
 		return cn.Kind == dbx.MongoDB
 	}

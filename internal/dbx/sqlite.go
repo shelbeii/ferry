@@ -20,7 +20,7 @@ func sqliteURI(path, mode string) string {
 	return "file:" + u.EscapedPath() + "?mode=" + mode
 }
 
-func openSQLite(path, database string) (*sql.DB, error) {
+func openSQLite(path, database string, readOnly bool) (*sql.DB, error) {
 	if database != "main" {
 		return nil, errors.New("SQLite 只打开所选文件的 main 数据库")
 	}
@@ -34,15 +34,35 @@ func openSQLite(path, database string) (*sql.DB, error) {
 	if !st.Mode().IsRegular() {
 		return nil, errors.New("请选择常规 SQLite 数据库文件")
 	}
-	return sqlitedriver.Open(sqliteURI(path, "ro"), func(c *sqlite3.Conn) error {
+	mode := "rw"
+	if readOnly {
+		mode = "ro"
+	}
+	return sqlitedriver.Open(sqliteURI(path, mode), func(c *sqlite3.Conn) error {
 		if _, err := c.Config(sqlite3.DBCONFIG_DEFENSIVE, true); err != nil {
 			return err
 		}
-		if err := c.Exec("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON"); err != nil {
+		if err := c.Exec("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON"); err != nil {
 			return err
 		}
-		return c.SetAuthorizer(sqliteReadOnly)
+		if readOnly {
+			if err := c.Exec("PRAGMA query_only=ON"); err != nil {
+				return err
+			}
+			return c.SetAuthorizer(sqliteReadOnly)
+		}
+		return c.SetAuthorizer(sqliteWritable)
 	})
+}
+
+func sqliteWritable(action sqlite3.AuthorizerActionCode, a, b, db, trigger string) sqlite3.AuthorizerReturnCode {
+	switch action {
+	case sqlite3.AUTH_PRAGMA, sqlite3.AUTH_FUNCTION:
+		return sqliteReadOnly(action, a, b, db, trigger)
+	case sqlite3.AUTH_ATTACH, sqlite3.AUTH_DETACH, sqlite3.AUTH_CREATE_VTABLE:
+		return sqlite3.AUTH_DENY
+	}
+	return sqlite3.AUTH_OK
 }
 
 func sqliteExportDestination(database, output string) error {

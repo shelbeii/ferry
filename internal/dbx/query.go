@@ -8,25 +8,29 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Split 把一段 SQL 按分号拆成语句：跳过引号、注释里的分号，PostgreSQL 的 $$ 函数体；
 // MySQL 支持 DELIMITER（写存储过程时用）。去掉空语句和只有注释的语句。
 func Split(kind, src string) []string {
-	out, _, _ := splitScan(kind, src, ";", true)
+	out, _, _ := splitScan(kind, src, ";", true, false, nil)
 	return out
 }
 
 // splitScan 拆语句的核心。final 为 false 时（文件读到一半）只返回已经结束的语句（后面跟着分隔符的）：
 // used 是用掉了多少字节（剩下的接上后面读到的再拆），delim 是读到这里时的分隔符（MySQL 的 DELIMITER 改过的）。
-func splitScan(kind, src, delim string, final bool) (out []string, used int, endDelim string) {
-	var cur strings.Builder
-	flush := func() {
-		s := strings.TrimSpace(cur.String())
-		cur.Reset()
-		if s != "" && strings.TrimSpace(stripComments(kind, s)) != "" {
-			out = append(out, s)
+func splitScan(kind, src, delim string, final, importFile bool, onStatement func(int)) (out []string, used int, endDelim string) {
+	start, hasSQL := 0, false
+	flush := func(end, next int) {
+		if hasSQL {
+			out = append(out, strings.TrimSpace(src[start:end]))
+			if onStatement != nil {
+				onStatement(next)
+			}
 		}
+		start, hasSQL = next, false
 	}
 	n := len(src)
 	atLineStart := true
@@ -48,79 +52,81 @@ func splitScan(kind, src, delim string, final bool) (out []string, used int, end
 					break // DELIMITER 这一行还没读完
 				}
 				if d := strings.TrimSpace(line[9:]); d != "" {
-					flush()
+					flush(i, i)
 					delim = d
+					if end < 0 {
+						i = n
+					} else {
+						i = j + end + 1
+					}
+					start, used = i, i
+					continue
 				}
-				if end < 0 {
-					i = n
-				} else {
-					i = j + end + 1
-				}
-				used = i
-				continue
 			}
 		}
 		atLineStart = false
 		switch {
 		case c == '\n':
 			atLineStart = true
-			cur.WriteByte(c)
 			i++
 		case isSQLQuote(kind, c):
-			j := skipQuoted(kind, src, i)
-			cur.WriteString(src[i:j])
-			i = j
+			hasSQL = true
+			i = skipQuoted(kind, src, i)
 		case c == '-' && i+1 < n && src[i+1] == '-' && (kind != MySQL || i+2 >= n || src[i+2] == ' ' || src[i+2] == '\t' || src[i+2] == '\n' || src[i+2] == '\r'):
 			j := strings.IndexByte(src[i:], '\n')
 			if j < 0 {
 				j = n - i
 			}
-			cur.WriteString(src[i : i+j])
 			i += j
 		case c == '#' && (kind == MySQL || kind == ClickHouse):
 			j := strings.IndexByte(src[i:], '\n')
 			if j < 0 {
 				j = n - i
 			}
-			cur.WriteString(src[i : i+j])
 			i += j
 		case c == '/' && i+1 < n && src[i+1] == '*':
+			if importFile && kind == MySQL && (strings.HasPrefix(src[i:], "/*!") || strings.HasPrefix(src[i:], "/*M!")) {
+				hasSQL = true // mysqldump / mariadb-dump 的会话设置可以单独写在可执行注释里
+			}
 			j := strings.Index(src[i+2:], "*/")
 			if j < 0 {
 				j = n
 			} else {
 				j = i + 2 + j + 2
 			}
-			cur.WriteString(src[i:j])
 			i = j
-		case c == '$' && (kind == Postgres || kind == ClickHouse):
+		case c == '$' && (postgresProtocol(kind) || kind == ClickHouse):
+			hasSQL = true
 			if tag, ok := dollarTag(src[i:]); ok {
 				end := strings.Index(src[i+len(tag):], tag)
 				if end >= 0 {
-					j := i + len(tag) + end + len(tag)
-					cur.WriteString(src[i:j])
-					i = j
+					i += len(tag) + end + len(tag)
 					continue
 				}
 				if kind == Postgres {
-					cur.WriteString(src[i:])
 					i = n
 					continue
 				}
 			}
-			cur.WriteByte(c)
 			i++
 		case strings.HasPrefix(src[i:], delim):
-			flush()
+			end := i
 			i += len(delim)
+			flush(end, i)
 			used = i
+		case c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v':
+			i++
+		case !hasSQL && c >= utf8.RuneSelf:
+			r, size := utf8.DecodeRuneInString(src[i:])
+			hasSQL = !unicode.IsSpace(r)
+			i += size
 		default:
-			cur.WriteByte(c)
+			hasSQL = true
 			i++
 		}
 	}
 	if final {
-		flush()
+		flush(n, n)
 		used = n
 	}
 	return out, used, delim
@@ -128,7 +134,7 @@ func splitScan(kind, src, delim string, final bool) (out []string, used int, end
 
 func isSQLQuote(kind string, c byte) bool {
 	return c == '\'' || c == '"' || (c == '`' && (kind == MySQL || kind == SQLite || kind == ClickHouse)) ||
-		(c == '[' && kind == SQLite)
+		(c == '[' && (kind == SQLite || kind == SQLServer))
 }
 
 func skipQuoted(kind, s string, i int) int {
@@ -204,7 +210,10 @@ func stripComments(kind, s string) string {
 
 // FirstWord 语句的第一个关键字（大写，跳过注释和左括号）。
 func FirstWord(kind, stmt string) string {
-	s := strings.TrimLeft(stripComments(kind, stmt), " \t\r\n(")
+	s := strings.TrimLeft(stmt, " \t\r\n(")
+	if strings.HasPrefix(s, "--") || strings.HasPrefix(s, "/*") || strings.HasPrefix(s, "#") {
+		s = strings.TrimLeft(stripComments(kind, s), " \t\r\n(")
+	}
 	end := strings.IndexFunc(s, func(r rune) bool {
 		return !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
 	})
@@ -267,7 +276,7 @@ type QueryOptions struct {
 // Query 执行一段 SQL（可以有多条语句），每条一个结果。
 func (cl *Client) Query(ctx context.Context, dbName, src string, o QueryOptions) ([]Result, error) {
 	kind := cl.Conn.Kind
-	if cl.Conn.ReadOnlySQL() {
+	if cl.Conn.ReadOnly && (adapterSQL(kind) || cl.isTiDB()) {
 		return cl.readOnlySQLQuery(ctx, dbName, src, o)
 	}
 	stmts := Split(kind, src)
@@ -408,7 +417,7 @@ func (cl *Client) runOne(ctx context.Context, conn *sql.Conn, dbName, id, stmt s
 
 // Exec 依次执行几条语句（结构设计、删表等确认过的改动），出错就停。
 func (cl *Client) Exec(ctx context.Context, dbName string, stmts []string) ([]Result, error) {
-	if cl.Conn.ReadOnly || cl.Conn.BrowseOnly() {
+	if cl.Conn.ReadOnly || cl.Conn.LimitedDesktop() {
 		return nil, ErrReadOnly
 	}
 	conn, release, err := cl.Session(ctx, "", dbName)

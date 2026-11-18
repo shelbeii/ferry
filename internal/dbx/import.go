@@ -1,6 +1,6 @@
 package dbx
 
-// 导入：执行 SQL 文件（Ferry、mysqldump、pg_dump 导出的都行）、把 CSV 导进一张表。
+// 导入：执行 SQL 文件、把 CSV 导进一张表。
 
 import (
 	"bufio"
@@ -26,13 +26,23 @@ type ImportSQLOptions struct {
 	File string
 	// Continue 有语句出错时接着执行后面的（默认停下）
 	Continue bool
+	// BatchInserts 合并连续写入同一张表的单行 INSERT。仅在遇错停止时启用。
+	BatchInserts bool
 }
 
 // ImportError 执行出错的一条。
 type ImportError struct {
-	N     int64  `json:"n"` // 第几条语句
+	N     int64  `json:"n"`             // 第几条语句
+	End   int64  `json:"end,omitempty"` // 合并执行时的最后一条语句
 	SQL   string `json:"sql"`
 	Error string `json:"error"`
+}
+
+func (e ImportError) StatementLabel() string {
+	if e.End > e.N {
+		return fmt.Sprintf("第 %d–%d 条语句（合并执行）", e.N, e.End)
+	}
+	return fmt.Sprintf("第 %d 条语句", e.N)
 }
 
 // ImportResult 导入的结果。
@@ -44,14 +54,33 @@ type ImportResult struct {
 	Bytes  int64         `json:"bytes"`
 	Ms     int64         `json:"ms"`
 	// Stopped 出错后停下了（没执行完）
-	Stopped bool `json:"stopped,omitempty"`
+	Stopped                 bool  `json:"stopped,omitempty"`
+	LastSuccessfulStatement int64 `json:"lastSuccessfulStatement,omitempty"`
+	LastSuccessfulOffset    int64 `json:"lastSuccessfulOffset,omitempty"`
+}
+
+type ImportSQLStoppedError struct {
+	Result ImportResult
+	Cause  error
+}
+
+func (e *ImportSQLStoppedError) Error() string {
+	return fmt.Sprintf("SQL 文件执行中止，已提交的改动可能仍然生效。最后成功返回第 %d 条语句（文件字节 %d）：%v",
+		e.Result.LastSuccessfulStatement, e.Result.LastSuccessfulOffset, e.Cause)
+}
+
+func (e *ImportSQLStoppedError) Unwrap() error { return e.Cause }
+
+func (e *ImportSQLStoppedError) JSONDetail() map[string]any {
+	return map[string]any{"kind": "sql-import-stopped", "phase": "执行 SQL 文件", "attempted": e.Result.Stmts,
+		"lastSuccessfulStatement": e.Result.LastSuccessfulStatement, "lastSuccessfulOffset": e.Result.LastSuccessfulOffset}
 }
 
 // ErrImportReadOnly 只读连接不能导入。
 var ErrImportReadOnly = errors.New("这个连接设成了只读，不能导入")
 
 // ImportSQL 执行 SQL 文件：边读边按语句拆开执行（文件可以很大），用同一条连接（文件里的 SET、USE、关外键检查对后面的语句有效）。
-// 语句一条条直接执行（和 mysql、psql 一样），出错的那条之前的已经生效。progress 报告读了多少字节、执行了多少条。
+// progress 报告已成功执行到的字节和尝试执行的语句数。
 func (cl *Client) ImportSQL(ctx context.Context, dbName string, o ImportSQLOptions, progress func(done, total, stmts int64)) (*ImportResult, error) {
 	if cl.Conn.ReadOnly {
 		return nil, ErrImportReadOnly
@@ -66,7 +95,8 @@ func (cl *Client) ImportSQL(ctx context.Context, dbName string, o ImportSQLOptio
 	if st != nil {
 		total = st.Size()
 	}
-	db, err := cl.DB(ctx, dbName)
+	// 脚本可以 USE、SET 或打开事务，结束后关掉这条连接。
+	db, err := cl.pool(dbName, roleImport)
 	if err != nil {
 		return nil, err
 	}
@@ -79,44 +109,76 @@ func (cl *Client) ImportSQL(ctx context.Context, dbName string, o ImportSQLOptio
 	start := time.Now()
 	res := &ImportResult{}
 	kind := cl.Conn.Kind
-	rd := bufio.NewReaderSize(f, 1<<20)
+	rd := bufio.NewReader(f)
+	var read int64
 	if b, _ := rd.Peek(3); bytes.Equal(b, []byte("\xEF\xBB\xBF")) {
 		rd.Discard(3)
+		read = 3
 	}
-	var read int64
 	last := time.Now()
-	run := func(stmts []string) bool {
-		for _, s := range stmts {
-			res.Stmts++
+	batchInserts := o.BatchInserts && !o.Continue && (kind == MySQL || kind == Postgres)
+	batchBytes := maxImportBatchBytes
+	if batchInserts && kind == MySQL {
+		var packet int64
+		if err := conn.QueryRowContext(ctx, "SELECT @@max_allowed_packet").Scan(&packet); err != nil {
+			batchInserts = false
+		} else {
+			batchBytes = int(min(int64(batchBytes), packet-1)) // COM_QUERY 还要占一个字节
+		}
+	}
+	run := func(stmts []string, offsets []int64) bool {
+		for i := 0; i < len(stmts); {
+			if ctx.Err() != nil {
+				return false
+			}
+			s, n := stmts[i], 1
+			if batchInserts {
+				s, n = batchSQLInserts(kind, stmts[i:], batchBytes)
+			}
+			res.Stmts += int64(n)
 			r := cl.runOne(ctx, conn, dbName, id, s, 1)
 			if r.Error != "" {
-				res.Failed++
+				res.Failed += int64(n)
 				if len(res.Errors) < 20 {
-					res.Errors = append(res.Errors, ImportError{N: res.Stmts, SQL: firstLine(s), Error: r.Error})
+					e := ImportError{N: res.Stmts - int64(n) + 1, SQL: firstLine(stmts[i]), Error: r.Error}
+					if n > 1 {
+						e.End = res.Stmts
+					}
+					res.Errors = append(res.Errors, e)
 				}
 				if !o.Continue || ctx.Err() != nil {
 					res.Stopped = true
 					return false
 				}
+			} else {
+				res.LastSuccessfulStatement = res.Stmts
+				res.LastSuccessfulOffset = offsets[i+n-1]
 			}
+			i += n
 			if progress != nil && time.Since(last) > 300*time.Millisecond {
 				last = time.Now()
-				progress(read, total, res.Stmts)
+				progress(res.LastSuccessfulOffset, total, res.Stmts)
 			}
 		}
 		return true
 	}
-	if err := eachStatement(kind, rd, 1<<20, &read, run); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, errors.New("已停止：前面执行了的语句已经生效")
-	}
-	if progress != nil {
-		progress(read, total, res.Stmts)
-	}
+	err = eachStatement(ctx, kind, rd, 1<<20, &read, run)
 	res.Bytes = read
 	res.Ms = time.Since(start).Milliseconds()
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		res.Stopped = true
+		return res, &ImportSQLStoppedError{Result: *res, Cause: err}
+	}
+	if progress != nil {
+		done := read
+		if res.Stopped {
+			done = res.LastSuccessfulOffset
+		}
+		progress(done, total, res.Stmts)
+	}
 	return res, nil
 }
 
@@ -392,39 +454,52 @@ func (cl *Client) ImportCSV(ctx context.Context, dbName string, o CSVImport, pro
 }
 
 // eachStatement 从 rd 边读边拆语句（每次读 chunk 字节），拆出来的交给 fn；fn 返回 false 时停下。read 记读了多少字节。
-func eachStatement(kind string, rd io.Reader, chunk int, read *int64, fn func([]string) bool) error {
+func eachStatement(ctx context.Context, kind string, rd io.Reader, chunk int, read *int64, fn func([]string, []int64) bool) error {
 	var buf strings.Builder
 	delim := ";"
 	b := make([]byte, chunk)
 	var pending []byte // 上次读到的最后不完整的一行
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		n, rerr := io.ReadFull(rd, b)
 		*read += int64(n)
 		eof := rerr == io.EOF || rerr == io.ErrUnexpectedEOF
 		if rerr != nil && !eof {
 			return rerr
 		}
-		data := append(pending, b[:n]...)
-		pending = nil
+		base := *read - int64(n+len(pending)+buf.Len())
+		data := b[:n]
+		if len(pending) > 0 {
+			data = append(pending, data...)
+		}
 		// 只交整行给拆语句的（DELIMITER、注释要按行看）
 		if !eof {
-			i := bytes.LastIndexByte(data, '\n')
+			i := bytes.LastIndexByte(b[:n], '\n')
 			if i < 0 {
-				pending = data // 一行比 chunk 还长：接着读
+				if len(pending) == 0 {
+					data = bytes.Clone(data) // b 会被下一次读取覆盖
+				}
+				pending = data
 				continue
 			}
-			pending = append([]byte(nil), data[i+1:]...)
+			i += len(pending)
+			pending = bytes.Clone(data[i+1:])
 			data = data[:i+1]
 		}
 		buf.Write(data)
-		stmts, used, d := splitScan(kind, buf.String(), delim, eof)
+		var offsets []int64
+		stmts, used, d := splitScan(kind, buf.String(), delim, eof, true, func(end int) {
+			offsets = append(offsets, base+int64(end))
+		})
 		delim = d
-		if !eof {
+		if !eof && used > 0 {
 			rem := buf.String()[used:]
 			buf.Reset()
 			buf.WriteString(rem)
 		}
-		if !fn(stmts) || eof {
+		if !fn(stmts, offsets) || eof {
 			return nil
 		}
 	}

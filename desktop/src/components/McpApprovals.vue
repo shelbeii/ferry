@@ -63,8 +63,8 @@ interface McpRequest {
   /** db-exec：在数据库连接 db（dbName 是名称）的库 database 里执行 stmts；经服务器连时 target 是那台服务器 */
   db?: string
   dbName?: string
-  /** mysql | postgres | redis（redis 时 stmts 是一行一条的命令） */
   dbKind?: string
+  dbCheck?: string
   database?: string
   stmts?: string[]
 }
@@ -125,7 +125,7 @@ watch(current, (r) => {
 const estimate = ref<{ id: string; text: string; max: number; error?: string; busy?: boolean } | null>(null)
 async function estimateRows(r: McpRequest) {
   estimate.value = null
-  if (r.dbKind === 'redis' || !r.db || !(r.stmts ?? []).some((x) => /\b(UPDATE|DELETE)\b/i.test(x))) return
+  if (!['mysql', 'postgres'].includes(r.dbKind ?? '') || !r.db || !(r.stmts ?? []).some((x) => /\b(UPDATE|DELETE)\b/i.test(x))) return
   estimate.value = { id: r.id, text: '', max: 0, busy: true }
   try {
     const x = await call<{ estimates: { rows: number }[]; text: string; candidates: number }>(['db', 'estimate', r.db, r.database ?? ''], { FERRY_DB_REQ: JSON.stringify({ stmts: r.stmts ?? [] }) })
@@ -158,7 +158,7 @@ const clientOf = (r: McpRequest) => r.client || '编程软件'
 const canGrant = (r: McpRequest) =>
   r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick' && r.action !== 'secret' && !isBlock(r)
 const titleOf = (r: McpRequest) => {
-  if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条${r.dbKind === 'redis' ? '命令' : '语句'}）`
+  if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条${r.dbKind === 'redis' ? '命令' : r.dbKind === 'mongodb' ? '操作' : '语句'}）`
   if (r.action === 'create') return `新建项目 ${r.project}`
   if (isCfg(r)) return cfgLocal(r) ? '改这台电脑的本机设置' : '改项目配置 ferry.yaml'
   if (r.action.startsWith('sw-')) return `${VERBS[r.action]} ${r.software ?? String(r.input?.name ?? '')}`
@@ -309,7 +309,10 @@ function execute(r: McpRequest) {
   if (isDB(r)) {
     const title = `${titleOf(r)}（${clientOf(r)} 请求）`
     const args = ['db', 'ai-exec', r.db ?? '', r.database ?? '']
-    const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: `${clientOf(r)} · MCP`, FERRY_DB_REQ: JSON.stringify({ stmts: r.stmts ?? [] }) })
+    const task: Task = startTask(title, args, (t) => finish(r, t), {
+      FERRY_VIA: `${clientOf(r)} · MCP`,
+      FERRY_DB_REQ: JSON.stringify({ stmts: r.stmts ?? [], dbCheck: r.dbCheck }),
+    })
     watchProgress(r, task)
     return
   }

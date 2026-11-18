@@ -7,6 +7,7 @@ package dbx
 //   - PostgreSQL：枚举类型、序列、函数、表、数据、序列的当前值、外键（数据之后加，表的先后不要紧）、视图、触发器。
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -31,7 +32,7 @@ var definer = regexp.MustCompile("DEFINER=`[^`]*`@`[^`]*` ")
 
 // 多行一条 INSERT：最多这么多行、这么长
 const (
-	insertRows  = 500
+	insertRows  = 2000
 	insertBytes = 1 << 20
 )
 
@@ -550,36 +551,59 @@ func (cl *Client) writeInserts(ctx context.Context, q querier, w io.Writer, quer
 		cols[i] = Quote(kind, c)
 	}
 	head := "INSERT INTO " + table + " (" + strings.Join(cols, ", ") + ") " + extra + "VALUES\n"
-	lits := make([]string, len(names))
-	var batch []string
-	size := 0
-	flush := func() {
-		if len(batch) > 0 {
-			io.WriteString(w, head+strings.Join(batch, ",\n")+";\n")
-			batch, size = batch[:0], 0
+	var row, batch bytes.Buffer
+	count := 0
+	flush := func() error {
+		if count == 0 {
+			return nil
 		}
+		batch.WriteString(";\n")
+		_, err := w.Write(batch.Bytes())
+		batch.Reset()
+		if batch.Cap() > 2*insertBytes {
+			batch = bytes.Buffer{}
+		}
+		count = 0
+		return err
 	}
 	var n int64
 	for rows.Next() {
 		if err := rows.Scan(ptrs...); err != nil {
 			return n, err
 		}
+		row.WriteByte('(')
 		for i, v := range vals {
-			lits[i] = exportText(v, types[i], true, kind)
+			if i > 0 {
+				row.WriteString(", ")
+			}
+			row.WriteString(exportText(v, types[i], true, kind))
 		}
-		row := "(" + strings.Join(lits, ", ") + ")"
-		batch = append(batch, row)
-		size += len(row)
-		if len(batch) >= insertRows || size >= insertBytes {
-			flush()
+		row.WriteByte(')')
+		if count > 0 && (count >= insertRows || batch.Len()+row.Len()+4 > insertBytes) {
+			if err := flush(); err != nil {
+				return n, err
+			}
 		}
+		if count == 0 {
+			batch.WriteString(head)
+		} else {
+			batch.WriteString(",\n")
+		}
+		batch.Write(row.Bytes())
+		row.Reset()
+		if row.Cap() > 2*insertBytes {
+			row = bytes.Buffer{}
+		}
+		count++
 		n++
 		if progress != nil && n%10000 == 0 {
 			progress(n)
 		}
 	}
-	flush()
-	return n, rows.Err()
+	if err := rows.Err(); err != nil {
+		return n, err
+	}
+	return n, flush()
 }
 
 // mentions 定义里有没有这个名字（整个词：前后不是字母、数字、下划线）。

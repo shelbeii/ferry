@@ -12,12 +12,14 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 )
 
-func (cl *Client) clickHousePool(name string) *sql.DB {
+func (cl *Client) clickHousePool(name string, readOnly bool) *sql.DB {
 	o := &clickhouse.Options{
 		Addr:        []string{cl.addr},
 		Auth:        clickhouse.Auth{Database: name, Username: cl.Conn.User, Password: cl.password},
 		DialTimeout: dialTimeout,
-		Settings:    clickhouse.Settings{"readonly": 1},
+	}
+	if readOnly {
+		o.Settings = clickhouse.Settings{"readonly": 1}
 	}
 	if cl.tlsMode() != TLSOff {
 		o.TLS = cl.tlsConfig()

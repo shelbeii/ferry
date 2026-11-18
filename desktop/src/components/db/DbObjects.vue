@@ -25,7 +25,7 @@ const body = ref<HTMLElement>()
 
 const isPg = computed(() => props.conn.kind === 'postgres')
 const isMongo = computed(() => props.conn.kind === 'mongodb')
-const browseOnly = computed(() => dbCapabilities[props.conn.kind].browseOnly)
+const limitedDesktop = computed(() => dbCapabilities[props.conn.kind].limitedDesktop)
 const ro = computed(() => !!props.conn.readOnly)
 const isTables = computed(() => props.what === 'all' || props.what === 'table' || props.what === 'view')
 const inSchema = (s?: string) => !props.schema || (s || 'public') === props.schema
@@ -72,7 +72,7 @@ onMounted(() => {
 })
 
 /** PostgreSQL 点的是库、里面有好几个模式时多一列「模式」 */
-const showSchema = computed(() => !props.schema && (props.conn.kind === 'sqlserver'
+const showSchema = computed(() => !props.schema && (props.conn.kind === 'sqlserver' || props.conn.kind === 'dm' || props.conn.kind === 'kingbase'
   || isPg.value && new Set(all.value.map((x) => x.t?.schema || x.r?.schema || 'public')).size > 1))
 
 interface Col { k: string; t: string; w: number; num?: boolean; tip?: string }
@@ -103,7 +103,7 @@ const cols = computed<Col[]>(() => {
         { k: 'size', t: '大小', w: 100, num: true },
       ]
   }
-  if (browseOnly.value) return [{ k: 'name', t: '名称', w: 240 }, ...schemaCol, { k: 'type', t: '类型', w: 100 }]
+  if (limitedDesktop.value) return [{ k: 'name', t: '名称', w: 240 }, ...schemaCol, { k: 'type', t: '类型', w: 100 }]
   if (isPg.value) {
     return [
       { k: 'name', t: '名', w: 220 },
@@ -248,7 +248,7 @@ defineExpose({ reload: load })
 <template>
   <div class="objs">
     <div class="bar">
-      <template v-if="isTables && browseOnly">
+      <template v-if="isTables && limitedDesktop">
         <el-button size="small" :icon="FolderOpened" :disabled="!current" @click="current && emit('open', current)">打开</el-button>
         <el-button v-if="!isMongo" size="small" :icon="Download" :disabled="!current" @click="act('export-csv')">导出 CSV</el-button>
       </template>
