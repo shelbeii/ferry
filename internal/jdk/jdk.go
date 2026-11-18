@@ -28,6 +28,25 @@ import (
 // DefaultSource 默认的下载源：Adoptium（Eclipse Temurin）官方 API。
 const DefaultSource = "https://api.adoptium.net"
 
+// ValidateSource 检查下载源的配置格式，不发送网络请求。
+func ValidateSource(source string) error {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return nil
+	}
+	u, err := url.Parse(strings.NewReplacer("{java}", "21", "{arch}", "x64").Replace(source))
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return errors.New("JDK 下载源须填写 HTTP 或 HTTPS 的 Adoptium 兼容 API 根地址，也可填写包含版本或架构占位符的镜像地址")
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	page := strings.TrimRight(strings.ToLower(u.Path), "/")
+	if (host == "oracle.com" || host == "www.oracle.com") &&
+		(strings.HasSuffix(page, "/java/technologies/downloads") || strings.HasSuffix(page, "archive-downloads.html")) {
+		return errors.New("JDK 下载源填入了 Oracle JDK 下载网页。请在「设置 → 运行环境 → Java JDK」恢复默认并保存，或下载 Oracle 的 Linux .tar.gz 后选择「导入压缩包」")
+	}
+	return nil
+}
+
 // Meta 本机缓存里的一个 JDK。
 type Meta struct {
 	ID       string    `json:"id"`      // 如 jdk-17.0.13_11-x64
@@ -74,7 +93,7 @@ func List(dir string) []Meta {
 		if out[i].Java != out[j].Java {
 			return out[i].Java > out[j].Java
 		}
-		return versionLess(out[j].Version, out[i].Version)
+		return VersionLess(out[j].Version, out[i].Version)
 	})
 	return out
 }
@@ -216,8 +235,13 @@ func Major(v string) int {
 	return n
 }
 
-// versionLess 按数字逐段比较版本（17.0.9+9 < 17.0.13+11）。
-func versionLess(a, b string) bool {
+var reVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*\+[0-9]+(-[A-Za-z0-9.]+)?$`)
+
+// ValidVersion 检查形如 17.0.13+11 的完整版本。
+func ValidVersion(version string) bool { return reVersion.MatchString(version) }
+
+// VersionLess 按数字逐段比较版本（17.0.9+9 < 17.0.13+11）。
+func VersionLess(a, b string) bool {
 	num := func(s string) []int {
 		var out []int
 		for _, p := range strings.FieldsFunc(s, func(r rune) bool { return r < '0' || r > '9' }) {
@@ -293,6 +317,10 @@ type Progress func(done, total int64)
 //
 // 有 sha256 时校验（Adoptium API 自带；镜像取同名的 .sha256.txt / .sha256）。
 func Download(ctx context.Context, source string, java int, arch, dir string, progress Progress) (*Meta, error) {
+	source = strings.TrimSpace(source)
+	if err := ValidateSource(source); err != nil {
+		return nil, err
+	}
 	if source == "" {
 		source = DefaultSource
 	}
@@ -311,6 +339,10 @@ func Download(ctx context.Context, source string, java int, arch, dir string, pr
 // DownloadVersion 下载指定版本（如 25.0.4.1+1）、架构为 arch 的 JDK 到缓存目录。source 同 Download：
 // Adoptium API 按版本查；镜像的目录列表里找这个版本的压缩包；直接给的压缩包地址下载后核对版本。
 func DownloadVersion(ctx context.Context, source, version, arch, dir string, progress Progress) (*Meta, error) {
+	source = strings.TrimSpace(source)
+	if err := ValidateSource(source); err != nil {
+		return nil, err
+	}
 	if source == "" {
 		source = DefaultSource
 	}
@@ -465,7 +497,7 @@ func latestInListing(ctx context.Context, dirURL string, java int, arch string) 
 		if !strings.Contains(name, "jdk_"+arch+"_linux") || strings.Contains(name, "debugimage") || strings.Contains(name, "testimage") {
 			continue
 		}
-		if best == "" || versionLess(best, name) {
+		if best == "" || VersionLess(best, name) {
 			best = name
 		}
 	}
@@ -507,12 +539,17 @@ func get(ctx context.Context, u string, limit int64) ([]byte, error) {
 
 // fetch 下载到 w，返回 sha256。
 func fetch(ctx context.Context, u string, w io.Writer, progress Progress) (string, error) {
+	return FetchWithClient(ctx, http.DefaultClient, u, w, progress)
+}
+
+// FetchWithClient 下载到 w，调用方可为大包单独设置 HTTP 连接和超时。
+func FetchWithClient(ctx context.Context, client *http.Client, u string, w io.Writer, progress Progress) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "ferry")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return "", ctx.Err()

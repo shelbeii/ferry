@@ -306,11 +306,14 @@ export function passwordEnv(target: string): string {
 
 export interface InspectTarget {
   name: string
+  title?: string
   host: string
   port: number
   user: string
   sudo: boolean
   root: string
+  /** 服务器上的 Ferry 公共运行环境目录 */
+  runtimeDir: string
   runAs: string
   arch: string
   keepReleases: number
@@ -367,6 +370,7 @@ export interface LocalReport {
   file: string
   targets: {
     name: string
+    title?: string
     auth: 'key' | 'password'
     identityFile: string
     keyPath: string
@@ -939,6 +943,8 @@ export interface ExtraPort {
   use?: string
   /** 不宜对外开放（没有认证，或能控制进程） */
   risky?: boolean
+  /** 不宜对外、监听所有地址时防火墙对它的状态：open 放行、blocked 拦着、partial 只对部分来源放行；空 = 没有防火墙或看不出来 */
+  firewall?: 'open' | 'blocked' | 'partial'
 }
 
 export interface Site {
@@ -992,7 +998,7 @@ export interface AppOutcome {
 /** 部署会带上线的改动（ferry changes） */
 export interface AppChange {
   app: string
-  online?: { id: string; commit?: string; branch?: string; deployedAt?: string; deployedBy?: string }
+  online?: Pick<ReleaseMeta, 'id' | 'commit' | 'branch' | 'deployedAt' | 'deployedBy' | 'kept'>
   local: { commit: string; branch: string; dirty: boolean }
   known: boolean
   ahead: number

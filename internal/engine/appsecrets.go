@@ -59,6 +59,19 @@ func (e *Engine) keyringAppSecret(t *config.Target, app, name string) (value, so
 
 type appSecretLookup func(app, name string) (value, source string, err error)
 
+func availableSecretEnv(values *proto.AppSecretValues) []string {
+	if values == nil {
+		return nil
+	}
+	var names []string
+	for name, value := range *values {
+		if value != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // 每个目标每次操作最多读一次加密文件。完全由环境变量供值的 CI 可以直接部署。
 func (e *Engine) appSecretLookup(t *config.Target) appSecretLookup {
 	load := sync.OnceValues(func() (*teamSecretFile, error) {

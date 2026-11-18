@@ -83,6 +83,9 @@ type fwScan struct {
 	keep     []int                    // 不许关闭的端口（Ferry 连服务器用的 SSH 端口）
 	ferryDir string                   // 拦着的 Docker 端口记在这里（docker-guard.json）
 	ifaces   func() map[string]string // 地址 → 所在的网卡；nil = 不看
+	// runtimeOnly 只读运行时的规则、不和永久配置对比（看不出哪些规则只在运行时）：
+	// 应用状态里只要知道拦没拦，少起一次 firewall-cmd
+	runtimeOnly bool
 
 	ssh map[int]bool // sshd 监听的端口
 }
@@ -500,7 +503,11 @@ func (sc *fwScan) firewalld() *fwState {
 	// 区域从运行时的 interfaces 里找，不再一条一条地问（原来要连着起 4 次）。
 	var all [2]string
 	var allErr [2]error
-	eachParallel(2, 2, func(i int) {
+	n := 2
+	if sc.runtimeOnly {
+		n = 1
+	}
+	eachParallel(n, 2, func(i int) {
 		perm := ""
 		if i == 1 {
 			perm = " --permanent"
@@ -550,8 +557,10 @@ func (sc *fwScan) firewalld() *fwState {
 	var perm *fwZone // 永久配置：对比出只在运行时的规则
 	if p, ok := permZones[zone]; ok {
 		perm = parseZone(p)
-	} else if out, err := sc.run("LC_ALL=C firewall-cmd --permanent --zone="+zone+" --list-all 2>&1", fwTimeout); err == nil {
-		perm = parseZone(out)
+	} else if !sc.runtimeOnly {
+		if out, err := sc.run("LC_ALL=C firewall-cmd --permanent --zone="+zone+" --list-all 2>&1", fwTimeout); err == nil {
+			perm = parseZone(out)
+		}
 	}
 	temp := func(list func(*fwZone) []string, v string) bool { return perm != nil && !contains(list(perm), v) }
 	if z.target == "ACCEPT" {

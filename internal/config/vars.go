@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -19,6 +20,15 @@ type Scope struct {
 	Builtins map[string]string
 	Layers   []map[string]string
 	Each     func(name string) (string, error)
+}
+
+// UndefinedVarError 是变量在当前作用域中没有定义。
+type UndefinedVarError struct{ Name string }
+
+func (e *UndefinedVarError) Error() string { return fmt.Sprintf("未定义的变量 ${%s}", e.Name) }
+
+func (e *UndefinedVarError) CanDefine() bool {
+	return reVar.MatchString(e.Name) && !slices.Contains(BuiltinNames, e.Name)
 }
 
 // Expand 展开字符串里的变量。
@@ -122,7 +132,7 @@ func (sc *Scope) resolve(name string, depth int) (string, error) {
 			return sc.expand(v, depth+1)
 		}
 	}
-	return "", fmt.Errorf("未定义的变量 ${%s}", name)
+	return "", &UndefinedVarError{Name: name}
 }
 
 // BuiltinNames 内置变量名（不能在 vars 中重新定义）。

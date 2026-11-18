@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,7 +236,7 @@ func (e *Engine) ensureAgent(s *conn) error {
 		return err
 	}
 	tmpLocal.Close()
-	tmpRemote := fmt.Sprintf("/tmp/ferry-agent-%s-%d", bin.SHA256[:12], os.Getpid())
+	tmpRemote := fmt.Sprintf("/tmp/ferry-agent-%s-%s", bin.SHA256[:12], filepath.Base(tmpLocal.Name()))
 	total := int64(len(data))
 	err = s.c.UploadContext(e.ctx(), tmpLocal.Name(), tmpRemote+ext, 0o700, func(done, _ int64) {
 		e.Rep.Progress("agent", done, total)
@@ -248,9 +249,12 @@ func (e *Engine) ensureAgent(s *conn) error {
 	if hasGzip {
 		unpack = fmt.Sprintf("gzip -dc %[1]s.gz > %[1]s; rm -f %[1]s.gz; ", tmpRemote)
 	}
-	script := fmt.Sprintf("set -e; %[4]sinstall -d -m 755 -o root -g root %[1]s; install -m 755 -o root -g root %[2]s %[3]s; rm -f %[2]s; "+
-		"cd %[1]s && ls -t ferry-agent-* 2>/dev/null | tail -n +4 | xargs -r rm -f",
-		shQuote(s.ferryDir), tmpRemote, s.agent, unpack)
+	stagedAgent := shQuote(s.ferryDir + "/.new-" + filepath.Base(tmpLocal.Name()))
+	script := fmt.Sprintf("set -e; %[4]sinstall -d -m 755 -o root -g root %[1]s; "+
+		"install -m 755 -o root -g root %[2]s %[5]s; mv -f %[5]s %[3]s; rm -f %[2]s; "+
+		"cd %[1]s; ls -t ferry-agent-???????????? 2>/dev/null | tail -n +4 | while IFS= read -r old; do "+
+		"if [ \"$old\" != %[6]s ]; then rm -f -- \"$old\"; fi; done || true",
+		shQuote(s.ferryDir), tmpRemote, shQuote(s.agent), unpack, stagedAgent, shQuote(filepath.Base(s.agent)))
 	if _, res, err := s.c.Output(s.sudo + "sh -c " + shQuote(script)); err != nil || res.Code != 0 {
 		s.c.Output("rm -f " + tmpRemote + " " + tmpRemote + ".gz")
 		return fmt.Errorf("安装 agent 失败：%v %s", err, strings.TrimSpace(res.Stderr))

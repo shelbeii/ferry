@@ -3,8 +3,13 @@ package agent
 import (
 	"archive/zip"
 	"bytes"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/captain/ferry/internal/proto"
 )
@@ -77,5 +82,54 @@ func TestJdwpAddress(t *testing.T) {
 	}
 	if _, ok := jdwpAddress("-Dfoo=1"); ok {
 		t.Error("不是 jdwp")
+	}
+}
+
+// 应用状态里不宜对外的端口：防火墙拦着的标上 blocked；只读运行时的规则，不读永久配置
+func TestStatusFirewallMark(t *testing.T) {
+	proc := t.TempDir()
+	os.MkdirAll(filepath.Join(proc, "net"), 0o755)
+	os.WriteFile(filepath.Join(proc, "net", "route"), []byte("Iface\tDestination\tGateway\neth0\t00000000\t0101A8C0\n"), 0o644)
+	var mu sync.Mutex
+	var ran []string
+	run := fakeRun(map[string]string{
+		"systemctl is-active --quiet firewalld": "running\n",
+		"--list-all-zones":                      zonePublic,
+	})
+	sc := &fwScan{proc: proc, root: t.TempDir(), runtimeOnly: true, run: func(cmd string, d time.Duration) (string, error) {
+		mu.Lock()
+		ran = append(ran, cmd)
+		mu.Unlock()
+		return run(cmd, d)
+	}}
+	fw := &statusFW{scan: sc.firewall}
+	out := []proto.AppStatus{
+		{Name: "System", Extra: []proto.ExtraPort{{Addr: "*:8721", Risky: true}, {Addr: "*:10000"}}},
+		{Name: "Auth", Extra: []proto.ExtraPort{{Addr: "*:8080", Risky: true}, {Addr: "127.0.0.1:8720", Risky: true}, {Addr: "*:3306", Risky: true}}},
+	}
+	fw.start()
+	if !fw.mark(out) {
+		t.Fatal("有不宜对外的端口")
+	}
+	got := map[string]string{}
+	for _, s := range out {
+		for _, e := range s.Extra {
+			got[e.Addr] = e.Firewall
+		}
+	}
+	want := map[string]string{"*:8721": "blocked", "*:10000": "", "*:8080": "open", "127.0.0.1:8720": "", "*:3306": "partial"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%v", got)
+	}
+	for _, c := range ran {
+		if strings.Contains(c, "--permanent") {
+			t.Errorf("不该读永久配置：%s", c)
+		}
+	}
+
+	// 没有不宜对外的端口：不查防火墙
+	fw = &statusFW{scan: func() *fwState { t.Error("不该查防火墙"); return nil }}
+	if fw.mark([]proto.AppStatus{{Extra: []proto.ExtraPort{{Addr: "127.0.0.1:8721", Risky: true}}}}) {
+		t.Error("只监听本机的不算")
 	}
 }

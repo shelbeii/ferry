@@ -35,9 +35,13 @@ type UnitProps struct {
 	Since  string
 	// Enabled 开机自启：enabled / disabled / static …（UnitFileState）
 	Enabled string
+	// FragmentPath 是服务文件的位置，DropInPaths 是 systemd 加载的覆盖配置。
+	FragmentPath, DropInPaths string
 	// Restart 重启方式（on-failure / always / no）、RestartSec 等多久（如 5s）、Restarts 这次启动后自动重启过几次（systemd 235 起才有）
 	Restart, RestartSec string
 	Restarts            int
+	Result              string
+	ExecMainStatus      int
 }
 
 // System 对操作系统的全部依赖。真实实现见 realSystem；测试用假实现。
@@ -189,7 +193,8 @@ func (realSystem) UserGroups(name string) (int, []int, error) {
 func (realSystem) UnitProps(unit string) UnitProps {
 	out, _ := exec.Command("systemctl", "show", unit,
 		"-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "ActiveEnterTimestamp",
-		"-p", "UnitFileState", "-p", "Restart", "-p", "RestartUSec", "-p", "NRestarts").Output()
+		"-p", "UnitFileState", "-p", "Restart", "-p", "RestartUSec", "-p", "NRestarts",
+		"-p", "Result", "-p", "ExecMainStatus", "-p", "FragmentPath", "-p", "DropInPaths").Output()
 	return parseProps(string(out))
 }
 
@@ -213,12 +218,20 @@ func parseProps(s string) UnitProps {
 			p.Since = v
 		case "UnitFileState":
 			p.Enabled = v
+		case "FragmentPath":
+			p.FragmentPath = v
+		case "DropInPaths":
+			p.DropInPaths = v
 		case "Restart":
 			p.Restart = v
 		case "RestartUSec":
 			p.RestartSec = v
 		case "NRestarts":
 			p.Restarts, _ = strconv.Atoi(v)
+		case "Result":
+			p.Result = v
+		case "ExecMainStatus":
+			p.ExecMainStatus, _ = strconv.Atoi(v)
 		}
 	}
 	return p

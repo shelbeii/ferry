@@ -283,6 +283,7 @@ apps:
 | `conflicts` | | 同端口的其他单元：部署前停止，成功后取消其开机自启；失败回滚时恢复 |
 | `sharedDirs` | | `data` 下要创建的目录（归运行用户，不随版本变化）；不写时不建 `data` |
 | `diagLogs` | | 启动失败时显示其末尾，如 `${logs}/error.log`（相对路径为相对 `data`）；没有内容时看 journald |
+| `preflight` | | 上传前检查服务所需的变量和目标服务器到外部依赖的连通性 |
 | `runtime` | | `{java: 17}`：由 Ferry 提供 JDK（见下文），设置后不要再写 `java` |
 | `archiveLogs` | `sharedDirs` 里有 `logs` 时为 `[logs]` | 以前把日志写在 `data` 下的配置用：切换版本时把这些目录（相对 `data`）移进离开的版本目录，见下文 |
 | `health.tcp` | | `端口` 或 `主机:端口` |

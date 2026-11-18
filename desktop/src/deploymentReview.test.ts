@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Inspect, ReleaseInfo } from './ferry'
-import { deploymentTargets, previousRelease } from './deploymentReview'
+import { chosenKeepItems, configuredKeepRows, deploymentTargets, previousRelease, updateKeepRows } from './deploymentReview'
 
 const info = { apps: [{ name: 'api' }, { name: 'web' }], targets: [{ name: 'prod', apps: ['api'] }, { name: 'stage', apps: ['api', 'web'] }] } as Inspect
 
@@ -26,5 +26,25 @@ describe('上一个可用版本', () => {
   })
   it('没有可用版本时不提供错误的回滚目标', () => {
     expect(previousRelease([release('002', true), release('001', false, true)])).toBeUndefined()
+  })
+})
+
+describe('部署保留项', () => {
+  it('用重新读取的配置回显勾选项和共用状态', () => {
+    const rows = configuredKeepRows([{ path: 'config.js' }, { path: 'assets/uploads', shared: true }])
+    expect(rows.every((row) => row.on)).toBe(true)
+    expect(chosenKeepItems(rows)).toEqual([{ path: 'config.js' }, { path: 'assets/uploads', shared: true }])
+  })
+
+  it('从文件树取消或添加时，保留未展开的路径和通配符', () => {
+    const rows = configuredKeepRows([{ path: 'config.js' }, { path: 'assets/uploads', shared: true }, { path: 'conf/*.json' }])
+    const updated = updateKeepRows(rows, [{ path: 'logo.png' }], ['config.js'])
+    expect(chosenKeepItems(updated)).toEqual([{ path: 'assets/uploads', shared: true }, { path: 'conf/*.json' }, { path: 'logo.png' }])
+    expect(chosenKeepItems(rows)).toHaveLength(3)
+  })
+
+  it('重新选择已有路径时沿用原来的共用方式', () => {
+    const rows = [{ path: 'config', on: false }]
+    expect(chosenKeepItems(updateKeepRows(rows, [{ path: 'config', shared: true }], []))).toEqual([{ path: 'config' }])
   })
 })

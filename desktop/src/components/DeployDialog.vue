@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { appSecretBlocksDeployment, call, type AppChange, type AppSecretStatus, type Inspect, type KeepItem, type KeepItemReport, type KeepReport } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { appSettings, startTask } from '../state'
-import { deploymentTargets } from '../deploymentReview'
+import { chosenKeepItems, configuredKeepRows, deploymentTargets, updateKeepRows, type KeepRow } from '../deploymentReview'
 import KeepPicker from './KeepPicker.vue'
 import { Loading } from '@element-plus/icons-vue'
 
@@ -115,28 +115,26 @@ const short = (h?: string) => (h ? h.slice(0, 8) : '-')
 const when = (t?: string) => (t ? new Date(t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
 
 // 部署时保留服务器上的（artifact.keep）：配置里的默认勾上，可以这次不保留、从服务器上加
-type KeepRow = KeepItem & { on: boolean; added?: boolean }
 const appInfo = (name: string) => props.info.apps.find((a) => a.name === name)
-const keepRows = ref<Record<string, KeepRow[]>>(Object.fromEntries(props.info.apps.map((a) => [a.name, (a.keep ?? []).map((k) => ({ path: k.path, shared: !!k.shared, on: true }))])))
+const keepRows = ref<Record<string, KeepRow[]>>(Object.fromEntries(props.info.apps.map((a) => [a.name, configuredKeepRows(a.keep)])))
 const keepApps = computed(() => appList.value.filter((a) => keepRows.value[a]?.length))
 const otherApps = computed(() => appList.value.filter((a) => !keepRows.value[a]?.length))
+const onlineKeeps = computed(() => (changes.value ?? []).flatMap((c) => c.online?.kept?.length ? [{ app: c.app, paths: c.online.kept }] : []))
 const addApp = ref('')
 watch(otherApps, (list) => { if (!list.includes(addApp.value)) addApp.value = list[0] ?? '' }, { immediate: true })
-const chosen = (app: string): KeepItem[] => (keepRows.value[app] ?? []).filter((r) => r.on).map((r) => (r.shared ? { path: r.path, shared: true } : { path: r.path }))
+const chosen = (app: string) => chosenKeepItems(keepRows.value[app] ?? [])
 // 和 ferry.yaml 里的不一样（这次要用 --keep-files 告诉部署）
-function keepEdited(app: string) {
-  const yaml = appInfo(app)?.keep ?? []
+function keepEdited(app: string, yaml = appInfo(app)?.keep ?? []) {
   const now = chosen(app)
   return now.length !== yaml.length || now.some((k, i) => k.path !== yaml[i].path || !!k.shared !== !!yaml[i].shared)
 }
-const editedApps = computed(() => appList.value.filter(keepEdited))
+const editedApps = computed(() => appList.value.filter((app) => keepEdited(app)))
 const saveKeep = ref(false)
 const hasGlob = (p: string) => /[*?[]/.test(p)
 
 // 各项在查看的那台服务器上的情况（勾选、加、改「共用」后重新看）；按「服务器 | 应用 | 要保留的」记着，切回来不用再读
 const keepReports = ref<Record<string, KeepItemReport[]>>({})
 const keepErrors = ref<Record<string, string>>({})
-const keepLoading = ref<Record<string, boolean>>({})
 const keepReads = useReadRequests()
 const keepItems = (app: string) => (keepRows.value[app] ?? []).map((r) => (r.shared ? { path: r.path, shared: true } : { path: r.path }))
 const keepCacheKey = (target: string, app: string) => `${target}|${app}|${JSON.stringify(keepItems(app))}`
@@ -145,16 +143,13 @@ async function loadKeep() {
   if (!target) return
   await Promise.all(keepApps.value.map(async (app) => {
     const k = keepCacheKey(target, app)
-    if (keepReports.value[k] || keepLoading.value[k]) return
-    keepLoading.value[k] = true
+    if (keepReports.value[k] || keepReads.loading.value[k]) return
     try {
       const r = await keepReads.run(k, (s) => readCall<KeepReport>(['keep', 'scan', target, app, '--keep-files', JSON.stringify(keepItems(app)), '-c', props.config], s))
       keepReports.value[k] = r.items ?? []
       delete keepErrors.value[k]
     } catch (e) {
       if (!(e instanceof ReadCanceled)) keepErrors.value[k] = (e as Error).message
-    } finally {
-      delete keepLoading.value[k]
     }
   }))
 }
@@ -163,15 +158,19 @@ watch(keepKey, loadKeep, { immediate: true })
 onBeforeUnmount(() => { reads.cancelAll(); keepReads.cancelAll() })
 const reportFor = (app: string, r: KeepRow) => keepReports.value[keepCacheKey(reviewTarget.value, app)]?.find((x) => x.path === r.path && !!x.shared === !!r.shared)
 const keepErrorFor = (app: string) => keepErrors.value[keepCacheKey(reviewTarget.value, app)]
-const keepLoadingFor = (app: string) => !!keepLoading.value[keepCacheKey(reviewTarget.value, app)]
+const keepLoadingFor = (app: string) => !!keepReads.loading.value[keepCacheKey(reviewTarget.value, app)]
 const switchRuntime = (app: string, prefer?: string) => emit('switchRuntime', app, reviewTarget.value, prefer)
 // 配置改了（在上面叠着的「切换运行环境」里保存了）：读过的都作废，勾着的服务器重新比较
-watch(() => props.info, () => {
+watch(() => props.info, (info, previous) => {
   reads.cancelAll()
   keepReads.cancelAll()
   reviews.value = {}
   keepReports.value = {}
   keepErrors.value = {}
+  for (const app of info.apps) {
+    const old = previous.apps.find((a) => a.name === app.name)
+    if (!keepEdited(app.name, old?.keep ?? [])) keepRows.value[app.name] = configuredKeepRows(app.keep)
+  }
   for (const t of targets.value) loadChanges(t)
   loadKeep()
 })
@@ -183,13 +182,8 @@ function openPicker(app: string) {
   const program = a.type === 'java' || a.type === 'binary' ? a.artifact.split(/[\\/]/).pop() : undefined
   picker.value = { app, type: a.type, program }
 }
-function onPick(app: string, items: KeepItem[]) {
-  const rows = (keepRows.value[app] ??= [])
-  for (const it of items) {
-    const old = rows.find((r) => r.path === it.path)
-    if (old) old.on = true
-    else rows.push({ path: it.path, shared: !!it.shared, on: true, added: true })
-  }
+function onPick(app: string, items: KeepItem[], removed: string[]) {
+  keepRows.value[app] = updateKeepRows(keepRows.value[app] ?? [], items, removed)
 }
 function removeRow(app: string, r: KeepRow) {
   keepRows.value[app] = keepRows.value[app].filter((x) => x !== r)
@@ -229,10 +223,11 @@ async function start() {
   }
   const edited = editedApps.value
   if (edited.length) {
-    args.push('--keep-files', JSON.stringify(Object.fromEntries(edited.map((a) => [a, chosen(a)]))))
+    const selections = edited.map((app) => [app, chosen(app)] as const)
+    args.push('--keep-files', JSON.stringify(Object.fromEntries(selections)))
     if (saveKeep.value) {
       try {
-        for (const a of edited) await call(['keep', 'set', a, JSON.stringify(chosen(a)), '-c', props.config])
+        for (const [app, items] of selections) await call(['keep', 'set', app, JSON.stringify(items), '-c', props.config])
       } catch (e) {
         ElMessage.error(`写进 ferry.yaml 失败：${(e as Error).message}`)
         starting.value = false
@@ -360,6 +355,9 @@ async function start() {
               <div class="review-sec">
                 <div class="sec-label">保留</div>
                 <div class="keep">
+                  <div v-for="row in onlineKeeps" :key="row.app" class="muted small keep-history">
+                    <b>{{ row.app }}</b> 线上版本已保留 <span class="mono">{{ row.paths.join('、') }}</span>
+                  </div>
                   <div class="muted small">勾选的用服务器上的，不会被包里的替换（服务器上还没有时用包里的）</div>
                   <div v-for="a in keepApps" :key="a" class="keep-app">
                     <div class="keep-head">
@@ -379,7 +377,7 @@ async function start() {
                     </div>
                   </div>
                   <div v-if="otherApps.length" class="keep-add">
-                    <span class="muted small">{{ keepApps.length ? '其他应用' : '没有要保留的：服务器上的文件都换成包里的' }}</span>
+                    <span class="muted small">{{ keepApps.length ? '其他应用' : '本次没有勾选保留项' }}</span>
                     <el-select v-if="otherApps.length > 1" v-model="addApp" size="small" class="keep-app-select" aria-label="选应用"><el-option v-for="a in otherApps" :key="a" :label="a" :value="a" /></el-select>
                     <el-button link type="primary" size="small" :disabled="!reviewTarget || !addApp" @click="openPicker(addApp)">从服务器选要保留的{{ otherApps.length === 1 ? `（${addApp}）` : '' }}…</el-button>
                   </div>
@@ -447,8 +445,9 @@ async function start() {
     :app="picker.app"
     :type="picker.type"
     :program="picker.program"
-    :selected="(keepRows[picker.app] ?? []).map((r) => r.path)"
-    @pick="(items) => onPick(picker!.app, items)"
+    :selected="chosen(picker.app).map((r) => r.path)"
+    :online-kept="onlineKeeps.find((row) => row.app === picker!.app)?.paths ?? []"
+    @pick="(items, removed) => onPick(picker!.app, items, removed)"
     @close="picker = undefined"
   />
   <AppSecretsDialog v-if="manageSecretsFor" :config="config" :target="manageSecretsFor.target" :apps="manageSecretsFor.apps"
@@ -560,6 +559,7 @@ html.cg-on .plan-grid { background: var(--ferry-overlay-section-fill); }
   flex-direction: column;
   gap: 4px;
 }
+.keep-history { overflow-wrap: anywhere; }
 .keep-app + .keep-app,
 .keep-add {
   margin-top: 4px;

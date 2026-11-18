@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +13,37 @@ import (
 	"github.com/captain/ferry/internal/engine"
 	"github.com/captain/ferry/internal/ui"
 )
+
+func validateTargetCmd(c *cli, cio *cliIO, js *ui.JSON, fail func(error) int) int {
+	path := c.flags["config"]
+	if path == "" {
+		return fail(errors.New("检查新增服务器时请用 -c 指定配置文件"))
+	}
+	data := []byte(cio.getenv("FERRY_CONFIG_CONTENT"))
+	if !c.has("from-env") {
+		var err error
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	name := c.flags["target"]
+	f, err := config.LoadTargetDraft(data, path, name)
+	if err != nil {
+		return fail(err)
+	}
+	check, err := engine.CheckTargetDraft(f, name)
+	if err != nil {
+		return fail(err)
+	}
+	if js != nil {
+		return ok0(js, check)
+	}
+	if err := json.NewEncoder(cio.stdout).Encode(check); err != nil {
+		return fail(err)
+	}
+	return 0
+}
 
 // configToolCmd ferry config-schema / config-get / config-edit：和 AI 助手、MCP 的同名工具一样。
 // config-edit 也是桌面版执行编程软件请求的修改时用的（FERRY_CONFIG_EDIT 里带着用户确认时的原文摘要 base，文件变了就不写）。

@@ -4,6 +4,7 @@ package engine
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -393,7 +394,7 @@ func (e *Engine) deploy(targets []string, names []string, o DeployOptions) ([]*D
 		e.dropStages(plans, ups)
 		for i, u := range ups {
 			if u.err != nil {
-				return nil, fmt.Errorf("%s 上传失败，各服务器都没有改动：%w", plans[i].t.Name, u.err)
+				return nil, fmt.Errorf("%s 应用产物上传失败，停止切换各服务器的应用版本：%w", plans[i].t.Name, u.err)
 			}
 		}
 	}
@@ -568,6 +569,11 @@ func (e *Engine) preflight(s *session, items []*item, fix string) (*proto.Prefli
 	specs := make([]proto.AppSpec, len(items))
 	for i, it := range items {
 		specs[i] = it.spec
+		if r := it.spec.Requirements; r != nil {
+			req := *r
+			req.AvailableSecretEnv = availableSecretEnv(it.secrets)
+			specs[i].Requirements = &req
+		}
 	}
 	var p proto.Preflight
 	if err := s.callData("preflight", &proto.Request{Apps: specs, FixPerms: fix}, &p); err != nil {
@@ -1161,6 +1167,25 @@ func (e *Engine) uploadStreams(t *config.Target) int {
 // uploadRetries 上传时连接断了、卡住了，最多重新连接几次（每次接着传剩下的）。
 const uploadRetries = 5
 
+type uploadHint struct {
+	Streams int       `json:"streams"`
+	Until   time.Time `json:"until"`
+}
+
+func uploadHintPath(t *config.Target) string {
+	address := fmt.Sprintf("%s:%d/%s", strings.ToLower(t.Host), t.Port, t.User)
+	key := sha256.Sum256([]byte(address))
+	return filepath.Join(appdir.Dir(), "upload-hints", fmt.Sprintf("%x.json", key))
+}
+
+func limitUploadStreams(data []byte, maxStreams int, now time.Time) int {
+	var hint uploadHint
+	if json.Unmarshal(data, &hint) == nil && hint.Streams > 0 && hint.Until.After(now) {
+		return min(hint.Streams, maxStreams)
+	}
+	return maxStreams
+}
+
 // uploadItems 上传：总量大时切片多连接并行（应对 VPN 等对单条连接的限速），否则用一条连接逐个上传。
 // 连接断了、卡住了时重新连接，只传还没传完的片（大文件）或重传（小文件）；断过一次就少用几路，网络撑不住那么多连接。
 func (e *Engine) uploadItems(s *session, items []remote.UploadItem, upBytes, total int64) error {
@@ -1173,10 +1198,23 @@ func (e *Engine) uploadItems(s *session, items []remote.UploadItem, upBytes, tot
 		upBytes = sent
 	}
 	streams := e.uploadStreams(s.t)
+	hint := ""
+	if upBytes >= parallelMin {
+		hint = uploadHintPath(s.t)
+		data, _ := os.ReadFile(hint)
+		if learned := limitUploadStreams(data, streams, time.Now()); learned < streams {
+			e.Rep.Info("沿用这条连接最近成功的上传并行度：%d 路", learned)
+			streams = learned
+		}
+	}
 	state := &remote.UploadState{}
 	for attempt := 1; ; attempt++ {
 		err := e.uploadOnce(s, items, upBytes, total, streams, state, attempt == 1)
 		if err == nil {
+			if hint != "" && attempt > 1 {
+				data, _ := json.Marshal(uploadHint{Streams: streams, Until: time.Now().Add(30 * time.Minute)})
+				_ = appdir.WriteFileAtomic(hint, data, 0o600)
+			}
 			e.Rep.Progress("", upBytes, upBytes)
 			return nil
 		}

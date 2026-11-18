@@ -81,6 +81,12 @@ apps.[].service.health.tcp
 apps.[].service.health.timeout
 apps.[].service.java
 apps.[].service.jvmArgs
+apps.[].service.preflight
+apps.[].service.preflight.dependencies
+apps.[].service.preflight.dependencies.[].address
+apps.[].service.preflight.dependencies.[].name
+apps.[].service.preflight.dependencies.[].protocol
+apps.[].service.preflight.requiredEnv
 apps.[].service.restart
 apps.[].service.restart.delay
 apps.[].service.restart.max

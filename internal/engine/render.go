@@ -309,6 +309,16 @@ func baseSpec(f *config.File, t *config.Target, a *config.App) (proto.AppSpec, e
 	if s.Health, err = health(sc, svc.Health); err != nil {
 		return s, wrap("health", err)
 	}
+	if p := svc.Preflight; p != nil {
+		s.Requirements = &proto.ServiceRequirements{RequiredEnv: p.RequiredEnv}
+		for _, dep := range p.Dependencies {
+			address, err := sc.Expand(dep.Address)
+			if err != nil {
+				return s, wrap("service.preflight.dependencies", err)
+			}
+			s.Requirements.Dependencies = append(s.Requirements.Dependencies, proto.ServiceDependency{Name: dep.Name, Protocol: dep.Protocol, Address: address})
+		}
+	}
 	for _, p := range svc.DiagLogs {
 		v, err := sc.Expand(p)
 		if err != nil {

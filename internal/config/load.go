@@ -15,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/captain/ferry/internal/jdk"
 	"github.com/captain/ferry/internal/proto"
 )
 
@@ -67,6 +68,15 @@ func Load(path string) (*File, error) {
 
 // LoadContent 校验内存中的配置内容，相对路径按 path 所在目录计算（编辑器实时校验，不用先保存）。
 func LoadContent(data []byte, path string) (*File, error) {
+	return loadContent(data, path, "")
+}
+
+// LoadTargetDraft 校验编辑器草稿。新增目标的运行用户和应用根目录由目标检查单独汇报。
+func LoadTargetDraft(data []byte, path, target string) (*File, error) {
+	return loadContent(data, path, target)
+}
+
+func loadContent(data []byte, path, setupTarget string) (*File, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -77,10 +87,12 @@ func LoadContent(data []byte, path string) (*File, error) {
 	}
 	f.Path = abs
 	f.Dir = filepath.Dir(abs)
-	if err := f.normalize(); err != nil {
+	if err := f.normalize(setupTarget); err != nil {
 		return nil, fmt.Errorf("%s:\n%w", abs, err)
 	}
-	f.Warnings = unusedFields(f, data)
+	if setupTarget == "" {
+		f.Warnings = unusedFields(f, data)
+	}
 	return f, nil
 }
 
@@ -123,7 +135,7 @@ func explainUnknown(err error) error {
 }
 
 // normalize 补默认值并校验，所有问题一次报出。
-func (f *File) normalize() error {
+func (f *File) normalize(setupTarget string) error {
 	var errs []error
 	bad := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
@@ -254,7 +266,7 @@ func (f *File) normalize() error {
 		checkVars(where+".vars", t.Vars)
 	}
 
-	if len(f.Apps) == 0 && f.Kind != KindConnections {
+	if len(f.Apps) == 0 && f.Kind != KindConnections && setupTarget == "" {
 		bad("至少需要一个 apps")
 	}
 	seen := map[string]bool{}
@@ -345,6 +357,26 @@ func (f *File) normalize() error {
 			if s.User != "" && !reUser.MatchString(s.User) {
 				bad("%s：user %q 无效", where, s.User)
 			}
+			if p := s.Preflight; p != nil {
+				for _, name := range p.RequiredEnv {
+					if !proto.ValidAppSecretName(name) {
+						bad("%s：service.preflight.requiredEnv 中的变量名 %q 无效", where, name)
+					}
+				}
+				if len(p.Dependencies) > 16 {
+					bad("%s：每个服务最多配置 16 项预检依赖", where)
+				}
+				for _, dep := range p.Dependencies {
+					if strings.TrimSpace(dep.Name) == "" || strings.TrimSpace(dep.Address) == "" {
+						bad("%s：service.preflight.dependencies 需要 name 和 address", where)
+					}
+					switch dep.Protocol {
+					case "", "tcp", "http", "mysql", "redis", "nacos":
+					default:
+						bad("%s：service.preflight.dependencies 的协议 %q 无效", where, dep.Protocol)
+					}
+				}
+			}
 			if s.Runtime != nil {
 				switch {
 				case a.Type != "java":
@@ -355,7 +387,7 @@ func (f *File) normalize() error {
 					bad("%s：设置了 runtime（由 Ferry 提供 JDK）就不要再写 java（%s）", where, s.Java)
 				case len(s.Exec) > 0 && !slices.ContainsFunc(s.Exec, func(x string) bool { return strings.Contains(x, "${java}") }):
 					bad("%s：设置了 runtime 时，exec 里要用 ${java} 启动（它就是 Ferry 提供的 JDK），不要写别的 java 路径", where)
-				case s.Runtime.Version != "" && !reJDKVersion.MatchString(s.Runtime.Version):
+				case s.Runtime.Version != "" && !jdk.ValidVersion(s.Runtime.Version):
 					bad("%s：runtime.version 要写完整的 JDK 版本，如 25.0.4.1+1（java -version 里 build 后面那一段）", where)
 				case s.Runtime.Version != "" && jdkMajor(s.Runtime.Version) != s.Runtime.Java:
 					bad("%s：runtime.version %s 不是 Java %d 的版本", where, s.Runtime.Version, s.Runtime.Java)
@@ -476,23 +508,17 @@ func (f *File) normalize() error {
 				bad("targets.%s.apps：没有应用 %q", t.Name, n)
 			}
 		}
-		for _, a := range f.Apps {
-			if a == nil || a.Type == "static" || !t.Allows(a.Name) {
-				continue
-			}
-			if a.Service.User == "" && t.RunAs == "" {
-				bad("targets.%s：应用 %s 没有运行用户（设置 targets.%s.runAs 或 apps.%s.service.user）", t.Name, a.Name, t.Name, a.Name)
-			}
+		if t.Name == setupTarget {
+			continue
 		}
 		for _, a := range f.Apps {
-			if a == nil || a.Type != "static" || !t.Allows(a.Name) || a.Service.User != "" || t.RunAs != "" {
+			if a == nil || !t.Allows(a.Name) || t.RunAs != "" || !a.RequiresTargetRunAs() {
 				continue
 			}
-			for _, h := range append(append([]*Hook{}, a.Hooks.BeforeSwitch...), a.Hooks.AfterSwitch...) {
-				if h != nil && h.User == "" {
-					bad("targets.%s：应用 %s 的 hooks 不知道以哪个用户执行（给 hooks 写 user，或设置 targets.%s.runAs）", t.Name, a.Name, t.Name)
-					break
-				}
+			if a.Type == "static" {
+				bad("targets.%s：应用 %s 的 hooks 不知道以哪个用户执行（给 hooks 写 user，或设置 targets.%s.runAs）", t.Name, a.Name, t.Name)
+			} else {
+				bad("targets.%s：应用 %s 没有运行用户（设置 targets.%s.runAs 或 apps.%s.service.user）", t.Name, a.Name, t.Name, a.Name)
 			}
 		}
 		for _, a := range f.Apps {
@@ -507,6 +533,22 @@ func (f *File) normalize() error {
 	checkBackups(f, bad)
 	checkRollout(f.Rollout, bad)
 	return errors.Join(errs...)
+}
+
+// RequiresTargetRunAs 当前应用的服务或钩子是否需要目标提供默认运行用户。
+func (a *App) RequiresTargetRunAs() bool {
+	if a.Service.User != "" {
+		return false
+	}
+	if a.Type != "static" {
+		return true
+	}
+	for _, hooks := range [][]*Hook{a.Hooks.BeforeSwitch, a.Hooks.AfterSwitch} {
+		if slices.ContainsFunc(hooks, func(h *Hook) bool { return h != nil && h.User == "" }) {
+			return true
+		}
+	}
+	return false
 }
 
 // AppRoot 应用在目标上的部署根目录：应用的 root（展开变量）或目标的 root。
@@ -1020,9 +1062,6 @@ func checkZD(z *ZeroDowntime, where string, bad func(string, ...any)) {
 		bad("%s.drain 最多 10m（当前 %s）", at, z.Drain.Std())
 	}
 }
-
-// reJDKVersion 完整的 JDK 版本：25.0.4.1+1、17.0.13+11、21+35，可以带 -LTS 之类的后缀。
-var reJDKVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*\+[0-9]+(-[A-Za-z0-9.]+)?$`)
 
 // jdkMajor 完整版本的大版本：25.0.4.1+1 → 25。
 func jdkMajor(v string) int {

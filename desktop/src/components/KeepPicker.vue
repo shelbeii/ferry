@@ -1,21 +1,26 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import type Node from 'element-plus/es/components/tree/src/model/node'
 import { Document, Folder, Link } from '@element-plus/icons-vue'
 import { bytes, type KeepEntry, type KeepItem, type KeepReport } from '../ferry'
 import { readCall } from '../readRequests'
 
 // 从服务器上运行中的版本里选部署时要保留的文件、目录
-const props = defineProps<{ config: string; target: string; app: string; type: string; program?: string; selected: string[] }>()
-const emit = defineEmits<{ close: []; pick: [items: KeepItem[]] }>()
+const props = defineProps<{ config: string; target: string; app: string; type: string; program?: string; selected: string[]; onlineKept: string[] }>()
+const emit = defineEmits<{ close: []; pick: [items: KeepItem[], removed: string[]] }>()
 
 const visible = ref(true)
 const error = ref('')
 const release = ref<string>()
 const loaded = ref(false)
 const tree = ref<{ getCheckedNodes: () => KeepEntry[] }>()
-const checked = ref<KeepEntry[]>([])
+const initial = computed(() => new Set(props.selected))
+const added = ref(new Map<string, KeepEntry>())
+const removed = ref(new Set<string>())
+const selectedKeys = computed(() => [...props.selected.filter((path) => !removed.value.has(path)), ...added.value.keys()])
+const online = computed(() => new Set(props.onlineKept))
 const ctl = new AbortController()
+onBeforeUnmount(() => ctl.abort())
 
 // 不能保留的：Ferry 自己的、运行日志、服务器上装的依赖、程序文件
 const reserved = computed(() => {
@@ -49,14 +54,24 @@ async function load(node: Node, resolve: (data: KeepEntry[]) => void) {
   }
 }
 
-function onCheck() {
-  checked.value = (tree.value?.getCheckedNodes() ?? []).filter((x) => !filler(x))
+function onCheck(entry: KeepEntry, state: { checkedKeys: (string | number)[] }) {
+  if (disabled(entry) || filler(entry)) return
+  const checked = state.checkedKeys.includes(entry.path)
+  if (initial.value.has(entry.path)) {
+    if (checked) removed.value.delete(entry.path)
+    else removed.value.add(entry.path)
+  } else if (checked) {
+    added.value.set(entry.path, entry)
+  } else {
+    added.value.delete(entry.path)
+  }
 }
 
 function confirm() {
   // 目录默认共用（上传目录这类），文件默认随版本带过去；勾了目录又勾了它下面的，只要目录
-  const picked = checked.value.filter((x) => !checked.value.some((y) => y !== x && y.dir && x.path.startsWith(y.path + '/')))
-  emit('pick', picked.map((x) => ({ path: x.path, shared: !!x.dir && !x.link })))
+  const dirs = (tree.value?.getCheckedNodes() ?? []).filter((entry) => entry.dir && !entry.link)
+  const items = [...added.value.values()].filter((entry) => !dirs.some((dir) => entry.path.startsWith(dir.path + '/')))
+  emit('pick', items.map((x) => ({ path: x.path, shared: !!x.dir && !x.link })), [...removed.value])
   visible.value = false
 }
 
@@ -78,7 +93,7 @@ const size = (d: KeepEntry) => (d.dir ? '' : bytes(d.size ?? 0))
         check-strictly
         node-key="path"
         :load="load"
-        :default-checked-keys="selected"
+        :default-checked-keys="selectedKeys"
         :props="treeProps"
         @check="onCheck"
       >
@@ -88,15 +103,16 @@ const size = (d: KeepEntry) => (d.dir ? '' : bytes(d.size ?? 0))
             <span>{{ data.name }}</span>
             <span v-if="data.link" class="muted small">链接</span>
             <span class="muted small">{{ size(data) }}</span>
+            <span v-if="online.has(data.path) || online.has(data.path + '（共用）')" class="muted small">线上已保留</span>
           </span>
         </template>
       </el-tree>
     </div>
     <template #footer>
       <div class="foot">
-        <span class="muted small">目录默认「共用」（只有一份，回滚时不动），添加后可以改</span>
+        <span class="muted small">新选的目录默认「共用」，确认后可以在审阅页修改</span>
         <el-button @click="visible = false">取消</el-button>
-        <el-button type="primary" :disabled="!checked.length" @click="confirm">添加 {{ checked.length || '' }}</el-button>
+        <el-button type="primary" :disabled="!added.size && !removed.size" @click="confirm">确定</el-button>
       </div>
     </template>
   </el-dialog>

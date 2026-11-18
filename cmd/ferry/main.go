@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -389,6 +390,8 @@ func run(argv []string, cio *cliIO) int {
 		return createCmd(c, cio, js, con, fail)
 	case cmd == "config-schema" || cmd == "config-get" || cmd == "config-edit":
 		return configToolCmd(cmd, c, cio, js, fail)
+	case cmd == "validate" && c.flags["target"] != "":
+		return validateTargetCmd(c, cio, js, fail)
 	case cmd == "probe" && len(c.pos) > 0 && c.pos[0] == "prepare":
 		return probePrepareCmd(cio, js, fail)
 	case cmd == "connection":
@@ -1213,6 +1216,14 @@ func printStatus(con *ui.Console, st []proto.AppStatus) {
 			if use == "" {
 				use = "用途未识别（不是配置里的业务端口）"
 			}
+			switch e.Firewall {
+			case "blocked":
+				use += "（防火墙拦着，外部连不上）"
+			case "open":
+				use += "（防火墙放行了，外部能连上）"
+			case "partial":
+				use += "（防火墙只对部分来源放行）"
+			}
 			notes = append(notes, fmt.Sprintf("  %s %s：%s", s.Name, e.Addr, use))
 		}
 		problem := s.Problem
@@ -1623,8 +1634,9 @@ func inspect(f *config.File) map[string]any {
 			}
 		}
 		targets = append(targets, map[string]any{
-			"name": t.Name, "host": t.Host, "port": t.Port, "user": t.User, "sudo": t.Sudo, "root": t.Root,
-			"runAs": t.RunAs, "arch": t.Arch, "keepReleases": t.KeepReleases, "confirm": t.NeedConfirm(),
+			"name": t.Name, "title": t.Title, "host": t.Host, "port": t.Port, "user": t.User, "sudo": t.Sudo, "root": t.Root,
+			"runtimeDir": path.Join(t.FerryDir, "runtimes"),
+			"runAs":      t.RunAs, "arch": t.Arch, "keepReleases": t.KeepReleases, "confirm": t.NeedConfirm(),
 			"hostKey": t.HostKey, "apps": apps, "auth": t.Auth, "identityFile": t.IdentityFile, "appRoots": appRoots,
 			"production": t.Production, "aiChanges": t.AllowAIChanges(),
 			"local": t.Local, "localVars": t.LocalVars, "keyMissing": f.KeyMissing(t) != "",

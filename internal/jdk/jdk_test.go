@@ -84,8 +84,8 @@ func TestMajor(t *testing.T) {
 			t.Errorf("%q", v)
 		}
 	}
-	if !versionLess("17.0.9+9", "17.0.13+11") || versionLess("17.0.13+11", "17.0.9+9") {
-		t.Error("versionLess")
+	if !VersionLess("17.0.9+9", "17.0.13+11") || VersionLess("17.0.13+11", "17.0.9+9") {
+		t.Error("VersionLess")
 	}
 }
 

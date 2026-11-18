@@ -159,11 +159,13 @@ func (e *Engine) SetLocalTarget(target string, lt *config.LocalTarget) error {
 		lt = &config.LocalTarget{}
 	}
 	c := *lt
-	c.Vars = vars
-	l.Targets[target] = &c
-	if err := config.CheckLocal(e.File, l); err != nil {
+	// 登录方式单独检查；已有目标和变量覆盖保留给本机设置维护。
+	c.Vars = nil
+	if err := config.CheckLocal(e.File, &config.Local{Targets: map[string]*config.LocalTarget{target: &c}}); err != nil {
 		return err
 	}
+	c.Vars = vars
+	l.Targets[target] = &c
 	return config.WriteLocal(e.File, l)
 }
 

@@ -1117,6 +1117,75 @@
          ]
         },
         {
+         "name": "preflight",
+         "label": "部署预检",
+         "doc": "上传前检查目标服务器上的环境变量和外部依赖",
+         "kind": "obj",
+         "type": "对象",
+         "appTypes": [
+          "java",
+          "binary",
+          "python",
+          "node",
+          "dotnet"
+         ],
+         "fields": [
+          {
+           "name": "requiredEnv",
+           "label": "必需环境变量",
+           "doc": "非空的服务环境变量名。值可以来自 env、服务器上的 envFile 或 Ferry 应用密钥",
+           "kind": "list",
+           "type": "列表"
+          },
+          {
+           "name": "dependencies",
+           "label": "依赖服务",
+           "doc": "从目标服务器验证协议和可达性",
+           "kind": "objList",
+           "type": "列表",
+           "item": {
+            "label": "依赖服务",
+            "doc": "",
+            "kind": "obj",
+            "type": "对象",
+            "fields": [
+             {
+              "name": "name",
+              "label": "名称",
+              "doc": "预检失败时显示的名称",
+              "kind": "str",
+              "type": "字符串",
+              "required": true
+             },
+             {
+              "name": "protocol",
+              "label": "协议",
+              "doc": "TCP、HTTP、MySQL、Redis 或 Nacos",
+              "kind": "str",
+              "type": "字符串",
+              "values": [
+               "tcp",
+               "http",
+               "mysql",
+               "redis",
+               "nacos"
+              ],
+              "default": "tcp"
+             },
+             {
+              "name": "address",
+              "label": "地址",
+              "doc": "TCP、MySQL、Redis 用主机:端口；HTTP、Nacos 用健康检查 URL",
+              "kind": "str",
+              "type": "字符串",
+              "required": true
+             }
+            ]
+           }
+          }
+         ]
+        },
+        {
          "name": "restart",
          "label": "意外退出后重启",
          "doc": "程序自己退出了（崩溃、被系统杀掉）怎么自动拉起来。在 Ferry 里点「停止」或用 systemctl stop 停的不会被拉起。只改「什么时候重启」时可以只写一个值，如 restart: always",

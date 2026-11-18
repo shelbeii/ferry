@@ -67,6 +67,16 @@ func (e *Engine) Status(target string, names []string) ([]proto.AppStatus, error
 func (e *Engine) Preflight(target string, names []string) (*proto.Preflight, error) {
 	var out proto.Preflight
 	err := e.withSession(target, names, func(s *session, specs []proto.AppSpec) error {
+		lookup := e.appSecretLookup(s.t)
+		for i := range specs {
+			if r := specs[i].Requirements; r != nil {
+				values, err := appSecretValues(s.t, e.File.App(specs[i].Name), lookup)
+				if err != nil {
+					return err
+				}
+				r.AvailableSecretEnv = availableSecretEnv(values)
+			}
+		}
 		fix := agentFixPlan
 		if e.Settings.Deploy.KeepPerms {
 			fix = ""

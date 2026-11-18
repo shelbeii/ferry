@@ -212,6 +212,8 @@ printf '
 has "上传中途连接断了：重新连接" "上传时连接断了" "$out"
 has "接着传剩下的，少用几路" "改用 2 路" "$out"
 has "接着传完，部署成功（服务器校验 sha256 通过）" "部署完成" "$out"
+t "记下断线后成功的并行度（之后 30 分钟沿用）" ok '"streams":2' -- sh -c 'cat "$1"/upload-hints/*.json' _ "$OUT/home"
+rm -rf "$OUT/home/upload-hints" # 后面的测试要看配置的并行度
 t "多路上传后 sys 正常运行" ok '"active"' -- F status e2e-b sys --json
 
 step "崩溃回滚、多目标失败即停"

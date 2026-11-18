@@ -163,11 +163,12 @@ type AppSpec struct {
 	// 不用 java-N（同一台服务器上别的项目升级 JDK 影响不到它）
 	RuntimeVersion string `json:"runtimeVersion,omitempty"`
 
-	Unit     string           `json:"unit,omitempty"`     // systemd 单元名（含 .service）；static 为空
-	UnitText string           `json:"unitText,omitempty"` // 渲染好的单元文件内容
-	Secrets  *AppSecretValues `json:"secrets,omitempty"`
-	User     string           `json:"user,omitempty"` // 运行用户：版本目录、shared 目录归它所有
-	Conflict []string         `json:"conflicts,omitempty"`
+	Unit         string               `json:"unit,omitempty"`     // systemd 单元名（含 .service）；static 为空
+	UnitText     string               `json:"unitText,omitempty"` // 渲染好的单元文件内容
+	Secrets      *AppSecretValues     `json:"secrets,omitempty"`
+	Requirements *ServiceRequirements `json:"requirements,omitempty"`
+	User         string               `json:"user,omitempty"` // 运行用户：版本目录、shared 目录归它所有
+	Conflict     []string             `json:"conflicts,omitempty"`
 	// NoAutostart service.autostart: false：部署、启动后不设开机自启
 	NoAutostart bool `json:"noAutostart,omitempty"`
 	// BootDelaySec service.autostartDelay：开机后等这么多秒再启动（用 systemd 定时器，服务本身不设开机自启）；0 = 开机马上启动
@@ -211,6 +212,18 @@ type AppSpec struct {
 	HTTPS *BackendHTTPS `json:"https,omitempty"`
 	// Job 定时任务：Unit 是 oneshot 的服务（不开机自启），由 Job.Timer 这个定时器按时启动
 	Job *JobSpec `json:"job,omitempty"`
+}
+
+type ServiceRequirements struct {
+	RequiredEnv        []string            `json:"requiredEnv,omitempty"`
+	AvailableSecretEnv []string            `json:"availableSecretEnv,omitempty"`
+	Dependencies       []ServiceDependency `json:"dependencies,omitempty"`
+}
+
+type ServiceDependency struct {
+	Name     string `json:"name"`
+	Protocol string `json:"protocol,omitempty"`
+	Address  string `json:"address"`
 }
 
 // BackendHTTPS 是与应用版本分开配置、由 nginx 提供的 HTTPS 入口。
@@ -767,6 +780,9 @@ type ExtraPort struct {
 	Use  string `json:"use,omitempty"` // 用途（识别不出时为空）
 	// Risky 这类端口不宜对外开放（没有认证，或能控制进程）
 	Risky bool `json:"risky,omitempty"`
+	// Firewall 不宜对外、监听了所有地址时，防火墙对它的状态：open | blocked | partial（只对部分来源放行）；
+	// 空 = 没查、没有防火墙或看不出来
+	Firewall string `json:"firewall,omitempty"`
 }
 
 // Site nginx 里提供某个静态站点的一个 server 块。

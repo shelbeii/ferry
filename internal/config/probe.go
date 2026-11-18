@@ -23,7 +23,7 @@ func LoadProbeContent(data []byte, path string) (*File, error) {
 		}
 	}
 	f.Path, f.Dir = abs, filepath.Dir(abs)
-	if err := f.normalize(); err != nil {
+	if err := f.normalize(""); err != nil {
 		return nil, err
 	}
 	if project {

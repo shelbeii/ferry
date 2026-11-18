@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/captain/ferry/internal/proto"
@@ -564,13 +565,95 @@ func (a *Agent) status() int {
 		ngOnce.Do(func() { ngText, ngErr = a.Sys.NginxDump() })
 		return ngText, ngErr
 	}
+	// 不宜对外的端口监听了所有地址时，要看防火墙拦没拦（firewall-cmd 较慢）：
+	// 只在有这种端口时才查，和各应用的查看同时进行；上次有的话一开始就查（常驻 agent 里记着）
+	fw := &statusFW{scan: func() *fwState {
+		sc := a.fwScanner()
+		sc.runtimeOnly = true
+		return sc.firewall()
+	}}
+	if riskyHint.Load() {
+		fw.start()
+	}
 	// 各应用互不相干（systemctl、健康检查、读文件）：同时查，应用多时不用一个个等
 	out := make([]proto.AppStatus, len(a.req.Apps))
 	eachParallel(len(a.req.Apps), 6, func(i int) {
 		out[i] = a.appStatus(&a.req.Apps[i], nginx)
 		out[i].Busy = busy
+		if exposedRisky(&out[i]) {
+			fw.start()
+		}
 	})
+	riskyHint.Store(fw.mark(out))
 	return a.result(proto.CodeOK, "", out)
+}
+
+// riskyHint 上次读应用状态时有没有监听所有地址的不宜对外端口。
+var riskyHint atomic.Bool
+
+// exposedRisky 有不宜对外、又不是只监听本机的附加端口。
+func exposedRisky(st *proto.AppStatus) bool {
+	for _, e := range st.Extra {
+		if e.Risky && !loopbackAddr(e.Addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// loopbackAddr 127.0.0.1:8721、[::1]:8721 这种只有本机能连的地址。
+func loopbackAddr(addr string) bool {
+	return strings.HasPrefix(addr, "127.") || strings.HasPrefix(addr, "[::1]")
+}
+
+// statusFW 读应用状态时顺带看的防火墙：第一次要用时在后台读，mark 时等它读完。
+type statusFW struct {
+	scan    func() *fwState
+	once    sync.Once
+	done    chan struct{}
+	started atomic.Bool
+	st      *fwState
+}
+
+func (f *statusFW) start() {
+	f.once.Do(func() {
+		f.done = make(chan struct{})
+		f.started.Store(true)
+		go func() {
+			defer close(f.done)
+			defer func() { recover() }() // 读不到防火墙不影响应用状态
+			f.st = f.scan()
+		}()
+	})
+}
+
+// mark 给不宜对外、监听所有地址的附加端口标上防火墙的状态；返回有没有这种端口。
+func (f *statusFW) mark(out []proto.AppStatus) bool {
+	has := false
+	for i := range out {
+		if exposedRisky(&out[i]) {
+			has = true
+		}
+	}
+	if !has || !f.started.Load() { // 上次有、这次没有：不等（后台读完自己结束）
+		return has
+	}
+	<-f.done
+	if f.st == nil {
+		return has
+	}
+	for i := range out {
+		for j := range out[i].Extra {
+			e := &out[i].Extra[j]
+			if !e.Risky || loopbackAddr(e.Addr) {
+				continue
+			}
+			if port := portNum(e.Addr); port > 0 {
+				e.Firewall, _ = f.st.decide(port, "tcp")
+			}
+		}
+	}
+	return has
 }
 
 func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.AppStatus {
@@ -720,6 +803,9 @@ func (a *Agent) preflight() int {
 		}
 		if isService(s) {
 			hasService = true
+			if a.req.FixPerms != FixApply {
+				a.checkServiceRequirements(s, &p)
+			}
 			if _, ok := p.Users[s.User]; !ok {
 				_, _, err := a.Sys.LookupUser(s.User)
 				switch {

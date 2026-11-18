@@ -6,9 +6,10 @@ import { ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowRight, ArrowUp, CopyDocument, Delete, EditPen, Plus } from '@element-plus/icons-vue'
 import { isMap, isScalar, isSeq, type Document } from 'yaml'
 import { schema, type SchemaNode } from '../../editor/schema'
-import { addEntry, append, keysAt, move, nodeAt, parse, remove, renameKey, scalarAt, serialize, type Path } from '../../editor/configDoc'
+import { addEntry, append, hasAlias, keysAt, move, nodeAt, parse, remove, renameKey, scalarAt, serialize, setScalar, type Path } from '../../editor/configDoc'
 import ConfigFields from './ConfigFields.vue'
 import AddAppDialog from './AddAppDialog.vue'
+import AddTargetDialog from './AddTargetDialog.vue'
 import { applyAppSetup, type AppSetup, type DeploymentRequest } from '../../editor/appSetup'
 import { formCtx } from './ctx'
 
@@ -81,14 +82,16 @@ function openSection(s: Exclude<Section, 'project'>) {
   if (first) sel.value = { s, key: first.key }
 }
 
+function targetLabel(key: string): string {
+  const title = scalarAt(doc.value, ['targets', key, 'title'])
+  return title && title !== key ? `${title}（${key}）` : key
+}
+
 function itemsOf(s: Section): { key: string | number; title: string; sub: string }[] {
   const d = doc.value
   if (s === 'builds') return keysAt(d, ['builds']).map((k) => ({ key: k, title: k, sub: String(scalarAt(d, ['builds', k, 'command']) ?? '') }))
   if (s === 'targets')
-    return keysAt(d, ['targets']).map((k) => {
-      const title = scalarAt(d, ['targets', k, 'title'])
-      return { key: k, title: title ? `${title}（${k}）` : k, sub: String(scalarAt(d, ['targets', k, 'host']) ?? '') }
-    })
+    return keysAt(d, ['targets']).map((k) => ({ key: k, title: targetLabel(k), sub: String(scalarAt(d, ['targets', k, 'host']) ?? '') }))
   if (s === 'apps') return names.value.apps.map((n, i) => ({ key: i, title: n, sub: String(scalarAt(d, ['apps', i, 'type']) ?? '') }))
   if (s === 'backups') {
     const n = nodeAt(d, ['backups'])
@@ -112,7 +115,7 @@ const current = computed<{ path: Path; node: SchemaNode; title: string; appType?
   const n = nodeAt(doc.value, path)
   if (n === undefined) return null
   if (s === 'builds') return { path, node: f.builds.map!, title: `构建 ${key}` }
-  if (s === 'targets') return { path, node: f.targets.map!, title: `服务器 ${key}` }
+  if (s === 'targets') return { path, node: f.targets.map!, title: `服务器 ${targetLabel(String(key))}` }
   if (s === 'apps') return { path, node: f.apps.item!, title: `应用 ${names.value.apps[key as number]}`, appType: String(scalarAt(doc.value, [...path, 'type']) ?? '') || undefined }
   return { path, node: f.backups.item!, title: `数据备份 ${itemsOf('backups')[key as number]?.title ?? ''}` }
 })
@@ -173,10 +176,7 @@ const newFields: Record<Exclude<Section, 'project'>, NewField[]> = {
     { key: 'name', label: '名字', placeholder: '如 backend', check: nameOk(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, '名字', () => names.value.builds) },
     { key: 'command', label: '构建命令', placeholder: '如 mvn -q package -DskipTests' },
   ],
-  targets: [
-    { key: 'name', label: '名字', placeholder: '如 prod、test-1', check: nameOk(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, '名字', () => names.value.targets) },
-    { key: 'host', label: '服务器地址', placeholder: 'IP 或域名' },
-  ],
+  targets: [], // 服务器使用 AddTargetDialog，检查项目在这台服务器上的配置。
   apps: [], // 应用使用 AddAppDialog，一次补齐运行设置。
   backups: [
     {
@@ -199,7 +199,7 @@ function startAdd(s: Exclude<Section, 'project'>) {
 }
 
 function confirmAdd() {
-  if (adding.s === 'apps') return
+  if (adding.s === 'apps' || adding.s === 'targets') return
   const f = adding.form
   for (const nf of adding.fields) {
     const v = (f[nf.key] ?? '').trim()
@@ -211,16 +211,22 @@ function confirmAdd() {
   let next: Sel = { s }
   edit((d) => {
     if (s === 'builds') addEntry(d, ['builds'], f.name.trim(), { command: f.command.trim() })
-    else if (s === 'targets') addEntry(d, ['targets'], f.name.trim(), { host: f.host.trim() })
     else {
       const v = f.value.trim()
       const what = f.kind === 'mysql' || f.kind === 'postgres' ? { database: v } : f.kind === 'paths' ? [v] : v
       next.key = append(d, ['backups'], { name: f.name.trim(), [f.kind]: what })
     }
   })
-  if (s === 'builds' || s === 'targets') next = { s, key: f.name.trim() }
+  if (s === 'builds') next = { s, key: f.name.trim() }
   adding.open = false
   nextTick(() => (sel.value = next))
+}
+
+function addTarget(text: string, key: string) {
+  emit('update:text', text)
+  adding.open = false
+  folded.delete('targets')
+  nextTick(() => (sel.value = { s: 'targets', key }))
 }
 
 function addApp(form: AppSetup, deploy: boolean) {
@@ -247,14 +253,46 @@ async function removeSel() {
   sel.value = { s: 'project' }
 }
 
-async function renameSel() {
+const canRenameTarget = computed(() => {
+  if (sel.value.s !== 'targets') return false
+  const path = ['targets', String(sel.value.key)]
+  const target = nodeAt(doc.value, path)
+  const title = nodeAt(doc.value, [...path, 'title'])
+  return isMap(target) && !target.anchor && !(isScalar(title) && title.anchor)
+    && !hasAlias(doc.value, [...path, 'title'])
+})
+
+async function renameTarget() {
+  if (!canRenameTarget.value) return
+  const key = String(sel.value.key)
+  const path = ['targets', key, 'title']
+  const title = String(scalarAt(doc.value, path) ?? '')
+  let name: string
+  try {
+    const r = (await ElMessageBox.prompt(
+      '填写服务器的显示名，可以用中文。留空时显示服务器标识。',
+      '服务器改名',
+      { inputValue: title || key, inputPlaceholder: key },
+    )) as { value: string | null }
+    name = r.value?.trim() ?? ''
+  } catch {
+    return
+  }
+  if (!canRenameTarget.value || sel.value.key !== key || name === (title || key)) return
+  edit((d) => {
+    if (name) setScalar(d, path, name)
+    else remove(d, path, 2)
+  })
+}
+
+async function renameBuild() {
   const { s, key } = sel.value
-  if (s !== 'builds' && s !== 'targets') return
-  const check = newFields[s][0].check!
+  if (s !== 'builds') return
+  const check = newFields.builds[0].check!
   let to: string
   try {
     const r = (await ElMessageBox.prompt(
-      s === 'targets' ? '改名后，本机设置、告警等按名字记录的东西要重新设置' : '引用了这条构建的应用会一起改',
+      '引用了这条构建的应用会一起改',
       `改名：${key}`,
       { inputValue: String(key), inputValidator: (v) => v.trim() === key || check(v.trim()) || true },
     )) as { value: string }
@@ -265,14 +303,12 @@ async function renameSel() {
   if (to === key) return
   edit((d) => {
     renameKey(d, [s], String(key), to)
-    if (s === 'builds') {
-      // 应用里引用这条构建的一起改
-      const apps = nodeAt(d, ['apps'])
-      if (isSeq(apps)) apps.items.forEach((a, i) => {
-        const b = nodeAt(d, ['apps', i, 'build'])
-        if (isScalar(b) && b.value === key) b.value = to
-      })
-    }
+    // 应用里引用这条构建的一起改
+    const apps = nodeAt(d, ['apps'])
+    if (isSeq(apps)) apps.items.forEach((_, i) => {
+      const b = nodeAt(d, ['apps', i, 'build'])
+      if (isScalar(b) && b.value === key) b.value = to
+    })
   })
   sel.value = { s, key: to }
 }
@@ -382,7 +418,8 @@ function isSel(s: Section, key?: string | number) {
                 <el-radio-button :value="true">只看写了的</el-radio-button>
               </el-radio-group>
               <template v-if="sel.s !== 'project'">
-                <el-button v-if="sel.s === 'builds' || sel.s === 'targets'" size="small" :icon="EditPen" @click="renameSel">改名</el-button>
+                <el-button v-if="sel.s === 'builds'" size="small" :icon="EditPen" @click="renameBuild">改名</el-button>
+                <el-button v-else-if="sel.s === 'targets'" size="small" :icon="EditPen" :disabled="!canRenameTarget" :title="canRenameTarget ? '修改显示名' : '此处使用了 YAML 锚点或引用，请在 YAML 页修改显示名'" @click="renameTarget">改名</el-button>
                 <template v-if="sel.s === 'apps' || sel.s === 'backups'">
                   <el-button size="small" :icon="ArrowUp" :disabled="sel.key === 0" title="上移" aria-label="上移" @click="moveSel(-1)" />
                   <el-button size="small" :icon="ArrowDown" :disabled="sel.key === listLen(sel.s) - 1" title="下移" aria-label="下移" @click="moveSel(1)" />
@@ -428,6 +465,7 @@ function isSel(s: Section, key?: string | number) {
     </template>
 
     <AddAppDialog v-if="adding.open && adding.s === 'apps'" :text="text" :config="config" :target="target" @close="adding.open = false" @add="addApp" />
+    <AddTargetDialog v-else-if="adding.open && adding.s === 'targets'" :text="text" :config="config" @close="adding.open = false" @add="addTarget" />
     <el-dialog v-else v-model="adding.open" :title="sections.find((x) => x.s === adding.s)?.add" width="480px" append-to-body>
       <el-form label-width="120px" @submit.prevent="confirmAdd">
         <el-form-item v-for="f in adding.fields" :key="f.key" :label="f.label">

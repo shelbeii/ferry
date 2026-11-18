@@ -164,6 +164,18 @@ const service = obj('服务', 'systemd 服务：怎样启动程序', {
   diagLogs: list('启动失败时看的日志', '启动失败时显示这些日志文件的末尾，如 ${logs}/error.log（相对路径为相对 data）', { appTypes: svc }),
   archiveLogs: list('随版本归档的日志目录', 'data 下的日志目录，切换版本时随离开的版本归档；写 [] 表示不归档', { appTypes: svc, default: 'sharedDirs 里的 logs（有的话）' }),
   health: { ...health(), appTypes: svc },
+  preflight: obj('部署预检', '上传前检查目标服务器上的环境变量和外部依赖', {
+    requiredEnv: list('必需环境变量', '非空的服务环境变量名。值可以来自 env、服务器上的 envFile 或 Ferry 应用密钥'),
+    dependencies: {
+      ...list('依赖服务', '从目标服务器验证协议和可达性'),
+      kind: 'objList',
+      item: obj('依赖服务', '', {
+        name: str('名称', '预检失败时显示的名称', { required: true }),
+        protocol: pick('协议', 'TCP、HTTP、MySQL、Redis 或 Nacos', ['tcp', 'http', 'mysql', 'redis', 'nacos'], { default: 'tcp' }),
+        address: str('地址', 'TCP、MySQL、Redis 用主机:端口；HTTP、Nacos 用健康检查 URL', { required: true }),
+      }),
+    },
+  }, { appTypes: svc }),
   restart: {
     ...obj(
       '意外退出后重启',

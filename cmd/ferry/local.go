@@ -28,6 +28,7 @@ var localUsage = errors.New(`用法：
 // localTarget ferry local 里一个目标的情况。
 type localTarget struct {
 	Name         string              `json:"name"`
+	Title        string              `json:"title,omitempty"`
 	Auth         string              `json:"auth"`         // 这台电脑上实际的登录方式
 	IdentityFile string              `json:"identityFile"` // 这台电脑上实际用的私钥（原样）
 	KeyPath      string              `json:"keyPath"`      // 私钥在这台电脑上的位置
@@ -217,7 +218,7 @@ func localShow(f *config.File) (*localReport, error) {
 	}
 	for _, n := range f.TargetNames() {
 		t, st := f.Targets[n], shared.Targets[n]
-		lt := localTarget{Name: n, Auth: t.Auth, IdentityFile: t.IdentityFile, SharedAuth: st.Auth, SharedKey: st.IdentityFile, Local: t.Local, Vars: []localVar{}}
+		lt := localTarget{Name: n, Title: t.Title, Auth: t.Auth, IdentityFile: t.IdentityFile, SharedAuth: st.Auth, SharedKey: st.IdentityFile, Local: t.Local, Vars: []localVar{}}
 		var mine map[string]string
 		if l.Targets[n] != nil {
 			mine = l.Targets[n].Vars

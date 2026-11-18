@@ -273,8 +273,9 @@ type Service struct {
 	SharedDirs   []string          `yaml:"sharedDirs"`
 	DiagLogs     []string          `yaml:"diagLogs"`
 	// ArchiveLogs shared 下的日志目录，切换版本时随离开的版本归档；不写时为 sharedDirs 里的 logs（有的话），[] 表示不归档
-	ArchiveLogs *[]string `yaml:"archiveLogs"`
-	Health      Health    `yaml:"health"`
+	ArchiveLogs *[]string         `yaml:"archiveLogs"`
+	Health      Health            `yaml:"health"`
+	Preflight   *ServicePreflight `yaml:"preflight"`
 	// Restart 意外退出后怎么重启；不写 = 出错退出时 5 秒后重启，一直重启
 	Restart *Restart `yaml:"restart"`
 	// Autostart 开机自启；不写 = 是。手动「停止」的应用开机不会自己起来，「启动」后恢复
@@ -286,6 +287,18 @@ type Service struct {
 	UnitExtra UnitExtra `yaml:"unitExtra"`
 	// ZeroDowntime 不停机发布：新版本在另一个端口启动、就绪后再停旧的
 	ZeroDowntime *ZeroDowntime `yaml:"zeroDowntime"`
+}
+
+// ServicePreflight 运行服务前，验证目标机上提供的变量与外部依赖。
+type ServicePreflight struct {
+	RequiredEnv  []string            `yaml:"requiredEnv"`
+	Dependencies []ServiceDependency `yaml:"dependencies"`
+}
+
+type ServiceDependency struct {
+	Name     string `yaml:"name"`
+	Protocol string `yaml:"protocol"`
+	Address  string `yaml:"address"`
 }
 
 // AutostartOn 开机自启（不写时是）。

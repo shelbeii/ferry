@@ -51,6 +51,7 @@ onMounted(load)
 
 // 当前这台服务器：顶部选中的
 const current = computed(() => rep.value?.targets.find((t) => t.name === props.focus) ?? rep.value?.targets[0])
+const displayName = computed(() => current.value?.title || current.value?.name || '')
 const tf = computed(() => (current.value ? form.targets[current.value.name] : undefined))
 
 // 用在这台电脑上的变量（源码目录等）：所有服务器共用
@@ -131,11 +132,11 @@ function keygen(name: string) {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="current ? `本机设置 · ${current.name}` : '本机设置'" width="760px" top="6vh" append-to-body @closed="emit('close')">
+  <el-dialog v-model="visible" :title="current ? `本机设置 · ${displayName}` : '本机设置'" width="760px" top="6vh" append-to-body @closed="emit('close')">
     <el-skeleton v-if="loading" :rows="5" animated />
     <template v-else-if="rep && current && tf">
       <p class="muted intro">
-        ferry.yaml 写通用的配置；这里是 <b class="mono">{{ current.name }}</b> 在这台电脑上的设置，<b>只对这台服务器生效</b>，
+        ferry.yaml 写通用的配置；这里是 <b class="mono" :title="current.name">{{ displayName }}</b> 在这台电脑上的设置，<b>只对这台服务器生效</b>，
         存在 Ferry 的数据目录里，不写进 ferry.yaml。设置别的服务器：在顶部切换服务器后再打开。
       </p>
       <el-alert v-if="problems.length" type="warning" :closable="false" show-icon class="problems" title="这台电脑上缺这些">
@@ -172,7 +173,7 @@ function keygen(name: string) {
       <template v-if="serverVars.length">
         <h4>变量</h4>
         <p class="muted small">
-          ferry.yaml 里的值在这台服务器上不对时（比如 JDK、脚本、密钥文件放的位置不一样）在这里改，只对 {{ current.name }} 生效。留空 = 按 ferry.yaml。
+          ferry.yaml 里的值在这台服务器上不对时（比如 JDK、脚本、密钥文件放的位置不一样）在这里改，只对 {{ displayName }} 生效。留空 = 按 ferry.yaml。
         </p>
         <div v-for="v in serverVars" :key="v.name" class="var two">
           <span class="mono name" :title="v.name">${{ '{' + v.name + '}' }}</span>
@@ -192,7 +193,7 @@ function keygen(name: string) {
           </div>
           <div v-if="misplaced(v)" class="small misplaced">
             这是服务器上的路径，写在这里对所有服务器都生效。
-            <el-button link type="primary" size="small" @click="moveToServer(v.name)">改成只对 {{ current.name }}</el-button>
+            <el-button link type="primary" size="small" @click="moveToServer(v.name)">改成只对 {{ displayName }}</el-button>
           </div>
         </div>
       </template>

@@ -1006,7 +1006,11 @@ func (a *Agent) waitReady(s *proto.AppSpec, unit string) error {
 		crashed := p.Active == "failed" || p.Active == "inactive" || p.Sub == "auto-restart" ||
 			(pid0 != 0 && p.PID != pid0)
 		if crashed {
-			a.fail(proto.EvCrash, s.Name, "进程已退出（%s/%s）", p.Active, p.Sub)
+			if p.ExecMainStatus != 0 {
+				a.fail(proto.EvCrash, s.Name, "进程已退出（%s/%s，%s，退出状态 %d）", p.Active, p.Sub, p.Result, p.ExecMainStatus)
+			} else {
+				a.fail(proto.EvCrash, s.Name, "进程已退出（%s/%s）", p.Active, p.Sub)
+			}
 			return fmt.Errorf("%s 启动后退出", s.Name)
 		}
 		if pid0 == 0 && p.PID != 0 {
@@ -1063,7 +1067,7 @@ func (a *Agent) waitProbe(s *proto.AppSpec) error {
 	}
 }
 
-// diag 输出启动失败原因：配置的日志文件（去掉堆栈）最后几行；没有就看 journald。
+// diag 合并本次启动的 systemd 输出和应用日志，把具体的根因放在尾部日志前面。
 func (a *Agent) diag(s *proto.AppSpec, unit string) {
 	if a.hasAppSecrets(s, unit) {
 		a.info(proto.EvDiag, s.Name, "此服务使用应用密钥，部署诊断省略进程日志。查看完整日志：journalctl -u %s", unit)
@@ -1088,27 +1092,36 @@ func (a *Agent) diag(s *proto.AppSpec, unit string) {
 				lines = append(lines, l)
 			}
 		}
-		if len(lines) > 0 {
-			break
-		}
 	}
-	if len(lines) == 0 {
-		since := a.Sys.Now().Add(-time.Minute)
-		if t, ok := a.waitStart[unit]; ok {
-			since = t.Add(-3 * time.Second) // 启动命令在开始等待前一刻发出
-		}
-		for _, l := range a.Sys.Journal(unit, 60, since) {
-			if !isStackLine(l) && strings.TrimSpace(l) != "" {
-				lines = append(lines, l)
+	since := a.Sys.Now().Add(-time.Minute)
+	if t, ok := a.waitStart[unit]; ok {
+		since = t.Add(-3 * time.Second) // 启动命令在开始等待前一刻发出
+	}
+	journal := a.Sys.Journal(unit, 120, since)
+	lines = append(lines, diagnosticLines(journal)...)
+	var reasons []string
+	for _, l := range lines {
+		lower := strings.ToLower(l)
+		for _, marker := range []string{"status=203/exec", "permission denied", "address already in use", "executable path specifies a directory", "error while loading shared libraries", "caused by:", "could not be found", "connection refused", "failed to initialize plugin config"} {
+			if strings.Contains(lower, marker) {
+				reasons = append(reasons, l)
+				break
 			}
 		}
 	}
-	if len(lines) > 12 {
-		lines = lines[len(lines)-12:]
+	if len(reasons) > 8 {
+		reasons = reasons[len(reasons)-8:]
 	}
-	lines = append(lines, exitHints(lines, s.UnitText)...)
-	lines = append(lines, a.inUseHints(s, lines, unit)...)
-	for _, l := range lines {
+	tail := lines[max(0, len(lines)-8):]
+	display := append(append([]string{}, reasons...), tail...)
+	display = append(display, exitHints(append(reasons, journal...), s.UnitText)...)
+	display = append(display, a.inUseHints(s, lines, unit)...)
+	seen := map[string]bool{}
+	for _, l := range display {
+		if seen[l] {
+			continue
+		}
+		seen[l] = true
 		if len(l) > 400 {
 			l = l[:400] + "…"
 		}
@@ -1119,6 +1132,16 @@ func (a *Agent) diag(s *proto.AppSpec, unit string) {
 		hint = strings.Join(s.DiagLogs, " ") + " ；" + hint
 	}
 	a.info(proto.EvDiag, s.Name, "完整日志：%s", hint)
+}
+
+func diagnosticLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !isStackLine(line) && strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // exitHints 日志里常见的启动失败退出码：用直白的话说明，找得到的话直接指出缺的文件。
