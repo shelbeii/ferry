@@ -10,7 +10,7 @@ import MarkdownIt from 'markdown-it'
 import { auditKindText, call, ferry, isSecretKind, type FerryLine } from '../ferry'
 import { onFileDrop, openUrl, pickSaveFile } from '../platform'
 import { appSettings, secretRequest, trustRequest, settingsRequest, noteConfigWritten } from '../state'
-import { defaultEffort, effortLabel, effortOptions, modelEffort, addUsage, zeroUsage, usageText, findModelByName, cost, money, tokens, type Usage } from '../ai'
+import { defaultEffort, effortLabel, effortOptions, modelEffort, addUsage, zeroUsage, usageText, findModelByName, cost, money, tokens, type AiQuestion, type Usage } from '../ai'
 import { supportsImages, prepareImage, base64Blob, imageUrl, MAX_IMAGES, type AiImage } from '../ai'
 import GlassPane from './glass/GlassPane.vue'
 import { glass, setVar } from '../glass/runtime'
@@ -22,12 +22,14 @@ const props = defineProps<{
   config: string
   target: string
   title: string
+  question?: AiQuestion
   plain?: boolean
   /** 生产服务器：每次打开都从「只读」开始，每个改动都要确认 */
   production?: boolean
   /** 配置里不允许 AI 改动：只能查看 */
   noChanges?: boolean
 }>()
+const emit = defineEmits<{ 'question-handled': [question: AiQuestion] }>()
 const expandedPanel = ref(false)
 const open = defineModel<boolean>({ required: true })
 // 首次生成位移图会占用主线程和显卡，滑入/滑出时暂停计算，已有玻璃材质继续复用。
@@ -533,21 +535,6 @@ async function stop() {
   try { await kill?.() } finally { stopping.value = false }
 }
 
-/** 「让 AI 看看」：新开一个对话，直接问这句话（应用异常、任务失败时从别处点进来） */
-let asking = false
-async function ask(text: string) {
-  if (running.value) {
-    ElMessage.warning('AI 助手正在回答，等它说完再问')
-    return
-  }
-  asking = true
-  restored = true
-  newConv()
-  await nextTick()
-  send(text)
-}
-defineExpose({ ask })
-
 function newConv() {
   if (running.value) return
   restored = true // 用户主动新建对话时不再恢复上次的。
@@ -691,11 +678,24 @@ async function restoreConversation() {
     if (seq !== conversationSeq || disposed) return
     if (!open.value || moving.value) { restored = false; return }
     // 自动恢复不关闭用户刚打开的历史列表，只有主动选中对话时才收起。
-    if (available && !items.value.length && !conv.value && history.value.length && !asking) await openConv(history.value[0].id, false)
+    if (available && !items.value.length && !conv.value && history.value.length) await openConv(history.value[0].id, false)
   } finally {
     if (seq === conversationSeq) loadingConversation.value = false
   }
 }
+
+// 首次挂载时也接收问题；新建对话会使仍在读取的历史失效。
+watch([open, () => props.question], ([shown, question]) => {
+  if (!shown || !question) return
+  emit('question-handled', question)
+  if (running.value) {
+    ElMessage.warning('AI 助手正在回答，等它说完再问')
+    return
+  }
+  newConv()
+  input.value = question.text
+  void send()
+}, { immediate: true })
 
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && editing.value) { e.preventDefault(); cancelEdit(); return }

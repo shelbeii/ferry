@@ -585,7 +585,6 @@ function listenTip(l: string): string {
       </el-table>
       </div>
     </template>
-
     <FilesDrawer v-if="fileLocations.length" v-model="filesOpen" :config="config" :target="target" :title="filesTitle" :path="fileLocations[0].path" :locations="fileLocations" />
     <InstallSoftwareDialog v-if="installOpen" :config="config" :target="target" :report="report" :done="onInstalled" @close="installOpen = false" />
     <SoftwareWebDialog v-if="webOf" :sw="webOf" :config="config" :target="target" :host="host" :title="target" @close="webOf = null" @opened="(w) => w === 'builtin' && emit('leave')" />
@@ -692,6 +691,8 @@ function listenTip(l: string): string {
   </div>
 </template>
 
+<style scoped src="./serverInventory.css"></style>
+
 <style scoped>
 /* 点刷新时内容变淡（工具栏不变），读完恢复 */
 .sw.refreshing > :not(.software-toolbar) {
@@ -726,12 +727,6 @@ function listenTip(l: string): string {
   flex-direction: column;
   gap: 10px;
 }
-.software-toolbar { display: flex; align-items: center; flex-wrap: nowrap; gap: 10px; min-height: 32px; overflow-x: auto; padding: 3px; margin: -3px; position: sticky; top: -3px; z-index: 2; background: var(--el-bg-color-page); }
-.software-toolbar > * { flex-shrink: 0; }
-.software-toolbar > .software-search { flex: 0 1 300px; min-width: 120px; }
-.software-toolbar .el-button + .el-button { margin-left: 0; }
-.software-toolbar .el-radio-group { flex-wrap: nowrap; }
-.view-switch :deep(.el-radio-button__inner) { padding: 8px 10px; }
 .sw-head {
   display: flex;
   align-items: center;
@@ -843,84 +838,14 @@ function listenTip(l: string): string {
   background: var(--el-text-color-placeholder);
 }
 /* ---- 卡片 */
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 12px;
-}
 .cards-empty {
   grid-column: 1 / -1;
-}
-.card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px 14px 8px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--ferry-card-radius);
-  background: var(--el-bg-color);
-}
-.card-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.card-name {
-  flex: 1;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.card .name {
-  font-weight: 600;
-}
-.card-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 12px;
-  margin: 0;
-  font-size: 12px;
-}
-.card-fields .wide {
-  grid-column: 1 / -1;
-}
-.card-fields dt {
-  color: var(--el-text-color-secondary);
-}
-.card-fields dd {
-  margin: 1px 0 0;
-  color: var(--el-text-color-primary);
 }
 .card-fields .sub {
   font-size: 12px;
 }
-.ellipsis {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* 底部一栏贴着卡片底边：同一行的卡片里操作按钮在一条线上 */
-.card-foot {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  min-height: 32px;
-  margin-top: auto;
-  padding-top: 6px;
-  border-top: 1px solid var(--el-border-color-extra-light);
-}
-.card-foot .el-button {
-  height: 24px;
-  padding: 0;
-}
 .card-fields .port.local {
   color: inherit;
-}
-.card-foot .el-button + .el-button {
-  margin-left: 0;
 }
 /* ---- 列表 */
 .table-box {

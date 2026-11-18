@@ -7,6 +7,7 @@ import { type Connection } from '../ferry'
 import { connGen, freeNumber, hangupConnection, newTermTab, pageTerminals, type TermTab } from '../state'
 import SshPanel from './SshPanel.vue'
 import ServerInfoPanel from './ServerInfoPanel.vue'
+import RuntimePanel from './RuntimePanel.vue'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const TerminalView = defineAsyncComponent(() => import('./TerminalView.vue'))
@@ -22,6 +23,8 @@ const active = ref(0)
 const shown = ref(true)
 const filesOpen = ref(false)
 const softwareOpen = ref(false)
+const runtimeOpen = ref(false)
+const runtimeMode = ref<'card' | 'list'>('card')
 const sshOpen = ref(false)
 const sshUsed = ref(false) // 第一次打开时才去查
 const sshPanel = ref<InstanceType<typeof SshPanel>>()
@@ -76,6 +79,7 @@ watch(
     tabs.forEach(drop)
     tabs.splice(0)
     filesOpen.value = sshOpen.value = serverOpen.value = aiOpen.value = false
+    runtimeOpen.value = false
   },
 )
 onActivated(() => (shown.value = true))
@@ -92,6 +96,7 @@ onBeforeUnmount(() => tabs.forEach(drop))
       </div>
       <div class="head-actions">
         <el-button @click="softwareOpen = true">软件</el-button>
+        <el-button @click="runtimeOpen = true">运行环境</el-button>
         <el-tag size="small" :type="conn.auth === 'password' ? 'warning' : 'success'">{{ conn.auth === 'password' ? '密码登录' : '密钥登录' }}</el-tag>
         <el-tooltip :show-after="HOVER_DELAY" content="上传、下载、新建文件夹、改名、删除（以登录用户的身份）" placement="bottom">
           <el-button type="primary" :icon="FolderOpened" @click="filesOpen = true">文件</el-button>
@@ -134,6 +139,9 @@ onBeforeUnmount(() => tabs.forEach(drop))
 
     <FilesDrawer v-model="filesOpen" :config="config" :target="conn.name" :title="conn.title" />
     <el-drawer v-if="softwareOpen" v-model="softwareOpen" direction="rtl" size="94vw" append-to-body :title="`软件：${conn.title}`"><SoftwarePanel :config="config" :target="conn.name" :host="conn.host" :connected="live" @leave="softwareOpen = false" /></el-drawer>
+    <el-drawer v-if="runtimeOpen" v-model="runtimeOpen" direction="rtl" size="94vw" append-to-body :title="`运行环境：${conn.title}`">
+      <RuntimePanel v-model:mode="runtimeMode" :config="config" :target="conn.name" :connected="live" />
+    </el-drawer>
     <el-drawer v-if="sshUsed" v-model="sshOpen" direction="rtl" size="64%" append-to-body :title="`登录用户：${conn.title}`" class="ssh-drawer" @open="sshPanel?.load()">
       <SshPanel ref="sshPanel" :config="config" :target="conn.name" :connected="tabs.some((t) => t.state === 'open')" bar />
     </el-drawer>

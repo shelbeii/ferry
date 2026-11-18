@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, FolderOpened, Search, Plus, Upload } from '@element-plus/icons-vue'
+import { ArrowLeft, Delete, FolderOpened, Search, Plus, Upload } from '@element-plus/icons-vue'
 import { stringify } from 'yaml'
-import { call, variantMisfit, type Software, type SoftwareReport, type SwPackage, type SwParam, type SwTemplate, type SwTemplates, type SwVariant } from '../ferry'
+import { call, variantMisfit, type Software, type SoftwareReport, type SwExtra, type SwExtraPreview, type SwPackage, type SwParam, type SwTemplate, type SwTemplates, type SwVariant } from '../ferry'
+import { extraLine, extrasCount, extrasPayload, extraWhere, rowErrors, type ExtraRow } from '../softwareExtras'
 import { startTask, type Task } from '../state'
 import { pickFile } from '../platform'
 import LoadingBlock from './LoadingBlock.vue'
@@ -89,8 +90,74 @@ function selectDirectory(path: string) {
 }
 // 服务器要下载东西（从软件源装包、步骤里的下载）时走谁的网络
 type Network = 'auto' | 'local' | 'server'
-const downloads = computed(() => !!variant.value?.system || !!variant.value?.steps?.some((st) => st.run))
+const offlineOption = computed(() => !!variant.value?.system && !variant.value.package)
+const offlineBundleKind = computed<'rpm' | 'deb' | 'auto'>(() => {
+  const system = variant.value?.system
+  if (!system?.apt?.length) return 'rpm'
+  if (!system.dnf?.length || props.report?.pkgMgr === 'apt-get') return 'deb'
+  if (props.report?.pkgMgr === 'dnf' || props.report?.pkgMgr === 'yum') return 'rpm'
+  return 'auto'
+})
+const offlineBundleLabel = computed(() => offlineBundleKind.value === 'auto' ? 'RPM 或 DEB' : offlineBundleKind.value.toUpperCase())
+const offlinePackages = computed(() => library.value.filter(m => m.bundle && (offlineBundleKind.value === 'auto' || m.bundle === offlineBundleKind.value)))
+const offlineImportError = ref('')
+const offlineImportBusy = ref(false)
+const downloads = computed(() => !(offlineOption.value && form.value.pkg) && (!!variant.value?.system || !!variant.value?.steps?.some((st) => st.run)))
 const values = ref<Record<string, string | number | boolean>>({})
+
+// ---------------------------------------------------------------- 更多配置（模板参数没有的设置）
+
+const extrasOpen = ref(false)
+const extraRows = ref<Record<string, ExtraRow[]>>({})
+/** 这种装法能用的附加配置（和 Go 的 Extra.appliesTo 一致） */
+const extras = computed<SwExtra[]>(() => {
+  const v = variant.value
+  if (!v) return []
+  return (tpl.value?.extras ?? []).filter((x) => {
+    if (x.format === 'env' || x.format === 'args') return true
+    if (v.files?.some((f) => f.path === x.file)) return true
+    return x.format !== 'ini' && !!v.props?.some((pr) => pr.file === x.file)
+  })
+})
+const extraErrors = computed(() => Object.fromEntries(extras.value.map((x) => [x.id, rowErrors(x, extraRows.value[x.id] ?? [])])))
+const extrasInvalid = computed(() => Object.values(extraErrors.value).some((es) => es.some((e) => e.key || e.value)))
+const extrasFilled = computed(() => extrasCount(Object.fromEntries(extras.value.map((x) => [x.id, extraRows.value[x.id] ?? []]))))
+function extrasJSON(): string {
+  return extrasPayload(extras.value, extraRows.value)
+}
+function suggestion(x: SwExtra, key: string) {
+  const k = key.trim()
+  return (x.suggest ?? []).find((s) => s.key === k)
+}
+/** 还没填的常用项 */
+function unusedSuggest(x: SwExtra) {
+  const used = new Set((extraRows.value[x.id] ?? []).map((r) => r.key.trim()))
+  return (x.suggest ?? []).filter((s) => !used.has(s.key))
+}
+function addExtraRow(x: SwExtra, s?: { key: string; example?: string }) {
+  const rows = (extraRows.value[x.id] ??= [])
+  // 有空行时先用空行
+  const blank = rows.find((r) => !r.key.trim() && !r.value.trim())
+  if (blank && s) Object.assign(blank, { key: s.key, value: s.example ?? '' })
+  else rows.push({ key: s?.key ?? '', value: s?.example ?? '' })
+}
+function removeExtraRow(x: SwExtra, i: number) {
+  extraRows.value[x.id]?.splice(i, 1)
+}
+function searchSuggest(x: SwExtra, q: string, cb: (items: { value: string; help?: string }[]) => void) {
+  const k = q.trim().toLowerCase()
+  cb((x.suggest ?? []).filter((s) => !k || s.key.toLowerCase().includes(k)).map((s) => ({ value: s.key, help: s.help })))
+}
+function pickSuggest(x: SwExtra, row: ExtraRow) {
+  const s = suggestion(x, row.key)
+  if (s?.example && !row.value.trim()) row.value = s.example
+}
+function valuePlaceholder(x: SwExtra, key: string): string {
+  const s = suggestion(x, key)
+  if (s?.example) return `如 ${s.example}`
+  if (x.format === 'ini') return '值（只写名称的选项留空）'
+  return '值'
+}
 const latest = ref('')
 const latestError = ref('')
 const latestLoading = ref(false)
@@ -110,6 +177,8 @@ function open(t: SwTemplate) {
   const name = freeName(t.id)
   form.value = { name, in: form.value.in || '/opt/ferry-software', user: '', version: '', java: 0, pkg: '', javaDir: '', network: form.value.network || 'auto' }
   values.value = {}
+  extraRows.value = {}
+  extrasOpen.value = false
   for (const p of params.value) {
     if (p.type === 'bool') values.value[p.key] = p.default === 'true'
     else if (p.type === 'port' || p.type === 'number') values.value[p.key] = Number(p.default ?? 0)
@@ -150,10 +219,15 @@ function applyVariant() {
   form.value.java = v.java ?? 0
   form.value.version = ''
   form.value.pkg = ''
+  offlineImportError.value = ''
   latest.value = ''
   latestError.value = ''
-  if (v.package?.url) loadLatest()
-  else if (v.package) form.value.pkg = library.value.find((m) => m.template === tpl.value?.id)?.file ?? ''
+  ++latestSequence
+  reads.cancel('latest')
+  latestLoading.value = false
+  if (v.package?.url) {
+    if (!v.package.recommended) loadLatest()
+  } else if (v.package) form.value.pkg = library.value.find((m) => m.template === tpl.value?.id)?.file ?? ''
 }
 watch(vi, applyVariant)
 
@@ -177,7 +251,7 @@ async function loadLatest() {
 
 const localPkg = computed(() => {
   const t = tpl.value
-  const ver = form.value.version || latest.value || variant.value?.package?.fallback
+  const ver = form.value.version || variant.value?.package?.recommended || latest.value || variant.value?.package?.fallback
   return library.value.find((m) => m.template === t?.id && (!ver || m.version === ver))
 })
 
@@ -188,6 +262,7 @@ const shownVersion = computed(() => {
   if (!p) return ''
   if (form.value.version) return form.value.version
   if (form.value.pkg) return library.value.find((m) => m.file === form.value.pkg)?.version ?? ''
+  if (p.recommended) return p.recommended
   if (latest.value) return latest.value
   if (latestError.value) return library.value.find((m) => m.template === tpl.value?.id)?.version || p.fallback || ''
   return ''
@@ -302,7 +377,9 @@ const summary = computed<string[]>(() => {
   if (!v) return []
   const out: string[] = []
   const sys = pkgMgrApt.value ? v.system?.apt : v.system?.dnf
-  if (sys?.length) {
+  if (offlineOption.value && form.value.pkg) {
+    out.push(`上传 ${form.value.pkg}，使用 ZIP 内的系统包及依赖离线安装`)
+  } else if (sys?.length) {
     const names = sys.map((x) => x.split('|').join(' 或 ')).join('、')
     out.push(`${v.package ? '需要的系统库' : '程序'}从服务器的软件源装：${names}（已经装着的直接用、不升级；会顺带升级或删除别的已装包时先问你）`)
   }
@@ -317,6 +394,11 @@ const summary = computed<string[]>(() => {
   const tcp = params.value.filter((p) => p.type === 'port' && protos(p).includes('tcp')).flatMap(portsOf)
   const udp = params.value.filter((p) => p.type === 'port' && protos(p).includes('udp')).flatMap(portsOf)
   if (tcp.length || udp.length) out.push(`占用端口 ${[...tcp, ...udp.map((x) => `${x}/UDP`)].join('、')}`)
+  for (const x of extras.value) {
+    const errs = extraErrors.value[x.id] ?? []
+    const rows = (extraRows.value[x.id] ?? []).filter((r, i) => r.key.trim() && !errs[i]?.key && !errs[i]?.value)
+    if (rows.length) out.push(`写进 ${extraWhere(x)}：${rows.map((r) => extraLine(x.format, { key: r.key.trim(), value: r.value.trim() })).join('、')}`)
+  }
   if (v.selinux) out.push('服务器开着 SELinux 时，给安装目录和端口加上 SELinux 标签（程序才能读写、监听）')
   out.push('启动后等端口能连上；有密码的软件再用设置的账号和密码登录一次，登录不上就撤销安装')
   return out
@@ -354,7 +436,7 @@ const nameError = computed(() =>
 const misfit = computed(() => (variant.value ? variantMisfit(variant.value, os.value, arch.value) : ''))
 const needPkg = computed(() => !!variant.value?.package && !variant.value.package.url && !form.value.pkg)
 const canInstall = computed(
-  () => tpl.value && !misfit.value && !nameError.value && !inError.value && !needPkg.value && !javaDirError.value && params.value.every((p) => !paramError(p)),
+  () => tpl.value && !misfit.value && !nameError.value && !inError.value && !needPkg.value && !javaDirError.value && !extrasInvalid.value && params.value.every((p) => !paramError(p)),
 )
 
 async function importPkg(after?: (m: SwPackage) => void) {
@@ -370,6 +452,37 @@ async function importPkg(after?: (m: SwPackage) => void) {
   }
 }
 
+async function importOfflineBundle() {
+  const selectedForm = form.value
+  const selectedVariant = variant.value
+  const kind = offlineBundleKind.value
+  const isCurrent = () => view.value === 'template' && form.value === selectedForm && variant.value === selectedVariant
+  offlineImportBusy.value = true
+  try {
+    const file = await pickFile('选择离线系统包 ZIP', 'ZIP 压缩包', ['zip'])
+    if (!file || !isCurrent()) return
+    offlineImportError.value = ''
+    const m = await call<SwPackage>(['software', 'lib', 'import', file, kind])
+    if (info.value) info.value.library = [...library.value.filter(p => p.file !== m.file), m]
+    if (isCurrent()) {
+      selectedForm.pkg = m.file
+      ElMessage.success(`已导入并选中 ${m.file}`)
+    }
+  } catch (e) {
+    if (isCurrent()) offlineImportError.value = (e as Error).message
+  } finally {
+    offlineImportBusy.value = false
+  }
+}
+
+/** 交给 ferry 的环境变量：参数、附加配置 */
+function installEnv(): Record<string, string> {
+  const env: Record<string, string> = { FERRY_SOFTWARE_PARAMS: paramsJSON() }
+  const extra = extrasJSON()
+  if (extra) env.FERRY_SOFTWARE_EXTRA = extra
+  return env
+}
+
 function paramsJSON(): string {
   const out: Record<string, string> = {}
   for (const p of params.value) {
@@ -380,11 +493,11 @@ function paramsJSON(): string {
   return JSON.stringify(out)
 }
 
-function install() {
+function templateArgs(action: 'plan' | 'install') {
   const t = tpl.value
   if (!t) return
   const f = form.value
-  const args = ['software', 'install', props.target, t.id, '--name', f.name, '--in', f.in.trim().replace(/\/+$/, ''), '--user', f.user, '--variant', String(vi.value + 1)]
+  const args = ['software', action, props.target, t.id, '--name', f.name, '--in', f.in.trim().replace(/\/+$/, ''), '--user', f.user, '--variant', String(vi.value + 1)]
   // 版本和界面上显示的文件夹名一致
   const ver = f.version || (variant.value?.package?.url ? shownVersion.value : '')
   if (ver) args.push('--version', ver)
@@ -393,7 +506,62 @@ function install() {
   if (variant.value?.java && f.javaDir.trim()) args.push('--java-dir', f.javaDir.trim().replace(/\/+$/, ''))
   if (downloads.value && f.network !== 'auto') args.push('--network', f.network)
   args.push('-c', props.config)
-  startTask(`在 ${props.target} 上安装 ${t.name}（${f.name}）`, args, props.done, { FERRY_SOFTWARE_PARAMS: paramsJSON() })
+  return args
+}
+
+const reviewing = ref(false)
+const reviewText = ref('')
+const reviewError = ref('')
+const reviewExtras = ref<SwExtraPreview[]>([])
+const extraFile = ref<SwExtraPreview>()
+let reviewSequence = 0
+watch([form, values, tpl, vi, view, extraRows, () => props.config, () => props.target], () => {
+  reviewSequence++
+  reads.cancel('software-review')
+  reviewing.value = false
+  reviewText.value = ''
+  reviewError.value = ''
+  reviewExtras.value = []
+}, { deep: true })
+
+async function review() {
+  const args = templateArgs('plan')
+  if (!args) return
+  const sequence = ++reviewSequence
+  reviewing.value = true
+  reviewText.value = ''
+  reviewError.value = ''
+  reviewExtras.value = []
+  try {
+    const env = installEnv()
+    const plan = await reads.run('software-review', signal => readCall<{
+      dir: string
+      network: 'none' | 'local' | 'server' | 'offline'
+      missingPackages?: string[]
+      packageChanges?: string[]
+      package?: string
+      extras?: SwExtraPreview[]
+    }>(args, signal, env),
+      { timeout: 90_000, timeoutMessage: '安装预检超过 90 秒，请检查服务器和软件源后重试' },
+    )
+    if (sequence !== reviewSequence) return
+    const route = { none: '无需从服务器下载依赖', local: '经本机代理', server: '服务器直连软件源', offline: '使用离线包' }[plan.network]
+    reviewText.value = [plan.dir, plan.package, route, plan.missingPackages?.length && `待安装 ${plan.missingPackages.join('、')}`,
+      plan.packageChanges?.length && `会改动已装软件包 ${plan.packageChanges.join('、')}`].filter(Boolean).join(' · ')
+    reviewExtras.value = plan.extras ?? []
+  } catch (e) {
+    if (sequence === reviewSequence && !(e instanceof ReadCanceled)) reviewError.value = (e as Error).message
+  } finally {
+    if (sequence === reviewSequence) reviewing.value = false
+  }
+}
+
+function install() {
+  const t = tpl.value
+  const args = templateArgs('install')
+  if (!t || !args) return
+  const f = form.value
+  startTask(`在 ${props.target} 上安装 ${t.name}（${f.name}）`, args, props.done, installEnv())
   emit('close')
 }
 
@@ -401,6 +569,7 @@ function install() {
 
 const custom = ref({ pkg: '', title: '', name: '', exec: '', port: 8080, user: '', java: 0, format: '', strip: 1, into: '', save: false, id: '' })
 const customFile = computed(() => library.value.find((m) => m.file === custom.value.pkg))
+const archivePreview = ref<{ files: string[]; entries: number; bundle?: string }>()
 const extFormat = (file: string) => {
   const f = file.toLowerCase()
   if (f.endsWith('.tar.gz') || f.endsWith('.tgz')) return 'tar.gz'
@@ -410,6 +579,20 @@ const extFormat = (file: string) => {
   return 'binary'
 }
 const isArchive = computed(() => ['tar.gz', 'tar.xz', 'zip'].includes(custom.value.format))
+
+watch(() => [custom.value.pkg, custom.value.format, custom.value.strip] as const, async ([file, format, strip]) => {
+  archivePreview.value = undefined
+  reads.cancel('archive')
+  if (!file || !['zip', 'tar.gz'].includes(format)) return
+  try {
+    const result = await reads.run('archive', s => readCall<NonNullable<typeof archivePreview.value>>(
+      ['software', 'lib', 'inspect', file, String(strip ?? 0)], s,
+    ))
+    if (custom.value.pkg === file && custom.value.format === format && custom.value.strip === strip) archivePreview.value = result
+  } catch {
+    // 实际安装仍会独立校验安装包。
+  }
+})
 
 function openCustom() {
   custom.value = { pkg: '', title: '', name: freeName('app'), exec: '', port: 8080, user: '', java: 0, format: '', strip: 1, into: '', save: false, id: '' }
@@ -427,7 +610,7 @@ watch(
     const base = file.replace(/(\.tar\.gz|\.tgz|\.tar\.xz|\.zip|\.jar|\.war)$/i, '').replace(/[-_.]?v?\d.*$/, '')
     if (!custom.value.title) custom.value.title = base || file
     if (!custom.value.exec) {
-      custom.value.exec = fmt === 'jar' ? `\${java} -jar \${dir}/${file} --server.port=\${port}` : fmt === 'binary' ? `\${dir}/${file}` : '${dir}/bin/'
+      custom.value.exec = fmt === 'jar' ? `\${java} -jar \${dir}/${file} --server.port=\${port}` : fmt === 'binary' ? `\${dir}/${file}` : ''
       if (fmt === 'jar' && !custom.value.java) custom.value.java = 17
     }
   },
@@ -441,9 +624,12 @@ const customErrors = computed(() => {
   const c = custom.value
   const e: Record<string, string> = {}
   if (!c.pkg) e.pkg = '选一个安装包（没有就先导入）'
+  else if (archivePreview.value?.bundle) e.pkg = '系统软件包集合，请在对应软件的安装方式里选择离线包'
+  else if (archivePreview.value?.entries === 0) e.pkg = '当前剥离层数没有保留任何文件'
   if (!/^[a-z][a-z0-9-]{0,30}$/.test(c.name)) e.name = '小写字母、数字、横线，以字母开头'
   else if (taken.value.has(c.name)) e.name = '已经有同名的了'
   if (!c.exec.trim()) e.exec = '写启动命令'
+  else if (/^(?:"[^"]*\/"|'[^']*\/'|[^\s"'\\]+\/)(?:\s|$)/.test(c.exec.trim())) e.exec = '启动命令要指向程序文件'
   else if (c.exec.includes('${java}') && !c.java) e.exec = '用了 ${java}：要选 JDK'
   if (c.java && javaDirError.value) e.javaDir = javaDirError.value
   if (inError.value) e.in = inError.value
@@ -594,9 +780,10 @@ async function installCustom() {
         </el-form-item>
 
         <el-form-item v-if="variant.package?.url" label="版本">
-          <el-input v-model="form.version" class="mono short" :placeholder="latestLoading ? '正在查最新版本…' : latest || variant.package.fallback" />
+          <el-input v-model="form.version" class="mono short" :placeholder="latestLoading ? '正在查最新版本…' : variant.package.recommended || latest || variant.package.fallback" />
           <span class="muted small ml">
-            <template v-if="latestLoading">正在查最新版本…</template>
+            <template v-if="variant.package.recommended">推荐 {{ variant.package.recommended }}</template>
+            <template v-else-if="latestLoading">正在查最新版本…</template>
             <template v-else-if="latest">最新 {{ latest }}</template>
             <template v-else>查不到最新版本，不填用 {{ variant.package.fallback }}</template>
           </span>
@@ -609,6 +796,13 @@ async function installCustom() {
               </el-button>
             </template>
           </div>
+        </el-form-item>
+        <el-form-item v-else-if="offlineOption" label="离线系统包" :error="offlineImportError">
+          <el-select v-model="form.pkg" class="wide" placeholder="使用系统软件源" filterable clearable @change="offlineImportError = ''">
+            <el-option v-for="m in offlinePackages" :key="m.file" :value="m.file" :label="m.file" />
+          </el-select>
+          <el-button link type="primary" :icon="Upload" class="ml" :loading="offlineImportBusy" @click="importOfflineBundle">导入 ZIP…</el-button>
+          <div class="muted small">ZIP 内应包含适合这台服务器的 {{ offlineBundleLabel }} 软件包及其依赖。</div>
         </el-form-item>
         <el-form-item v-else-if="variant.package" label="安装包" :error="needPkg ? '先导入安装包，再选它' : ''">
           <el-select v-model="form.pkg" class="wide" placeholder="选本机库里的安装包" filterable>
@@ -667,6 +861,50 @@ async function installCustom() {
           <el-input v-model="form.javaDir" class="mono" clearable :placeholder="`留空：${sharedJdk(form.java)}（公共目录）`" />
           <div class="muted small">{{ javaDirHint(form.java) }}</div>
         </el-form-item>
+        <el-form-item v-if="extras.length" label="更多配置">
+          <el-button v-if="!extrasOpen" link type="primary" @click="extrasOpen = true">
+            补充模板参数里没有的设置（可选）<template v-if="extrasFilled">：已填 {{ extrasFilled }} 项</template>
+          </el-button>
+          <div v-else class="extras">
+            <div v-for="x in extras" :key="x.id" class="extra">
+              <div class="small">
+                <b>{{ x.label }}</b>
+              </div>
+              <div v-if="x.help" class="muted small">{{ x.help }}</div>
+              <div v-for="(r, i) in extraRows[x.id] ?? []" :key="i" class="extra-row">
+                <div class="extra-line">
+                  <div class="extra-key">
+                  <el-autocomplete v-model="r.key" :fetch-suggestions="(q: string, cb: any) => searchSuggest(x, q, cb)" placeholder="名称"
+                    :aria-label="`${x.label}：第 ${i + 1} 项的名称`" @select="pickSuggest(x, r)" @blur="pickSuggest(x, r)">
+                    <template #default="{ item }">
+                      <span class="mono">{{ item.value }}</span><span v-if="item.help" class="muted small ml">{{ item.help }}</span>
+                    </template>
+                  </el-autocomplete>
+                  </div>
+                  <span class="muted">{{ x.format === 'keyvalue' ? '' : '=' }}</span>
+                  <div class="extra-val">
+                    <el-input v-model="r.value" class="mono" :placeholder="valuePlaceholder(x, r.key)" :aria-label="`${x.label}：第 ${i + 1} 项的值`" />
+                  </div>
+                  <el-button link :icon="Delete" :aria-label="`删除第 ${i + 1} 项`" @click="removeExtraRow(x, i)" />
+                </div>
+                <div v-if="extraErrors[x.id]?.[i]?.key || extraErrors[x.id]?.[i]?.value" class="err small">
+                  {{ extraErrors[x.id][i].key || extraErrors[x.id][i].value }}
+                </div>
+                <div v-else-if="suggestion(x, r.key)?.help" class="muted small">{{ suggestion(x, r.key)?.help }}</div>
+              </div>
+              <div class="extra-add">
+                <el-button link type="primary" size="small" :icon="Plus" @click="addExtraRow(x)">添加一项</el-button>
+                <template v-if="unusedSuggest(x).length">
+                  <span class="muted small ml">常用：</span>
+                  <el-tooltip v-for="sg in unusedSuggest(x)" :key="sg.key" :content="sg.help || sg.key" :show-after="HOVER_DELAY" placement="top">
+                    <el-tag class="sug mono" size="small" effect="plain" disable-transitions @click="addExtraRow(x, sg)">{{ sg.key }}</el-tag>
+                  </el-tooltip>
+                </template>
+              </div>
+            </div>
+            <div class="muted small">同名的项替换模板里的值，没有的加上。端口、密码、目录等用上面的参数设置，这里不能改。点「预检」可以先看生成的配置。</div>
+          </div>
+        </el-form-item>
         <el-form-item label="安装时会">
           <ul class="summary small">
             <li v-for="s in summary" :key="s">{{ s }}</li>
@@ -695,6 +933,12 @@ async function installCustom() {
               ，解压时去掉 <el-input-number v-model="custom.strip" :min="0" :max="5" size="small" class="strip" /> 层目录（压缩包里通常有一层「软件名-版本/」）
             </template>
             <template v-else>，放在安装目录下的 <span class="mono">{{ custom.into }}</span></template>
+          </div>
+          <div v-if="archivePreview" class="muted small">
+            <template v-if="archivePreview.bundle">内容为 {{ archivePreview.bundle.toUpperCase() }} 软件包集合</template>
+            <template v-else>
+              解压后 {{ archivePreview.entries }} 个文件<span v-if="archivePreview.files.length"> · {{ archivePreview.files.slice(0, 6).join('、') }}</span>
+            </template>
           </div>
         </el-form-item>
         <el-form-item label="显示名">
@@ -743,10 +987,23 @@ async function installCustom() {
     </template>
 
     <template #footer>
+      <el-alert v-if="view === 'template' && reviewError" :title="reviewError" type="error" :closable="false" show-icon />
+      <div v-if="view === 'template' && reviewText" class="muted small">{{ reviewText }}</div>
+      <div v-for="x in view === 'template' ? reviewExtras : []" :key="x.id" class="review-extra small">
+        <span class="muted">{{ x.label }}会写进：</span><span class="mono">{{ x.items.map((it) => extraLine(x.format, it)).join('；') }}</span>
+        <el-button v-if="x.content || x.exec" link type="primary" size="small" class="ml" @click="extraFile = x">
+          {{ x.content ? `看生成的 ${x.file?.split('/').pop()}` : '看启动命令' }}
+        </el-button>
+      </div>
       <el-button @click="emit('close')">取消</el-button>
-      <el-button v-if="view === 'template'" type="primary" :disabled="!canInstall" @click="install">安装</el-button>
+      <el-button v-if="view === 'template'" :disabled="!canInstall" :loading="reviewing" @click="review">预检</el-button>
+      <el-button v-if="view === 'template'" type="primary" :disabled="!canInstall || reviewing" @click="install">安装</el-button>
       <el-button v-if="view === 'custom'" type="primary" @click="installCustom">安装</el-button>
     </template>
+  </el-dialog>
+  <el-dialog v-if="extraFile" :model-value="true" append-to-body width="760px" :title="extraFile.content ? extraFile.file : '启动命令'" @close="extraFile = undefined">
+    <p class="muted small desc-line">按现在填的参数和更多配置生成；密码已遮住，JDK、安装包的位置是占位。</p>
+    <pre class="mono extra-file">{{ extraFile.content || extraFile.exec }}</pre>
   </el-dialog>
   <RemoteDirectoryPicker v-if="directoryPickerOpen" :config="config" :target="target" :path="form.in" :validate="installLocationError" @select="selectDirectory" @close="directoryPickerOpen = false" />
 </template>
@@ -854,6 +1111,60 @@ async function installCustom() {
 .opt-why {
   float: right;
   margin-left: 16px;
+}
+.extras {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 720px;
+}
+.extra-row {
+  margin-top: 6px;
+}
+.extra-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.extra-key {
+  flex: 0 0 280px;
+}
+.extra-key :deep(.el-autocomplete) {
+  width: 100%;
+}
+.extra-key :deep(input) {
+  font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  font-size: 12.5px;
+}
+.extra-val {
+  flex: 1;
+  min-width: 0;
+}
+.extra-add {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.sug {
+  cursor: pointer;
+}
+.review-extra {
+  text-align: left;
+  margin: 4px 0;
+  word-break: break-all;
+}
+.extra-file {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
 }
 .summary {
   margin: 0;

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import LoadingBlock from './LoadingBlock.vue'
-import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, type Component } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowReactive, watch, type Component } from 'vue'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
-import { Refresh, Upload, VideoPlay, VideoPause, RefreshRight, Clock, EditPen, Key, Monitor, ChatDotRound, Grid, List, SwitchButton, Setting, ArrowDown, Tools, Bell, Box, Connection, User, DataLine, Document } from '@element-plus/icons-vue'
+import { Refresh, Upload, VideoPlay, VideoPause, RefreshRight, Clock, EditPen, Key, Monitor, ChatDotRound, Grid, List, SwitchButton, Setting, ArrowDown, Tools, Bell, Box, Connection, User, DataLine, Document, Cpu } from '@element-plus/icons-vue'
 import { call, FerryError, latencyInfo, latencyTip, shortCommit, time, type AppStatus, type JobRun, type ConnStatus, type LockHolder, type ExtraPort, type Inspect, type InspectTarget } from '../ferry'
 import { addProject, addTerminal, aiAskRequest, configWritten, startTask, trustRequest, trustedTick, secretRequest, localRequest, appSettings, tasks, projectSummary, projectTraits, type Project } from '../state'
+import type { AiQuestion } from '../ai'
 import SoftwarePanel from './SoftwarePanel.vue'
+import RuntimePanel from './RuntimePanel.vue'
 import RowActions from './RowActions.vue'
 import type { RowAction } from '../rowActions'
 import type { DeploymentRequest } from '../editor/appSetup'
@@ -179,6 +181,7 @@ async function syncSelection() {
 }
 
 const deployOpen = ref(false)
+const openingDeploy = ref(false)
 const editorDeployment = ref<DeploymentRequest>()
 const releasesApp = ref('')
 const appInfoRequest = ref<{ app: string; target: string }>()
@@ -236,14 +239,15 @@ const historyOpen = ref(false)
 // AI 助手：每台服务器一个对话（切换服务器时各自保留）
 const aiOpen = ref<Record<string, boolean>>({})
 const aiTargets = ref<string[]>([])
-const aiDrawers: Record<string, { ask: (text: string) => Promise<void> } | null> = {}
-// question：直接问这句话（新开一个对话），「让 AI 看看」用
-async function openAi(t: string, question = '') {
+// 抽屉首次异步加载时，先把问题留在对应的服务器上，等抽屉接收。
+const aiQuestions = shallowReactive(new Map<string, AiQuestion>())
+function openAi(t: string, question = '') {
+  if (question) aiQuestions.set(t, { text: question })
   if (!aiTargets.value.includes(t)) aiTargets.value.push(t)
   aiOpen.value[t] = true
-  if (!question) return
-  await nextTick()
-  aiDrawers[t]?.ask(question)
+}
+function onAiQuestionHandled(t: string, question: AiQuestion) {
+  if (aiQuestions.get(t) === question) aiQuestions.delete(t)
 }
 // AI 改了这个项目的配置（助手的 config_edit、编程软件请求的改配置）：重新读一遍
 watch(configWritten, (r) => {
@@ -345,14 +349,15 @@ async function setLocalLogin(how: 'key' | 'password') {
 }
 const editorFocus = ref<string[] | undefined>()
 
-// 服务器下的标签：应用 / 软件 / 端口 / 登录用户 / 服务器信息
-const view = ref<'apps' | 'software' | 'ports' | 'ssh' | 'server'>('apps')
+// 服务器下的标签：应用 / 软件 / 运行环境 / 端口 / 登录用户 / 服务器信息
+const view = ref<'apps' | 'software' | 'runtimes' | 'ports' | 'ssh' | 'server'>('apps')
 // 现在显示的是软件、端口这些面板（不是应用列表）：应用列表这时只隐藏，见模板里的 apps-pane
 const panelView = computed(() => view.value !== 'apps' && !!activeTarget.value)
 const targetDetails = ref(false)
 const workspaceTabs: { value: typeof view.value; label: string; icon: Component }[] = [
   { value: 'apps', label: '应用', icon: Grid },
   { value: 'software', label: '软件', icon: Box },
+  { value: 'runtimes', label: '运行环境', icon: Cpu },
   { value: 'ports', label: '端口', icon: Connection },
   { value: 'ssh', label: '登录用户', icon: User },
   { value: 'server', label: '服务器信息', icon: DataLine },
@@ -360,6 +365,7 @@ const workspaceTabs: { value: typeof view.value; label: string; icon: Component 
 // 页面出来、切换视图（工具栏有时没有）、开关液态玻璃时重新量
 watch([bodyEl, view, () => glass.enabled], () => nextTick(observeFloat), { flush: 'post' })
 const swPanel = ref<InstanceType<typeof SoftwarePanel>>()
+const runtimePanel = ref<InstanceType<typeof RuntimePanel>>()
 const portPanel = ref<InstanceType<typeof PortPanel>>()
 const sshPanel = ref<InstanceType<typeof SshPanel>>()
 const serverPanel = ref<InstanceType<typeof ServerInfoPanel>>()
@@ -491,7 +497,8 @@ async function refresh() {
   if (refreshing.value) return
   const t = activeTarget.value
   if (!t) return
-  const panel = view.value === 'software' ? swPanel.value : view.value === 'ports' ? portPanel.value : view.value === 'ssh' ? sshPanel.value : view.value === 'server' ? serverPanel.value : undefined
+  const panels = { software: swPanel, runtimes: runtimePanel, ports: portPanel, ssh: sshPanel, server: serverPanel }
+  const panel = view.value === 'apps' ? undefined : panels[view.value].value
   const started = Date.now()
   statusReads.cancel(t)
   try {
@@ -528,6 +535,7 @@ const tabRefreshing = computed(() => {
   switch (view.value) {
     case 'apps': return appsRefreshing.value
     case 'software': return !!swPanel.value?.refreshing
+    case 'runtimes': return !!runtimePanel.value?.refreshing
     case 'ports': return !!portPanel.value?.refreshing
     case 'ssh': return !!sshPanel.value?.refreshing
     case 'server': return !!serverPanel.value?.refreshing
@@ -712,7 +720,9 @@ function stateType(s: AppStatus): 'success' | 'danger' | 'warning' | 'info' {
 }
 
 // ---- 概览数字与筛选：点「运行中 / 已停止 / 需要留意」只看这些，再点一次恢复全部
-const riskyPorts = (s: AppStatus) => (s.extra ?? []).filter((e) => e.risky && !isLocal(e.addr))
+// 不宜对外、监听了所有地址、防火墙又没拦着的附加端口（防火墙拦着的外部连不上，不算）
+const exposed = (e: ExtraPort) => !!e.risky && !isLocal(e.addr) && e.firewall !== 'blocked'
+const riskyPorts = (s: AppStatus) => (s.extra ?? []).filter(exposed)
 const isUp = (s: AppStatus) => stateType(s) === 'success'
 // agent 写的「未部署」是有单元但没有 Ferry 的版本；「单元不存在」是连单元都没有。
 // 有单元、在运行（或启动中、失败了）的是别的方式部署的：照 systemd 的状态显示，版本处注明不是 Ferry 部署的
@@ -756,7 +766,7 @@ const stats = computed(() => {
 })
 // 「应用」的概览：还没读到状态时格子照样显示，正在读时数字处是占位，读不到时是「—」
 
-// 「软件 / 端口 / 登录用户」上方的四格概览：第一次打开、还没读到时格子照样显示，
+// 各服务器面板上方的概览：第一次打开、还没读到时格子照样显示，
 // 正在查看时数字处是占位，读不到时是「—」。bare：只有标题的格子
 // filter：点这一格只看这些（软件、端口），再点一次恢复全部
 type StatCard = { label: string; num?: string | number; small?: string; cls?: string; sub?: string; title?: string; bare?: boolean; filter?: string }
@@ -781,6 +791,18 @@ const filterTag = computed(() => {
 })
 const panelStats = computed<{ ready: boolean; busy: boolean; cards: StatCard[] } | null>(() => {
   if (view.value === 'apps') return null
+  if (view.value === 'runtimes') {
+    const panel = runtimePanel.value
+    const c = panel?.counts
+    return {
+      ready: !!c,
+      busy: !!activeTarget.value && (!panel || panel.loading),
+      cards: [
+        { label: '已安装版本', num: c?.total, cls: 'ok', sub: 'Ferry 管理的运行环境' },
+        { label: '共享入口', num: c?.shared, sub: '供应用按 Java 大版本复用' },
+      ],
+    }
+  }
   const panel = view.value === 'software' ? swPanel.value : view.value === 'ports' ? portPanel.value : view.value === 'server' ? serverPanel.value : sshPanel.value
   // 面板还没挂上时也算正在查看
   const busy = !panel || panel.loading
@@ -831,9 +853,10 @@ watch(
   { deep: true },
 )
 
-// ---- 卡片 / 列表：Ferry 每次启动都先用卡片；切换后这次运行期间保留（「应用」「软件」各自一个），不记到下次
+// 卡片 / 列表：应用、软件和运行环境各自记住当前的显示方式
 const viewMode = ref<'card' | 'list'>('card')
 const swViewMode = ref<'card' | 'list'>('card')
+const runtimeViewMode = ref<'card' | 'list'>('card')
 
 // 状态的小圆点颜色
 function stateDot(s: AppStatus): string {
@@ -859,7 +882,15 @@ function mainTip(s: AppStatus, l: string): string {
 // 附加端口：用途 + 监听范围；不宜对外开放却监听了所有地址时提醒
 function extraTip(e: ExtraPort): string {
   const use = e.use || '用途未识别：不是配置里的业务端口（健康检查端口），可能是程序里的组件自己开的'
-  const warn = e.risky && !isLocal(e.addr) ? '。监听了所有地址，防火墙没拦的话外部也能连上：点一下到「端口」里查看、关闭' : ''
+  let warn = ''
+  if (e.risky && !isLocal(e.addr)) {
+    const byFirewall: Record<string, string> = {
+      blocked: '。监听了所有地址，防火墙拦着，外部连不上',
+      open: '。监听了所有地址，防火墙放行了，外部能连上：点一下到「端口」里查看、关闭',
+      partial: '。监听了所有地址，防火墙只对部分来源放行：点一下到「端口」里查看',
+    }
+    warn = byFirewall[e.firewall ?? ''] ?? '。监听了所有地址，防火墙没拦的话外部也能连上：点一下到「端口」里查看、关闭'
+  }
   return `${use}。${listenTip(e.addr)}${warn}`
 }
 
@@ -1068,13 +1099,23 @@ async function control(action: 'start' | 'stop' | 'restart') {
 }
 
 // 部署要先勾选应用：不勾选就部署全部太容易误操作（要全部部署就勾表头的全选）
-function openDeploy() {
+async function openDeploy() {
+  if (openingDeploy.value) return
   if (!selectedNames.value.length) {
     ElMessage.warning('请先勾选要部署的应用（全部部署可以点「全选」或表头的勾选框）')
     return
   }
-  editorDeployment.value = { apps: [...selectedNames.value], targets: [activeTarget.value] }
-  deployOpen.value = true
+  const current = captureContext()
+  const requested = { apps: [...selectedNames.value], targets: [activeTarget.value] }
+  openingDeploy.value = true
+  try {
+    if (await loadInspect() && current()) {
+      editorDeployment.value = requested
+      deployOpen.value = true
+    }
+  } finally {
+    openingDeploy.value = false
+  }
 }
 
 function deployToRuntime(app: string, target: string, prefer?: string) {
@@ -1118,7 +1159,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       <el-dropdown v-if="info?.targets.length" trigger="click" placement="bottom-start" class="target-pick" @command="(name: string) => (activeTarget = name)">
         <GlassPane as="button" type="button" radius="pill" class="target-trigger" aria-label="选择服务器" aria-haspopup="menu">
           <span class="tdot target-led" :class="targetDot(activeTarget)" />
-          <span class="mono target-name">{{ activeTarget }}</span>
+          <span class="mono target-name" :title="activeTarget">{{ target?.title || activeTarget }}</span>
           <span v-if="target?.production" class="prod">生产</span>
           <el-icon class="target-chevron"><ArrowDown /></el-icon>
         </GlassPane>
@@ -1126,7 +1167,7 @@ async function onSaved(deployment?: DeploymentRequest) {
           <el-dropdown-menu class="target-menu">
             <el-dropdown-item v-for="t in info.targets" :key="t.name" :command="t.name" :class="{ 'target-on': t.name === activeTarget }">
               <span class="tdot" :class="targetDot(t.name)" :title="targetState(t.name)" />
-              <span class="mono target-menu-name">{{ t.name }}</span>
+              <span class="mono target-menu-name" :title="t.name">{{ t.title || t.name }}</span>
               <span class="mono target-menu-host">{{ t.user }}@{{ t.host }}</span>
               <span v-if="t.production" class="prod">生产</span>
             </el-dropdown-item>
@@ -1319,7 +1360,7 @@ async function onSaved(deployment?: DeploymentRequest) {
         </div>
       </div>
 
-      <!-- 「软件 / 端口 / 登录用户」的四格：还没读到时照样显示，数字处是占位 -->
+      <!-- 服务器面板的概览：读取期间保持高度，只替换数字和说明 -->
       <div v-else-if="panelStats" class="stats" :style="{ gridTemplateColumns: `repeat(${panelStats.cards.length}, minmax(0, 1fr))` }">
         <component
           :is="c.filter && panelStats.ready ? 'button' : 'div'"
@@ -1353,7 +1394,7 @@ async function onSaved(deployment?: DeploymentRequest) {
         <GlassTabs v-model="view" :options="workspaceTabs" class="workspace-switch" label="切换服务器功能" />
         <el-tag v-if="filterTag" closable class="filter-tag" @close="filterTag.clear()">{{ filterTag.text }}</el-tag>
       </nav>
-      <div v-if="view !== 'software' && view !== 'ports'" class="toolbar">
+      <div v-if="view !== 'software' && view !== 'runtimes' && view !== 'ports'" class="toolbar">
         <GlassPane v-if="glass.enabled" class="cg-strip" :radius="14" :adaptive="false" aria-hidden="true" />
         <template v-if="view === 'server'">
           <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的服务器信息" placement="bottom">
@@ -1380,7 +1421,7 @@ async function onSaved(deployment?: DeploymentRequest) {
         </template>
         <template v-else>
           <el-input v-model="appQuery" class="app-search" placeholder="搜索应用或端口" clearable aria-label="搜索应用或端口" />
-          <el-button type="primary" :icon="Upload" class="deploy-btn" :disabled="!selectedNames.length" @click="openDeploy">
+          <el-button type="primary" :icon="Upload" class="deploy-btn" :disabled="!selectedNames.length" :loading="openingDeploy" @click="openDeploy">
             部署{{ selectedNames.length ? `（${selectedNames.length}）` : '' }}
           </el-button>
           <el-button-group class="app-controls">
@@ -1436,6 +1477,15 @@ async function onSaved(deployment?: DeploymentRequest) {
         @loaded="loadConns"
         @go-port="goPort"
         @backup="backupOpen = true"
+      />
+      <RuntimePanel
+        v-else-if="view === 'runtimes' && activeTarget"
+        ref="runtimePanel"
+        v-model:mode="runtimeViewMode"
+        :config="project.path"
+        :target="activeTarget"
+        :connected="!!conn?.connected"
+        @loaded="loadConns"
       />
       <SshPanel
         v-else-if="view === 'ssh' && activeTarget"
@@ -1550,7 +1600,7 @@ async function onSaved(deployment?: DeploymentRequest) {
             </dl>
             <div class="card-foot">
               <el-tooltip :show-after="HOVER_DELAY" v-for="e in riskyPorts(row)" :key="e.addr" placement="top" :content="extraTip(e)">
-                <span class="chip warn mono clickable" @click.stop="goPort(e.addr)">{{ portOf(e.addr) }} 对外开放</span>
+                <span class="chip warn mono clickable" @click.stop="goPort(e.addr)">{{ portOf(e.addr) }} {{ e.firewall === 'partial' ? '部分来源能连' : '对外开放' }}</span>
               </el-tooltip>
               <span v-if="row.healthy === false" class="chip bad">不健康</span>
               <el-tooltip :show-after="HOVER_DELAY" v-if="row.restarts" :content="restartsTip(row)" placement="top">
@@ -1623,7 +1673,7 @@ async function onSaved(deployment?: DeploymentRequest) {
             <el-table-column label="附加端口" min-width="100">
               <template #default="{ row }">
                 <el-tooltip :show-after="HOVER_DELAY" v-for="e in row.extra ?? []" :key="e.addr" placement="top" :content="extraTip(e)">
-                  <span class="port mono extra" :class="{ risky: e.risky && !isLocal(e.addr), clickable: e.risky && !isLocal(e.addr) }" @click="e.risky && !isLocal(e.addr) && goPort(e.addr)">{{ portOf(e.addr) }}</span>
+                  <span class="port mono extra" :class="{ risky: exposed(e), clickable: e.risky && !isLocal(e.addr) }" @click="e.risky && !isLocal(e.addr) && goPort(e.addr)">{{ portOf(e.addr) }}</span>
                 </el-tooltip>
               </template>
             </el-table-column>
@@ -1720,13 +1770,14 @@ async function onSaved(deployment?: DeploymentRequest) {
     <AiDrawer
       v-for="tn in aiTargets"
       :key="tn"
-      :ref="(el) => (aiDrawers[tn] = el as { ask: (text: string) => Promise<void> } | null)"
       v-model="aiOpen[tn]"
       :config="project.path"
       :target="tn"
       :title="tn"
+      :question="aiQuestions.get(tn)"
       :production="info?.targets.find((x) => x.name === tn)?.production"
       :no-changes="info?.targets.find((x) => x.name === tn)?.aiChanges === false"
+      @question-handled="onAiQuestionHandled(tn, $event)"
     />
     <MonitorDialog v-if="monitorOpen" :config="project.path" :target="activeTarget" @close="monitorOpen = false" />
     <AuditDialog v-if="auditOpen" :config="project.path" :target="activeTarget" @close="auditOpen = false" />

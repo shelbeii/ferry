@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Loading, RefreshRight, Search } from '@element-plus/icons-vue'
-import { tasks, drawerOpen, selectedTaskId as selectedId, loadTaskDetail, removeTasks, askFixParents, askPkgChanges, aiAskRequest, currentPath, selectProject, type Task } from '../state'
+import { tasks, drawerOpen, selectedTaskId as selectedId, loadTaskDetail, reconcileInstallTask, removeTasks, askFixParents, askPkgChanges, aiAskRequest, currentPath, selectProject, type Task } from '../state'
 import { bytes, call, evLabel, padWidth, type FerryLine, type DeployReport, type AppOutcome } from '../ferry'
 import { ElMessage } from 'element-plus'
 import { useTaskList } from '../taskList'
@@ -295,6 +295,7 @@ async function clearFinished() {
         </div>
         <div class="detail-meta"><el-tag :type="selected.status === 'ok' ? 'success' : selected.status === 'failed' ? 'danger' : selected.status === 'interrupted' ? 'warning' : 'primary'" size="small">{{ { running: '进行中', ok: '完成', failed: '失败', interrupted: '中断' }[selected.status] }}</el-tag><span>{{ clock(selected.startedAt) }} · 用时 {{ elapsed(selected) }}</span><span v-if="selected.target" class="mono">{{ selected.target }}</span></div>
         <el-alert v-if="selected.detailLoadError" :title="selected.detailLoadError" type="error" :closable="false"><el-button link type="primary" @click="loadTaskDetail(selected)">重新读取</el-button></el-alert>
+        <el-button v-if="selected.installId && (selected.status === 'interrupted' || selected.status === 'failed')" link type="primary" @click="reconcileInstallTask(selected)">查询服务器安装状态</el-button>
         <el-alert
           v-if="selected.kill"
           type="info"

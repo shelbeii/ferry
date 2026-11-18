@@ -956,13 +956,15 @@ async function pickKeyDir() {
         <section v-show="runtimeView === 'jdk'">
         <p class="muted small">应用配置了 <span class="mono">service.runtime: &#123;java: 17&#125;</span> 时用这里的 JDK，服务器上没有会自动上传。</p>
         <el-form v-if="form" label-width="110px">
-          <el-form-item label="下载源">
+          <el-form-item label="JDK 下载源">
             <el-input v-model="jdkSourceText" class="mono" :placeholder="JDK_SOURCE" />
             <div class="muted small">
               <template v-if="!form.runtime.source">默认：Eclipse Temurin 官方（Adoptium）。</template>
               <template v-else><el-button link type="primary" size="small" @click="jdkSourceText = JDK_SOURCE">恢复默认（官方）</el-button></template>
 
-              可以换成镜像，如 <span class="mono">https://mirrors.tuna.tsinghua.edu.cn/Adoptium/&#123;java&#125;/jdk/&#123;arch&#125;/linux/</span>
+              可填写 Adoptium 兼容的 API 根地址或镜像模板。
+              从 Oracle 等厂商网页下载 Linux JDK 后，请用下方的「导入压缩包」添加。
+              镜像示例 <span class="mono">https://mirrors.tuna.tsinghua.edu.cn/Adoptium/&#123;java&#125;/jdk/&#123;arch&#125;/linux/</span>
             </div>
           </el-form-item>
           <el-form-item label="本机存放">

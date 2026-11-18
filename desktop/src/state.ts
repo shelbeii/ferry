@@ -265,8 +265,9 @@ export interface Task {
   retryWith?: (extra: string[]) => void
   /** 任务的 ferry.yaml */
   config?: string
-  /** 任务作用的服务器（部署、启停等；「让 AI 看看」用）。只在这次打开 Ferry 期间有 */
+  /** 任务作用的服务器（部署、启停等；「让 AI 看看」用）。 */
   target?: string
+  installId?: string
   /** 以前的任务（从记录里读的）：输出等打开时才读，读之前为 false */
   loaded?: boolean
   loadingDetail?: boolean
@@ -314,7 +315,8 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
         }
         const eta = speed && speed > 0 ? (l.total - l.done) / speed : undefined
         task.progress = { label: l.label ?? '', done: l.done, total: l.total, speed, eta }
-        if (task.step?.text !== '上传 ' + (l.label ?? '')) task.step = { text: '上传 ' + (l.label ?? ''), at: task.step?.text.startsWith('上传') ? task.step.at : t }
+        const label = l.label ?? ''
+        if (label.startsWith('已执行 ')) task.step = { text: label, at: task.step?.at ?? t }
         return
       }
       if (l.kind === 'result') return
@@ -328,6 +330,15 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
       }
       pushLine(task, l)
       if (l.kind === 'step') task.step = { text: l.msg ?? '', at: t }
+      else if (l.kind === 'event' && l.code === 'INSTALL_TASK' && l.msg) {
+        task.installId = l.msg
+        task.target = l.target || task.target
+        saveTask(task)
+      } else if (l.kind === 'event' && l.code === 'INSTALL_PHASE') {
+        task.step = { text: l.msg ?? '', at: t }
+        task.progress = undefined
+        sample = undefined
+      }
       else if (l.kind === 'event' && l.code === 'WAIT') {
         // 「127.0.0.1:9201（最多 180s）」：记下最长等待
         const m = /最多 (\d+)s/.exec(l.msg ?? '')
@@ -337,7 +348,7 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
         task.step = { text: `${verbs[l.code!]} ${l.app ?? ''}`.trim(), at: t }
       }
     },
-    env,
+    args[0] === 'software' && args[1] === 'install' ? { FERRY_TASK_ID: hid, ...env } : env,
   )
   task.kill = run.kill
   task.config = configOf(args)
@@ -351,9 +362,10 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
     task.detail = r.detail
     task.data = r.data
     task.endedAt = Date.now()
-    task.progress = undefined
+    if (r.ok) task.progress = undefined
     task.kill = undefined
     saveTask(task)
+    if (!r.ok && task.installId && !r.detail) void reconcileInstallTask(task)
     if (task.endedAt - task.startedAt >= notifyAfterMs) {
       const took = Math.round((task.endedAt - task.startedAt) / 1000)
       if (r.ok) notifyUser(`${title}：完成`, `用时 ${took} 秒`)
@@ -483,13 +495,14 @@ function trimTasks() {
 // ---------------------------------------------------------------- 任务记录（重启后还在）
 
 /** 每个任务上次保存时的输出行数，和保存的先后（一个接一个，后存的不会被先存的覆盖） */
-const saved = new Map<string, { lines: number; chain: Promise<void> }>()
+const saved = new Map<string, { lines: number; progress?: number; chain: Promise<void> }>()
 let saveTimer: number | undefined
 
 /** 保存任务记录：开始时、进行中每隔几秒（有新输出时）、结束时各存一次。保存失败不影响任务本身。 */
 function saveTask(t: Task) {
   const s = saved.get(t.hid) ?? { lines: -1, chain: Promise.resolve() }
   s.lines = t.received ?? t.lines.length
+  s.progress = t.progress?.done
   const rec = {
     id: t.hid,
     title: t.title,
@@ -498,6 +511,10 @@ function saveTask(t: Task) {
     endedAt: t.endedAt,
     error: t.error,
     config: t.config,
+    target: t.target,
+    installId: t.installId,
+    progress: t.progress,
+    step: t.step,
     detail: t.detail,
     data: t.data,
     lines: t.lines,
@@ -509,7 +526,10 @@ function saveTask(t: Task) {
   saved.set(t.hid, s)
   saveTimer ??= window.setInterval(() => {
     const live = tasks.filter((x) => x.status === 'running')
-    for (const x of live) if ((x.received ?? x.lines.length) !== saved.get(x.hid)?.lines) saveTask(x)
+    for (const x of live) {
+      const previous = saved.get(x.hid)
+      if ((x.received ?? x.lines.length) !== previous?.lines || x.progress?.done !== previous?.progress) saveTask(x)
+    }
     if (live.length === 0) {
       clearInterval(saveTimer)
       saveTimer = undefined
@@ -532,6 +552,8 @@ interface TaskSummary {
   endedAt?: number
   error?: string
   config?: string
+  target?: string
+  installId?: string
 }
 
 /** 桌面版启动时读以前的任务（只读概要，输出在打开时才读）；上次没跑完的标成中断。 */
@@ -552,11 +574,57 @@ export async function loadTaskHistory() {
         lastAt: s.endedAt ?? s.startedAt,
         error: s.error,
         config: s.config,
+        target: s.target,
+        installId: s.installId,
         loaded: false,
       }) as Task,
     )
   }
   tasks.sort((a, b) => b.startedAt - a.startedAt)
+  for (const task of tasks) {
+    if (task.status === 'interrupted' && task.installId) void reconcileInstallTask(task)
+  }
+}
+
+export async function reconcileInstallTask(t: Task) {
+  if (!t.installId || !t.target || !t.config) return
+  try {
+    const state = await call<{ phase: string; status: 'ok' | 'failed' | 'running' | 'needs-confirmation' | 'interrupted' } | null>(
+      ['software', 'status', t.target, t.installId, '-c', t.config],
+    )
+    if (!state?.status || !tasks.includes(t)) return
+    const hadEnded = t.endedAt !== undefined
+    if (state.status === 'running') {
+      const changedPhase = t.step?.text !== state.phase
+      t.status = 'running'
+      t.error = undefined
+      t.endedAt = undefined
+      t.step = { text: state.phase, at: t.step?.text === state.phase ? t.step.at : Date.now() }
+      t.lastAt = Date.now()
+      if (hadEnded) await loadTaskDetail(t)
+      if (hadEnded || changedPhase) {
+        saveTask(t)
+      }
+      setTimeout(() => void reconcileInstallTask(t), 5000)
+      return
+    }
+    if (t.status === 'failed' && state.status === 'failed') return // 保留当前任务的完整失败原因
+    await loadTaskDetail(t)
+    t.status = state.status === 'needs-confirmation' ? 'failed' : state.status
+    t.endedAt = Date.now()
+    t.error = t.status === 'ok' ? undefined : (t.error?.startsWith('桌面版关闭') || !t.error
+      ? `服务器安装任务${state.status === 'needs-confirmation' ? '需要确认包变更' : t.status === 'interrupted' ? '已退出，结果待核对' : '失败'}（${state.phase}）`
+      : t.error)
+    t.step = { text: state.phase, at: t.endedAt }
+    saveTask(t)
+  } catch {
+    if (t.status === 'running' && !t.kill) {
+      t.status = 'interrupted'
+      t.error = '暂时无法查询服务器上的安装状态'
+      t.endedAt = Date.now()
+      saveTask(t)
+    }
+  }
 }
 
 /** 以前的任务：打开时读输出、结果 */
@@ -565,11 +633,13 @@ export async function loadTaskDetail(t: Task) {
   t.loadingDetail = true
   t.detailLoadError = ''
   try {
-    const r = await call<{ lines?: FerryLine[]; data?: unknown; detail?: ErrorDetail; error?: string }>(['task-history', 'show', t.hid])
+    const r = await call<{ lines?: FerryLine[]; data?: unknown; detail?: ErrorDetail; error?: string; progress?: Task['progress']; step?: Task['step'] }>(['task-history', 'show', t.hid])
     t.lines = r.lines ?? []
     t.data = r.data
     t.detail = r.detail
     if (r.error) t.error = r.error
+    if (!t.step) t.step = r.step
+    t.progress = r.progress
     t.loaded = true
   } catch (e) {
     t.detailLoadError = `读取任务记录失败：${(e as Error).message}`

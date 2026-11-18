@@ -587,6 +587,30 @@ export function appSecretStatus(row: AppSecretStatus): string {
   return row.optional ? '缺少（可选）' : '缺少'
 }
 
+export interface InstalledJDK {
+  id: string
+  java: number
+  version?: string
+  arch: string
+  path: string
+  shared: boolean
+  custom?: boolean
+}
+
+export interface InstalledRuntime {
+  kind: 'jdk' | 'node' | 'python' | 'dotnet'
+  component?: 'aspnetcore' | 'runtime' | 'sdk'
+  id: string
+  version: string
+  arch: string
+  home: string
+  path: string
+  java?: number
+  shared?: boolean
+  custom?: boolean
+  unavailable?: boolean
+}
+
 /** ferry software：服务器上已有的软件（只读查看） */
 export interface SoftwareReport {
   items: Software[]
@@ -597,6 +621,7 @@ export interface SoftwareReport {
   arch?: string
   os?: { id: string; like?: string[]; version?: string; pretty?: string }
   runtimes?: Record<string, { id: string; java: number }>
+  jdks?: InstalledJDK[]
   /** 服务器上 ferry 组件的目录：公共的 JDK 在它下面的 runtimes */
   ferryDir?: string
   disks?: { path: string; freeMB: number }[]
@@ -776,11 +801,13 @@ export interface SwVariant {
   note?: string
   java?: number
   user: string
-  package?: { url?: string; file?: string; github?: string; fallback?: string; size?: string; format?: string; strip?: number; into?: string }
+  package?: { url?: string; file?: string; github?: string; fallback?: string; recommended?: string; size?: string; format?: string; strip?: number; into?: string }
   system?: { dnf?: string[]; apt?: string[]; disable?: string[]; require?: string }
   /** 开着 SELinux 时给安装目录、端口加的标签 */
   selinux?: { files?: string; port?: string }
   files?: { path: string }[] | null
+  /** 改安装包里的配置文件 */
+  props?: { file: string }[] | null
   steps?: { run?: string; http?: { post: string } }[] | null
   service?: { exec: string }
 }
@@ -798,6 +825,36 @@ export interface SwTemplate {
   overrides?: boolean
   /** ai = AI 助手保存的 */
   origin?: string
+  /** 安装时可以补充的配置（参数没有的设置） */
+  extras?: SwExtra[] | null
+}
+
+/** 模板的附加配置：安装时按「名称=值」补充，合并进配置文件、环境变量或启动参数 */
+export interface SwExtra {
+  id: string
+  label: string
+  format: 'ini' | 'keyvalue' | 'properties' | 'env' | 'args'
+  file?: string
+  /** ini：合并进哪一段；没有时名称写成「段.名称」 */
+  section?: string
+  /** args：每项前面加的（"-c "、"--"） */
+  prefix?: string
+  help?: string
+  protect?: string[] | null
+  suggest?: { key: string; example?: string; help?: string }[] | null
+  /** 不能改的名称（由参数决定或会影响 Ferry 管理） */
+  locked?: string[] | null
+}
+
+/** 预检返回的附加配置：会写进去的项、合并后的文件、启动命令 */
+export interface SwExtraPreview {
+  id: string
+  label: string
+  format: SwExtra['format']
+  file?: string
+  items: { section?: string; key: string; value: string }[]
+  content?: string
+  exec?: string
 }
 
 /** 本机库里的安装包 */
@@ -813,6 +870,8 @@ export interface SwPackage {
   added?: string
   /** tar.gz / tar.xz / zip / jar / binary */
   format?: string
+  /** ZIP 内的系统包类型 */
+  bundle?: 'rpm' | 'deb'
   /** binary 是 Linux 程序时：amd64 / arm64 */
   arch?: string
   /** 给人看的类型：Linux 程序（arm64）、tar.gz 压缩包…… */
@@ -1317,7 +1376,7 @@ export interface AuditEntry {
 
 /** 审计记录的类型，按组（筛选用）；和 internal/proto/audit.go 的 AuditKinds 一致 */
 export const AUDIT_GROUPS: { label: string; kinds: Record<string, string> }[] = [
-  { label: '部署、启停', kinds: { deploy: '部署', rollback: '回滚', control: '启停应用', runjob: '运行定时任务', runtime: '安装 JDK', 'https-renew': '续期 HTTPS 证书', secretset: '更新应用密钥' } },
+  { label: '部署、启停', kinds: { deploy: '部署', rollback: '回滚', control: '启停应用', runjob: '运行定时任务', runtime: '安装 JDK', 'runtime-remove': '卸载 JDK', 'runtime-install': '安装运行环境', 'runtime-uninstall': '卸载运行环境', 'https-renew': '续期 HTTPS 证书', secretset: '更新应用密钥' } },
   { label: '终端', kinds: { 'terminal-open': '打开终端', 'terminal-close': '关闭终端' } },
   { label: '文件', kinds: { 'file-save': '保存文件', 'file-rename': '改名', 'file-remove': '删除文件', 'file-upload': '上传文件', 'file-mkdir': '新建文件夹' } },
   { label: '数据库', kinds: { 'db-exec': '执行 SQL', 'redis-exec': '执行 Redis 命令' } },

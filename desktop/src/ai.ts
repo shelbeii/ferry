@@ -2,6 +2,9 @@
 // 思考档位总是选一个具体的档位（或关闭）；模型没有设置默认档位时用 defaultEffort 挑一个。
 import type { AiEffort, AiModel } from './ferry'
 
+/** 任务或应用排查转交给 AI 抽屉的问题。每次点击都创建一条请求。 */
+export type AiQuestion = { text: string }
+
 export const THINKING_STYLES: { value: string; label: string }[] = [
   { value: '', label: '自动识别' },
   { value: 'effort', label: 'reasoning_effort（OpenAI 等）' },

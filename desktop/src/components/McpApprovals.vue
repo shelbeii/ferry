@@ -319,7 +319,11 @@ function execute(r: McpRequest) {
   if (isAI(r)) {
     const title = `${titleOf(r)} ${r.target}（${clientOf(r)} 请求）`
     const args = ['ai-exec', r.target, r.tool ?? '', '-c', r.config, '--scope', scopeOf(r)]
-    const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: `${clientOf(r)} · MCP`, FERRY_AI_INPUT: JSON.stringify(r.input ?? {}) })
+    const task: Task = startTask(title, args, (t) => finish(r, t), {
+      FERRY_VIA: `${clientOf(r)} · MCP`,
+      FERRY_AI_INPUT: JSON.stringify(r.input ?? {}),
+      ...(r.action === 'install' ? { FERRY_TASK_ID: r.id } : {}),
+    })
     watchProgress(r, task)
     return
   }

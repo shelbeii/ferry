@@ -8,6 +8,13 @@ describe('任务与认证的目标解析', () => {
   it.each(['list', 'associate', 'read', 'save', 'apply', 'restore'])('software config %s 不把子命令认成服务器', (op) => {
     expect(commandTarget(['software', 'config', op, 'tunnel-162', '--unit', 'nginx.service'])).toBe('tunnel-162')
   })
+  it('为 JDK 清单、安装、卸载和同名服务器解析正确目标', () => {
+    expect(commandTarget(['software', 'jdk', 'list', 'prod'])).toBe('prod')
+    expect(commandTarget(['software', 'jdk', 'install', 'prod', '--java', '21'])).toBe('prod')
+    expect(commandTarget(['software', 'jdk', 'remove', 'prod', '/opt/jdks/jdk-21-x64/bin/java', '--yes'])).toBe('prod')
+    expect(commandTarget(['software', 'runtime', 'install', 'prod', 'node', '--channel', '24'])).toBe('prod')
+    expect(commandTarget(['software', 'jdk', '-c', 'ferry.yaml'])).toBe('jdk')
+  })
   it('覆盖多目标、端口测试、会话、备份、文件与免密配置', () => {
     for (const args of [['deploy', '41,162', 'api'], ['port', 'check', '41', '8080'], ['who', 'kick', '41', '123'], ['backup', '41', 'restore'], ['files', 'ls', '41', '/'], ['keygen', '41']]) expect(commandTarget(args)).toBe('41')
     expect(commandTarget(['software', '41', '-c', 'ferry.yaml'])).toBe('41')
