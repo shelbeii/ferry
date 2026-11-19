@@ -709,13 +709,13 @@ async function installCustom() {
       </div>
       <el-alert v-for="e in info.errors ?? []" :key="e" type="warning" :title="`模板有问题：${e}`" :closable="false" show-icon class="tpl-err" />
       <div class="grid">
-        <div class="card custom" @click="openCustom">
+        <div class="install-template-card custom" @click="openCustom">
           <div class="card-head">
             <el-icon><Plus /></el-icon><b>自定义安装</b>
           </div>
           <div class="muted small">选一个自己的程序或压缩包，填启动命令和端口，装成系统服务；可以存成模板以后再用</div>
         </div>
-        <div v-for="t in shown" :key="t.id" class="card" :class="{ off: bestVariant(t) < 0 }" @click="open(t)">
+        <div v-for="t in shown" :key="t.id" class="install-template-card" :class="{ off: bestVariant(t) < 0 }" @click="open(t)">
           <div class="card-head">
             <b>{{ t.name }}</b>
             <el-tag size="small" type="info">{{ t.category || '其他' }}</el-tag>
@@ -1038,24 +1038,10 @@ async function installCustom() {
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 10px;
 }
-.card {
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
-  padding: 12px 14px;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-.card:hover {
-  border-color: var(--el-color-primary);
-  box-shadow: 0 2px 8px var(--el-color-primary-light-8);
-}
-.card.off {
+.install-template-card.off {
   opacity: 0.65;
 }
-.card.custom {
+.install-template-card.custom {
   border-style: dashed;
 }
 .card-head {

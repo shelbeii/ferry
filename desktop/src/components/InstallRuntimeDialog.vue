@@ -139,7 +139,7 @@ function selectDirectory(path: string) {
 <template>
   <el-dialog :model-value="true" :title="selected ? `在 ${target} 安装 ${selected.name}` : `在 ${target} 安装运行环境`" width="min(580px, 94vw)" append-to-body @close="emit('close')">
     <div v-if="!selected" class="template-grid" aria-label="运行环境模板">
-      <button v-for="template in templates" :key="template.id" type="button" class="template-card" @click="selectTemplate(template)">
+      <button v-for="template in templates" :key="template.id" type="button" class="install-template-card" @click="selectTemplate(template)">
         <span class="template-title"><el-icon><component :is="template.icon" /></el-icon><strong>{{ template.name }}</strong></span>
         <span class="muted small">{{ template.description }}</span>
       </button>
@@ -211,21 +211,6 @@ function selectDirectory(path: string) {
 
 <style scoped>
 .template-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-.template-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 14px;
-  color: var(--el-text-color-primary);
-  text-align: left;
-  font: inherit;
-  cursor: pointer;
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--ferry-card-radius);
-  background: var(--el-bg-color);
-}
-.template-card:hover, .template-card:focus-visible { border-color: var(--el-color-primary); }
 .template-title { display: flex; align-items: center; gap: 8px; }
 .el-form { margin-top: 12px; }
 .shared-directory { width: 100%; line-height: 1.5; padding-top: 6px; overflow-wrap: anywhere; }

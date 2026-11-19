@@ -300,6 +300,24 @@ html.dark {
 }
 .el-dialog__body > :first-child { margin-top: 0; }
 .el-dialog__body > :last-child { margin-bottom: 0; }
+/* 安装模板卡片透出弹窗的玻璃底色。 */
+.el-dialog .install-template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
+  background: transparent;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.el-dialog .install-template-card:is(:hover, :focus-visible) {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 2px 8px var(--el-color-primary-light-8);
+}
 .el-message-box__container { align-items: flex-start; gap: 12px; }
 /* 提示图标放在标题栏左侧，正文从内容区左边缘开始；标题两侧留相同空间，始终居中。 */
 .el-message-box__status {
