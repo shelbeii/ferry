@@ -8,6 +8,7 @@ import { connGen, freeNumber, hangupConnection, newTermTab, pageTerminals, type 
 import SshPanel from './SshPanel.vue'
 import ServerInfoPanel from './ServerInfoPanel.vue'
 import RuntimePanel from './RuntimePanel.vue'
+import GlassButton from './glass/GlassButton.vue'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const TerminalView = defineAsyncComponent(() => import('./TerminalView.vue'))
@@ -90,31 +91,33 @@ onBeforeUnmount(() => tabs.forEach(drop))
 <template>
   <div class="conn-page">
     <div class="head">
-      <div>
+      <div class="conn-heading">
         <h2>{{ conn.title }}</h2>
-        <div class="muted mono">{{ addr }}</div>
+        <div class="conn-meta muted">
+          <span class="mono">{{ addr }}</span>
+          <span class="conn-auth">{{ conn.auth === 'password' ? '密码登录' : '密钥登录' }}</span>
+        </div>
       </div>
       <div class="head-actions">
-        <el-button @click="softwareOpen = true">软件</el-button>
-        <el-button @click="runtimeOpen = true">运行环境</el-button>
-        <el-tag size="small" :type="conn.auth === 'password' ? 'warning' : 'success'">{{ conn.auth === 'password' ? '密码登录' : '密钥登录' }}</el-tag>
+        <GlassButton @click="softwareOpen = true">软件</GlassButton>
+        <GlassButton @click="runtimeOpen = true">运行环境</GlassButton>
         <el-tooltip :show-after="HOVER_DELAY" content="上传、下载、新建文件夹、改名、删除（以登录用户的身份）" placement="bottom">
-          <el-button type="primary" :icon="FolderOpened" @click="filesOpen = true">文件</el-button>
+          <GlassButton tone="primary" :icon="FolderOpened" @click="filesOpen = true">文件</GlassButton>
         </el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="谁连着这台服务器：登录用户、来源 IP、连了多久、在干什么，可以断开" placement="bottom">
-          <el-button :icon="User" @click="(sshUsed = true), (sshOpen = true)">登录用户</el-button>
+          <GlassButton :icon="User" @click="(sshUsed = true), (sshOpen = true)">登录用户</GlassButton>
         </el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="系统、CPU、内存和各挂载点的资源使用情况" placement="bottom">
-          <el-button :icon="Monitor" @click="(serverUsed = true), (serverOpen = true)">服务器信息</el-button>
+          <GlassButton :icon="Monitor" @click="(serverUsed = true), (serverOpen = true)">服务器信息</GlassButton>
         </el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="让 AI 查看、排查这台服务器；允许改动时，每个改动都先问你" placement="bottom">
-          <el-button :icon="ChatDotRound" @click="(aiUsed = true), (aiOpen = true)">AI 助手</el-button>
+          <GlassButton :icon="ChatDotRound" @click="(aiUsed = true), (aiOpen = true)">AI 助手</GlassButton>
         </el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="断开这台服务器的所有终端和 SSH 连接（终端标签留着，按回车重新连接）" placement="bottom">
-          <el-button v-if="live" :icon="SwitchButton" @click="hangupConnection(conn.name, conn.title)">断开</el-button>
+          <GlassButton v-if="live" :icon="SwitchButton" @click="hangupConnection(conn.name, conn.title)">断开</GlassButton>
         </el-tooltip>
-        <el-button :icon="EditPen" @click="emit('edit')">修改</el-button>
-        <el-button :icon="Delete" text type="danger" @click="emit('remove')">删除</el-button>
+        <GlassButton :icon="EditPen" @click="emit('edit')">修改</GlassButton>
+        <GlassButton tone="danger" :icon="Delete" @click="emit('remove')">删除</GlassButton>
       </div>
     </div>
 
@@ -123,7 +126,7 @@ onBeforeUnmount(() => tabs.forEach(drop))
         <div v-for="t in tabs" :key="t.id" class="tab" :class="{ active: t.id === active }" @click="active = t.id" @mousedown.middle.prevent="closeTab(t)">
           <span class="led" :class="t.state" />
           <span>{{ t.title }}</span>
-          <el-icon class="x" @click.stop="closeTab(t)"><Close /></el-icon>
+          <button type="button" class="terminal-tab-close" :aria-label="`关闭${t.title}`" @click.stop="closeTab(t)"><el-icon><Close /></el-icon></button>
         </div>
         <el-tooltip :show-after="HOVER_DELAY" content="再开一个终端" placement="bottom">
           <el-button text size="small" :icon="Plus" class="add" @click="newTab" />
@@ -162,9 +165,16 @@ onBeforeUnmount(() => tabs.forEach(drop))
 }
 .head {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
   align-items: flex-start;
+  gap: 10px 16px;
 }
+.conn-heading {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.conn-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.conn-auth { font-size: 12px; }
 h2 {
   margin: 0 0 4px;
 }
@@ -174,9 +184,8 @@ h2 {
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
-}
-.head-actions .el-button + .el-button {
-  margin-left: 0;
+  max-width: 100%;
+  margin-inline-start: auto;
 }
 .term-card {
   flex: 1;
@@ -213,13 +222,6 @@ h2 {
 .tab.active {
   background: #1e1e1e;
   color: #fff;
-}
-.x {
-  font-size: 12px;
-  opacity: 0.6;
-}
-.x:hover {
-  opacity: 1;
 }
 .led {
   width: 7px;

@@ -1043,7 +1043,7 @@ function copy(text: string) {
         <div v-if="attachments.length || adding" class="attach">
           <div v-for="(im, k) in attachments" :key="k" class="attach-item">
             <el-image :src="imageUrl(im)" :preview-src-list="attachments.map(imageUrl)" :initial-index="k" preview-teleported hide-on-click-modal fit="cover" class="attach-img" />
-            <span class="attach-x" title="去掉这张" @click="removeImage(k)"><el-icon><Close /></el-icon></span>
+            <button type="button" class="attach-x" title="去掉这张" aria-label="移除图片" @click="removeImage(k)"><el-icon><Close /></el-icon></button>
           </div>
           <div v-if="adding" class="attach-item attach-loading"><el-icon class="is-loading"><Loading /></el-icon></div>
           <span v-if="attachments.length && !canImages" class="warn-line small">{{ curModel?.name }} 不能看图片，图片不会给它看</span>
@@ -1100,14 +1100,14 @@ function copy(text: string) {
             :content="canImages ? '附图片（也可以直接粘贴截图，或把图片拖进来）' : `${curModel?.name ?? '当前模型'} 不能看图片（在「模型设置」里可以改）`"
             placement="top"
           >
-            <span class="chip" :class="{ off: running || !canImages }" @click="!running && canImages && pickImages()">
+            <button type="button" class="chip" :class="{ off: running || !canImages }" :aria-disabled="running || !canImages" aria-label="附图片" @click="!running && canImages && pickImages()">
               <el-icon><Picture /></el-icon>
-            </span>
+            </button>
           </el-tooltip>
           <el-tooltip v-if="models.length" :show-after="HOVER_DELAY" content="安全输入密码、账号：AI 只拿到代号，看不到内容" placement="top">
-            <span class="chip" :class="{ off: running }" role="button" aria-label="安全输入密码" @click="!running && (secureOpen = true)">
+            <button type="button" class="chip" :class="{ off: running }" :aria-disabled="running" aria-label="安全输入密码" @click="!running && (secureOpen = true)">
               <el-icon><Lock /></el-icon>
-            </span>
+            </button>
           </el-tooltip>
           <span class="spacer" />
           <span v-if="totalText" class="muted hint total">{{ totalText }}</span>
@@ -1702,6 +1702,7 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   gap: 4px;
   height: 26px;
   padding: 0 8px 0 10px;
+  border: 0;
   border-radius: 13px;
   background: var(--el-fill-color-light);
   color: var(--el-text-color-regular);
@@ -1776,6 +1777,8 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   right: -6px;
   width: 18px;
   height: 18px;
+  padding: 0;
+  border: 0;
   border-radius: 50%;
   background: var(--el-text-color-secondary);
   color: var(--el-bg-color);

@@ -1157,12 +1157,14 @@ async function onSaved(deployment?: DeploymentRequest) {
     <div class="head">
       <!-- 服务器：下拉选择，放在最前面。灯是各台服务器的连接状态（绿：已连接，橙色闪：正在连接） -->
       <el-dropdown v-if="info?.targets.length" trigger="click" placement="bottom-start" class="target-pick" @command="(name: string) => (activeTarget = name)">
-        <GlassPane as="button" type="button" radius="pill" class="target-trigger" aria-label="选择服务器" aria-haspopup="menu">
-          <span class="tdot target-led" :class="targetDot(activeTarget)" />
-          <span class="mono target-name" :title="activeTarget">{{ target?.title || activeTarget }}</span>
-          <span v-if="target?.production" class="prod">生产</span>
-          <el-icon class="target-chevron"><ArrowDown /></el-icon>
-        </GlassPane>
+        <GlassButton class="target-trigger" aria-label="选择服务器" aria-haspopup="menu">
+          <template #content>
+            <span class="tdot target-led" :class="targetDot(activeTarget)" />
+            <span class="mono target-name" :title="activeTarget">{{ target?.title || activeTarget }}</span>
+            <span v-if="target?.production" class="prod">生产</span>
+            <el-icon class="target-chevron"><ArrowDown /></el-icon>
+          </template>
+        </GlassButton>
         <template #dropdown>
           <el-dropdown-menu class="target-menu">
             <el-dropdown-item v-for="t in info.targets" :key="t.name" :command="t.name" :class="{ 'target-on': t.name === activeTarget }">
@@ -1183,38 +1185,39 @@ async function onSaved(deployment?: DeploymentRequest) {
           <span class="field mono title-addr" @click="openEditor('host')">{{ target.user }}@{{ target.host }}:{{ target.port }}</span>
         </el-tooltip>
       </GlassPane>
-      <span class="spacer" />
-      <template v-if="target">
-        <el-tooltip :show-after="HOVER_DELAY" :content="connTip" placement="bottom">
-          <span class="conn" :class="{ on: conn?.connected }"><span class="conn-led" />{{ conn?.connected ? '已连接' : loadingStatus ? '正在连接' : '未连接' }}</span>
+      <div class="head-actions">
+        <template v-if="target">
+          <el-tooltip :show-after="HOVER_DELAY" :content="connTip" placement="bottom">
+            <span class="conn" :class="{ on: conn?.connected }"><span class="conn-led" />{{ conn?.connected ? '已连接' : loadingStatus ? '正在连接' : '未连接' }}</span>
+          </el-tooltip>
+          <el-tooltip v-if="conn?.connected && latency" :show-after="HOVER_DELAY" :content="latencyTip(latency.level)" placement="bottom">
+            <span class="latency" :class="latency.level">延迟 {{ latency.text }}</span>
+          </el-tooltip>
+          <el-tooltip v-if="conn?.connected" :show-after="HOVER_DELAY" content="断开与这台服务器的连接" placement="bottom">
+            <GlassButton :icon="SwitchButton" aria-label="断开连接" @click="disconnect">断开</GlassButton>
+          </el-tooltip>
+          <el-tooltip :show-after="HOVER_DELAY" placement="bottom">
+            <template #content>
+              <b v-if="compact">终端：</b>打开这台服务器的命令行，以 {{ target.user }} 登录{{ target.user !== 'root' ? '（需要 root 权限时用 sudo）' : '' }}<br />
+              可以开多个
+            </template>
+            <GlassButton :icon="Monitor" aria-label="终端" @click="addTerminal(project.path, target.name)">终端</GlassButton>
+          </el-tooltip>
+          <el-tooltip
+            :show-after="HOVER_DELAY"
+            :content="(compact ? 'AI 助手：' : '') + '让 AI 查看、排查这台服务器；允许改动时，每个改动都先问你'"
+            placement="bottom"
+          >
+            <GlassButton :icon="ChatDotRound" aria-label="AI 助手" @click="openAi(target.name)">AI 助手</GlassButton>
+          </el-tooltip>
+        </template>
+        <el-tooltip :show-after="HOVER_DELAY" content="编辑配置（ferry.yaml）" placement="bottom" :disabled="!compact">
+          <GlassButton :icon="EditPen" aria-label="编辑配置" @click="openEditor()">编辑配置</GlassButton>
         </el-tooltip>
-        <el-tooltip v-if="conn?.connected && latency" :show-after="HOVER_DELAY" :content="latencyTip(latency.level)" placement="bottom">
-          <span class="latency" :class="latency.level">延迟 {{ latency.text }}</span>
+        <el-tooltip :show-after="HOVER_DELAY" content="刷新整页：重新读配置、连接、应用状态和当前这一页（只刷新某一页用那一页工具栏上的刷新）" placement="bottom">
+          <GlassButton :icon="Refresh" :loading="loadingStatus || refreshing" aria-label="刷新" @click="refresh" />
         </el-tooltip>
-        <el-tooltip v-if="conn?.connected" :show-after="HOVER_DELAY" content="断开与这台服务器的连接" placement="bottom">
-          <GlassButton :icon="SwitchButton" aria-label="断开连接" @click="disconnect">断开</GlassButton>
-        </el-tooltip>
-        <el-tooltip :show-after="HOVER_DELAY" placement="bottom">
-          <template #content>
-            <b v-if="compact">终端：</b>打开这台服务器的命令行，以 {{ target.user }} 登录{{ target.user !== 'root' ? '（需要 root 权限时用 sudo）' : '' }}<br />
-            可以开多个
-          </template>
-          <GlassButton :icon="Monitor" aria-label="终端" @click="addTerminal(project.path, target.name)">终端</GlassButton>
-        </el-tooltip>
-        <el-tooltip
-          :show-after="HOVER_DELAY"
-          :content="(compact ? 'AI 助手：' : '') + '让 AI 查看、排查这台服务器；允许改动时，每个改动都先问你'"
-          placement="bottom"
-        >
-          <GlassButton :icon="ChatDotRound" aria-label="AI 助手" @click="openAi(target.name)">AI 助手</GlassButton>
-        </el-tooltip>
-      </template>
-      <el-tooltip :show-after="HOVER_DELAY" content="编辑配置（ferry.yaml）" placement="bottom" :disabled="!compact">
-        <GlassButton :icon="EditPen" aria-label="编辑配置" @click="openEditor()">编辑配置</GlassButton>
-      </el-tooltip>
-      <el-tooltip :show-after="HOVER_DELAY" content="刷新整页：重新读配置、连接、应用状态和当前这一页（只刷新某一页用那一页工具栏上的刷新）" placement="bottom">
-        <GlassButton :icon="Refresh" :loading="loadingStatus || refreshing" aria-label="刷新" @click="refresh" />
-      </el-tooltip>
+      </div>
     </div>
 
     <el-alert v-if="loadError" type="error" :closable="false" show-icon title="配置有错误">
@@ -1230,11 +1233,13 @@ async function onSaved(deployment?: DeploymentRequest) {
         <!-- 点击打开、再点收起：不用 Element Plus 默认的 0.2 秒隐藏延迟（那是给悬停用的），收起才不拖 -->
         <el-popover v-model:visible="targetDetails" trigger="click" :hide-after="0" role="dialog" placement="bottom-start" popper-class="cg-menu-popover" transition="el-zoom-in-top" :width="420" :popper-style="{ maxWidth: 'calc(100vw - 40px)' }">
           <template #reference>
-            <GlassPane as="button" type="button" radius="pill" class="deployment-toggle" :class="{ active: targetDetails }" aria-haspopup="dialog" :aria-expanded="targetDetails" @keydown.esc.stop="targetDetails = false">
-              <el-icon><Setting /></el-icon>
-              <span>部署参数</span>
-              <el-icon class="deployment-chevron" :class="{ open: targetDetails }"><ArrowDown /></el-icon>
-            </GlassPane>
+            <GlassButton class="deployment-toggle" :class="{ active: targetDetails }" aria-haspopup="dialog" :aria-expanded="targetDetails" @keydown.esc.stop="targetDetails = false">
+              <template #content>
+                <el-icon><Setting /></el-icon>
+                <span>部署参数</span>
+                <el-icon class="deployment-chevron" :class="{ open: targetDetails }"><ArrowDown /></el-icon>
+              </template>
+            </GlassButton>
           </template>
           <section class="deployment-details" aria-label="部署参数详情" @keydown.esc.stop="targetDetails = false">
             <div class="deployment-heading"><strong>部署参数</strong><span>点击参数可编辑</span></div>
@@ -1260,26 +1265,17 @@ async function onSaved(deployment?: DeploymentRequest) {
           </section>
         </el-popover>
         <el-button v-if="target.keyMissing" size="small" type="danger" plain :icon="Key" @click="localOpen = true">私钥缺失</el-button>
-        <GlassPane v-if="needKeygen" as="button" type="button" radius="pill" class="server-glass-button" @click="openKeygen()">
-          <el-icon><Key /></el-icon>
-          <span>配置免密登录</span>
-        </GlassPane>
+        <GlassButton v-if="needKeygen" size="small" :icon="Key" class="server-glass-button" @click="openKeygen()">配置免密登录</GlassButton>
         <!-- 这个目标套用了本机设置时标出「已生效」，提示里写用的是什么 -->
         <el-tooltip
           :show-after="HOVER_DELAY"
           :content="localOn(target) ? localTip(target) : '这台服务器自己的登录方式、路径（JDK、脚本……），以及这台电脑上的源码目录，不写进 ferry.yaml'"
           placement="bottom"
         >
-          <GlassPane as="button" type="button" radius="pill" class="server-glass-button" @click="localOpen = true">
-            <el-icon><Tools /></el-icon>
-            <span>本机设置<span v-if="localOn(target)" class="local-on">已生效</span></span>
-          </GlassPane>
+          <GlassButton size="small" :icon="Tools" class="server-glass-button" @click="localOpen = true">本机设置<span v-if="localOn(target)" class="local-on">已生效</span></GlassButton>
         </el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="服务器上定时检查应用、磁盘、证书、端口，有问题发到群里（可以随时打开、关闭）" placement="bottom">
-          <GlassPane as="button" type="button" radius="pill" class="server-glass-button" @click="monitorOpen = true">
-            <el-icon><Bell /></el-icon>
-            <span>服务器告警</span>
-          </GlassPane>
+          <GlassButton size="small" :icon="Bell" class="server-glass-button" @click="monitorOpen = true">服务器告警</GlassButton>
         </el-tooltip>
         <el-tooltip
           v-if="hasBackups"
@@ -1287,16 +1283,10 @@ async function onSaved(deployment?: DeploymentRequest) {
           content="配置里写的备份：在服务器上打开按时备份、现在备份、恢复、下载到这台电脑（要备份什么在「编辑配置」里改）"
           placement="bottom"
         >
-          <GlassPane as="button" type="button" radius="pill" class="server-glass-button" @click="backupOpen = true">
-            <el-icon><Box /></el-icon>
-            <span>数据备份</span>
-          </GlassPane>
+          <GlassButton size="small" :icon="Box" class="server-glass-button" @click="backupOpen = true">数据备份</GlassButton>
         </el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="谁什么时候在这台服务器上做了什么改动：部署、终端、文件、数据库、软件、防火墙……（团队里每个人的）" placement="bottom">
-          <GlassPane as="button" type="button" radius="pill" class="server-glass-button" @click="auditOpen = true">
-            <el-icon><Document /></el-icon>
-            <span>审计记录</span>
-          </GlassPane>
+          <GlassButton size="small" :icon="Document" class="server-glass-button" @click="auditOpen = true">审计记录</GlassButton>
         </el-tooltip>
         <el-tooltip v-if="readAgo" :show-after="HOVER_DELAY" :content="readTip" placement="bottom">
           <span class="read-at">状态{{ readAgo }}读取{{ autoMinutes < 0 ? '（不自动更新）' : conn?.connected ? '' : '（已断开，不自动更新）' }}</span>
@@ -1959,19 +1949,27 @@ async function onSaved(deployment?: DeploymentRequest) {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   min-width: 0;
+}
+.head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  margin-inline-start: auto;
 }
 .compact .head .latency { display: none; }
 /* 窄窗口：顶部按钮只留图标 */
-.compact .head :deep(.el-button [class*='el-icon'] + span),
-.compact .head :deep(.cg-button-label) {
+.compact .head-actions :deep(.cg-button-label) {
   display: none;
 }
-.compact .head .cg-button { width: 34px; padding: 0; }
+.compact .head-actions .cg-button { width: 34px; padding: 0; }
 /* 玻璃按钮和这一行的其他控件一样高 */
-.head .cg-button { height: 34px; padding-inline: 14px; }
-.head .cg-button.cg-icon-only { width: 34px; padding: 0; }
+.head-actions .cg-button { height: 34px; padding-inline: 14px; }
+.head-actions .cg-button.cg-icon-only { width: 34px; padding: 0; }
 .head h2 {
   margin: 0;
   font-size: 18px;

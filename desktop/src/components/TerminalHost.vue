@@ -64,7 +64,7 @@ onBeforeUnmount(stopDrag)
         >
           <span class="led" :class="t.state" />
           <span class="title">{{ t.title }}</span>
-          <el-icon class="x" @click.stop="close(t)"><Close /></el-icon>
+          <button type="button" class="terminal-tab-close" :aria-label="`关闭${t.title}`" @click.stop="close(t)"><el-icon><Close /></el-icon></button>
         </div>
         <el-tooltip :show-after="HOVER_DELAY" content="再开一个终端，连到同一台服务器" placement="bottom">
           <el-button text size="small" :icon="Plus" class="head-btn" @click="another" />
@@ -87,10 +87,10 @@ onBeforeUnmount(stopDrag)
       />
     </div>
   </div>
-  <div v-if="!terminalShown && terminals.length" class="term-pill" @click="terminalShown = true">
+  <button v-if="!terminalShown && terminals.length" type="button" class="term-pill" @click="terminalShown = true">
     <el-icon><Monitor /></el-icon>
     终端（{{ terminals.length }}）
-  </div>
+  </button>
 </template>
 
 <style scoped>
@@ -159,15 +159,6 @@ onBeforeUnmount(stopDrag)
   background: #1e1e1e;
   color: #fff;
 }
-.tab .x {
-  font-size: 12px;
-  border-radius: 3px;
-  opacity: 0.6;
-}
-.tab .x:hover {
-  opacity: 1;
-  background: #444;
-}
 .led {
   width: 7px;
   height: 7px;
@@ -196,6 +187,7 @@ onBeforeUnmount(stopDrag)
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
+  border: 0;
   border-radius: 16px;
   background: #252526;
   color: #eee;
