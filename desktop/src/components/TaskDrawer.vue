@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Loading, RefreshRight, Search } from '@element-plus/icons-vue'
 import { tasks, drawerOpen, selectedTaskId as selectedId, loadTaskDetail, reconcileInstallTask, removeTasks, askFixParents, askPkgChanges, aiAskRequest, currentPath, selectProject, type Task } from '../state'
 import { bytes, call, evLabel, padWidth, type FerryLine, type DeployReport, type AppOutcome } from '../ferry'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTaskList } from '../taskList'
 
 const { query, statusFilter, filteredTasks, visibleTasks, hasMore, reset, loadMore } = useTaskList(tasks)
@@ -239,12 +239,26 @@ function explain(o: AppOutcome): string {
   return '完成'
 }
 
+const clearingFinished = ref(false)
+
 /** 已完成（含失败、中断）的从面板和任务记录里一起删掉 */
 async function clearFinished() {
+  if (clearingFinished.value) return
+  const finished = tasks.filter((t) => t.status !== 'running')
+  if (!finished.length) return
+
+  clearingFinished.value = true
   try {
-    await removeTasks(tasks.filter((t) => t.status !== 'running'))
+    const action = await ElMessageBox.confirm(
+      `将删除全部 ${finished.length} 条已结束任务记录，包括失败和中断的任务。删除后无法恢复。`,
+      '清除已完成任务',
+      { type: 'warning', confirmButtonType: 'danger', confirmButtonText: '确认清除', cancelButtonText: '取消', autofocus: false },
+    ).catch(() => 'cancel')
+    if (action === 'confirm') await removeTasks(finished)
   } catch (e) {
     ElMessage.error(`删除任务记录失败：${(e as Error).message}`)
+  } finally {
+    clearingFinished.value = false
   }
 }
 </script>
@@ -255,7 +269,7 @@ async function clearFinished() {
       <div class="list">
         <div class="list-head">
           <span class="muted task-count" aria-live="polite">已加载 {{ visibleTasks.length }} / {{ filteredTasks.length }} 个</span>
-          <el-button text size="small" :disabled="!tasks.some((t) => t.status !== 'running')" @click="clearFinished">清除已完成</el-button>
+          <el-button text size="small" :disabled="clearingFinished || !tasks.some((t) => t.status !== 'running')" @click="clearFinished">清除已完成</el-button>
         </div>
         <el-input v-model="query" :prefix-icon="Search" placeholder="搜索任务或服务器" clearable size="small" aria-label="搜索任务" />
         <el-select v-model="statusFilter" size="small" class="task-filter" aria-label="任务状态"><el-option label="全部任务" value="all" /><el-option label="进行中" value="running" /><el-option label="失败" value="failed" /><el-option label="已结束" value="finished" /></el-select>
