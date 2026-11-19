@@ -196,3 +196,13 @@ export function createSprings(
 export function rubber(offset: number, limit: number): number {
   return limit * Math.tanh(offset / (limit * 2.5))
 }
+
+/** 在可见区内放大和拖动按钮，有余量时给边缘、阴影和焦点描边留出空间。 */
+export function fitButtonAxis(center: number, size: number, start: number, end: number, offset: number, scale: number) {
+  const room = end - start
+  const inset = Math.min(7, Math.max(0, (room - size) / 2))
+  const fittedScale = Math.min(scale, (room - 2 * inset) / size)
+  const half = size * fittedScale / 2
+  const position = Math.max(start + inset + half, Math.min(end - inset - half, center + offset))
+  return { offset: position - center, scale: fittedScale }
+}

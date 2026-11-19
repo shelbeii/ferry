@@ -12,6 +12,7 @@ import { startTheme } from './state'
 import { preloadLater } from './preload'
 import { installGlassMenus } from './glass/menus'
 import { installGlassSegments } from './glass/segments'
+import { installGlassButtons } from './glass/buttons'
 import { installTextSelectionGuard } from './textSelection'
 import { dialogTransition } from './fx/dialogParticles'
 import { installPopperParticles } from './fx/popperParticles'
@@ -23,6 +24,7 @@ const themeReady = startTheme()
 // 所有悬停说明（el-tooltip、表格里过长省略的单元格）都写 :show-after="HOVER_DELAY"
 app.config.globalProperties.HOVER_DELAY = HOVER_DELAY
 app.mount('#app')
+installGlassButtons()
 installTextSelectionGuard()
 preloadLater()
 // 下拉框里的玻璃液滴高亮（弹出层都由 Element Plus 生成，全局监听，见 glass/menus.ts）

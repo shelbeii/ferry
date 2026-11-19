@@ -353,6 +353,7 @@ html.dark {
   white-space: normal;
   line-height: 1.4;
 }
+.el-dialog__footer > .cg-button { min-width: 80px; padding-inline: 18px; }
 .el-dialog__footer > span { flex-basis: 100%; min-width: 0; margin: 0; text-align: center; overflow-wrap: anywhere; }
 .el-dialog__footer > .preview-footer { width: 100%; flex-wrap: wrap; }
 .el-dialog__body .el-form-item__content { min-width: 0; }

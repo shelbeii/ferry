@@ -1,5 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { createSprings, lensField, refractionProfile, rubber, stepSpring } from './optics'
+import { createSprings, fitButtonAxis, lensField, refractionProfile, rubber, stepSpring } from './optics'
+
+describe('玻璃按钮拖动边界', () => {
+  it('有空间时保留拖动偏移和放大比例', () => {
+    expect(fitButtonAxis(200, 120, 0, 400, -8, 1.2)).toEqual({ offset: -8, scale: 1.2 })
+  })
+
+  it('在两个边缘限制弹簧回弹和拖动偏移', () => {
+    const left = fitButtonAxis(60, 120, 0, 400, -10, 1.25)
+    const right = fitButtonAxis(340, 120, 0, 400, 10, 1.25)
+    expect(60 + left.offset - 60 * left.scale).toBeCloseTo(7)
+    expect(340 + right.offset + 60 * right.scale).toBeCloseTo(393)
+  })
+
+  it('可见区较窄时限制放大，按钮完全占满可见区时保持居中', () => {
+    expect(fitButtonAxis(50, 100, 0, 110, 8, 1.25)).toEqual({ offset: 5, scale: 1 })
+    expect(fitButtonAxis(60, 120, 0, 90, -8, 1.25)).toEqual({ offset: -15, scale: .75 })
+  })
+})
 
 // 从位移图里读回某个像素的取样偏移（像素）
 function offsetAt(field: ReturnType<typeof lensField>, x: number, y: number) {

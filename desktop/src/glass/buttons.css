@@ -1,0 +1,111 @@
+.cg-button-moving { z-index: 2; isolation: isolate; }
+
+.cg-native-button-effect {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.cg-native-button-effect > .cg-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+.cg-glow {
+  opacity: 0;
+  background: radial-gradient(circle at 50% 50%, rgb(255 255 255 / .55), rgb(255 255 255 / .18) 22%, transparent 40%) 50% 50% / 200% 200% no-repeat;
+}
+html.dark .cg-glow {
+  background-image: radial-gradient(circle at 50% 50%, rgb(255 255 255 / .3), rgb(255 255 255 / .08) 22%, transparent 40%);
+}
+
+@media (prefers-reduced-transparency: no-preference) and (forced-colors: none) {
+  html.cg-on {
+    --cg-action-surface: var(--ferry-surface-raised);
+    --cg-action-tint: clamp(27%, calc(25% + 12% * var(--cg-k, 1)), 62%);
+    --cg-action-color-tint: clamp(10%, calc(8% + 9% * var(--cg-k, 1)), 25%);
+    --cg-action-edge: var(--ferry-overlay-line);
+    --cg-action-highlight: rgb(255 255 255 / .58);
+    --cg-action-shadow: 0 2px 5px rgb(16 24 40 / .07);
+    --cg-action-optics: .32;
+  }
+  html.dark.cg-on {
+    --cg-action-surface: var(--el-text-color-secondary);
+    --cg-action-tint: clamp(7%, calc(6% + 4% * var(--cg-k, 1)), 18%);
+    --cg-action-highlight: rgb(255 255 255 / .19);
+    --cg-action-shadow: 0 2px 5px rgb(0 0 0 / .16);
+  }
+  html.cg-on :where(.el-dialog, .el-drawer, .el-message-box, .el-popper) {
+    --cg-action-optics: clamp(.14, calc(.26 - .07 * var(--cg-k, 1)), .26);
+  }
+  html.cg-on :where(button, .el-button, [role="button"], .install-template-card) {
+    --cg-action-accent: transparent;
+    --cg-action-ink: var(--el-text-color-regular);
+    --cg-action-hover: 0%;
+    --cg-action-sheen: linear-gradient(180deg,
+      color-mix(in srgb, var(--cg-action-surface) calc(var(--cg-action-tint) + var(--cg-action-hover)), transparent),
+      color-mix(in srgb, var(--cg-action-surface) calc(.62 * var(--cg-action-tint) + var(--cg-action-hover)), transparent));
+    --cg-action-fill: var(--cg-action-sheen)
+      color-mix(in srgb, var(--cg-action-accent) calc(var(--cg-action-color-tint) + .5 * var(--cg-action-hover)), transparent);
+  }
+  html.cg-on :is(.cg-button--primary, .el-button--primary) { --cg-action-accent: var(--el-color-primary); }
+  html.cg-on .el-button--success { --cg-action-accent: var(--el-color-success); }
+  html.cg-on .el-button--info { --cg-action-accent: var(--el-color-info); }
+  html.cg-on .el-button--warning { --cg-action-accent: var(--el-color-warning); }
+  html.cg-on :is(.cg-button--danger, .el-button--danger) { --cg-action-accent: var(--el-color-danger); }
+  html.cg-on :is(.cg-button--primary, .cg-button--danger, .el-button--primary, .el-button--success, .el-button--warning, .el-button--danger, .el-button--info) {
+    --cg-action-ink: color-mix(in srgb, var(--cg-action-accent) 55%, var(--el-text-color-primary));
+  }
+  html.cg-on :where(button, .el-button, [role="button"], .install-template-card):is(:hover, :focus-visible, [aria-pressed="true"], [aria-expanded="true"]):not(:disabled, .is-disabled, .off) {
+    --cg-action-hover: 7%;
+  }
+
+  html.cg-on .cg-button {
+    --cg-bright: 1;
+    --cg-sat: 1.12;
+    --cg-rim-hi: .55;
+    --cg-rim-back: .22;
+    --cg-rim-lo: .05;
+    color: var(--cg-action-ink);
+    box-shadow: 0 0 0 1px var(--cg-action-edge), var(--cg-action-shadow);
+  }
+  html.dark.cg-on .cg-button { --cg-rim-hi: .38; }
+  html.cg-on .cg-button > .cg-tint { background: var(--cg-action-fill); }
+  html.cg-on .cg-button > .cg-optic { opacity: var(--cg-action-optics); }
+  html.cg-on .cg-button > .cg-rim { box-shadow: inset 0 1px 1px var(--cg-action-highlight); }
+
+  /* Element Plus 的尺寸、图标、默认事件和组合边框继续由组件管理。 */
+  html.cg-on .el-button:not(.is-link, .is-text) {
+    color: var(--cg-action-ink);
+    background: var(--cg-action-fill);
+    border-color: var(--cg-action-edge);
+    box-shadow: inset 0 1px 1px var(--cg-action-highlight), var(--cg-action-shadow);
+  }
+  html.cg-on .el-button:not(.is-link, .is-text, .is-circle, .el-button-group > *, .el-input-group__append > *, .el-input-group__prepend > *) {
+    border-radius: 999px;
+  }
+  html.cg-on .el-button:is(.is-link, .is-text):is(:hover, :focus-visible, .cg-button-moving):not(:disabled, .is-disabled) {
+    background: var(--cg-action-fill);
+    box-shadow: inset 0 1px 1px var(--cg-action-highlight);
+  }
+  html.cg-on .el-button:is(:disabled, .is-disabled) { opacity: .55; }
+
+  /* 导航、表格行、卡片使用同一高光，保留它们原本的选中和状态底色。 */
+  html.cg-on :is(button.rail-btn, .browser-drawer button.icon, .browser-drawer button.tool):not(.on, :disabled) {
+    background: var(--cg-action-fill);
+    box-shadow: inset 0 1px 1px var(--cg-action-highlight);
+  }
+  html.cg-on :where(button:not(.el-button, .cg-button, .cg-switch, .cg-tab), [role="button"], .install-template-card):is(:hover, :focus-visible, .cg-button-moving):not(:disabled, [aria-disabled="true"]) {
+    background-image: var(--cg-action-sheen);
+    box-shadow: inset 0 1px 1px var(--cg-action-highlight);
+  }
+  .cg-native-button-effect::before {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    opacity: var(--cg-action-optics);
+    backdrop-filter: blur(calc(2px * var(--cg-blur-k, 1))) var(--cg-pressed-lens,) saturate(1.12);
+    content: '';
+  }
+}
