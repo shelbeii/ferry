@@ -509,8 +509,8 @@ function listenTip(l: string): string {
             </div>
           </dl>
           <div class="card-foot">
-            <RowActions :key="key" :actions="rowActions(row)" :label="row.instance || row.name" :inline-count="0" />
             <el-tooltip :show-after="HOVER_DELAY" v-if="!row.instance && !controllable(row)" :content="readonlyWhy(row)" placement="top"><span class="muted small">只读</span></el-tooltip>
+            <RowActions :key="key" :actions="rowActions(row)" :label="row.instance || row.name" :inline-count="0" />
           </div>
         </article>
         <el-empty v-if="!items.length" :description="emptyText" :image-size="60" class="cards-empty" />
@@ -846,6 +846,9 @@ function listenTip(l: string): string {
 }
 .card-fields .port.local {
   color: inherit;
+}
+.card-foot > .row-actions {
+  margin-inline-start: auto;
 }
 /* ---- 列表 */
 .table-box {
