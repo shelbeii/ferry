@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import GlassButton from './glass/GlassButton.vue'
 import { call } from '../ferry'
 
 // 软件模板编辑器：检查、保存到自己的模板目录（ID 和内置的一样时覆盖内置的）
@@ -69,9 +70,9 @@ async function run(action: 'check' | 'save') {
       </el-collapse-item>
     </el-collapse>
     <template #footer>
-      <el-button @click="emit('close')">取消</el-button>
-      <el-button :loading="busy" @click="run('check')">检查</el-button>
-      <el-button type="primary" :loading="busy" @click="run('save')">保存</el-button>
+      <GlassButton @click="emit('close')">取消</GlassButton>
+      <GlassButton :loading="busy" @click="run('check')">检查</GlassButton>
+      <GlassButton tone="primary" :loading="busy" @click="run('save')">保存</GlassButton>
     </template>
   </el-dialog>
 </template>

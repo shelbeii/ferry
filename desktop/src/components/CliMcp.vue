@@ -7,6 +7,7 @@ import { call, type Inspect } from '../ferry'
 import { projects } from '../state'
 import McpCallsDialog from './McpCallsDialog.vue'
 import McpToolsDialog from './McpToolsDialog.vue'
+import GlassButton from './glass/GlassButton.vue'
 import GlassSwitch from './glass/GlassSwitch.vue'
 import GlassToggle from './glass/GlassToggle.vue'
 
@@ -202,8 +203,8 @@ onMounted(loadCallCount)
         <template v-if="status.supported">
           <el-tag v-if="status.inPath" type="success" size="small" disable-transitions>已加入</el-tag>
           <el-tag v-else type="info" size="small" disable-transitions>未加入</el-tag>
-          <el-button v-if="status.inPath" size="small" class="ml" :loading="busy" @click="setPath(false)">移除</el-button>
-          <el-button v-else size="small" type="primary" class="ml" :loading="busy" @click="setPath(true)">加入 PATH</el-button>
+          <GlassButton v-if="status.inPath" size="small" class="ml" :loading="busy" @click="setPath(false)">移除</GlassButton>
+          <GlassButton v-else size="small" tone="primary" class="ml" :loading="busy" @click="setPath(true)">加入 PATH</GlassButton>
         </template>
         <span v-else class="muted">这个系统上请自己把 <span class="mono">{{ status.dir }}</span> 加进 PATH</span>
       </el-descriptions-item>
@@ -269,7 +270,7 @@ onMounted(loadCallCount)
     <div class="muted small where">{{ current.where }}</div>
     <div class="snippet">
       <pre class="mono">{{ current.text }}</pre>
-      <el-button class="copy" size="small" :icon="CopyDocument" @click="copy(current.text, '配置')">复制</el-button>
+      <GlassButton class="copy" size="small" :icon="CopyDocument" @click="copy(current.text, '配置')">复制</GlassButton>
     </div>
     <p class="muted small">
       配置里用的是 ferry 程序的完整路径，不加入 PATH 也能用。Ferry 升级后路径不变，不用重新配置；换了安装位置要改一下。
@@ -281,8 +282,8 @@ onMounted(loadCallCount)
       保留多少天、最多占用多少，在<el-button link type="primary" class="inline-link" @click="emit('goto', 'storage')">「存储」</el-button>里设置。
     </p>
     <div class="calls-row">
-      <el-button :icon="Document" @click="showCalls = true">查看调用记录</el-button>
-      <el-button :icon="Tools" class="no-ml" @click="showTools = true">MCP 工具列表</el-button>
+      <GlassButton :icon="Document" @click="showCalls = true">查看调用记录</GlassButton>
+      <GlassButton :icon="Tools" class="no-ml" @click="showTools = true">MCP 工具列表</GlassButton>
       <span v-if="callCount !== undefined" class="muted small">{{ callCount ? `现有 ${callCount} 条调用记录` : '还没有编程软件调用过' }}</span>
     </div>
     <McpCallsDialog v-if="showCalls" :data-dir="dataDir" @close="(showCalls = false), loadCallCount()" />
@@ -311,6 +312,7 @@ h4.first {
 }
 .calls-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }

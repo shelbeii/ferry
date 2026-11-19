@@ -6,6 +6,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { call, NOTIFY_KINDS, type AppSettings, type NotifyChannel } from '../ferry'
 import { projects } from '../state'
+import GlassButton from './glass/GlassButton.vue'
 import GlassSwitch from './glass/GlassSwitch.vue'
 import GlassToggle from './glass/GlassToggle.vue'
 import { notifySecretChanges } from '../settingsSecrets'
@@ -196,7 +197,7 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
       <el-button text size="small" type="danger" @click="remove(i)">删除</el-button>
     </div>
     <div class="add">
-      <el-button size="small" :icon="Plus" @click="openEdit(-1)">添加</el-button>
+      <GlassButton size="small" :icon="Plus" @click="openEdit(-1)">添加</GlassButton>
     </div>
     <p v-if="envCount" class="muted small">另有 {{ envCount }} 个来自环境变量 FERRY_NOTIFY。</p>
 
@@ -230,7 +231,7 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
               class="mono"
               :placeholder="draft.id && has('sign', draft.id) ? '已保存（填写则替换）' : '机器人设了加签 / 签名校验才填'"
             />
-            <el-button v-if="draft.id && has('sign', draft.id)" @click="deleteDraftSign">删除</el-button>
+            <GlassButton v-if="draft.id && has('sign', draft.id)" @click="deleteDraftSign">删除</GlassButton>
           </div>
         </el-form-item>
         <el-form-item label="什么时候发">
@@ -247,13 +248,13 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
           <GlassToggle v-model="draft.productionOnly" class="prod">只发生产服务器（production: true）的</GlassToggle>
         </el-form-item>
         <el-form-item>
-          <el-button :loading="testing" @click="test">发一条测试消息</el-button>
+          <GlassButton :loading="testing" @click="test">发一条测试消息</GlassButton>
           <span v-if="testResult" class="small ml" :class="testResult.ok ? 'ok' : 'bad'">{{ testResult.msg }}</span>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="editing = false">取消</el-button>
-        <el-button type="primary" @click="saveEdit">确定</el-button>
+        <GlassButton @click="editing = false">取消</GlassButton>
+        <GlassButton tone="primary" @click="saveEdit">确定</GlassButton>
       </template>
     </el-dialog>
   </div>

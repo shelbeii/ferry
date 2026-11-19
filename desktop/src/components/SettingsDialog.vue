@@ -14,6 +14,7 @@ import { appInfo, browserDataUsage, clearBrowserData, clearUiCache, isTauri, uiC
 import { clearHistory } from '../browser/address'
 import { glass, GLASS_TRANSPARENCY_DEFAULT } from '../glass/runtime'
 import { setParticles } from '../fx/dialogParticles'
+import GlassButton from './glass/GlassButton.vue'
 import GlassToggle from './glass/GlassToggle.vue'
 import { checkUpdate, updater } from '../update'
 
@@ -706,9 +707,9 @@ async function pickKeyDir() {
           <el-tag size="small" :type="locked ? 'warning' : 'info'">{{ modeText[dataDir?.mode ?? 'install'] }}</el-tag>
         </div>
         <div class="row">
-          <el-button :icon="FolderOpened" :disabled="!isTauri" @click="openDataDir">在资源管理器中显示</el-button>
-          <el-button :disabled="locked" @click="changeDir(false)">更改位置…</el-button>
-          <el-button :disabled="locked || dataDir?.mode === 'install' || dataDir?.mode === 'user'" @click="changeDir(true)">恢复默认位置</el-button>
+          <GlassButton :icon="FolderOpened" :disabled="!isTauri" @click="openDataDir">在资源管理器中显示</GlassButton>
+          <GlassButton :disabled="locked" @click="changeDir(false)">更改位置…</GlassButton>
+          <GlassButton :disabled="locked || dataDir?.mode === 'install' || dataDir?.mode === 'user'" @click="changeDir(true)">恢复默认位置</GlassButton>
         </div>
         <el-alert v-if="dataDir?.note" type="warning" :closable="false" show-icon class="note">
           <template #title>没有用安装目录（{{ dataDir.note }}），数据放在用户目录。可以把 Ferry 装到可写的目录，或用「更改位置」指定</template>
@@ -745,8 +746,8 @@ async function pickKeyDir() {
           <el-form-item>
             <div class="usage">
               <span class="muted small">{{ taskUsage ? `现有 ${taskUsage.count} 个任务记录，占用 ${bytes(taskUsage.bytes)}` : '' }}</span>
-              <el-button size="small" :loading="taskCleaning" @click="cleanTasks(false)">按上面的设置清理</el-button>
-              <el-button size="small" type="danger" plain :disabled="!taskUsage?.count" @click="cleanTasks(true)">全部删除</el-button>
+              <GlassButton size="small" :loading="taskCleaning" @click="cleanTasks(false)">按上面的设置清理</GlassButton>
+              <GlassButton size="small" tone="danger" :disabled="!taskUsage?.count" @click="cleanTasks(true)">全部删除</GlassButton>
             </div>
           </el-form-item>
         </el-form>
@@ -768,8 +769,8 @@ async function pickKeyDir() {
           <el-form-item>
             <div class="usage">
               <span class="muted small">{{ aiUsage ? `现有 ${aiUsage.count} 个对话，占用 ${bytes(aiUsage.bytes)}` : '' }}</span>
-              <el-button size="small" :loading="aiCleaning" @click="cleanAi(false)">按上面的设置清理</el-button>
-              <el-button size="small" type="danger" plain :disabled="!aiUsage?.count" @click="cleanAi(true)">全部删除</el-button>
+              <GlassButton size="small" :loading="aiCleaning" @click="cleanAi(false)">按上面的设置清理</GlassButton>
+              <GlassButton size="small" tone="danger" :disabled="!aiUsage?.count" @click="cleanAi(true)">全部删除</GlassButton>
             </div>
           </el-form-item>
         </el-form>
@@ -791,8 +792,8 @@ async function pickKeyDir() {
           <el-form-item>
             <div class="usage">
               <span class="muted small">{{ mcpUsage ? `现有 ${mcpUsage.count} 条调用记录，占用 ${bytes(mcpUsage.bytes)}` : '' }}</span>
-              <el-button size="small" :loading="mcpCleaning" @click="cleanMcpLog(false)">按上面的设置清理</el-button>
-              <el-button size="small" type="danger" plain :disabled="!mcpUsage?.count" @click="cleanMcpLog(true)">全部删除</el-button>
+              <GlassButton size="small" :loading="mcpCleaning" @click="cleanMcpLog(false)">按上面的设置清理</GlassButton>
+              <GlassButton size="small" tone="danger" :disabled="!mcpUsage?.count" @click="cleanMcpLog(true)">全部删除</GlassButton>
             </div>
           </el-form-item>
         </el-form>
@@ -803,7 +804,7 @@ async function pickKeyDir() {
           <el-form-item>
             <div class="usage">
               <span class="muted small">占用 {{ bytes(browserUsage) }}</span>
-              <el-button size="small" type="danger" plain :loading="browserCleaning" @click="cleanBrowser">清除浏览器数据</el-button>
+              <GlassButton size="small" tone="danger" :loading="browserCleaning" @click="cleanBrowser">清除浏览器数据</GlassButton>
             </div>
           </el-form-item>
         </el-form>
@@ -819,7 +820,7 @@ async function pickKeyDir() {
             <el-form-item>
               <div class="usage">
                 <span class="muted small">占用 {{ bytes(uiCache) }}</span>
-                <el-button size="small" :loading="uiCacheCleaning" @click="cleanUiCache">清除界面缓存</el-button>
+                <GlassButton size="small" :loading="uiCacheCleaning" @click="cleanUiCache">清除界面缓存</GlassButton>
               </div>
             </el-form-item>
           </el-form>
@@ -903,13 +904,13 @@ async function pickKeyDir() {
           <el-input v-model="r.value" placeholder="值" class="mono" />
           <el-button :icon="Delete" link type="danger" @click="envRows.splice(i, 1)" />
         </div>
-        <el-button :icon="Plus" size="small" @click="envRows.push({ key: '', value: '' })">添加变量</el-button>
+        <GlassButton :icon="Plus" size="small" @click="envRows.push({ key: '', value: '' })">添加变量</GlassButton>
         <h4>加到 PATH 最前面的目录</h4>
         <div v-for="(_, i) in pathRows" :key="'p' + i" class="kv">
           <el-input v-model="pathRows[i]" class="mono" placeholder="如 D:\Maven\bin" />
           <el-button :icon="Delete" link type="danger" @click="pathRows.splice(i, 1)" />
         </div>
-        <el-button :icon="Plus" size="small" @click="addPathDir">添加目录</el-button>
+        <GlassButton :icon="Plus" size="small" @click="addPathDir">添加目录</GlassButton>
         <h4>输出</h4>
         <GlassToggle v-model="form.build.verbose">在任务面板里实时显示构建输出</GlassToggle>
       </el-tab-pane>
@@ -970,7 +971,7 @@ async function pickKeyDir() {
           <el-form-item label="本机存放">
             <div class="row">
               <el-input v-model="form.runtime.cacheDir" class="mono" :placeholder="jdks?.dir ?? '数据目录下的 runtimes'" />
-              <el-button :icon="FolderOpened" @click="chooseJdkDir">选择</el-button>
+              <GlassButton :icon="FolderOpened" @click="chooseJdkDir">选择</GlassButton>
             </div>
             <div class="muted small">每个 JDK 约 190 MB</div>
           </el-form-item>
@@ -985,8 +986,8 @@ async function pickKeyDir() {
             <el-option value="x64" label="x64（x86_64）" />
             <el-option value="aarch64" label="aarch64（arm64）" />
           </el-select>
-          <el-button size="small" @click="downloadJdk">下载</el-button>
-          <el-button size="small" :loading="jdkBusy" @click="importJdk">导入压缩包…</el-button>
+          <GlassButton size="small" @click="downloadJdk">下载</GlassButton>
+          <GlassButton size="small" :loading="jdkBusy" @click="importJdk">导入压缩包…</GlassButton>
         </div>
         <el-alert v-if="jdkError" type="error" :title="jdkError" :closable="false" show-icon />
         <el-table :data="jdks?.jdks ?? []" size="small" border empty-text="还没有：部署时按需下载；本机不能上网时可以先导入">
@@ -1031,8 +1032,8 @@ async function pickKeyDir() {
             <el-option value="x86_64" label="x86_64（amd64）" />
             <el-option value="aarch64" label="aarch64（arm64）" />
           </el-select>
-          <el-button size="small" @click="downloadNginx">下载</el-button>
-          <el-button size="small" :loading="ngxBusy" @click="importNginx">导入程序…</el-button>
+          <GlassButton size="small" @click="downloadNginx">下载</GlassButton>
+          <GlassButton size="small" :loading="ngxBusy" @click="importNginx">导入程序…</GlassButton>
         </div>
         <el-table :data="jdks?.nginx ?? []" size="small" border empty-text="还没有：部署时按需下载；本机不能上网时可以先导入">
           <el-table-column label="nginx" min-width="210">
@@ -1067,7 +1068,7 @@ async function pickKeyDir() {
         <div class="jdk-bar">
           <span class="muted small">本机已有的安装包</span>
           <span class="spacer" />
-          <el-button size="small" :loading="swBusy" @click="importSoftware">导入安装包…</el-button>
+          <GlassButton size="small" :loading="swBusy" @click="importSoftware">导入安装包…</GlassButton>
         </div>
         <el-table :data="swLib" size="small" border empty-text="还没有：安装时按需下载；自己的程序、压缩包也可以导入，在「自定义安装」里用">
           <el-table-column label="安装包" min-width="200">
@@ -1104,9 +1105,9 @@ async function pickKeyDir() {
         <div class="jdk-bar">
           <span class="muted small">共 {{ tpl?.templates.length ?? 0 }} 个</span>
           <span class="spacer" />
-          <el-button size="small" @click="newTemplate">新建</el-button>
-          <el-button size="small" @click="importTemplate">导入模板文件…</el-button>
-          <el-button v-if="isTauri && tpl" size="small" @click="reveal(tpl.dir)">打开模板目录</el-button>
+          <GlassButton size="small" @click="newTemplate">新建</GlassButton>
+          <GlassButton size="small" @click="importTemplate">导入模板文件…</GlassButton>
+          <GlassButton v-if="isTauri && tpl" size="small" @click="reveal(tpl.dir)">打开模板目录</GlassButton>
         </div>
         <el-alert v-for="e in tpl?.errors ?? []" :key="e" type="warning" :title="e" :closable="false" show-icon />
         <el-table :data="tpl?.templates ?? []" size="small" border>
@@ -1234,8 +1235,8 @@ async function pickKeyDir() {
               <span v-else-if="updater.info">已是最新版本<span class="muted">（GitHub 上最新发布的是 {{ updater.info.latest }}）</span></span>
               <span v-else-if="updater.checkError" class="danger">检查失败：{{ updater.checkError }}</span>
               <span v-else class="muted">还没检查过</span>
-              <el-button v-if="updater.info?.newer" type="primary" size="small" @click="updater.dialog = true">查看并更新</el-button>
-              <el-button v-else size="small" :loading="updater.checking" @click="manualCheck">检查更新</el-button>
+              <GlassButton v-if="updater.info?.newer" tone="primary" size="small" @click="updater.dialog = true">查看并更新</GlassButton>
+              <GlassButton v-else size="small" :loading="updater.checking" @click="manualCheck">检查更新</GlassButton>
             </div>
             <div class="muted small">
               {{ appSettings?.ui.checkUpdate === false ? '没开自动检查' : '打开 Ferry 后和之后每 6 小时自动查一次' }}（在<el-button link type="primary" class="inline-link" @click="tab = 'ui'">「界面」</el-button>里改）。从 GitHub 下载，下载慢或打不开时可以在<el-button link type="primary" class="inline-link" @click="tab = 'runtime'">「运行环境」</el-button>填 GitHub 加速。
@@ -1243,22 +1244,22 @@ async function pickKeyDir() {
           </el-descriptions-item>
         </el-descriptions>
         <div class="row about-actions">
-          <el-button :icon="CopyDocument" @click="copyAbout">复制版本信息</el-button>
-          <el-button :icon="Link" @click="openUrl(REPO)">项目主页</el-button>
+          <GlassButton :icon="CopyDocument" @click="copyAbout">复制版本信息</GlassButton>
+          <GlassButton :icon="Link" @click="openUrl(REPO)">项目主页</GlassButton>
         </div>
       </el-tab-pane>
     </el-tabs>
       </section>
     </div>
-    <el-alert v-else-if="initializationError" type="error" title="设置读取失败" :closable="false" show-icon><p>{{ initializationError }}</p><el-button type="primary" size="small" @click="initialize">重新读取设置</el-button></el-alert>
+    <el-alert v-else-if="initializationError" type="error" title="设置读取失败" :closable="false" show-icon><p>{{ initializationError }}</p><GlassButton tone="primary" size="small" @click="initialize">重新读取设置</GlassButton></el-alert>
     <LoadingBlock v-else text="正在读取设置…" :rows="9" min-height="320px" />
     <template #footer>
       <!-- 「关于」页没有可保存的内容 -->
-      <el-button v-if="tab === 'about'" :disabled="saving" @click="visible = false">关闭</el-button>
+      <GlassButton v-if="tab === 'about'" :disabled="saving" @click="visible = false">关闭</GlassButton>
       <template v-else>
         <span class="muted small foot" :title="info?.file">设置与模型、通知、DNS 凭据一起保存；测试、查看和清理即时执行。</span>
-        <el-button :disabled="saving" @click="visible = false">取消</el-button>
-        <el-button type="primary" :disabled="!form" :loading="saving" @click="save">保存</el-button>
+        <GlassButton :disabled="saving" @click="visible = false">取消</GlassButton>
+        <GlassButton tone="primary" :disabled="!form" :loading="saving" @click="save">保存</GlassButton>
       </template>
     </template>
   </el-dialog>
@@ -1286,7 +1287,15 @@ async function pickKeyDir() {
 .settings-group button { text-align: left; padding: 10px 12px; font-size: 13px; border: 0; border-radius: 7px; color: var(--el-text-color-regular); background: transparent; cursor: pointer; }
 .settings-group button:hover { background: var(--el-fill-color-light); }
 .settings-group button.active { background: var(--el-color-primary-light-9); color: var(--el-color-primary); font-weight: 600; }
-.settings-content { min-width: 0; overflow-y: auto; padding-right: 8px; overflow-wrap: anywhere; }
+.settings-content {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  margin-inline-start: -8px;
+  padding: 6px 8px 12px;
+  scroll-padding: 6px 8px 12px;
+  overflow-wrap: anywhere;
+}
 .settings-content :deep(.el-form-item__content) { min-width: 0; }
 .settings-heading h2 { font-size: 24px; margin: 0 0 8px; letter-spacing: -.6px; }
 .settings-heading p { color: var(--el-text-color-secondary); margin: 0 0 26px; line-height: 1.7; font-size: 13px; }

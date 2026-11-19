@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Hide, View } from '@element-plus/icons-vue'
 import { ferry, type Running, type SecretEntry } from '../ferry'
+import GlassButton from './glass/GlassButton.vue'
 import LoadingBlock from './LoadingBlock.vue'
 
 const props = defineProps<{ entry: SecretEntry }>()
@@ -92,8 +93,8 @@ onBeforeUnmount(clear)
       <p class="muted small">这里是本机保存的内容；如果在服务器或服务商那里修改过，这里不会自动更新。</p>
     </template>
     <template #footer>
-      <el-button v-if="error" :loading="loading" @click="load">重新读取</el-button>
-      <el-button type="primary" @click="visible = false">关闭</el-button>
+      <GlassButton v-if="error" :loading="loading" @click="load">重新读取</GlassButton>
+      <GlassButton tone="primary" @click="visible = false">关闭</GlassButton>
     </template>
   </el-dialog>
 </template>

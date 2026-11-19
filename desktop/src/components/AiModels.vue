@@ -6,6 +6,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Close, Plus } from '@element-plus/icons-vue'
 import { call, type AiEffort, type AiModel, type AppSettings } from '../ferry'
 import { MAX_LEVELS, THINKING_STYLES, defaultEffort, defaultLevels, effortLabel, modelEffort, plainHttpOutside, supportsImages, thinkingStyle, validEffortValue } from '../ai'
+import GlassButton from './glass/GlassButton.vue'
 import { aiSecretChanges } from '../settingsSecrets'
 
 const props = defineProps<{ ai: AppSettings['ai'] }>()
@@ -239,7 +240,7 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
       <el-button text size="small" type="danger" @click="remove(i)">删除</el-button>
     </div>
     <div class="add">
-      <el-button size="small" :icon="Plus" @click="openEdit(-1)">添加模型</el-button>
+      <GlassButton size="small" :icon="Plus" @click="openEdit(-1)">添加模型</GlassButton>
       <span v-if="ai.models.length > 1" class="muted small">选中的是默认模型；对话时可以换。</span>
     </div>
 
@@ -273,7 +274,7 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
               class="mono"
               :placeholder="draft.id && hasKey(draft.id) ? '已保存（填写则替换）' : '保存在系统凭据库'"
             />
-            <el-button v-if="draft.id && hasKey(draft.id)" @click="deleteDraftKey">删除</el-button>
+            <GlassButton v-if="draft.id && hasKey(draft.id)" @click="deleteDraftKey">删除</GlassButton>
           </div>
         </el-form-item>
         <el-form-item v-if="draft.provider === 'openai'" label="思考参数">
@@ -291,7 +292,7 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
               <el-button text size="small" :icon="Close" title="删除这一档" @click="removeLevel(i)" />
             </div>
             <div class="level-ops">
-              <el-button size="small" :icon="Plus" :disabled="levelRows.length >= MAX_LEVELS" @click="addLevel">添加档位</el-button>
+              <GlassButton size="small" :icon="Plus" :disabled="levelRows.length >= MAX_LEVELS" @click="addLevel">添加档位</GlassButton>
               <el-button v-if="levelsCustom" text size="small" type="primary" @click="resetLevels">恢复默认档位</el-button>
               <span v-else class="muted small">现在是默认档位，可以直接改</span>
             </div>
@@ -328,13 +329,13 @@ defineExpose({ getSecretChanges, acceptSecretChanges })
           <div class="muted small">每百万 tokens 的价格，可以不填；填了对话时显示大约花了多少钱</div>
         </el-form-item>
         <el-form-item>
-          <el-button :loading="testing" @click="test">测试</el-button>
+          <GlassButton :loading="testing" @click="test">测试</GlassButton>
           <span v-if="testResult" class="small ml" :class="testResult.ok ? 'ok' : 'bad'">{{ testResult.msg }}</span>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="editing = false">取消</el-button>
-        <el-button type="primary" @click="saveEdit">确定</el-button>
+        <GlassButton @click="editing = false">取消</GlassButton>
+        <GlassButton tone="primary" @click="saveEdit">确定</GlassButton>
       </template>
     </el-dialog>
   </div>

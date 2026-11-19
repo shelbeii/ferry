@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { FolderOpened, Refresh } from '@element-plus/icons-vue'
 import { call, time } from '../ferry'
 import { reveal } from '../platform'
+import GlassButton from './glass/GlassButton.vue'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 
 const props = defineProps<{ dataDir?: string }>()
@@ -223,9 +224,9 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
       </el-radio-group>
       <el-checkbox v-model="changes" size="small">只看改动服务器的</el-checkbox>
       <el-input v-model="keyword" size="small" clearable placeholder="搜索项目、服务器、应用、命令、错误…" class="keyword" />
-      <el-button size="small" :disabled="!filtered" @click="resetFilters">清空筛选</el-button>
+      <GlassButton size="small" :disabled="!filtered" @click="resetFilters">清空筛选</GlassButton>
       <span class="spacer" />
-      <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+      <GlassButton size="small" :icon="Refresh" :loading="loading" @click="load">刷新</GlassButton>
     </div>
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="mb" />
     <el-table
