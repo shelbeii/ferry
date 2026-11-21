@@ -3,13 +3,15 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/captain/ferry/internal/filetext"
-	"github.com/captain/ferry/internal/proto"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/captain/ferry/internal/filetext"
+	"github.com/captain/ferry/internal/proto"
 )
 
 func configFixture(t *testing.T) (*fakeSys, *Agent, proto.SoftwareConfigFile) {
@@ -88,6 +90,54 @@ func TestSoftwareConfigCommandRestrictsIdentity(t *testing.T) {
 	r = execConfigured(t, a, "swconfig", &proto.Request{FerryDir: a.req.FerryDir, SoftwareConfig: &proto.SoftwareConfigRequest{Instance: "cache", Operation: "read", ID: "../../etc/shadow"}})
 	if r.code == 0 {
 		t.Fatal("不能提供任意路径读取 root 文件")
+	}
+}
+
+type softwareConfigLockSystem struct{ System }
+
+func (s softwareConfigLockSystem) Lock(file string, wait time.Duration) (func(), error) {
+	if _, err := os.Stat(filepath.Dir(file)); err != nil {
+		return nil, err
+	}
+	return s.System.Lock(file, wait)
+}
+
+func TestSoftwareConfigFirstSaveCreatesLockDirectory(t *testing.T) {
+	f, a, c := configFixture(t)
+	a.Sys = softwareConfigLockSystem{f}
+	doc, _, _, err := a.readConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "{\"port\":6380}\n"
+	req := &proto.Request{
+		FerryDir: filepath.Join(t.TempDir(), "ferry"),
+		SoftwareConfig: &proto.SoftwareConfigRequest{
+			Instance: "cache", Operation: "save", ID: c.ID, Revision: doc.Revision, Content: &content,
+		},
+	}
+	r := execConfigured(t, a, "swconfig", req)
+	if r.code != proto.CodeOK {
+		t.Fatalf("首次保存：%s", r.dump())
+	}
+	if got, err := os.ReadFile(c.Path); err != nil || string(got) != "{\"port\":6380}\r\n" {
+		t.Fatalf("首次保存后的配置：%q, %v", got, err)
+	}
+
+	f.locked = true
+	r = execConfigured(t, a, "swconfig", req)
+	if r.code != proto.CodeLocked {
+		t.Fatalf("已有配置锁：%s", r.dump())
+	}
+
+	f.locked = false
+	req.FerryDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(req.FerryDir, "software"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r = execConfigured(t, a, "swconfig", req)
+	if r.code != proto.CodeFailed || !strings.Contains(r.result.Msg, "无法创建软件配置锁目录") {
+		t.Fatalf("锁目录初始化失败不应报操作冲突：%s", r.dump())
 	}
 }
 

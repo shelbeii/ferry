@@ -61,9 +61,16 @@ func (a *Agent) softwareConfig() int {
 	if c.ReadOnly != "" {
 		return a.result(proto.CodeBadInput, c.ReadOnly, nil)
 	}
-	unlock, err := a.Sys.Lock(filepath.Join(a.swDir(), "config-"+c.ID+".lock"), 30*time.Second)
+	dir := a.swDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return a.result(proto.CodeFailed, "无法创建软件配置锁目录："+err.Error(), nil)
+	}
+	unlock, err := a.Sys.Lock(filepath.Join(dir, "config-"+c.ID+".lock"), 30*time.Second)
+	if errors.Is(err, ErrLocked) {
+		return a.result(proto.CodeLocked, "另一个操作正在修改此配置，请稍后重试", nil)
+	}
 	if err != nil {
-		return a.result(proto.CodeLocked, err.Error(), nil)
+		return a.result(proto.CodeFailed, "无法锁定软件配置："+err.Error(), nil)
 	}
 	defer unlock()
 	switch q.Operation {
@@ -346,7 +353,8 @@ type configBackup struct {
 }
 
 func localConfigRevision(target string, raw []byte, st os.FileInfo) string {
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%x\x00%d\x00%d", target, sha256.Sum256(raw), st.ModTime().UnixNano(), st.Mode()))))
+	meta, _ := configMetadata(st)
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%x\x00%d\x00%d\x00%s", target, sha256.Sum256(raw), st.ModTime().UnixNano(), st.Mode(), meta))))
 }
 
 func (a *Agent) readConfig(c proto.SoftwareConfigFile) (*filetext.Document, []byte, string, error) {
@@ -375,6 +383,9 @@ func (a *Agent) readConfig(c proto.SoftwareConfigFile) (*filetext.Document, []by
 		return nil, nil, "", err
 	}
 	doc.Path, doc.Size, doc.ReadOnly, doc.Backup = c.Path, st.Size(), c.ReadOnly, a.hasConfigBackup(c.ID)
+	if _, linked := configMetadata(st); linked && !c.InPlace && doc.ReadOnly == "" {
+		doc.ReadOnly = "此配置有多个硬链接，无法安全替换"
+	}
 	if doc.Revision != "" {
 		doc.Revision = localConfigRevision(p, b, st)
 	}
@@ -388,6 +399,9 @@ func (a *Agent) saveConfig(c proto.SoftwareConfigFile, q *proto.SoftwareConfigRe
 	}
 	if q.Revision == "" || doc.Revision != q.Revision {
 		return nil, errors.New("配置已被其他操作修改，请复制草稿后重新读取")
+	}
+	if doc.ReadOnly != "" {
+		return nil, errors.New(doc.ReadOnly)
 	}
 	if doc.Truncated || doc.Unsupported != "" {
 		return nil, errors.New("只能保存完整加载的文本文件，最大 1 MiB")
@@ -427,35 +441,39 @@ func (a *Agent) saveConfig(c proto.SoftwareConfigFile, q *proto.SoftwareConfigRe
 		return nil, fmt.Errorf("无法读取原文件权限：%v", err)
 	}
 	backup := configBackup{Path: target, Content: raw, Mode: owner.Perm, UID: owner.UID, GID: owner.GID, At: a.Sys.Now()}
-	if err := os.MkdirAll(filepath.Dir(a.backupConfigPath(c.ID)), 0o700); err != nil {
-		return nil, err
-	}
-	b, _ := json.Marshal(backup)
-	if err := writeFileAtomic(a.backupConfigPath(c.ID), b, 0o600); err != nil {
-		return nil, err
-	}
 	var token [10]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return nil, err
 	}
 	tmp := filepath.Join(filepath.Dir(target), ".ferry-config-"+hex.EncodeToString(token[:]))
-	if err := os.WriteFile(tmp, content, 0o600); err != nil {
+	staged, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return nil, err
 	}
 	defer os.Remove(tmp)
-	if f, err := os.OpenFile(tmp, os.O_WRONLY, 0); err != nil {
+	defer staged.Close()
+	if _, err := staged.Write(content); err != nil {
 		return nil, err
-	} else {
-		err = f.Sync()
-		f.Close()
-		if err != nil {
-			return nil, err
-		}
 	}
 	if err := a.Sys.Lchown(tmp, owner.UID, owner.GID); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(tmp, owner.Perm); err != nil {
+	if err := staged.Chmod(owner.Perm); err != nil {
+		return nil, err
+	}
+	original, err := os.Open(target)
+	if err != nil {
+		return nil, err
+	}
+	err = preserveConfigMetadata(original, staged, c.InPlace)
+	original.Close()
+	if err != nil {
+		return nil, fmt.Errorf("无法保留文件权限元数据：%w", err)
+	}
+	if err := staged.Sync(); err != nil {
+		return nil, err
+	}
+	if err := staged.Close(); err != nil {
 		return nil, err
 	}
 	latest, _, resolved, err := a.readConfig(c)
@@ -464,6 +482,13 @@ func (a *Agent) saveConfig(c proto.SoftwareConfigFile, q *proto.SoftwareConfigRe
 	}
 	if latest.Revision != q.Revision || resolved != target {
 		return nil, errors.New("保存期间配置发生变化，原文件未覆盖")
+	}
+	if err := os.MkdirAll(filepath.Dir(a.backupConfigPath(c.ID)), 0o700); err != nil {
+		return nil, err
+	}
+	b, _ := json.Marshal(backup)
+	if err := writeFileAtomic(a.backupConfigPath(c.ID), b, 0o600); err != nil {
+		return nil, err
 	}
 	if c.InPlace {
 		// 单文件 bind mount 保留 inode，失败时恢复完整备份。
