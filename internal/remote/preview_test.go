@@ -105,25 +105,25 @@ func TestPreviewFileSFTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := previewTestClient(t, dir)
-	p, err := c.PreviewFile(context.Background(), ".ferry-runtime.json")
+	p, err := c.Files().PreviewFile(context.Background(), ".ferry-runtime.json")
 	if err != nil || p.Content != content || p.Size != int64(len(content)) || p.Path != ".ferry-runtime.json" || p.Unsupported != "" {
 		t.Fatalf("SFTP 预览失败：%+v, %v", p, err)
 	}
-	if _, err := c.PreviewFile(context.Background(), "."); err == nil || !strings.Contains(err.Error(), "普通文件") {
+	if _, err := c.Files().PreviewFile(context.Background(), "."); err == nil || !strings.Contains(err.Error(), "普通文件") {
 		t.Fatalf("不能读取文件夹：%v", err)
 	}
-	if _, err := c.PreviewFile(context.Background(), "missing.json"); err == nil || !strings.Contains(err.Error(), "不存在") {
+	if _, err := c.Files().PreviewFile(context.Background(), "missing.json"); err == nil || !strings.Contains(err.Error(), "不存在") {
 		t.Fatalf("缺失文件应说明原因：%v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.PreviewFile(ctx, ".ferry-runtime.json"); !errors.Is(err, ErrCanceled) {
+	if _, err := c.Files().PreviewFile(ctx, ".ferry-runtime.json"); !errors.Is(err, ErrCanceled) {
 		t.Fatalf("已取消的请求不应读取文件：%v", err)
 	}
 	// Windows 未开启开发人员模式时不能建链接，其他情况下验证链接照常只读。
 	// 相对目标也适用于 Windows 上的测试 SFTP 服务，避免把盘符当成远程相对路径拼接。
 	if os.Symlink(".ferry-runtime.json", filepath.Join(dir, "config-link")) == nil {
-		if linked, err := c.PreviewFile(context.Background(), "config-link"); err != nil || linked.Content != content {
+		if linked, err := c.Files().PreviewFile(context.Background(), "config-link"); err != nil || linked.Content != content {
 			t.Fatalf("应能读取指向文本文件的链接：%v", err)
 		}
 	}

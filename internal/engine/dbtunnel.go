@@ -23,7 +23,7 @@ func (e *Engine) OpenTunnel(target string) (*Tunnel, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := e.connect(t)
+	s, err := e.connectSSH(t)
 	if err != nil {
 		return nil, err
 	}
@@ -60,8 +60,14 @@ func (tn *Tunnel) ContainerAddr(ctx context.Context, container string, port int)
 	if strings.ContainsAny(container, "'\"\\ $`;&|<>") {
 		return "", fmt.Errorf("容器名 %q 不合法", container)
 	}
-	cmd := tn.s.sudo + "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' " + shQuote(container)
-	out, r, err := tn.s.c.Output(cmd)
+	cmd := "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' " + shQuote(container)
+	var lines []string
+	run := tn.s.c.RunContext
+	if tn.s.allowsSudo() {
+		run = tn.s.runPriv
+	}
+	r, err := run(ctx, cmd, nil, func(line string) { lines = append(lines, line) })
+	out := strings.Join(lines, "\n")
 	if err != nil {
 		return "", err
 	}

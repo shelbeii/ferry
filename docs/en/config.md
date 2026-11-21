@@ -77,7 +77,8 @@ Ferry runs a build once per deployment even when several apps use it. Build logs
 | Field | Default | Purpose |
 | --- | --- | --- |
 | `host`, `port` | Required host, port `22` | SSH address and port. |
-| `user`, `sudo` | `root`, `false` | Login user and whether Ferry uses `sudo -n` to run the agent. A non-root deployer needs passwordless sudo. |
+| `user`, `sudo` | `root`, `false` | Login user and whether Ferry uses sudo for privileged operations. |
+| `sudoAuth` | `nopasswd` | `nopasswd` uses non-interactive sudo, `password` uses a separate sudo credential, and `disabled` disables elevation. |
 | `auth` | `key` | `key` uses a private key or SSH agent. `password` also supports keyboard-interactive. |
 | `identityFile` | Default SSH identities | Private key on the local machine, for example `~/.ssh/id_ed25519`. |
 | `hostKey` | Known-hosts records | Pin an SSH fingerprint such as `SHA256:…`. Use `ferry hostkey prod` to read the presented fingerprint and verify it independently. |

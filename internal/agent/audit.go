@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,7 +54,47 @@ func (a *Agent) auditCmd() int {
 	if err != nil {
 		return a.result(proto.CodeFailed, "读审计记录失败："+err.Error(), nil)
 	}
+	if out = append(out, a.loginAudit(q)...); len(out) > 1 {
+		sort.SliceStable(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+		limit := q.Limit
+		if limit <= 0 {
+			limit = 200
+		}
+		out = out[:min(len(out), limit, 2000)]
+	}
 	return a.result(proto.CodeOK, "", out)
+}
+
+func (a *Agent) loginAudit(q proto.AuditQuery) []proto.AuditEntry {
+	journal, err := a.Sys.Shell("journalctl -t ferry-audit --no-pager -o json -n 2000", 3*time.Second)
+	if err != nil {
+		return nil
+	}
+	var out []proto.AuditEntry
+	for _, line := range strings.Split(journal, "\n") {
+		if !strings.Contains(line, proto.AuditJournalMarker) {
+			continue
+		}
+		var record struct {
+			Message string `json:"MESSAGE"`
+			UID     string `json:"_UID"`
+		}
+		if json.Unmarshal([]byte(line), &record) != nil || record.UID == "" {
+			continue
+		}
+		_, encoded, found := strings.Cut(record.Message, proto.AuditJournalMarker)
+		if !found || len(encoded) > 4800 {
+			continue
+		}
+		body, err := base64.RawStdEncoding.DecodeString(encoded)
+		var entry proto.AuditEntry
+		if err != nil || json.Unmarshal(body, &entry) != nil || entry.Project != a.req.Project || entry.Target != a.req.Target || entry.Time.Before(q.Since) || !auditMatch(entry, q) {
+			continue
+		}
+		entry.Source = "journal:uid=" + record.UID
+		out = append(out, entry)
+	}
+	return out
 }
 
 // appendAudit 补上时间、操作人、项目、目标，追加一行（O_APPEND、一次写完，几个 agent 同时写也不会交错），再写 syslog。

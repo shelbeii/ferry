@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +16,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/pkg/sftp"
 )
+
+// FileClient provides the same file operations over login or elevated SFTP.
+type FileClient struct {
+	sftpClient func() (*sftp.Client, error)
+	run        func(context.Context, string, []byte, func(string)) (RunResult, error)
+}
 
 // FileEntry 远程目录里的一项。
 type FileEntry struct {
@@ -25,10 +34,12 @@ type FileEntry struct {
 	Dir   bool      `json:"dir"`  // 目录（含指向目录的链接）
 	Link  bool      `json:"link,omitempty"`
 	MTime time.Time `json:"mtime"`
+	UID   *uint32   `json:"uid,omitempty"`
+	GID   *uint32   `json:"gid,omitempty"`
 }
 
 // Home 登录用户的主目录（SFTP 会话的起始目录）。
-func (c *Client) Home() (string, error) {
+func (c *FileClient) Home() (string, error) {
 	s, err := c.sftpClient()
 	if err != nil {
 		return "", err
@@ -37,7 +48,7 @@ func (c *Client) Home() (string, error) {
 }
 
 // FileLocation 目录直接打开；文件（含符号链接）在它所在的目录中定位。
-func (c *Client) FileLocation(p string) (dir, focus string, err error) {
+func (c *FileClient) FileLocation(p string) (dir, focus string, err error) {
 	s, err := c.sftpClient()
 	if err != nil {
 		return "", "", err
@@ -54,7 +65,7 @@ func (c *Client) FileLocation(p string) (dir, focus string, err error) {
 }
 
 // ListDir 列出远程目录：目录在前，各自按名称排序。返回规范化后的绝对路径。
-func (c *Client) ListDir(dir string) (string, []FileEntry, error) {
+func (c *FileClient) ListDir(dir string) (string, []FileEntry, error) {
 	s, err := c.sftpClient()
 	if err != nil {
 		return "", nil, err
@@ -70,6 +81,9 @@ func (c *Client) ListDir(dir string) (string, []FileEntry, error) {
 	var links []int
 	for _, fi := range infos {
 		e := FileEntry{Name: fi.Name(), Size: fi.Size(), Mode: fi.Mode().String(), Dir: fi.IsDir(), MTime: fi.ModTime()}
+		if owner, ok := fi.Sys().(*sftp.FileStat); ok {
+			e.UID, e.GID = &owner.UID, &owner.GID
+		}
 		if fi.Mode()&fs.ModeSymlink != 0 {
 			e.Link = true
 			links = append(links, len(out))
@@ -93,7 +107,7 @@ func (c *Client) ListDir(dir string) (string, []FileEntry, error) {
 }
 
 // Mkdir 建远程目录。
-func (c *Client) Mkdir(p string) error {
+func (c *FileClient) Mkdir(p string) error {
 	s, err := c.sftpClient()
 	if err != nil {
 		return err
@@ -101,8 +115,49 @@ func (c *Client) Mkdir(p string) error {
 	return fileErr("新建文件夹", p, s.Mkdir(p))
 }
 
+// MkdirOwned publishes a new owned directory only under trusted parents.
+// Ownership is set on a temporary directory before the requested name becomes visible.
+func (c *FileClient) MkdirOwned(p string, uid, gid int) error {
+	if !path.IsAbs(p) || path.Clean(p) == "/" {
+		return errors.New("指定属主时需要新文件夹的绝对路径")
+	}
+	s, err := c.sftpClient()
+	if err != nil {
+		return err
+	}
+	parent, err := s.RealPath(path.Dir(p))
+	if err != nil {
+		return fileErr("查看上级目录", p, err)
+	}
+	for current := parent; ; current = path.Dir(current) {
+		st, err := s.Lstat(current)
+		if err != nil {
+			return fileErr("查看上级目录", current, err)
+		}
+		owner, ok := st.Sys().(*sftp.FileStat)
+		if !ok || owner.UID != 0 || !st.IsDir() || st.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("上级目录 %s 必须归 root 且组和其他用户不可写，才能安全地指定新目录属主", current)
+		}
+		if current == "/" {
+			break
+		}
+	}
+	tmp := path.Join(parent, ".ferry-directory-"+rand.Text())
+	if err := s.Mkdir(tmp); err != nil {
+		return fileErr("新建文件夹", p, err)
+	}
+	defer s.RemoveDirectory(tmp)
+	if err := s.Chmod(tmp, 0o750); err != nil {
+		return fileErr("设置新目录权限", p, err)
+	}
+	if err := s.Chown(tmp, uid, gid); err != nil {
+		return fileErr("设置新目录属主", p, err)
+	}
+	return fileErr("新建文件夹", p, s.Rename(tmp, path.Join(parent, path.Base(p))))
+}
+
 // Rename 改名或移动（目标已存在时报错）。
-func (c *Client) Rename(from, to string) error {
+func (c *FileClient) Rename(from, to string) error {
 	s, err := c.sftpClient()
 	if err != nil {
 		return err
@@ -114,7 +169,7 @@ func (c *Client) Rename(from, to string) error {
 }
 
 // RemoveAll 删除远程文件或整个目录。
-func (c *Client) RemoveAll(p string) error {
+func (c *FileClient) RemoveAll(p string) error {
 	s, err := c.sftpClient()
 	if err != nil {
 		return err
@@ -129,7 +184,7 @@ func (c *Client) RemoveAll(p string) error {
 }
 
 // ExistsRemote 这些路径里已经存在的（上传前检查会不会覆盖）。
-func (c *Client) ExistsRemote(paths []string) ([]string, error) {
+func (c *FileClient) ExistsRemote(paths []string) ([]string, error) {
 	s, err := c.sftpClient()
 	if err != nil {
 		return nil, err
@@ -182,7 +237,7 @@ func eachLimit(n, limit int, fn func(i int)) {
 type TransferProgress func(file string, done, total int64)
 
 // UploadTree 把本机的文件、文件夹（整个）传到远程目录 dir 下；同名的覆盖（保留原来的权限）。
-func (c *Client) UploadTree(ctx context.Context, locals []string, dir string, progress TransferProgress) error {
+func (c *FileClient) UploadTree(ctx context.Context, locals []string, dir string, overwrite bool, progress TransferProgress) error {
 	s, err := c.sftpClient()
 	if err != nil {
 		return err
@@ -248,7 +303,7 @@ func (c *Client) UploadTree(ctx context.Context, locals []string, dir string, pr
 		}
 		name := strings.TrimPrefix(strings.TrimPrefix(it.remote, dir), "/")
 		var sent int64
-		err := c.UploadContext(tr.ctx, it.local, it.remote, mode, func(d, _ int64) {
+		err := uploadFile(tr.ctx, s, it.local, it.remote, mode, overwrite, func(d, _ int64) {
 			tr.add(name, d-sent)
 			sent = d
 		})
@@ -260,6 +315,7 @@ func (c *Client) UploadTree(ctx context.Context, locals []string, dir string, pr
 			return
 		}
 		tr.add(name, it.size-sent)
+		tr.complete(name)
 	})
 	return tr.result(ctx)
 }
@@ -269,13 +325,14 @@ const transferParallel = 8
 
 // transfer 同时传几个文件时的总进度和第一个错误。
 type transfer struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	total    int64
-	done     atomic.Int64
-	progress TransferProgress
-	mu       sync.Mutex
-	err      error
+	ctx       context.Context
+	cancel    context.CancelFunc
+	total     int64
+	done      atomic.Int64
+	progress  TransferProgress
+	mu        sync.Mutex
+	err       error
+	completed []string
 }
 
 func newTransfer(ctx context.Context, total int64, progress TransferProgress) *transfer {
@@ -304,16 +361,34 @@ func (t *transfer) fail(err error) {
 	t.cancel()
 }
 
+func (t *transfer) complete(name string) {
+	t.mu.Lock()
+	t.completed = append(t.completed, name)
+	t.mu.Unlock()
+}
+
 // result 都结束后：外面取消了是 ErrCanceled，否则是第一个错误。
 func (t *transfer) result(parent context.Context) error {
+	err := t.err
 	if parent.Err() != nil {
-		return ErrCanceled
+		err = ErrCanceled
 	}
-	return t.err
+	if err == nil || len(t.completed) == 0 {
+		return err
+	}
+	sort.Strings(t.completed)
+	list := strings.Join(t.completed[:min(8, len(t.completed))], "、")
+	if len(t.completed) > 8 {
+		list += fmt.Sprintf(" 等 %d 项", len(t.completed))
+	}
+	if errors.Is(err, ErrCanceled) {
+		return fmt.Errorf("已完成 %s；其余项已取消", list)
+	}
+	return fmt.Errorf("已完成 %s；其余项未全部处理：%w", list, err)
 }
 
 // DownloadTree 把远程的文件、目录（整个）下载到本机目录 dir 下；同名的覆盖。先写 .part，完整后改名。
-func (c *Client) DownloadTree(ctx context.Context, remotes []string, dir string, progress TransferProgress) error {
+func (c *FileClient) DownloadTree(ctx context.Context, remotes []string, dir string, progress TransferProgress) error {
 	s, err := c.sftpClient()
 	if err != nil {
 		return err
@@ -397,6 +472,7 @@ func (c *Client) DownloadTree(ctx context.Context, remotes []string, dir string,
 			return
 		}
 		tr.add(name, n-got)
+		tr.complete(name)
 	})
 	return tr.result(ctx)
 }
@@ -412,7 +488,7 @@ func remotesBase(remotes []string, it string) string {
 	return it
 }
 
-func (c *Client) downloadFile(ctx context.Context, remotePath, local string, progress func(done int64)) (int64, error) {
+func (c *FileClient) downloadFile(ctx context.Context, remotePath, local string, progress func(done int64)) (int64, error) {
 	s, err := c.sftpClient()
 	if err != nil {
 		return 0, err
@@ -424,25 +500,24 @@ func (c *Client) downloadFile(ctx context.Context, remotePath, local string, pro
 	stop := context.AfterFunc(ctx, func() { src.Close() })
 	defer stop()
 	defer src.Close()
-	tmp := local + ".part"
-	dst, err := os.Create(tmp)
+	tmp := filepath.Join(filepath.Dir(local), ".ferry-download-"+rand.Text()+".part")
+	dst, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
 	if err != nil {
 		return 0, err
 	}
+	defer os.Remove(tmp)
 	w := &progressWriter{w: dst, progress: progress}
 	n, err := src.WriteTo(w)
 	if cerr := dst.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
-		os.Remove(tmp)
 		if ctx.Err() != nil {
 			return n, ErrCanceled
 		}
 		return n, fileErr("下载", remotePath, err)
 	}
 	if err := os.Rename(tmp, local); err != nil {
-		os.Remove(tmp)
 		return n, err
 	}
 	return n, nil
@@ -465,6 +540,12 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// FilePermissionError 表示服务器拒绝了文件操作。
+type FilePermissionError string
+
+func (e FilePermissionError) Error() string { return string(e) }
+func (FilePermissionError) Unwrap() error   { return fs.ErrPermission }
+
 // fileErr 把 SFTP 的错误换成看得懂的话。
 func fileErr(op, p string, err error) error {
 	if err == nil {
@@ -473,7 +554,7 @@ func fileErr(op, p string, err error) error {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, fs.ErrPermission) || strings.Contains(msg, "permission denied"):
-		return fmt.Errorf("%s %s 失败：没有权限（以登录用户的身份操作）", op, p)
+		return FilePermissionError(fmt.Sprintf("%s %s 失败：没有权限", op, p))
 	case errors.Is(err, fs.ErrNotExist) || strings.Contains(msg, "not exist") || strings.Contains(msg, "no such file"):
 		return fmt.Errorf("%s %s 失败：不存在", op, p)
 	}

@@ -32,7 +32,7 @@ func (e *Engine) credentials(t *config.Target) *credentials {
 func (c *credentials) passwordNeed(rejected bool) *secret.NeedError {
 	t := c.t
 	return &secret.NeedError{
-		Kind: secret.KindPassword, Target: t.Name, Env: secret.PasswordEnv(t.Name),
+		Kind: secret.KindPassword, Target: t.Name, Env: secret.SessionEnv(secret.PasswordAccount(t.User, t.Host, t.Port)),
 		Account: secret.PasswordAccount(t.User, t.Host, t.Port), Rejected: rejected,
 		Prompt: fmt.Sprintf("%s@%s:%d 的登录密码", t.User, t.Host, t.Port),
 	}
@@ -44,7 +44,12 @@ func (c *credentials) Password() (string, error) {
 		return c.password, nil // 多路上传的额外连接复用同一个密码，不再询问
 	}
 	need := c.passwordNeed(false)
-	v, src, err := secret.Lookup(c.e.getenv, need.Env, need.Account)
+	v, src, err := secret.Lookup(func(key string) string {
+		if v := c.e.getenv(key); v != "" {
+			return v
+		}
+		return c.e.getenv(secret.PasswordEnv(c.t.Name))
+	}, need.Env, need.Account)
 	if err != nil {
 		c.e.Rep.Warn("%v", err)
 	}

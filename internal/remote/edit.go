@@ -74,11 +74,23 @@ func encodeFileEdit(text string, original *FilePreview) ([]byte, error) {
 }
 
 // SaveFile 在同目录写完临时文件，再原子替换；保存前再次核对内容指纹。
-func (c *Client) SaveFile(ctx context.Context, p string, edit FileEdit) (*FilePreview, error) {
+func (c *FileClient) SaveFile(ctx context.Context, p string, edit FileEdit) (*FilePreview, error) {
 	if b, err := hex.DecodeString(edit.Revision); err != nil || len(b) != sha256.Size {
 		return nil, errors.New("缺少有效的文件版本，请重新读取文件后再保存")
 	}
-	original, err := c.PreviewFile(ctx, p)
+	if ctx.Err() != nil {
+		return nil, ErrCanceled
+	}
+	s, err := c.sftpClient()
+	if err != nil {
+		return nil, err
+	}
+	// 本次初始版本检查和临时文件写入使用同一个解析后的目标。
+	target, err := resolveFileTarget(s, p)
+	if err != nil {
+		return nil, fileErr("保存", p, err)
+	}
+	original, err := previewFile(ctx, s, p, target)
 	if err != nil {
 		return nil, err
 	}
@@ -92,16 +104,8 @@ func (c *Client) SaveFile(ctx context.Context, p string, edit FileEdit) (*FilePr
 	if err != nil {
 		return nil, err
 	}
-	s, err := c.sftpClient()
-	if err != nil {
-		return nil, err
-	}
 	if _, ok := s.HasExtension("posix-rename@openssh.com"); !ok {
 		return nil, errors.New("服务器 SFTP 不支持原子替换文件，无法安全保存；请下载后编辑并上传")
-	}
-	target, err := resolveFileTarget(s, p)
-	if err != nil {
-		return nil, fileErr("保存", p, err)
 	}
 	st, err := s.Stat(target)
 	if err != nil {

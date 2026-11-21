@@ -78,7 +78,7 @@ type ServerAddr struct {
 const serverInfoScript = `export LC_ALL=C
 [ "$(uname -s)" = Linux ] || { echo '仅支持 Linux 服务器' >&2; exit 2; }
 echo @@system
-printf 'hostname\t'; hostname 2>/dev/null
+printf 'hostname\t%s\n' "$(hostname 2>/dev/null || uname -n)"
 printf 'kernel\t'; uname -r
 printf 'arch\t'; uname -m
 printf 'timezone\t'; date '+%Z %z'

@@ -40,7 +40,7 @@ func parseFileSize(out string) (int64, error) {
 
 // FileSize 以登录用户的权限按需统计，不读取文件内容、不安装 agent。
 // 选中的链接定位到其目标；目录内部的链接只计链接自身，避免循环和越界统计。
-func (c *Client) FileSize(parent context.Context, p string) (*FileSize, error) {
+func (c *FileClient) FileSize(parent context.Context, p string) (*FileSize, error) {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	canceled := func() error {
@@ -80,10 +80,10 @@ func (c *Client) FileSize(parent context.Context, p string) (*FileSize, error) {
 		}
 		return result, nil
 	}
-	if c.ssh != nil && path.IsAbs(target) {
+	if c.run != nil && path.IsAbs(target) {
 		var out bytes.Buffer
 		limited := &limitedBuffer{buf: &out, max: 8192}
-		r, err := c.RunContext(ctx, fileSizeCommand(target), nil, func(line string) {
+		r, err := c.run(ctx, fileSizeCommand(target), nil, func(line string) {
 			fmt.Fprintln(limited, line)
 		})
 		if err := canceled(); err != nil {

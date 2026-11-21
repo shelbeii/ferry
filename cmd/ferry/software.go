@@ -75,14 +75,13 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 	for _, t := range e.File.Targets {
 		if t.Plain {
 			t.Plain = false
-			t.Sudo = t.User != "root"
+			t.Sudo = t.User != "root" && t.SudoAuth != "disabled"
 			if t.Root == "" {
 				t.Root = "/opt/ferry"
 			}
 			if t.FerryDir == "" {
 				t.FerryDir = "/usr/local/lib/ferry"
 			}
-			e.Pool = nil
 		}
 	}
 	ok := func(data any) int { return ok0(js, data) }

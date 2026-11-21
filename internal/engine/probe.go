@@ -90,7 +90,7 @@ d=%[3]s; while [ -n "$d" ] && [ "$d" != / ]; do if [ -e "$d" ]; then o=$(stat -c
 
 // privWrap 在登录用户下判断权限：root 直接执行；能免密 sudo 就用 sudo 执行（看得到所有进程）；否则以登录用户执行。
 // 脚本从标准输入读入。
-const privWrap = `if [ "$(id -u)" = 0 ]; then echo "priv root"; sh -s; elif sudo -n true 2>/dev/null; then echo "priv sudo"; sudo -n sh -s; else echo "priv none"; sh -s; fi`
+const privWrap = `if [ "$(id -u)" = 0 ]; then echo "priv root"; sh -s; elif sudo -n -u root true 2>/dev/null; then echo "priv sudo"; sudo -n -u root sh -s; else echo "priv none"; sh -s; fi`
 
 // Probe 测试连接并检查服务器（target 必须是只登录的目标，见 config.Target.Plain）。
 func (e *Engine) Probe(target string, r ProbeRequest) (*ProbeResult, error) {
@@ -104,7 +104,7 @@ func (e *Engine) Probe(target string, r ProbeRequest) (*ProbeResult, error) {
 	}
 	defer s.close()
 	var lines []string
-	res, err := s.c.Run(privWrap, []byte(probeScript(r)), func(l string) { lines = append(lines, l) })
+	res, err := s.runPrivilegeProbe(e.ctx(), probeScript(r), func(l string) { lines = append(lines, l) })
 	if err != nil {
 		return nil, err
 	}
@@ -114,13 +114,10 @@ func (e *Engine) Probe(target string, r ProbeRequest) (*ProbeResult, error) {
 	p := parseProbe(t, r, lines)
 	if p.Priv == "root" || p.Priv == "sudo" {
 		run := func(cmd string, timeout time.Duration) (string, error) {
-			if p.Priv == "sudo" {
-				cmd = "sudo -n sh -c " + shQuote(cmd)
-			}
 			ctx, cancel := context.WithTimeout(e.ctx(), timeout)
 			defer cancel()
 			var out []string
-			res, err := s.c.RunContext(ctx, cmd, nil, func(l string) { out = append(out, l) })
+			res, err := s.runPriv(ctx, "sh -c "+shQuote(cmd), nil, func(l string) { out = append(out, l) })
 			if err != nil {
 				return "", err
 			}
@@ -166,12 +163,12 @@ func (e *Engine) CreateRunUser(target, name string) error {
 n=/sbin/nologin; [ -x "$n" ] || n=/usr/sbin/nologin
 useradd -r -m -s "$n" "$u"`, shQuote(name))
 	var out []string
-	res, err := s.c.Run(privWrap, []byte(script), func(l string) { out = append(out, l) })
+	res, err := s.runPrivilegeProbe(e.ctx(), script, func(l string) { out = append(out, l) })
 	if err != nil {
 		return err
 	}
 	if len(out) > 0 && out[0] == "priv none" {
-		return fmt.Errorf("登录用户 %s 不是 root，也不能免密 sudo，没法创建用户", t.User)
+		return fmt.Errorf("登录用户 %s 无法提权创建用户，请选择服务器支持的 sudo 认证方式", t.User)
 	}
 	if res.Code != 0 {
 		return fmt.Errorf("创建运行用户 %s 失败：%s", name, strings.TrimSpace(res.Stderr))
@@ -311,9 +308,13 @@ func parseProbe(t *config.Target, r ProbeRequest, lines []string) *ProbeResult {
 	switch p.Priv {
 	case "root":
 	case "sudo":
-		add("ok", "", "登录用户 %s 可以免密 sudo：部署时用 sudo 执行", t.User)
+		if t.SudoAuth == "password" {
+			add("ok", "", "登录用户 %s 可以使用 sudo：部署时使用所选的密码认证方式", t.User)
+		} else {
+			add("ok", "", "登录用户 %s 可以免密 sudo：部署时用 sudo 执行", t.User)
+		}
 	default:
-		add("error", "", "登录用户 %s 不是 root，也不能免密 sudo：部署需要 root 权限。请用 root 登录，或在服务器上给 %s 配置免密 sudo", t.User, t.User)
+		add("error", "", "登录用户 %s 不是 root，也无法免密 sudo。部署需要 root 权限。如果这台服务器要求密码，请将 sudo 认证设为使用密码", t.User)
 	}
 	if !systemd {
 		add("error", "", "服务器上没有 systemd：Ferry 用它运行和管理服务")

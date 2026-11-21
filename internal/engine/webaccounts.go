@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/captain/ferry/internal/secret"
 )
@@ -148,11 +150,23 @@ func (e *Engine) WebAccounts(target string, q WebQuery) ([]WebAccount, error) {
 	if needEnv || webLoginChecks[q.Kind] != nil {
 		err := e.withTarget(target, func(s *session) error {
 			if needEnv {
+				var authErr error
 				run := func(cmd string) (string, bool) {
-					o, r, err := s.c.Output("timeout 15 " + s.sudo + cmd)
+					if authErr != nil {
+						return "", false
+					}
+					ctx, cancel := context.WithTimeout(e.ctx(), 15*time.Second)
+					defer cancel()
+					o, r, err := s.outputPriv(ctx, cmd)
+					if isPrivilegeError(err) {
+						authErr = err
+					}
 					return o, err == nil && r.Code == 0
 				}
 				env, args = processEnv(q, run)
+				if authErr != nil {
+					return authErr
+				}
 			}
 			for _, a := range webEnvAccounts(q.Kind, env, args) {
 				add(a)
@@ -164,6 +178,9 @@ func (e *Engine) WebAccounts(target string, q WebQuery) ([]WebAccount, error) {
 			return nil
 		})
 		if err != nil {
+			if isPrivilegeError(err) && len(out) == 0 {
+				return nil, err
+			}
 			e.Rep.Warn("没能从服务器上读账号、试账号：%v", err)
 		} else {
 			return sortChecked(out), nil

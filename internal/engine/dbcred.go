@@ -69,8 +69,17 @@ func (e *Engine) DBCredentials(target string, q DBCredQuery) (*DBCred, error) {
 	}
 	var cred *DBCred
 	err := e.withTarget(target, func(s *session) error {
+		var authErr error
 		run := func(cmd string) (string, bool) {
-			out, r, err := s.c.Output("timeout 15 " + s.sudo + cmd)
+			if authErr != nil {
+				return "", false
+			}
+			ctx, cancel := context.WithTimeout(e.ctx(), 15*time.Second)
+			defer cancel()
+			out, r, err := s.outputPriv(ctx, cmd)
+			if isPrivilegeError(err) {
+				authErr = err
+			}
 			return out, err == nil && r.Code == 0
 		}
 		if q.Instance == "" {
@@ -81,6 +90,9 @@ func (e *Engine) DBCredentials(target string, q DBCredQuery) (*DBCred, error) {
 				c, note = hostCands(q, s.t.User, run)
 			}
 			cands = append(cands, c...)
+		}
+		if authErr != nil {
+			return authErr
 		}
 		reach := newReach(q.Container, q.InnerPort, q.Port)
 		cred = pickCred(cands, defUser, note, func(c dbCand) (bool, error) { return e.tryLogin(s, q, reach, c) })

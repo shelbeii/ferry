@@ -15,6 +15,7 @@ import (
 const Limit = 1 << 20
 
 type Document struct {
+	Identity    string `json:"identity,omitempty"`
 	ReadOnly    string `json:"readOnly,omitempty"`
 	Backup      bool   `json:"backup"`
 	Path        string `json:"path"`

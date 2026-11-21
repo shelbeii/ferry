@@ -27,6 +27,7 @@ type TargetSpec struct {
 	Port          int    `json:"port"`
 	User          string `json:"user"`
 	Sudo          bool   `json:"sudo"`
+	SudoAuth      string `json:"sudoAuth"`
 	Auth          string `json:"auth"` // key / password
 	IdentityFile  string `json:"identityFile"`
 	Root          string `json:"root"`     // 部署目录，空 = /opt/<project>
@@ -156,7 +157,10 @@ func Generate(s Spec, configPath string) (string, error) {
 		}
 		w(2, "user: %s", q(user))
 		if t.Sudo && user != "root" {
-			w(2, "sudo: true          # 普通用户登录，用免密 sudo 执行部署")
+			w(2, "sudo: true          # 普通用户登录，用 sudo 执行部署")
+			if t.SudoAuth == "password" {
+				w(2, "sudoAuth: password  # 密码首次使用时输入，可以保存到系统凭据库")
+			}
 		}
 		if t.Auth == "password" {
 			w(2, "auth: password      # 密码不写在这里：第一次连接时输入，可以保存到系统凭据库")

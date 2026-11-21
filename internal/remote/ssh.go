@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -702,10 +703,13 @@ func (c *Client) Output(cmd string) (string, RunResult, error) {
 
 // Pipe 一直开着的远程命令：随时往 In 写、从 Out 读（常驻的 agent 用）。
 type Pipe struct {
-	s      *ssh.Session
-	In     io.WriteCloser
-	Out    io.Reader
-	stderr bytes.Buffer
+	s       *ssh.Session
+	In      io.WriteCloser
+	Out     io.Reader
+	stderr  bytes.Buffer
+	markers []string
+	done    chan struct{}
+	err     error
 }
 
 // StartPipe 启动 cmd，不等它结束。用完 Close。
@@ -715,12 +719,21 @@ func (c *Client) StartPipe(cmd string) (*Pipe, error) {
 
 // StartPipeContext 同 StartPipe；ctx 结束时不再等会话打开。
 func (c *Client) StartPipeContext(ctx context.Context, cmd string) (*Pipe, error) {
+	return c.startPipe(ctx, cmd, nil)
+}
+
+func (c *Client) startPipe(ctx context.Context, cmd string, stderr io.Writer) (*Pipe, error) {
 	s, err := c.newSessionCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
+	stop := context.AfterFunc(ctx, func() { s.Close() })
+	defer stop()
 	p := &Pipe{s: s}
 	s.Stderr = &limitedBuffer{buf: &p.stderr, max: 64 << 10}
+	if stderr != nil {
+		s.Stderr = io.MultiWriter(s.Stderr, stderr)
+	}
 	if p.In, err = s.StdinPipe(); err == nil {
 		p.Out, err = s.StdoutPipe()
 	}
@@ -729,16 +742,31 @@ func (c *Client) StartPipeContext(ctx context.Context, cmd string) (*Pipe, error
 	}
 	if err != nil {
 		s.Close()
+		if ctx.Err() != nil {
+			return nil, ErrCanceled
+		}
 		return nil, err
 	}
 	return p, nil
 }
 
 // Wait 等命令结束；返回后 Stderr 才完整。
-func (p *Pipe) Wait() error { return p.s.Wait() }
+func (p *Pipe) Wait() error {
+	if p.done != nil {
+		<-p.done
+		return p.err
+	}
+	return p.s.Wait()
+}
 
 // Stderr 命令的错误输出（Wait 返回后读）。
-func (p *Pipe) Stderr() string { return p.stderr.String() }
+func (p *Pipe) Stderr() string {
+	out := p.stderr.String()
+	for _, marker := range p.markers {
+		out = strings.ReplaceAll(out, marker, "")
+	}
+	return out
+}
 
 // Close 关掉会话（远程命令的输入随之结束）。
 func (p *Pipe) Close() error { return p.s.Close() }
@@ -760,6 +788,64 @@ func (l *limitedBuffer) Write(p []byte) (int, error) {
 }
 
 // ---------------------------------------------------------------- SFTP
+
+func (c *Client) Files() *FileClient {
+	f := &FileClient{sftpClient: c.sftpClient}
+	if c.ssh != nil {
+		f.run = c.RunContext
+	}
+	return f
+}
+
+// FilesOverPipe starts the SFTP protocol after the remote command is ready.
+func FilesOverPipe(ctx context.Context, p *Pipe) (*FileClient, func(), error) {
+	openCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	stopOpen := context.AfterFunc(openCtx, func() { p.Close() })
+	s, err := sftp.NewClientPipe(p.Out, p.In, sftp.UseConcurrentWrites(true), sftp.MaxConcurrentRequestsPerFile(64))
+	stopOpen()
+	openErr := openCtx.Err()
+	cancel()
+	if err == nil && openErr != nil {
+		p.Close()
+		s.Close()
+		err = openErr
+	}
+	if err != nil {
+		p.Close()
+		p.Wait()
+		if ctx.Err() != nil {
+			return nil, nil, ErrCanceled
+		}
+		if errors.Is(openErr, context.DeadlineExceeded) {
+			return nil, nil, errors.New("打开提权文件会话超时")
+		}
+		if msg := strings.TrimSpace(p.Stderr()); msg != "" {
+			if err := ExplainSudoError(msg); err != nil {
+				return nil, nil, err
+			}
+			return nil, nil, fmt.Errorf("打开提权文件会话：%s", msg)
+		}
+		return nil, nil, fmt.Errorf("打开提权文件会话：%w", err)
+	}
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		// Allow a canceled operation to remove its staging files first.
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-closed:
+		case <-timer.C:
+			p.Close()
+		}
+	})
+	return &FileClient{sftpClient: func() (*sftp.Client, error) { return s, nil }}, func() {
+		stop()
+		close(closed)
+		p.Close()
+		s.Close()
+		p.Wait()
+	}, nil
+}
 
 func (c *Client) sftpClient() (*sftp.Client, error) {
 	c.sftpMu.Lock() // 连接被多个请求复用时可能同时调用
@@ -793,6 +879,10 @@ func (c *Client) UploadContext(ctx context.Context, local, remotePath string, mo
 	if err != nil {
 		return err
 	}
+	return uploadFile(ctx, s, local, remotePath, mode, true, progress)
+}
+
+func uploadFile(ctx context.Context, s *sftp.Client, local, remotePath string, mode os.FileMode, overwrite bool, progress Progress) error {
 	src, err := os.Open(local)
 	if err != nil {
 		return err
@@ -802,24 +892,39 @@ func (c *Client) UploadContext(ctx context.Context, local, remotePath string, mo
 	if err != nil {
 		return err
 	}
-	tmp := remotePath + ".part"
-	dst, err := s.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	tmp := path.Join(path.Dir(remotePath), ".ferry-upload-"+rand.Text()+".part")
+	dst, err := s.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
 		return fmt.Errorf("创建远程文件 %s：%w", tmp, err)
 	}
+	defer s.Remove(tmp)
+	defer dst.Close()
+	stop := context.AfterFunc(ctx, func() { dst.Close() })
+	defer stop()
+	if err := dst.Chmod(0o600); err != nil {
+		return err
+	}
 	r := &countingReader{ctx: ctx, r: src, size: st.Size(), progress: progress}
 	if _, err := dst.ReadFrom(r); err != nil {
-		dst.Close()
-		s.Remove(tmp)
+		if ctx.Err() != nil {
+			return ErrCanceled
+		}
 		return fmt.Errorf("上传 %s：%w", filepath.Base(local), err)
+	}
+	if err := dst.Chmod(mode); err != nil {
+		return err
 	}
 	if err := dst.Close(); err != nil {
 		return err
 	}
-	if err := s.Chmod(tmp, mode); err != nil {
-		return err
+	if ctx.Err() != nil {
+		return ErrCanceled
 	}
-	if err := s.PosixRename(tmp, remotePath); err != nil {
+	publish := s.Rename
+	if overwrite {
+		publish = s.PosixRename
+	}
+	if err := publish(tmp, remotePath); err != nil {
 		return fmt.Errorf("改名 %s：%w", remotePath, err)
 	}
 	return nil

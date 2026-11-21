@@ -77,9 +77,14 @@ func TestSwReach(t *testing.T) {
 		t.Fatalf("没同意时不应改动：%v", f.calls)
 	}
 
-	// 同意了，不支持 ACL：chmod o+x，保留原来的权限位
+	// 同意修复目录但没有同意扩大权限，不应悄悄给所有用户开放访问。
 	f, a, pl = setup(false)
 	pl.FixParents = true
+	if err := a.swReach(pl); err == nil || !strings.Contains(err.Error(), "扩大访问范围") || len(f.calls) != 0 {
+		t.Fatalf("不支持 ACL 时应提示，且不修改权限：%v，%v", err, f.calls)
+	}
+	// 明确允许扩大权限后才 chmod o+x，保留原来的权限位。
+	pl.AllowPublicPerms = true
 	if err := a.swReach(pl); err != nil {
 		t.Fatal(err)
 	}

@@ -210,7 +210,7 @@ func systemDir(p string) bool {
 }
 
 // grantTraverse 让 user 能进入目录 p：支持 ACL 时只给它开，否则给其他用户加上 x（进得去，但列不出里面有哪些文件）。
-func (a *Agent) grantTraverse(user, p string) (string, error) {
+func (a *Agent) grantTraverse(user, p string, allowPublic bool) (string, error) {
 	if systemDir(p) {
 		return "", fmt.Errorf("%s 是系统目录，不自动修改它的权限", p)
 	}
@@ -220,6 +220,9 @@ func (a *Agent) grantTraverse(user, p string) (string, error) {
 			return "", fmt.Errorf("%s失败：%v", acl, err)
 		}
 		return acl, nil
+	}
+	if !allowPublic {
+		return "", fmt.Errorf("%s 无法只通过 ACL 授权给 %s，请配置专用 ACL/组、选择其他安装目录，或明确允许扩大访问范围", p, user)
 	}
 	o, err := a.Sys.Ownership(p)
 	if err != nil {
@@ -248,7 +251,7 @@ func (a *Agent) swReach(pl *proto.SoftwarePlan) error {
 			if granted[b.Path] {
 				return fmt.Errorf("给 %s 加上权限后，运行用户 %s 还是进不去：可能被 ACL 或安全策略（SELinux、麒麟安全）拦截了，换一个安装目录", b.Path, pl.User)
 			}
-			desc, err := a.grantTraverse(pl.User, b.Path)
+			desc, err := a.grantTraverse(pl.User, b.Path, pl.AllowPublicPerms)
 			if err != nil {
 				return err
 			}

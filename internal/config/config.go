@@ -78,17 +78,18 @@ type Target struct {
 	Name          string `yaml:"-"`
 	Host          string `yaml:"host"`
 	Port          int    `yaml:"port"`
-	User          string `yaml:"user"`          // SSH 用户，默认 root
-	Auth          string `yaml:"auth"`          // key（默认，私钥 / ssh-agent）或 password（密码不写在这里，见 ferry secret）
-	IdentityFile  string `yaml:"identityFile"`  // 私钥；相对配置目录，支持 ~
-	HostKey       string `yaml:"hostKey"`       // 可选：固定主机公钥指纹 SHA256:...
-	Sudo          bool   `yaml:"sudo"`          // 非 root 时用 sudo -n 执行 agent
-	Root          string `yaml:"root"`          // 部署根目录，默认 /opt/<project>
-	RunAs         string `yaml:"runAs"`         // 默认运行用户
-	Arch          string `yaml:"arch"`          // 可选：amd64 / arm64；与服务器实际不符时报错
-	KeepReleases  int    `yaml:"keepReleases"`  // 每个应用保留的版本数，默认 5
-	UploadStreams int    `yaml:"uploadStreams"` // 上传并行连接数（0 = 用设置里的默认值）；VPN 等对单条连接限速时调大
-	SecretsFrom   string `yaml:"secretsFrom"`   // keyring（默认）或 file:<相对路径>.age
+	User          string `yaml:"user"`               // SSH 用户，默认 root
+	Auth          string `yaml:"auth"`               // key（默认，私钥 / ssh-agent）或 password（密码不写在这里，见 ferry secret）
+	IdentityFile  string `yaml:"identityFile"`       // 私钥；相对配置目录，支持 ~
+	HostKey       string `yaml:"hostKey"`            // 可选：固定主机公钥指纹 SHA256:...
+	Sudo          bool   `yaml:"sudo"`               // 非 root 时用 sudo 执行 agent
+	SudoAuth      string `yaml:"sudoAuth,omitempty"` // 空或 nopasswd 沿用免密；password 提示输入或使用凭据库
+	Root          string `yaml:"root"`               // 部署根目录，默认 /opt/<project>
+	RunAs         string `yaml:"runAs"`              // 默认运行用户
+	Arch          string `yaml:"arch"`               // 可选：amd64 / arm64；与服务器实际不符时报错
+	KeepReleases  int    `yaml:"keepReleases"`       // 每个应用保留的版本数，默认 5
+	UploadStreams int    `yaml:"uploadStreams"`      // 上传并行连接数（0 = 用设置里的默认值）；VPN 等对单条连接限速时调大
+	SecretsFrom   string `yaml:"secretsFrom"`        // keyring（默认）或 file:<相对路径>.age
 	// FerryDir 服务器上存放 ferry 组件的目录：agent 与 Ferry 提供的运行环境（JDK）。默认 /usr/local/lib/ferry；必须归 root、他人不可写
 	FerryDir    string                `yaml:"ferryDir"`
 	Confirm     *bool                 `yaml:"confirm"` // 部署前是否要求确认，默认 true

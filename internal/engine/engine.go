@@ -61,6 +61,7 @@ type Engine struct {
 	// Background 桌面版的后台自动刷新：只用连接池里已有的连接（没有就返回 ErrNotConnected，不新建），
 	// 用过也不算「使用」，不推迟空闲断开
 	Background bool
+	FileSudo   bool // 本次文件操作显式选择了提权
 
 	projectDir string
 }
@@ -576,7 +577,7 @@ func (e *Engine) preflight(s *session, items []*item, fix string) (*proto.Prefli
 		}
 	}
 	var p proto.Preflight
-	if err := s.callData("preflight", &proto.Request{Apps: specs, FixPerms: fix}, &p); err != nil {
+	if err := s.callData("preflight", &proto.Request{Apps: specs, FixPerms: fix, AllowPublicPerms: e.Settings.Deploy.AllowPublicPerms}, &p); err != nil {
 		return nil, err
 	}
 	if fix != agentFixApply {
@@ -873,7 +874,8 @@ func (e *Engine) runBuilds(t *config.Target, apps []*config.App, items []*item, 
 		OnWait:  func(lock string) { e.Rep.Warn("另一个构建正在使用构建锁 %s，排队等待……", lock) },
 		Ctx:     e.Ctx,
 	}
-	runner.OmitEnv = append(runner.OmitEnv, ageIdentityEnv)
+	runner.OmitEnv = []string{ageIdentityEnv, "FERRY_SSH_KEY", "FERRY_SECRET_VALUE"}
+	runner.OmitEnvPrefixes = []string{"FERRY_PASSWORD_", "FERRY_SSH_KEY_", "FERRY_PASSPHRASE_", "FERRY_SUDO_"}
 	for _, app := range e.File.Apps {
 		for _, ref := range app.Service.Secrets {
 			runner.OmitEnv = append(runner.OmitEnv, secret.AppEnv(app.Name, ref.Name))

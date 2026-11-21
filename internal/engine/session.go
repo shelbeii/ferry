@@ -21,6 +21,7 @@ import (
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/remote"
+	"github.com/captain/ferry/internal/secret"
 )
 
 // AgentDir 服务器上存放 agent 的默认目录（root 所有的系统目录，避免被普通用户替换后以 root 执行）；目标可以用 ferryDir 改。
@@ -28,16 +29,21 @@ const AgentDir = config.DefaultFerryDir
 
 // conn 到一台服务器的连接及其上已确认的 agent。ferry serve 里会被多个请求复用。
 type conn struct {
-	c     *remote.Client
-	sudo  string
-	agent string
-	arch  string
-	opts  remote.Options // 多路上传时用同样的参数（含已取得的密码）再建连接
-	label string         // user@host:port
+	c            *remote.Client
+	sudo         string
+	agent        string
+	arch         string
+	agentMu      sync.Mutex // 保护已经校验过的 agent 路径和架构
+	agentGate    chan struct{}
+	opts         remote.Options // 多路上传时用同样的参数（含已取得的密码）再建连接
+	label        string         // user@host:port
+	sudoMu       sync.Mutex
+	sudoPrompted string // 仅单次 CLI 运行的交互式输入
 	// ferryDir 服务器上 ferry 组件的目录（agent、运行环境）
 	ferryDir string
 	// broken 上一次在它上面的操作因连接问题失败：下次复用前先确认还能用
-	broken atomic.Bool
+	broken     atomic.Bool
+	sftpServer atomic.Pointer[string] // OpenSSH helper discovered on this connection
 
 	// 常驻的 agent（见 agentserve.go）
 	srvMu       sync.Mutex
@@ -67,16 +73,33 @@ func (c *conn) setCPUSample(lines []string) {
 // session 一次操作对一个目标的使用：连接（可能是复用的）+ 本次请求的引擎（输出、配置）。
 type session struct {
 	*conn
-	e       *Engine
-	t       *config.Target
-	release func()
+	e            *Engine
+	t            *config.Target
+	release      func()
+	agent        string
+	arch         string
+	fileIdentity string
 }
 
 // connect 取得到目标的连接：有连接池时复用，否则新建（用完关闭）。
 func (e *Engine) connect(t *config.Target) (*session, error) {
-	if !t.Plain && t.User != "root" && !t.Sudo {
-		return nil, fmt.Errorf("目标 %s 用 %s 登录：agent 需要 root，请设置 sudo: true（并允许免密 sudo）", t.Name, t.User)
+	if !t.Plain && t.User != "root" && (!t.Sudo || t.SudoAuth == "disabled") {
+		return nil, fmt.Errorf("目标 %s 用 %s 登录：agent 需要 root，请设置 sudo: true，并选择服务器支持的 sudo 认证方式", t.Name, t.User)
 	}
+	s, err := e.connectSSH(t)
+	if err != nil || t.Plain {
+		return s, err
+	}
+	if err := s.prepareAgent(); err != nil {
+		s.close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// connectSSH only authenticates the transport. It also reuses connections that
+// already have a verified agent, without requiring the agent to open SSH.
+func (e *Engine) connectSSH(t *config.Target) (*session, error) {
 	var cn *conn
 	var release func()
 	var err error
@@ -92,18 +115,51 @@ func (e *Engine) connect(t *config.Target) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if t.Arch != "" && t.Arch != cn.arch {
-		release()
-		return nil, fmt.Errorf("目标 %s 配置的 arch 是 %s，服务器实际是 %s", t.Name, t.Arch, cn.arch)
+	s := &session{conn: cn, e: e, t: t, release: release}
+	if !t.Plain {
+		s.readAgent()
 	}
-	return &session{conn: cn, e: e, t: t, release: release}, nil
+	return s, nil
 }
 
-// dial 新建连接并确保服务器上有匹配版本的 agent。
+func (s *session) readAgent() {
+	s.agentMu.Lock()
+	s.agent, s.arch = s.conn.agent, s.conn.arch
+	s.agentMu.Unlock()
+}
+
+func (s *session) prepareAgent() error {
+	if s.agent == "" {
+		if s.e.Background {
+			return ErrNotConnected
+		}
+		select {
+		case s.agentGate <- struct{}{}:
+			defer func() { <-s.agentGate }()
+		case <-s.e.ctx().Done():
+			return ErrCanceled
+		}
+		s.readAgent()
+		if s.agent == "" {
+			if err := s.e.ensureAgent(s); err != nil {
+				return err
+			}
+			s.agentMu.Lock()
+			s.conn.agent, s.conn.arch = s.agent, s.arch
+			s.agentMu.Unlock()
+		}
+	}
+	if s.t.Arch != "" && s.t.Arch != s.arch {
+		return fmt.Errorf("目标 %s 配置的 arch 是 %s，服务器实际是 %s", s.t.Name, s.t.Arch, s.arch)
+	}
+	return nil
+}
+
+// dial 新建 SSH 连接。
 func (e *Engine) dial(t *config.Target) (*conn, error) {
 	sudo := ""
 	if t.User != "root" {
-		sudo = "sudo -n "
+		sudo = "sudo -n -u root "
 	}
 	cred := e.credentials(t)
 	opts := e.dialOptions(t, cred)
@@ -115,16 +171,9 @@ func (e *Engine) dial(t *config.Target) (*conn, error) {
 	if cred.missingKey != "" {
 		e.Rep.Warn("这台电脑上没有私钥 %s，用默认私钥或 ssh-agent 登录了；可以在本机设置里改成这台电脑上的私钥", cred.missingKey)
 	}
-	cn := &conn{c: c, sudo: sudo, opts: opts, label: fmt.Sprintf("%s@%s:%d", t.User, t.Host, t.Port), ferryDir: t.FerryDir}
+	cn := &conn{c: c, sudo: sudo, opts: opts, label: fmt.Sprintf("%s@%s:%d", t.User, t.Host, t.Port), ferryDir: t.FerryDir, agentGate: make(chan struct{}, 1)}
 	if cn.ferryDir == "" {
 		cn.ferryDir = AgentDir
-	}
-	if t.Plain {
-		return cn, nil // 只登录（终端、文件），不用 agent
-	}
-	if err := e.ensureAgent(cn); err != nil {
-		c.Close()
-		return nil, err
 	}
 	return cn, nil
 }
@@ -169,22 +218,42 @@ func gzipAgent(arch string, data []byte) []byte {
 
 // ensureAgent 确认服务器上有这个版本的 agent，没有就上传。agent 内容不随应用版本变化（只在 agent 代码改了时才重新上传），
 // 上传压缩后的文件（约为原来的 40%，经 VPN 等慢速网络时差别明显），在服务器上解压。
-func (e *Engine) ensureAgent(s *conn) error {
+func (e *Engine) ensureAgent(s *session) error {
 	// 一次往返：架构、有没有 gzip、ferry 组件目录及其上级是否归 root 且他人不可写（agent 以 root 运行，不能放在别人能替换的地方），
 	// 以及这个版本的 agent 在不在、能不能运行（在的话不用再单独问一次）
 	paths := map[string]string{}
+	sums := map[string]string{}
 	for _, arch := range []string{"amd64", "arm64"} {
 		if b, err := agentbin.Get(arch); err == nil {
 			paths[arch] = s.ferryDir + "/ferry-agent-" + b.SHA256[:12]
+			sums[arch] = b.SHA256
 		}
 	}
+	prefix := s.sudo
+	if s.passwordSudo() {
+		prefix = ""
+	}
 	check := fmt.Sprintf(`uname -m; command -v gzip >/dev/null 2>&1 && echo has-gzip || echo no-gzip; `+
-		`d=%s; while [ -n "$d" ] && [ "$d" != / ]; do if [ -e "$d" ]; then u=$(stat -c %%u "$d"); m=$(stat -c %%a "$d"); `+
-		`if [ "$u" != 0 ] || [ $((0$m & 022)) -ne 0 ]; then echo "unsafe $d $u $m"; fi; fi; d=$(dirname "$d"); done; `+
-		`case "$(uname -m)" in x86_64|amd64) a=%s;; aarch64|arm64) a=%s;; *) a=;; esac; `+
-		`if [ -n "$a" ] && [ -x "$a" ]; then t0=$(date +%%s%%N); echo @@agent; %s"$a" version 2>/dev/null; t1=$(date +%%s%%N); echo; echo "@@took $t0 $t1"; fi`,
-		shQuote(s.ferryDir), shQuote(paths["amd64"]), shQuote(paths["arm64"]), s.sudo)
-	out, res, err := s.c.Output(check)
+		`unsafe=0; d=%s; while [ -n "$d" ] && [ "$d" != / ]; do if [ -e "$d" ] || [ -L "$d" ]; then u=$(stat -c %%u "$d"); m=$(stat -c %%a "$d"); `+
+		`if [ "$u" != 0 ] || [ $((0$m & 022)) -ne 0 ]; then echo "unsafe $d $u $m"; unsafe=1; fi; fi; d=$(dirname "$d"); done; `+
+		`case "$(uname -m)" in x86_64|amd64) a=%s; want=%s;; aarch64|arm64) a=%s; want=%s;; *) a=;; esac; `+
+		`if [ "$unsafe" = 0 ] && [ -n "$a" ] && [ -f "$a" ] && [ -x "$a" ] && [ ! -L "$a" ]; then `+
+		`actual=$(sha256sum < "$a") && [ "${actual%%%% *}" = "$want" ] || exit 0; `+
+		`t0=$(date +%%s%%N); echo @@agent; %s"$a" version 2>/dev/null; t1=$(date +%%s%%N); echo; echo "@@took $t0 $t1"; fi`,
+		shQuote(s.ferryDir), shQuote(paths["amd64"]), shQuote(sums["amd64"]), shQuote(paths["arm64"]), shQuote(sums["arm64"]), prefix)
+	var out string
+	var res remote.RunResult
+	var err error
+	if s.passwordSudo() {
+		out, res, err = s.outputPriv(e.ctx(), "sh -c "+shQuote(check))
+	} else {
+		var metadata strings.Builder
+		res, err = s.c.RunContext(e.ctx(), check, nil, func(line string) { metadata.WriteString(line); metadata.WriteByte('\n') })
+		out = metadata.String()
+	}
+	if err != nil && s.passwordSudo() {
+		return err
+	}
 	if err != nil || res.Code != 0 {
 		return fmt.Errorf("读取服务器架构失败：%v %s", err, res.Stderr)
 	}
@@ -215,7 +284,7 @@ func (e *Engine) ensureAgent(s *conn) error {
 	s.agent = s.ferryDir + "/ferry-agent-" + bin.SHA256[:12]
 	if version != "" {
 		version, took, _ := strings.Cut(version, "@@took ")
-		e.warnSlowSudo(s, took)
+		e.warnSlowSudo(s.conn, took)
 		if agentVersionOK(version, bin.SHA256) {
 			return nil
 		}
@@ -237,40 +306,60 @@ func (e *Engine) ensureAgent(s *conn) error {
 	}
 	tmpLocal.Close()
 	tmpRemote := fmt.Sprintf("/tmp/ferry-agent-%s-%s", bin.SHA256[:12], filepath.Base(tmpLocal.Name()))
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.c.RunContext(ctx, "rm -f -- "+shQuote(tmpRemote+ext), nil, nil)
+	}()
 	total := int64(len(data))
 	err = s.c.UploadContext(e.ctx(), tmpLocal.Name(), tmpRemote+ext, 0o700, func(done, _ int64) {
 		e.Rep.Progress("agent", done, total)
 	})
 	if err != nil {
-		s.c.Output("rm -f " + tmpRemote + ext)
 		return err
 	}
-	unpack := ""
+	unpack := "cat -- " + shQuote(tmpRemote)
 	if hasGzip {
-		unpack = fmt.Sprintf("gzip -dc %[1]s.gz > %[1]s; rm -f %[1]s.gz; ", tmpRemote)
+		unpack = "gzip -dc -- " + shQuote(tmpRemote+ext)
 	}
-	stagedAgent := shQuote(s.ferryDir + "/.new-" + filepath.Base(tmpLocal.Name()))
-	script := fmt.Sprintf("set -e; %[4]sinstall -d -m 755 -o root -g root %[1]s; "+
-		"install -m 755 -o root -g root %[2]s %[5]s; mv -f %[5]s %[3]s; rm -f %[2]s; "+
+	script := fmt.Sprintf("set -e; install -d -m 755 -o root -g root %[1]s; "+
+		"tmp=$(mktemp %[1]s/.agent.XXXXXXXX); trap 'rm -f -- \"$tmp\"' EXIT; "+
+		"%[3]s > \"$tmp\"; actual=$(sha256sum < \"$tmp\"); "+
+		"if [ \"${actual%%%% *}\" != %[4]s ]; then echo 'agent SHA-256 mismatch' >&2; exit 1; fi; "+
+		"chmod 755 \"$tmp\"; mv -fT -- \"$tmp\" %[2]s; "+
 		"cd %[1]s; ls -t ferry-agent-???????????? 2>/dev/null | tail -n +4 | while IFS= read -r old; do "+
-		"if [ \"$old\" != %[6]s ]; then rm -f -- \"$old\"; fi; done || true",
-		shQuote(s.ferryDir), tmpRemote, shQuote(s.agent), unpack, stagedAgent, shQuote(filepath.Base(s.agent)))
-	if _, res, err := s.c.Output(s.sudo + "sh -c " + shQuote(script)); err != nil || res.Code != 0 {
-		s.c.Output("rm -f " + tmpRemote + " " + tmpRemote + ".gz")
+		"if [ \"$old\" != %[5]s ]; then rm -f -- \"$old\"; fi; done || true",
+		shQuote(s.ferryDir), shQuote(s.agent), unpack, shQuote(bin.SHA256), shQuote(filepath.Base(s.agent)))
+	_, res, err = s.outputPriv(e.ctx(), "sh -c "+shQuote(script))
+	if err != nil || res.Code != 0 {
+		var policyErr *remote.SudoError
+		if err != nil && (s.passwordSudo() || errors.As(err, &policyErr)) {
+			return err
+		}
 		return fmt.Errorf("安装 agent 失败：%v %s", err, strings.TrimSpace(res.Stderr))
 	}
-	if !s.agentOK(bin.SHA256) {
-		return errors.New("agent 安装后校验失败")
+	if err := s.agentOK(bin.SHA256); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (s *conn) agentOK(sha string) bool {
-	out, res, err := s.c.Output(s.sudo + s.agent + " version")
-	if err != nil || res.Code != 0 {
-		return false
+func (s *session) agentCommand(cmd string) string {
+	if s.passwordSudo() {
+		return shQuote(s.agent) + " " + cmd
 	}
-	return agentVersionOK(out, sha)
+	return s.agent + " " + cmd
+}
+
+func (s *session) agentOK(sha string) error {
+	out, res, err := s.outputPriv(s.e.ctx(), s.agentCommand("version"))
+	if err != nil {
+		return err
+	}
+	if res.Code != 0 || !agentVersionOK(out, sha) {
+		return errors.New("agent 安装后校验失败")
+	}
+	return nil
 }
 
 // agentVersionOK agent version 的输出是不是这个版本（校验和、协议版本都对上）。
@@ -354,8 +443,12 @@ func (s *session) call(cmd string, req *proto.Request) (*proto.Result, error) {
 		}
 		result = nil
 	}
-	res, err := s.c.RunContext(s.e.ctx(), s.sudo+s.agent+" "+cmd, body, onLine)
+	res, err := s.runPriv(s.e.ctx(), s.agentCommand(cmd), body, onLine)
 	if err != nil {
+		var need *secret.NeedError
+		if errors.As(err, &need) {
+			return nil, err
+		}
 		if !errors.Is(err, remote.ErrCanceled) {
 			s.broken.Store(true)
 		}

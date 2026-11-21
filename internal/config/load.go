@@ -209,6 +209,12 @@ func (f *File) normalize(setupTarget string) error {
 		if t.User == "" {
 			t.User = "root"
 		}
+		if t.SudoAuth != "" && t.SudoAuth != "nopasswd" && t.SudoAuth != "password" && t.SudoAuth != "disabled" {
+			bad("%s：sudoAuth 只能是 nopasswd、password 或 disabled（凭据保存在系统凭据库）", where)
+		}
+		if t.Sudo && t.SudoAuth == "disabled" && t.User != "root" {
+			bad("%s：sudo: true 与 sudoAuth: disabled 冲突", where)
+		}
 		switch t.Auth {
 		case "":
 			t.Auth = "key"

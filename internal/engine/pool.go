@@ -17,6 +17,7 @@ import (
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/remote"
 	"github.com/captain/ferry/internal/safe"
+	"github.com/captain/ferry/internal/secret"
 )
 
 // Pool 到服务器的常驻连接（ferry serve 里用）：同一台服务器、同样的登录方式只建一条连接，
@@ -30,15 +31,16 @@ type Pool struct {
 }
 
 type poolEntry struct {
-	key      string
-	cn       *conn
-	users    int // 正在使用它的请求数
-	created  time.Time
-	lastUsed time.Time
-	refs     map[poolRef]bool // 用过它的「配置文件 + 目标」
-	dialing  chan struct{}    // 正在建立时不为空，建好或失败后关闭
-	dialErr  error            // 建立失败的原因（dialing 关闭后读）：等它的请求直接报这个错，不再一个接一个重新连
-	stale    bool             // 已失效（配置、凭据变了或手动断开）：没人用时关闭，不再分给新请求
+	key         string
+	cn          *conn
+	users       int // 正在使用它的请求数
+	created     time.Time
+	lastUsed    time.Time
+	refs        map[poolRef]bool // 用过它的「配置文件 + 目标」
+	credentials []string
+	dialing     chan struct{} // 正在建立时不为空，建好或失败后关闭
+	dialErr     error         // 建立失败的原因（dialing 关闭后读）：等它的请求直接报这个错，不再一个接一个重新连
+	stale       bool          // 已失效（配置、凭据变了或手动断开）：没人用时关闭，不再分给新请求
 }
 
 type poolRef struct{ config, target string }
@@ -76,7 +78,13 @@ func poolKey(f *config.File, t *config.Target) string {
 			id = fmt.Sprintf("%s@%d/%d", id, fi.ModTime().UnixNano(), fi.Size())
 		}
 	}
-	return strings.Join([]string{t.User, t.Host, fmt.Sprint(t.Port), t.Auth, id, t.HostKey, fmt.Sprint(t.Sudo), t.FerryDir, fmt.Sprint(t.Plain)}, "|")
+	scope := fmt.Sprint(t.Plain, ":", t.Sudo)
+	if f.Kind == config.KindConnections {
+		// A connection and its software workspace use the same transport.
+		// Plain requests never receive the prepared privileged agent.
+		scope = config.KindConnections
+	}
+	return strings.Join([]string{t.User, t.Host, fmt.Sprint(t.Port), t.Auth, id, t.HostKey, scope, t.SudoAuth, t.FerryDir}, "|")
 }
 
 func refOf(f *config.File, t *config.Target) poolRef {
@@ -142,7 +150,7 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 			return ent.cn, p.releaser(ent, !e.Background), nil
 		}
 		// 新建
-		ent = &poolEntry{key: key, dialing: make(chan struct{}), refs: map[poolRef]bool{}}
+		ent = &poolEntry{key: key, dialing: make(chan struct{}), refs: map[poolRef]bool{}, credentials: poolCredentials(e.File, t)}
 		p.entries[key] = ent
 		p.mu.Unlock()
 
@@ -161,7 +169,9 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 			return nil, nil, err
 		}
 		ent.cn, ent.users, ent.created, ent.lastUsed = cn, 1, time.Now(), time.Now()
-		p.retarget(ent, ref)
+		if !ent.stale {
+			p.retarget(ent, ref)
+		}
 		p.mu.Unlock()
 		return cn, p.releaser(ent, true), nil
 	}
@@ -235,10 +245,10 @@ func (p *Pool) remove(ent *poolEntry) {
 
 // invalidate 让连接失效：没人用就立即关闭，否则用完后关闭。调用时持有锁。
 func (p *Pool) invalidate(ent *poolEntry) {
+	ent.stale = true
 	if ent.dialing != nil {
 		return
 	}
-	ent.stale = true
 	if ent.users == 0 {
 		p.remove(ent)
 	}
@@ -250,6 +260,33 @@ func (p *Pool) InvalidateAll() {
 	defer p.mu.Unlock()
 	for _, ent := range p.entries {
 		p.invalidate(ent)
+	}
+}
+
+func poolCredentials(f *config.File, t *config.Target) []string {
+	accounts := []string{secret.SudoAccount(t.User, t.Host, t.Port)}
+	if t.Auth == "password" {
+		return append(accounts, secret.PasswordAccount(t.User, t.Host, t.Port))
+	}
+	if key := identity(f, t); key != "" {
+		return append(accounts, secret.PassphraseAccount(key))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, key := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+			accounts = append(accounts, secret.PassphraseAccount(filepath.Join(home, ".ssh", key)))
+		}
+	}
+	return accounts
+}
+
+// InvalidateCredential retires transports using only the changed credential.
+func (p *Pool) InvalidateCredential(account string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, ent := range p.entries {
+		if slices.Contains(ent.credentials, account) {
+			p.invalidate(ent)
+		}
 	}
 }
 

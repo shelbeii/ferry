@@ -42,7 +42,9 @@
 
 **原因**　部署需要安装 agent 和管理 systemd 单元。当前 SSH 用户没有可用的非交互 sudo，或 Ferry 没有启用它。
 
-**处理**　经服务器管理员确认后配置部署账号，在 SSH 会话里验证 `sudo -n true`，再设置 `targets.prod.sudo: true`。应用仍应设置独立的非 root `runAs` 用户。[目标配置](config.md#targets名字)
+**处理**　给部署账号授权后设置 `targets.prod.sudo: true`。免密账号可用 `sudo -n true` 检查。服务器要求密码时，再设置 `targets.prod.sudoAuth: password`，首次需要提权时输入。应用仍应设置独立的非 root `runAs` 用户。[目标配置](config.md#targets名字)
+
+如果 SSH 终端能打开，只有管理操作失败，可先看提示中的 sudo 状态。文件权限不足时在文件面板里选「以 sudo 操作」；系统拒绝授权、挂载只读或应用运行用户缺少访问权时，按对应提示处理。
 
 ### 7. 「用 sudo 运行一次要 … 秒」
 

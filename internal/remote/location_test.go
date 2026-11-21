@@ -26,16 +26,16 @@ func TestFileLocation(t *testing.T) {
 		{"/", "/", ""},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
-			dir, focus, err := c.FileLocation(tc.input)
+			dir, focus, err := c.Files().FileLocation(tc.input)
 			if err != nil || dir != tc.dir || focus != tc.focus {
 				t.Fatalf("FileLocation(%q) = %q, %q, %v", tc.input, dir, focus, err)
 			}
-			if _, entries, err := c.ListDir(dir); err != nil || entries == nil {
+			if _, entries, err := c.Files().ListDir(dir); err != nil || entries == nil {
 				t.Fatalf("位置必须可以列目录：%v", err)
 			}
 		})
 	}
-	if _, _, err := c.FileLocation("/missing"); err == nil {
+	if _, _, err := c.Files().FileLocation("/missing"); err == nil {
 		t.Fatal("不存在的位置应报错，不能打开其他目录")
 	}
 }

@@ -31,7 +31,7 @@ func (e *Engine) Terminal(target string, tio TermIO) (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	s, err := e.connect(t)
+	s, err := e.connectSSH(t)
 	if err != nil {
 		return -1, err
 	}

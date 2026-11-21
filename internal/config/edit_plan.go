@@ -366,6 +366,7 @@ var riskyFields = []struct{ prefix, why string }{
 	{"targets.*.identityFile", "登录用的私钥"},
 	{"targets.*.hostKey", "主机公钥指纹"},
 	{"targets.*.sudo", "是否用 sudo"},
+	{"targets.*.sudoAuth", "sudo 认证"},
 	{"targets.*.root", "部署根目录"},
 	{"targets.*.ferryDir", "Ferry 组件目录"},
 	{"targets.*.runAs", "服务默认的运行用户"},

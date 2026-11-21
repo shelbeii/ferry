@@ -80,6 +80,7 @@ const usage = `ferry —— 后端 / 前端部署工具
   move-config <新位置> -c <ferry.yaml> [--force]   移动配置文件，本机设置、部署历史、构建日志、项目列表跟着改过去
   secret   set|delete|status <目标>          服务器登录密码（auth: password）存到系统凭据库
   secret   set|delete|status --passphrase <私钥>  私钥密码
+  secret   set|delete|status --sudo <目标>    sudo 密码，独立保存在系统凭据库
   secret   list | delete --account <账户>    已保存的凭据（列表只含账户；桌面版可单独查看内容）
   settings [save]               查看设置（--json）；save 从环境变量 FERRY_SETTINGS_VALUE 读 JSON 保存
   notify   [list] | save <ID> [--sign] | forget <ID> [--sign] | test [<ID>]
@@ -152,8 +153,11 @@ const usage = `ferry —— 后端 / 前端部署工具
   files    preview <目标> <文件>   只读预览文本内容（最多读取前 1 MiB）
   files    size <目标> <路径>      按需统计文件或目录的逻辑大小，目录内部链接不展开
   files    save <目标> <文件>      保存文本；版本及内容从 FERRY_FILE_VALUE 的 JSON 读取
+  files    compress <目标> --to <远程ZIP> <远程路径…> | extract <目标> --to <新远程目录> <远程压缩包>
   files    upload <目标> --dir <远程目录> [--overwrite] <本机文件…> | download <目标> --to <本机目录> [--overwrite] <远程路径…>
-                                服务器上的文件（SFTP，以登录用户的身份）
+                                --as-sudo 使用提权文件会话；mkdir --owner login|run-as 指定新目录属主
+                                save --sudo-if-needed 在保存权限不足时用已启用的 sudo 重试
+  files    access <目标> <路径> [--as-sudo]     按实际执行身份检查读、写、执行或进入权限
   connection list | save | remove <名称>   桌面版「新建连接」保存的服务器（数据目录的 connections.yaml，用 -c 指定它来连接）
   path     [status] | add | remove   把 ferry 所在目录加进 / 移出当前用户的 PATH（Windows），之后可以直接敲 ferry
   mcp-log  [--offset 0] [--limit 200] [--tool a,b] [--client 名称] [--result ok|fail] [--changes]
@@ -192,13 +196,18 @@ var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": t
 	"version": true, "channel": true, "component": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
 	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "mem": true, "load": true, "ping": true, "keep-files": true, "query": true,
 	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true, "action": true, "snapshot": true, "app": true,
-	"conf": true}
+	"conf": true, "owner": true}
 
 // repeatFlags 可以写几次的选项：值按行连起来
 var repeatFlags = map[string]bool{"conf": true}
 var boolFlags = map[string]bool{
-	"with-secrets": true,
-	"y":            true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
+	"with-secrets":       true,
+	"sudo":               true,
+	"as-sudo":            true,
+	"sudo-if-needed":     true,
+	"verify":             true,
+	"allow-public-perms": true,
+	"y":                  true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
@@ -373,7 +382,7 @@ func run(argv []string, cio *cliIO) int {
 		return aiSecretCmd(c, cio, js, fail)
 	case cmd == "datadir":
 		return datadirCmd(c, cio, js, con, fail)
-	case cmd == "secret" && (len(c.pos) > 0 && (c.pos[0] == "list" || c.pos[0] == "show") || c.flags["account"] != ""):
+	case cmd == "secret" && (len(c.pos) > 0 && (c.pos[0] == "list" || c.pos[0] == "show" || c.pos[0] == "forget-session") || c.flags["account"] != ""):
 		return secretAccountCmd(c, cio, js, con, fail)
 	case cmd == "pool" && serving && c.flags["config"] == "":
 		return ok0(js, cio.pool.List())
@@ -467,6 +476,9 @@ func run(argv []string, cio *cliIO) int {
 		Background: c.has("background") && cio.pool != nil}
 	if c.has("keep-perms") {
 		e.Settings.Deploy.KeepPerms = true // 不自动修正权限（preflight 只报告问题）
+	}
+	if c.has("allow-public-perms") {
+		e.Settings.Deploy.AllowPublicPerms = true
 	}
 
 	need := func(n int, what string) error {
@@ -613,12 +625,12 @@ func run(argv []string, cio *cliIO) int {
 		return 0
 
 	case "secret":
-		res, err := secretCmd(f, c, cio, con)
+		res, err := secretCmd(e, c, cio, con)
 		if err != nil {
 			return fail(err)
 		}
-		if c.pos[0] != "status" {
-			cio.invalidate()
+		if account, _ := res["account"].(string); account != "" && cio.pool != nil {
+			cio.pool.InvalidateCredential(account)
 		}
 		if js != nil {
 			return ok(res)
@@ -1008,13 +1020,14 @@ const logsLoadedMark = "\x00ferry:loaded"
 var connCommands = map[string]bool{"software": true, "terminal": true, "files": true, "trust": true, "hostkey": true, "secret": true,
 	"pool": true, "disconnect": true, "validate": true, "inspect": true, "ai": true, "probe": true, "who": true, "server-info": true, "forward": true}
 
-// filesCmd ferry files ls|size|preview|save|mkdir|mv|rm|upload|download <目标> …
+// filesCmd ferry files ls|size|preview|save|mkdir|mv|rm|upload|download|compress|extract <目标> …
 func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail func(error) int) int {
-	usage := errors.New("用法：ferry files ls|size|preview|save|mkdir|mv|rm|upload|download <目标> …（ferry help 查看）")
+	usage := errors.New("用法：ferry files ls|access|size|preview|save|mkdir|mv|rm|upload|download|compress|extract <目标> …（ferry help 查看）")
 	if len(c.pos) < 2 {
 		return fail(usage)
 	}
 	sub, target, rest := c.pos[0], c.pos[1], c.pos[2:]
+	e.FileSudo = c.has("as-sudo")
 	done := func(data any, msg string) int {
 		if js != nil {
 			return ok0(js, data)
@@ -1040,6 +1053,15 @@ func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console
 			}
 		}
 		return done(l, "")
+	case "access":
+		if len(rest) != 1 {
+			return fail(usage)
+		}
+		a, err := e.FileAccess(target, rest[0])
+		if err != nil {
+			return fail(err)
+		}
+		return done(a, fmt.Sprintf("%s（%s）可见：%t，读：%t，写：%t，执行或进入：%t", rest[0], a.Identity, a.Exists, a.Read, a.Write, a.Execute))
 	case "size":
 		if len(rest) != 1 {
 			return fail(usage)
@@ -1078,7 +1100,7 @@ func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console
 		if err := json.Unmarshal([]byte(cio.getenv("FERRY_FILE_VALUE")), &value); err != nil || value.Content == nil {
 			return fail(errors.New("请用 FERRY_FILE_VALUE 提供包含 revision 和 content 的 JSON"))
 		}
-		p, err := e.SaveFile(target, rest[0], remote.FileEdit{Revision: value.Revision, Content: *value.Content})
+		p, err := e.SaveFile(target, rest[0], remote.FileEdit{Revision: value.Revision, Content: *value.Content}, c.has("sudo-if-needed"))
 		if err != nil {
 			return fail(err)
 		}
@@ -1087,7 +1109,7 @@ func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console
 		if len(rest) != 1 {
 			return fail(usage)
 		}
-		if err := e.MakeDir(target, rest[0]); err != nil {
+		if err := e.MakeDirFor(target, rest[0], c.flags["owner"]); err != nil {
 			return fail(err)
 		}
 		return done(map[string]any{"path": rest[0]}, "已新建 "+rest[0])
@@ -1123,6 +1145,24 @@ func filesCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, con *ui.Console
 			return fail(err)
 		}
 		return done(map[string]any{"to": c.flags["to"], "files": rest}, "下载完成")
+	case "compress":
+		dst := c.flags["to"]
+		if len(rest) == 0 || dst == "" {
+			return fail(usage)
+		}
+		if err := e.CompressFiles(target, rest, dst); err != nil {
+			return fail(err)
+		}
+		return done(map[string]any{"path": dst}, "已压缩到 "+dst)
+	case "extract":
+		dst := c.flags["to"]
+		if len(rest) != 1 || dst == "" {
+			return fail(usage)
+		}
+		if err := e.ExtractArchive(target, rest[0], dst); err != nil {
+			return fail(err)
+		}
+		return done(map[string]any{"path": dst}, "已解压到 "+dst)
 	}
 	return fail(usage)
 }
@@ -1643,7 +1683,7 @@ func inspect(f *config.File) map[string]any {
 			}
 		}
 		targets = append(targets, map[string]any{
-			"name": t.Name, "title": t.Title, "host": t.Host, "port": t.Port, "user": t.User, "sudo": t.Sudo, "root": t.Root,
+			"name": t.Name, "title": t.Title, "host": t.Host, "port": t.Port, "user": t.User, "sudo": t.Sudo, "sudoAuth": t.SudoAuth, "root": t.Root,
 			"runtimeDir": path.Join(t.FerryDir, "runtimes"),
 			"runAs":      t.RunAs, "arch": t.Arch, "keepReleases": t.KeepReleases, "confirm": t.NeedConfirm(),
 			"hostKey": t.HostKey, "apps": apps, "auth": t.Auth, "identityFile": t.IdentityFile, "appRoots": appRoots,
@@ -1704,13 +1744,17 @@ func cmdInit() int {
 }
 
 // secretCmd ferry secret set|delete|status <目标> | --passphrase <私钥>
-func secretCmd(f *config.File, c *cli, cio *cliIO, con *ui.Console) (map[string]any, error) {
+func secretCmd(e *engine.Engine, c *cli, cio *cliIO, con *ui.Console) (map[string]any, error) {
+	f := e.File
 	if len(c.pos) == 0 {
 		return nil, errors.New("用法：ferry secret set|delete|status <目标> 或 --passphrase <私钥>")
 	}
 	action := c.pos[0]
-	var account, what string
+	var account, what, env string
 	if key := c.flags["passphrase"]; key != "" {
+		if c.has("sudo") {
+			return nil, errors.New("--sudo 和 --passphrase 只能选一个")
+		}
 		account, what = secret.PassphraseAccount(f.LocalPath(key)), "私钥 "+key+" 的密码"
 	} else {
 		if len(c.pos) < 2 {
@@ -1721,6 +1765,10 @@ func secretCmd(f *config.File, c *cli, cio *cliIO, con *ui.Console) (map[string]
 			return nil, err
 		}
 		account, what = secret.PasswordAccount(t.User, t.Host, t.Port), fmt.Sprintf("%s@%s:%d 的登录密码", t.User, t.Host, t.Port)
+		if c.has("sudo") {
+			account, what = secret.SudoAccount(t.User, t.Host, t.Port), fmt.Sprintf("%s@%s:%d 的 sudo 密码", t.User, t.Host, t.Port)
+			env = secret.SudoEnv(t.User, t.Host, t.Port)
+		}
 	}
 	switch action {
 	case "set":
@@ -1731,13 +1779,35 @@ func secretCmd(f *config.File, c *cli, cio *cliIO, con *ui.Console) (map[string]
 		if v == "" {
 			return nil, errors.New("没有输入：在终端中运行，或通过环境变量 FERRY_SECRET_VALUE 提供")
 		}
+		if c.has("sudo") && strings.ContainsAny(v, "\r\n\x00") {
+			return nil, errors.New("sudo 密码不能包含换行或 NUL")
+		}
+		if c.has("verify") {
+			if !c.has("sudo") {
+				return nil, errors.New("--verify 仅用于验证 sudo 密码")
+			}
+			verified, err := e.VerifySudoPassword(c.pos[1], v)
+			if err != nil {
+				return nil, err
+			}
+			if !verified {
+				if con != nil {
+					con.Info("服务器未要求 sudo 密码")
+				}
+				return map[string]any{"stored": false, "env": env, "passwordless": true}, nil
+			}
+		}
 		if err := secret.Set(account, v); err != nil {
 			return nil, err
 		}
 		if con != nil {
 			con.OK("已把%s保存到系统凭据库", what)
 		}
-		return map[string]any{"stored": true}, nil
+		result := map[string]any{"stored": true, "account": account}
+		if env != "" {
+			result["env"] = env
+		}
+		return result, nil
 	case "delete":
 		if err := secret.Delete(account); err != nil {
 			return nil, err
@@ -1745,7 +1815,7 @@ func secretCmd(f *config.File, c *cli, cio *cliIO, con *ui.Console) (map[string]
 		if con != nil {
 			con.OK("已删除%s", what)
 		}
-		return map[string]any{"stored": false}, nil
+		return map[string]any{"stored": false, "account": account}, nil
 	case "status":
 		_, ok, err := secret.Get(account)
 		if err != nil {
@@ -2111,6 +2181,9 @@ func secretAccountCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail fun
 		return fail(errors.New("用法：ferry secret list | delete --account <账户>；查看内容请在桌面版设置 → 凭据里点「查看」"))
 	}
 	switch c.pos[0] {
+	case "forget-session":
+		cio.invalidate()
+		return ok0(js, map[string]bool{"invalidated": true})
 	case "show":
 		// 内容只经本机 sidecar 的响应交给查看对话框，不输出到普通命令行或任务记录。
 		if cio.pool == nil || js == nil {
@@ -2140,7 +2213,9 @@ func secretAccountCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail fun
 		if err := secret.Delete(c.flags["account"]); err != nil {
 			return fail(err)
 		}
-		cio.invalidate()
+		if cio.pool != nil {
+			cio.pool.InvalidateCredential(c.flags["account"])
+		}
 		if rest, ok := strings.CutPrefix(c.flags["account"], secret.KindAIInput+":"); ok {
 			// AI 助手里填的：内存里的也忘掉（ai-input:<对话>:<名字>）
 			if conv, name, ok := strings.Cut(rest, ":"); ok {
@@ -2148,7 +2223,7 @@ func secretAccountCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail fun
 			}
 		}
 		if js != nil {
-			js.Result(true, map[string]any{"stored": false}, nil)
+			js.Result(true, map[string]any{"stored": false, "env": secret.SessionEnv(c.flags["account"])}, nil)
 		} else {
 			con.OK("已删除 %s", c.flags["account"])
 		}

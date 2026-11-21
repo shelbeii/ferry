@@ -13,6 +13,7 @@ import (
 
 	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/config"
+	"github.com/captain/ferry/internal/secret"
 	"github.com/captain/ferry/internal/ui"
 )
 
@@ -32,6 +33,7 @@ type connTarget struct {
 	User         string `yaml:"user,omitempty" json:"user"`
 	Auth         string `yaml:"auth,omitempty" json:"auth"`
 	IdentityFile string `yaml:"identityFile,omitempty" json:"identityFile"`
+	SudoAuth     string `yaml:"sudoAuth,omitempty" json:"sudoAuth,omitempty"`
 	HostKey      string `yaml:"hostKey,omitempty" json:"hostKey"`
 }
 
@@ -162,7 +164,8 @@ func connectionCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, fail func(e
 		if con != nil {
 			con.OK("已保存 %s", name)
 		}
-		return ok0(js, map[string]any{"name": name, "path": connectionsPath()})
+		account := secret.PasswordAccount(orDefault(t.User, "root"), t.Host, orPort(t.Port))
+		return ok0(js, map[string]any{"name": name, "path": connectionsPath(), "passwordEnv": secret.SessionEnv(account)})
 	case "remove":
 		if len(c.pos) < 2 {
 			return fail(errors.New("用法：ferry connection remove <名称>"))

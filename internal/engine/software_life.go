@@ -257,8 +257,8 @@ func (e *Engine) SoftwareBackup(target, name, database string) (string, error) {
 	}
 	envFile := in.Dir + "/ferry-backup.env"
 	e.Rep.Step("在 %s 上写备份用的密码文件 %s（只有 root 能读）", t.Name, envFile)
-	cmd := s.sudo + "sh -c " + shQuote("umask 077; cat > "+shQuote(envFile)+" && chown root:root "+shQuote(envFile))
-	res, err := s.c.RunContext(e.ctx(), cmd, []byte(pwVar+"="+pw+"\n"), nil)
+	cmd := "sh -c " + shQuote("umask 077; cat > "+shQuote(envFile)+" && chown root:root "+shQuote(envFile))
+	res, err := s.runPriv(e.ctx(), cmd, []byte(pwVar+"="+pw+"\n"), nil)
 	if err != nil {
 		return "", err
 	}

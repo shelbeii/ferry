@@ -117,7 +117,7 @@ func (a *Agent) fixAccess(user, p string, flag byte, isDir, apply bool) (string,
 		}
 		return desc, true
 	}
-	// 其他用户：优先只给运行用户开（ACL），文件系统不支持时再对所有用户开放这一位
+	// 其他用户：优先只给运行用户开（ACL）。公开权限需要单独选择。
 	aclDesc := fmt.Sprintf("只给 %s 加上%s %s 的权限（setfacl -m u:%s:%c %s）", user, word, p, user, flag, p)
 	if !apply {
 		if _, err := exec.LookPath("setfacl"); err == nil {
@@ -128,6 +128,9 @@ func (a *Agent) fixAccess(user, p string, flag byte, isDir, apply bool) (string,
 			return aclDesc + "失败：" + err.Error(), false
 		}
 		return aclDesc, true
+	}
+	if !a.req.AllowPublicPerms {
+		return fmt.Sprintf("%s 无法只通过 ACL 授权给 %s，请为运行用户配置专用 ACL/组，或明确允许扩大访问范围", p, user), false
 	}
 	desc := fmt.Sprintf("让所有用户可以%s %s（chmod o+%c %s）", word, p, flag, p)
 	if apply {

@@ -193,7 +193,8 @@ type Deploy struct {
 	SkipBuild bool `json:"skipBuild"`
 	Full      bool `json:"full"`
 	// KeepPerms 部署时不自动修正权限（默认修正：运行用户访问不了的目录 / 文件、不安全的部署目录）
-	KeepPerms bool `json:"keepPerms"`
+	KeepPerms        bool `json:"keepPerms"`
+	AllowPublicPerms bool `json:"allowPublicPerms,omitempty"`
 }
 
 // Runtime Ferry 提供的运行环境（JDK）。

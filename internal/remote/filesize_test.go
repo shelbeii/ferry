@@ -33,21 +33,21 @@ func TestFileSizeIncludesHiddenFilesAndDoesNotExpandInternalLinks(t *testing.T) 
 		expected += st.Size()
 	}
 	for _, p := range []string{"/srv/site", "/selected-site"} {
-		result, err := c.FileSize(context.Background(), p)
+		result, err := c.Files().FileSize(context.Background(), p)
 		if err != nil || result == nil || result.Bytes != expected || !result.Dir || result.Path != p {
 			t.Fatalf("目录与选中的目录链接应统计完整内容，内部链接不展开：%+v, %v, expected %d", result, err, expected)
 		}
 	}
-	file, err := c.FileSize(context.Background(), "/srv/site/index.html")
+	file, err := c.Files().FileSize(context.Background(), "/srv/site/index.html")
 	if err != nil || file.Bytes != 5 || file.Dir {
 		t.Fatalf("普通文件按实际长度读取：%+v, %v", file, err)
 	}
 	writeEditFixture(t, c, "/empty", "")
-	zero, err := c.FileSize(context.Background(), "/empty")
+	zero, err := c.Files().FileSize(context.Background(), "/empty")
 	if err != nil || zero.Bytes != 0 {
 		t.Fatalf("空文件必须显示 0 字节：%+v, %v", zero, err)
 	}
-	if result, err := c.FileSize(context.Background(), "/missing"); err == nil || result != nil {
+	if result, err := c.Files().FileSize(context.Background(), "/missing"); err == nil || result != nil {
 		t.Fatal("不存在的条目不能显示为 0 字节")
 	}
 }
@@ -76,7 +76,7 @@ func TestFileSizeUnreadableDirectoryDoesNotReturnPartialTotal(t *testing.T) {
 	c := editMemoryClient(t, handlers)
 	c.sftp.MkdirAll("/site/locked")
 	writeEditFixture(t, c, "/site/visible", "content")
-	result, err := c.FileSize(context.Background(), "/site")
+	result, err := c.Files().FileSize(context.Background(), "/site")
 	if result != nil || err == nil || !strings.Contains(err.Error(), "没有权限") || !strings.Contains(err.Error(), "/site/locked") {
 		t.Fatalf("无权限必须明确报告，不能把部分大小当作总数：%+v %v", result, err)
 	}
@@ -89,13 +89,13 @@ func TestFileSizeCancelKeepsSFTPSessionUsable(t *testing.T) {
 	handlers.FileList = sizeListHandler{FileLister: handlers.FileList, onList: cancel}
 	c := editMemoryClient(t, handlers)
 	c.sftp.MkdirAll("/site")
-	if result, err := c.FileSize(ctx, "/site"); result != nil || !errors.Is(err, ErrCanceled) {
+	if result, err := c.Files().FileSize(ctx, "/site"); result != nil || !errors.Is(err, ErrCanceled) {
 		t.Fatalf("目录统计中可取消：%+v %v", result, err)
 	}
 	if _, err := c.sftp.Stat("/site"); err != nil {
 		t.Fatal("取消统计不能关闭共用的 SFTP 会话：", err)
 	}
-	if _, err := (&Client{}).FileSize(ctx, "/"); !errors.Is(err, ErrCanceled) {
+	if _, err := (&FileClient{}).FileSize(ctx, "/"); !errors.Is(err, ErrCanceled) {
 		t.Fatal("已取消的请求不应建立连接：", err)
 	}
 }

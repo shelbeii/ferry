@@ -100,7 +100,7 @@ func (e *Engine) withConn(target string, fn func(s *session) error) error {
 	if err != nil {
 		return err
 	}
-	s, err := e.connect(t)
+	s, err := e.connectSSH(t)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (e *Engine) withConn(target string, fn func(s *session) error) error {
 
 func listSSH(s *session) (*SSHReport, error) {
 	var lines []string
-	res, err := s.c.Run(privWrap, []byte(sshScript), func(l string) { lines = append(lines, l) })
+	res, err := s.runPrivilegeProbe(s.e.ctx(), sshScript, func(l string) { lines = append(lines, l) })
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +163,7 @@ func (e *Engine) SSHKick(target string, pids []int) (*SSHReport, error) {
 				return ErrCanceled
 			}
 		}
-		if _, err := s.c.Run(privWrap, []byte(kickScript(kill)), nil); err != nil {
+		if _, err := s.runPrivilegeProbe(e.ctx(), kickScript(kill), nil); err != nil {
 			return err
 		}
 		if rep, err = listSSH(s); err != nil {

@@ -28,6 +28,7 @@ var vaultMu sync.Mutex
 // 凭据种类。
 const (
 	KindPassword   = "password"   // 服务器登录密码
+	KindSudo       = "sudo"       // 服务器 sudo 密码
 	KindPassphrase = "passphrase" // 私钥密码
 	KindSoftware   = "software"   // Ferry 安装的软件的管理员 / root 密码
 	KindAI         = "ai"         // 服务器助手用的大模型 API Key
@@ -52,6 +53,33 @@ func service() string {
 // PasswordAccount 服务器密码在凭据库里的账户名。
 func PasswordAccount(user, host string, port int) string {
 	return fmt.Sprintf("password:%s@%s:%d", user, strings.ToLower(host), port)
+}
+
+func SudoAccount(user, host string, port int) string {
+	return fmt.Sprintf("sudo:%s@%s:%d", user, strings.ToLower(host), port)
+}
+
+func SudoEnv(user, host string, port int) string {
+	return SessionEnv(SudoAccount(user, host, port))
+}
+
+func SessionEnv(account string) string {
+	kind, value, ok := strings.Cut(account, ":")
+	if !ok {
+		return ""
+	}
+	switch kind {
+	case KindPassphrase:
+		return PassphraseEnv(value)
+	case KindSudo, KindPassword:
+		sum := sha256.Sum256([]byte(account))
+		return "FERRY_" + strings.ToUpper(kind) + "_SESSION_" + strings.ToUpper(hex.EncodeToString(sum[:])[:24])
+	}
+	return ""
+}
+
+func SudoTargetEnv(target string) string {
+	return "FERRY_SUDO_" + PasswordEnv(target)[len("FERRY_"):]
 }
 
 // SoftwareAccount Ferry 安装的软件的密码在凭据库里的账户名：software:<名称>@<服务器>:<SSH 端口>。
@@ -227,6 +255,14 @@ func (e *NeedError) Error() string {
 	what := "服务器 " + e.Target + " 的登录密码"
 	if e.Kind == KindPassphrase {
 		what = "私钥 " + e.Key + " 的密码"
+	}
+	if e.Kind == KindSudo {
+		what = "服务器 " + e.Target + " 的 sudo 密码"
+		env := SudoTargetEnv(e.Target)
+		if e.Rejected {
+			return what + "被拒绝：更新系统凭据库（ferry secret set --sudo " + e.Target + "）或环境变量 " + env
+		}
+		return "需要" + what + "：在终端中输入，或通过 ferry secret set --sudo " + e.Target + " 或环境变量 " + env + " 提供"
 	}
 	if e.Rejected {
 		return what + "不正确：用 ferry secret set 重新保存，或通过环境变量 " + e.Env + " 提供"

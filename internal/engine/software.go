@@ -578,6 +578,7 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	plan.Variant, plan.Logrotate = vi, v.Logrotate
 	plan.Ports, plan.UDPPorts, plan.PortMap = ports, udpPorts, portMap
 	plan.FixParents = fix
+	plan.AllowPublicPerms = e.Settings.Deploy.AllowPublicPerms
 	plan.Proxy, plan.NoProxy = networkPlan.Proxy, networkPlan.NoProxy
 	if plan.System != nil {
 		plan.System.AllowChanges = o.AllowChanges

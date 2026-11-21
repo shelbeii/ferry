@@ -6,6 +6,7 @@
 #   KEEP=1 test/e2e/run.sh   结束后保留容器（便于排查）
 #   E2E_JDK_ONLY=1 test/e2e/run.sh   只运行服务器 JDK 管理场景
 #   E2E_RUNTIME_ONLY=1 test/e2e/run.sh   用真实发行包测试 Node.js、Python、.NET，并回归 JDK
+#   E2E_SUDO_ONLY=1 test/e2e/run.sh   只测试需要密码和免密的 sudo
 #
 # 不会碰本机的 ferry 数据目录：运行时 FERRY_HOME 指向 out/home。
 set -uo pipefail
@@ -16,10 +17,16 @@ E2E=$(winpwd)
 ROOT=$(cd ../.. && winpwd)
 OUT=$E2E/out
 runtimeOnly=${E2E_RUNTIME_ONLY:-0}
+sudoOnly=${E2E_SUDO_ONLY:-0}
 focused=${E2E_JDK_ONLY:-0}
-[[ $runtimeOnly == 1 ]] && focused=1
+[[ $runtimeOnly == 1 || $sudoOnly == 1 ]] && focused=1
+containerPrefix=ferry-e2e
 # 专项测试用独立的产物目录和动态 SSH 端口，方便和桌面预览同时运行。
-if [[ $runtimeOnly == 1 ]]; then
+if [[ $sudoOnly == 1 ]]; then
+  mkdir -p "$OUT" || exit 2
+  OUT=$(mktemp -d "$OUT/sudo-only.XXXXXX") || exit 2
+  containerPrefix="ferry-e2e-${OUT##*/}"
+elif [[ $runtimeOnly == 1 ]]; then
   OUT=$OUT/runtime-only
 elif [[ $focused == 1 ]]; then
   OUT=$OUT/jdk-only
@@ -31,7 +38,7 @@ OLD_REF=${OLD_REF:-5e35281}   # 0.12.13：以前的目录结构（releases/、sh
 PASS=0
 FAILED=0
 
-rm -rf "$OUT"
+[[ $sudoOnly == 1 ]] || rm -rf "$OUT"
 mkdir -p "$OUT/web" "$OUT/site" "$OUT/home" "$OUT/agents"
 : > "$LOG"
 
@@ -40,7 +47,7 @@ die() { echo "错误：$*" >&2; exit 2; }
 
 finish() {
   if [[ ${KEEP:-} != 1 ]]; then
-    docker rm -f ferry-e2e-a ferry-e2e-b >/dev/null 2>&1
+    docker rm -f "$containerPrefix-a" "$containerPrefix-b" >/dev/null 2>&1
   fi
   printf '\n通过 %d，失败 %d（详细输出：%s）\n' "$PASS" "$FAILED" "$LOG"
   (( FAILED == 0 ))
@@ -92,7 +99,7 @@ F() { FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" "$@"; }
 FK() { FERRY_HOME="$OUT/home" "$FERRY" -c "$OUT/kg.yaml" "$@"; }
 # 带密码运行（模拟桌面版把用户输入的密码通过环境变量传给 ferry）
 withpw() { FERRY_PASSWORD_E2E_PW=$1 "${@:2}"; }
-dx() { docker exec "ferry-e2e-$1" sh -c "$2"; }
+dx() { docker exec "$containerPrefix-$1" sh -c "$2"; }
 health() { dx "$1" "curl -s http://127.0.0.1:$2/health"; }
 
 # ---------------------------------------------------------------- 准备
@@ -104,6 +111,10 @@ docker info >/dev/null 2>&1 || die "docker 没有运行"
   EXE=$(go env GOEXE)
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$OUT/agents/ferry-agent-linux-amd64" ./cmd/ferry-agent || exit 1
   go build -o "$OUT/ferry$EXE" ./cmd/ferry || exit 1
+  if [[ $sudoOnly == 1 ]]; then
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '-X main.version=v1' -o "$OUT/demo-v1" ./test/e2e/demo
+    exit $?
+  fi
   if [[ $focused == 1 ]]; then
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$OUT/demo-v1" ./test/e2e/demo || exit 1
     go run ./test/e2e/mkjar "$OUT/rt.jar" v1 || exit 1
@@ -149,10 +160,10 @@ docker build -q -t "$IMAGE" "$E2E" >/dev/null || die "构建镜像失败"
 for spec in a:2222 b:2223; do
   n=${spec%%:*} port=${spec#*:}
   [[ $focused == 1 ]] && port=
-  docker rm -f "ferry-e2e-$n" >/dev/null 2>&1
+  [[ $sudoOnly == 1 ]] || docker rm -f "$containerPrefix-$n" >/dev/null 2>&1
   extra=()
   [[ $n == a ]] && extra=(--tmpfs /data:rw,exec,mode=755,size=256m -p 127.0.0.1::18597)  # 模拟另一个分区，及本机 JDK 镜像地址
-  docker run -d --name "ferry-e2e-$n" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+  docker run -d --name "$containerPrefix-$n" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     "${extra[@]}" -p "127.0.0.1:$port:22" "$IMAGE" >/dev/null || die "启动容器 $n 失败"
 done
 for n in a b; do
@@ -160,13 +171,21 @@ for n in a b; do
     [[ $(dx "$n" 'systemctl is-active sshd' 2>/dev/null) == active ]] && break
     sleep 1
   done
-  docker exec -i "ferry-e2e-$n" sh -c 'cat > /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /home/deployer/.ssh/ \
+  docker exec -i "$containerPrefix-$n" sh -c 'cat > /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /home/deployer/.ssh/ \
     && chown deployer: /home/deployer/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys /home/deployer/.ssh/authorized_keys' \
     < "$OUT/id_test.pub"
-  docker cp "$OUT/demo-v1" "ferry-e2e-$n:/usr/local/bin/demoserver" >/dev/null
+  docker cp "$OUT/demo-v1" "$containerPrefix-$n:/usr/local/bin/demoserver" >/dev/null
   dx "$n" 'chmod 755 /usr/local/bin/demoserver'
 done
 echo "  容器就绪"
+
+if [[ $sudoOnly == 1 || $focused != 1 ]]; then
+  source "$E2E/sudo.sh"
+fi
+if [[ $sudoOnly == 1 ]]; then
+  finish
+  exit $?
+fi
 
 source "$E2E/jdk.sh"
 if [[ $runtimeOnly == 1 ]]; then

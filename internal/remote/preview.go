@@ -3,8 +3,11 @@ package remote
 import (
 	"context"
 	"fmt"
-	"github.com/captain/ferry/internal/filetext"
 	"io"
+	"os"
+
+	"github.com/captain/ferry/internal/filetext"
+	"github.com/pkg/sftp"
 )
 
 const FilePreviewLimit = filetext.Limit
@@ -12,7 +15,7 @@ const FilePreviewLimit = filetext.Limit
 type FilePreview = filetext.Document
 
 // PreviewFile 以登录用户的身份只读预览普通文件（允许指向普通文件的链接）。
-func (c *Client) PreviewFile(ctx context.Context, p string) (*FilePreview, error) {
+func (c *FileClient) PreviewFile(ctx context.Context, p string) (*FilePreview, error) {
 	if ctx.Err() != nil {
 		return nil, ErrCanceled
 	}
@@ -24,40 +27,49 @@ func (c *Client) PreviewFile(ctx context.Context, p string) (*FilePreview, error
 	if err != nil {
 		return nil, fileErr("读取", p, err)
 	}
+	return previewFile(ctx, s, p, target)
+}
+
+func previewFile(ctx context.Context, s *sftp.Client, p, target string) (*FilePreview, error) {
+	doc, st, err := readSFTPPreview(ctx, s, p, target)
+	if err == nil && doc.Revision != "" {
+		doc.Revision = fileRevision(target, doc.Revision, st)
+	}
+	return doc, err
+}
+
+func readSFTPPreview(ctx context.Context, s *sftp.Client, p, target string) (*FilePreview, os.FileInfo, error) {
 	// 在打开之前排除目录、设备、管道，避免在特殊文件上一直等待读取。
 	st, err := s.Stat(target)
 	if err != nil {
-		return nil, fileErr("读取", p, err)
+		return nil, nil, fileErr("读取", p, err)
 	}
 	if !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s：仅支持查看普通文件的内容", p)
+		return nil, nil, fmt.Errorf("%s：仅支持查看普通文件的内容", p)
 	}
 	src, err := s.Open(target)
 	if err != nil {
-		return nil, fileErr("读取", p, err)
+		return nil, nil, fileErr("读取", p, err)
 	}
 	stop := context.AfterFunc(ctx, func() { src.Close() })
 	defer stop()
 	defer src.Close()
 	st, err = src.Stat()
 	if err == nil && !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s：仅支持查看普通文件的内容", p)
+		return nil, nil, fmt.Errorf("%s：仅支持查看普通文件的内容", p)
 	}
 	if err != nil {
-		return nil, fileErr("读取", p, err)
+		return nil, nil, fileErr("读取", p, err)
 	}
 	out, err := readFilePreview(src)
 	if ctx.Err() != nil {
-		return nil, ErrCanceled
+		return nil, nil, ErrCanceled
 	}
 	if err != nil {
-		return nil, fileErr("读取", p, err)
+		return nil, nil, fileErr("读取", p, err)
 	}
 	out.Path, out.Size = p, st.Size()
-	if out.Revision != "" {
-		out.Revision = fileRevision(target, out.Revision, st)
-	}
-	return out, nil
+	return out, st, nil
 }
 
 func readFilePreview(r io.Reader) (*FilePreview, error)           { return filetext.Decode(r) }

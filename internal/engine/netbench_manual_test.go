@@ -100,7 +100,8 @@ func TestNetBench(t *testing.T) {
 	defer c.Close()
 	cn := &conn{c: c, ferryDir: AgentDir, label: "root@e2e-a"}
 	e := &Engine{Rep: &recRep{}}
-	if err := e.ensureAgent(cn); err != nil {
+	s := &session{conn: cn, e: e}
+	if err := e.ensureAgent(s); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("新建连接 + 确认 agent：%v", time.Since(start).Round(time.Millisecond))
@@ -114,12 +115,12 @@ func TestNetBench(t *testing.T) {
 	var exec, serve []time.Duration
 	for i := 0; i < 9; i++ {
 		t0 := time.Now()
-		if _, err := c.Run(cn.agent+" history", body, func(string) {}); err != nil {
+		if _, err := c.Run(s.agent+" history", body, func(string) {}); err != nil {
 			t.Fatal(err)
 		}
 		exec = append(exec, time.Since(t0))
 	}
-	srv, err := startAgentServer(c, cn.agent+" serve")
+	srv, err := startAgentServer(c, s.agent+" serve")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,11 +168,13 @@ func TestNetBenchSudo(t *testing.T) {
 	defer c.Close()
 	cn := &conn{c: c, ferryDir: AgentDir, sudo: "sudo -n ", label: "deployer@e2e-b"}
 	rep := &recRep{}
-	if err := (&Engine{Rep: rep}).ensureAgent(cn); err != nil {
+	e := &Engine{Rep: rep}
+	s := &session{conn: cn, e: e}
+	if err := e.ensureAgent(s); err != nil {
 		t.Fatal(err)
 	}
-	srv := cn.server()
-	if srv == nil {
+	srv, err := s.server()
+	if err != nil || srv == nil {
 		t.Fatal("经 sudo 启动常驻的 agent 失败")
 	}
 	var got string

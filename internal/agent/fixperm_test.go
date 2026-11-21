@@ -33,8 +33,8 @@ func permFixture(t *testing.T) (f *fakeSys, s proto.AppSpec, script, scripts, tm
 	return
 }
 
-func runAccess(f *fakeSys, s *proto.AppSpec, mode string) *proto.Preflight {
-	a := &Agent{Sys: f, req: &proto.Request{Root: f.root, FixPerms: mode}}
+func runAccess(f *fakeSys, s *proto.AppSpec, mode string, public ...bool) *proto.Preflight {
+	a := &Agent{Sys: f, req: &proto.Request{Root: f.root, FixPerms: mode, AllowPublicPerms: len(public) > 0 && public[0]}}
 	p := &proto.Preflight{}
 	a.checkServiceAccess(s, p, map[string]error{})
 	return p
@@ -55,7 +55,7 @@ func TestFixPermsPlanThenApply(t *testing.T) {
 		t.Fatalf("problems：%v", p.Problems)
 	}
 	// plan：只列出，不改；没有问题
-	p := runAccess(f, &s, FixPlan)
+	p := runAccess(f, &s, FixPlan, true)
 	if len(p.Problems) != 0 || len(p.Fixable) != 2 || len(f.calls) != 0 {
 		t.Fatalf("plan：problems=%v fixable=%v calls=%v", p.Problems, p.Fixable, f.calls)
 	}
@@ -64,13 +64,23 @@ func TestFixPermsPlanThenApply(t *testing.T) {
 		t.Fatalf("fixable：\n%s", joined)
 	}
 	// apply：真的改，改完重新检查都通过
-	p = runAccess(f, &s, FixApply)
+	p = runAccess(f, &s, FixApply, true)
 	if len(p.Problems) != 0 || len(p.Fixed) != 2 {
 		t.Fatalf("apply：problems=%v fixed=%v", p.Problems, p.Fixed)
 	}
 	calls := strings.Join(f.calls, "\n")
 	if !strings.Contains(calls, "chown 1000:1000 "+tmp) || !strings.Contains(calls, "chmod 701 "+scripts) {
 		t.Fatalf("应 chown 临时目录、给脚本目录加 o+x：\n%s", calls)
+	}
+}
+
+func TestFixPermsDoesNotOpenAccessToAllByDefault(t *testing.T) {
+	f, s, _, scripts, _ := permFixture(t)
+	f.denied = map[string]bool{scripts: true}
+	f.owners = map[string]Ownership{scripts: {UID: 0, GID: 0, User: "root", Group: "root", Perm: os.ModeDir | 0o700}}
+	p := runAccess(f, &s, FixApply)
+	if len(p.Problems) != 1 || len(p.Fixed) != 0 || len(f.calls) != 0 {
+		t.Fatalf("无 ACL 且未明确允许，不应扩大权限：problems=%v fixed=%v calls=%v", p.Problems, p.Fixed, f.calls)
 	}
 }
 

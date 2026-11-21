@@ -28,6 +28,7 @@ type probeTarget struct {
 	Port         int    `json:"port"`
 	User         string `json:"user"`
 	Auth         string `json:"auth"`
+	SudoAuth     string `json:"sudoAuth"`
 	IdentityFile string `json:"identityFile"`
 	// Connection 从已有的连接填入：沿用它固定的主机公钥，私钥的相对路径按连接文件所在目录换算
 	Connection string `json:"connection"`
@@ -61,7 +62,7 @@ func probePrepareCmd(cio *cliIO, js *ui.JSON, fail func(error) int) int {
 		if pt.Name == "" || strings.TrimSpace(pt.Host) == "" {
 			return fail(fmt.Errorf("服务器 %q 没有填地址", pt.Name))
 		}
-		t := &connTarget{Host: strings.TrimSpace(pt.Host), Port: pt.Port, User: strings.TrimSpace(pt.User), Auth: pt.Auth}
+		t := &connTarget{Host: strings.TrimSpace(pt.Host), Port: pt.Port, User: strings.TrimSpace(pt.User), Auth: pt.Auth, SudoAuth: pt.SudoAuth}
 		base := in.ProjectDir
 		if c := conns.Targets[pt.Connection]; c != nil {
 			base = filepath.Dir(connectionsPath())

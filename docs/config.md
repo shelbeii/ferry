@@ -84,7 +84,8 @@ apps:
 | `host` | | 必填 |
 | `port` | 22 | |
 | `user` | root | SSH 用户 |
-| `sudo` | false | 非 root 登录时用 `sudo -n` 执行 agent（需要免密 sudo） |
+| `sudo` | false | 非 root 登录时，为部署等管理操作启用 sudo |
+| `sudoAuth` | nopasswd | `nopasswd` 使用免密 sudo，`password` 使用独立的 sudo 凭据，`disabled` 禁用提权（普通连接可以使用） |
 | `auth` | key | `key`：私钥 / ssh-agent；`password`：密码登录（同时支持 keyboard-interactive）。密码不写在配置里，见下方「登录凭据」 |
 | `identityFile` | `~/.ssh/id_ed25519` 等 | 私钥（`auth: key`）。私钥有密码时按「登录凭据」的顺序取。也会用 ssh-agent（Windows 为 OpenSSH 代理） |
 | `hostKey` | | 固定主机公钥指纹 `SHA256:…`；不设置时用 `~/.ferry/known_hosts` 与 `~/.ssh/known_hosts` |
@@ -103,6 +104,14 @@ apps:
 | `vars` | | 目标变量 |
 
 ## 登录凭据
+
+密码 sudo 使用单独的凭据。项目目标配置 `sudo: true` 和 `sudoAuth: password`。独立连接可在「修改连接」里选择「sudo 认证 → 使用密码」。桌面首次提权时会提示输入，可只在当前会话使用或保存到系统凭据库。命令行可用 `ferry secret set --sudo <目标>` 保存，CI 可用 `FERRY_SUDO_PASSWORD_<目标名大写>`，目标名中的非字母数字换成下划线。服务器仍需授权该账号执行对应的 sudo 操作。终端中手动输入的命令沿用服务器的交互式 sudo。
+
+终端、普通文件浏览和 SSH 转发只需要 SSH 登录。部署、软件安装等管理操作在使用时检查 sudo 和服务器组件。
+
+文件管理器默认使用登录账号。在文件面板中切换「以 sudo 操作」后，浏览和同一面板发起的文件操作使用独立提权会话。界面显示当前身份，删除和上传覆盖时也会显示它；关闭面板后结束该模式。右键可以检查当前身份的实际读、写、进入或执行权限。需要把新目录交给登录用户或目标默认运行用户时，从提权模式的右键菜单选择对应选项。对不可信的可写上级目录，Ferry 会拒绝代设属主。
+
+命令行可用 `ferry files ... --as-sudo`、`ferry files access <目标> <路径>` 和 `ferry files mkdir <目标> <路径> --as-sudo --owner login|run-as`。连接保留原有的普通创建失败后尝试 sudo 的行为。使用提权文件模式需要服务器有外置 OpenSSH `sftp-server`，以及 sudoers 授权。
 
 密码与私钥密码**从不写进 ferry.yaml**。需要时依次从这里取：
 
@@ -299,7 +308,7 @@ apps:
 
 `ExecStart` 中参数含空格等字符时自动加引号，`%` 写成 `%%`；`$NAME` 保留给 systemd 展开环境变量。
 
-预检会以运行用户的身份（`runuser -u <用户> -- test …`，ACL 与安全模块的限制也算在内）检查单元里用到的路径：`ExecStartPre` / `ExecStart` / `ExecStartPost` 的程序要能执行（脚本还要能读），参数里已存在的文件要能读（可执行文件还要能执行）、目录要能进入和列出，`-Djava.io.tmpdir` 还要能写，`WorkingDirectory` 要存在且能进入；`ProtectHome=` 挡住 `/home` 下的路径也会指出。访问不了时说明卡在哪一级目录及其属主、权限。部署时默认**自动修正**这些权限（`--keep-perms` 或设置里关掉「部署时自动修正权限」则只报告）：要写入的交给运行用户（`chown`，不递归）；要读、进入、执行的只补缺的那一位——属主、同组用 `chmod u+ / g+`，其他用户优先 `setfacl` 只给运行用户开，文件系统不支持 ACL 时才 `chmod o+`；部署目录本身属主不是 root 或他人可写时改回 `root`、去掉组和其他用户的写权限。系统目录（/etc、/usr…）、一级目录（/home、/data 这类挂载点）、别人的家目录、部署目录的上级都不会自动修改；权限位允许却仍被拒绝（ACL、麒麟 KYSEC、SELinux）的也不自动改。运行用户不存在时，部署时同样会自动创建（`useradd -r -m -s /sbin/nologin <用户>`）。单独的 `ferry preflight` 只列出「部署时会自动修正」的内容，不修改；部署时在确认之后、构建之前修改，并在任务里逐条列出。修正不了的问题会在改动服务器之前阻止部署；带 `-` 前缀（失败可忽略）的命令只提示。
+预检会以运行用户的身份（`runuser -u <用户> -- test …`，ACL 与安全模块的限制也算在内）检查单元里用到的路径：`ExecStartPre` / `ExecStart` / `ExecStartPost` 的程序要能执行（脚本还要能读），参数里已存在的文件要能读（可执行文件还要能执行）、目录要能进入和列出，`-Djava.io.tmpdir` 还要能写，`WorkingDirectory` 要存在且能进入；`ProtectHome=` 挡住 `/home` 下的路径也会指出。访问不了时说明卡在哪一级目录及其属主、权限。部署时默认**自动修正**这些权限（`--keep-perms` 或设置里关掉「部署时自动修正权限」则只报告）：要写入的交给运行用户（`chown`，不递归）；要读、进入、执行的只补缺的那一位——属主、同组用 `chmod u+ / g+`，其他用户优先 `setfacl` 只给运行用户开，ACL 不可用时提示管理员，只在明确允许扩大访问范围（设置或 `--allow-public-perms`）时才 `chmod o+`；部署目录本身属主不是 root 或他人可写时改回 `root`、去掉组和其他用户的写权限。系统目录（/etc、/usr…）、一级目录（/home、/data 这类挂载点）、别人的家目录、部署目录的上级都不会自动修改；权限位允许却仍被拒绝（ACL、麒麟 KYSEC、SELinux）的也不自动改。运行用户不存在时，部署时同样会自动创建（`useradd -r -m -s /sbin/nologin <用户>`）。单独的 `ferry preflight` 只列出「部署时会自动修正」的内容，不修改；部署时在确认之后、构建之前修改，并在任务里逐条列出。修正不了的问题会在改动服务器之前阻止部署；带 `-` 前缀（失败可忽略）的命令只提示。
 
 Java 应用：预检读取 `service.java` 的版本，并找出服务器上常见位置（/usr/lib/jvm、/usr/java、/opt、/usr/local、/home/*/runtime…）已有的 JDK；构建之后、上传之前读取 jar 主类的 class 文件版本（61 = Java 17），服务器上的 java 不够新时直接停下（不上传、不动服务器），并列出可以改用的 JDK。本次部署的应用自己的目录、含变量或通配符的参数不检查，`EnvironmentFile` 由 systemd 以 root 读取，也不检查。
 

@@ -210,13 +210,26 @@
       {
        "name": "sudo",
        "label": "用 sudo",
-       "doc": "不是 root 登录时用 sudo -n 执行（需要免密 sudo）",
+       "doc": "非 root 登录时，为部署等管理操作启用 sudo",
        "kind": "bool",
        "type": "布尔",
        "values": [
         "true",
         "false"
        ]
+      },
+      {
+       "name": "sudoAuth",
+       "label": "sudo 认证",
+       "doc": "nopasswd 为免密。password 使用单独的 sudo 密码。disabled 禁用提权。",
+       "kind": "str",
+       "type": "字符串",
+       "values": [
+        "nopasswd",
+        "password",
+        "disabled"
+       ],
+       "default": "nopasswd"
       },
       {
        "name": "root",

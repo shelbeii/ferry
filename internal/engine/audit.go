@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -56,10 +57,7 @@ func (s *session) audit(e proto.AuditEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var err error
-	if s.agent == "" {
-		msg := fmt.Sprintf("%s %s %s", e.Actor, proto.AuditKindText(e.Kind), e.Object)
-		_, err = s.c.RunContext(ctx, "logger -t ferry-audit -- "+shQuote(strings.TrimSpace(msg)), nil, nil)
-	} else {
+	if s.agent != "" {
 		eng := *s.e
 		eng.Ctx = ctx
 		eng.Rep = quietReporter{}
@@ -68,9 +66,29 @@ func (s *session) audit(e proto.AuditEntry) {
 		remoteEntry := e
 		remoteEntry.Host = ""
 		err = sc.callData("audit", &proto.Request{Audit: &remoteEntry}, nil)
+		if err == nil {
+			return
+		}
 	}
-	if err != nil {
-		s.e.warnAuditOnce(err)
+	msg := fmt.Sprintf("%s %s %s [%s]", e.Actor, proto.AuditKindText(e.Kind), e.Object, e.Result)
+	if e.Identity != "" {
+		msg += " [" + e.Identity + "]"
+	}
+	// A login session can use the system logger without bootstrapping the agent.
+	// Keep a bounded record so the remote audit view can still find the event.
+	e.Host = ""
+	e.Source = "journal"
+	e.Detail = string([]rune(e.Detail)[:min(len([]rune(e.Detail)), 240)])
+	e.Error = string([]rune(e.Error)[:min(len([]rune(e.Error)), 240)])
+	if raw, encErr := json.Marshal(e); encErr == nil && len(raw) <= 3500 {
+		msg += proto.AuditJournalMarker + base64.RawStdEncoding.EncodeToString(raw)
+	}
+	res, logErr := s.c.RunContext(ctx, "logger -t ferry-audit -- "+shQuote(strings.TrimSpace(msg)), nil, nil)
+	if logErr == nil && res.Code != 0 {
+		logErr = fmt.Errorf("logger 退出码 %d：%s", res.Code, strings.TrimSpace(res.Stderr))
+	}
+	if logErr != nil {
+		s.e.warnAuditOnce(logErr)
 	}
 }
 
@@ -101,23 +119,33 @@ func (quietReporter) Confirm(string) bool           { return false }
 func (quietReporter) Secret(string) (string, bool)  { return "", false }
 
 // withChange 像 withClient，做完再记一条审计（kind、object、detail）。要传的文件已经存在（还没改动）时不记。
-func (e *Engine) withChange(target, kind, object, detail string, fn func(c *remote.Client) error) error {
+func (e *Engine) withChange(target, kind, object, detail string, fn func(*session, *remote.FileClient) error) error {
 	t, err := e.File.Target(target)
 	if err != nil {
 		return err
 	}
-	s, err := e.connect(t)
+	s, err := e.connectSSH(t)
 	if err != nil {
 		return err
 	}
 	defer s.close()
-	err = fn(s.c)
+	f, closeFiles, err := s.fileClient(e.FileSudo)
+	if err == nil {
+		defer closeFiles()
+		err = fn(s, f)
+	}
 	if err != nil && !s.c.Alive() {
 		s.broken.Store(true)
 	}
+	err = s.explainFileError(err)
 	var exists *ExistsError
 	if !errors.As(err, &exists) {
-		s.audit(s.auditEntry(kind, object, detail, err))
+		entry := s.auditEntry(kind, object, detail, err)
+		entry.Identity = s.fileIdentity
+		if err == nil && kind == "file-save" {
+			e.Rep.Step("文件已写入，正在记录审计")
+		}
+		s.audit(entry)
 	}
 	return err
 }

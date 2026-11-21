@@ -107,7 +107,8 @@ type Request struct {
 	RuntimePath string `json:"runtimePath,omitempty"`
 
 	// preflight：自动修正权限。"plan" 列出将要做的修改（Fixable），"apply" 修改后重新检查（Fixed）
-	FixPerms string `json:"fixPerms,omitempty"`
+	FixPerms         string `json:"fixPerms,omitempty"`
+	AllowPublicPerms bool   `json:"allowPublicPerms,omitempty"`
 
 	// 锁等待：0 = 拿不到立即失败
 	LockWaitSec int `json:"lockWaitSec,omitempty"`
@@ -1030,7 +1031,8 @@ type SoftwarePlan struct {
 	// Reach 运行用户还要能进的目录（装在别处的 JDK）
 	Reach []string `json:"reach,omitempty"`
 	// FixParents 运行用户进不了安装目录（或 Reach）的上级目录时，给它加上进入的权限（用户已同意）
-	FixParents bool `json:"fixParents,omitempty"`
+	FixParents       bool `json:"fixParents,omitempty"`
+	AllowPublicPerms bool `json:"allowPublicPerms,omitempty"`
 	// SELinux 开着 SELinux 时给安装目录、端口加的标签（从软件源装的程序受 SELinux 限制）
 	SELinux *PlanSELinux `json:"selinux,omitempty"`
 	// Logrotate 给 Logs 里的日志文件加上按天轮转（软件自己不轮转日志时）

@@ -58,9 +58,13 @@ func startAgentServer(c *remote.Client, cmd string) (*agentServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newAgentServer(p), nil
+}
+
+func newAgentServer(p *remote.Pipe) *agentServer {
 	a := &agentServer{pipe: p, calls: map[string]*serveCall{}, done: make(chan struct{})}
 	safe.Go("常驻 agent 的输出", a.read)
-	return a, nil
+	return a
 }
 
 // read 把输出按请求号分给各个请求，直到常驻的 agent 退出（连接断了、会话关了）。
@@ -181,30 +185,43 @@ func (a *agentServer) cancel(id string) {
 }
 
 // server 这条连接上常驻的 agent：还没有、已经退出的启动一个；最近启动失败过的返回 nil（单独运行）。
-func (s *conn) server() *agentServer {
+func (s *session) server() (*agentServer, error) {
 	s.srvMu.Lock()
 	defer s.srvMu.Unlock()
 	if s.srv != nil && s.srv.alive() {
-		return s.srv
+		return s.srv, nil
 	}
 	if s.srv != nil && s.srv.served.Load() == 0 { // 上一个一个请求都没做完就退出了（sudo 要密码等）：一段时间内不再试
 		s.srv, s.srvFailedAt = nil, time.Now()
 	}
 	if !s.srvFailedAt.IsZero() && time.Since(s.srvFailedAt) < serveRetryAfter {
-		return nil
+		return nil, nil
 	}
-	srv, err := startAgentServer(s.c, s.sudo+s.agent+" serve")
+	if s.passwordSudo() {
+		ctx, cancel := context.WithTimeout(s.e.ctx(), serveStartTimeout)
+		defer cancel()
+		p, err := s.c.StartSudoPipe(ctx, s.agentCommand("serve"), s.sudoPassword)
+		if err != nil {
+			return nil, s.sudoError(err)
+		}
+		s.srv, s.srvFailedAt = newAgentServer(p), time.Time{}
+		return s.srv, nil
+	}
+	srv, err := startAgentServer(s.c, s.sudo+s.agentCommand("serve"))
 	if err != nil {
 		s.srvFailedAt = time.Now()
-		return nil
+		return nil, nil
 	}
 	s.srv, s.srvFailedAt = srv, time.Time{}
-	return srv
+	return srv, nil
 }
 
 // callServe 交给常驻的 agent 做；常驻的用不了时 ok 为 false（调用方改为单独运行）。
 func (s *session) callServe(cmd string, req *proto.Request, onLine func(string)) (code int, ok bool, err error) {
-	srv := s.server()
+	srv, err := s.server()
+	if err != nil {
+		return 0, true, err
+	}
 	if srv == nil {
 		return 0, false, nil
 	}

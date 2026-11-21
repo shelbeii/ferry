@@ -171,7 +171,7 @@ func TestAgentServerCalls(t *testing.T) {
 func TestSessionCallUsesServer(t *testing.T) {
 	d := newServeSSHD(t)
 	c := d.dial(t)
-	s := &session{conn: &conn{c: c, agent: "/opt/ferry/ferry-agent-x", ferryDir: "/opt/ferry"},
+	s := &session{conn: &conn{c: c, ferryDir: "/opt/ferry"}, agent: "/opt/ferry/ferry-agent-x",
 		e: &Engine{Rep: &recRep{}, File: &config.File{Project: "p"}}, t: &config.Target{Name: "t", Root: t.TempDir()}, release: func() {}}
 	r, err := s.call("history", &proto.Request{})
 	if err != nil || r.RC != proto.CodeOK {

@@ -214,6 +214,7 @@ targets.*.root
 targets.*.runAs
 targets.*.secretsFrom
 targets.*.sudo
+targets.*.sudoAuth
 targets.*.title
 targets.*.uploadStreams
 targets.*.user

@@ -462,7 +462,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			}
 			// 改动的命令、用到用户填的值的命令：已经过用户确认（或同类已放行）。服务器日志里记的是代号
 			serverLog(s, t, conv, "执行："+a.Command)
-			return runChange(ctx, s, t, cmd, nil, env)
+			return runChange(ctx, s, t, cmd, nil, env, false)
 		},
 	}}
 	if change {
@@ -1066,23 +1066,19 @@ const writeFileDiffMax = 2 << 20
 
 // aiWriteFile 写文件：确认时显示和原文件的差异，写之前把原文件备份成 <文件>.ferry-bak-<时间>。
 func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool {
-	sudo := ""
-	if t.User != "root" {
-		sudo = "sudo -n "
-	}
 	type args struct{ Path, Content, Mode string }
 	// read 原文件（算差异用）：只读普通文件，最多读 writeFileDiffMax 字节；更大的（或 /dev/zero 这种读不完的）当作「太大」，
 	// 不然模型给错路径时会一直读下去，把内存用完
-	read := func(p string) (old string, exists, tooBig bool) {
+	read := func(p string) (old string, exists, tooBig bool, err error) {
 		q := ai.ShellQuote(p)
-		out, res, err := s.c.Output(sudo + "sh -c " + ai.ShellQuote(fmt.Sprintf("[ -f %s ] && head -c %d -- %s", q, writeFileDiffMax+1, q)) + " 2>/dev/null")
+		out, res, err := s.outputPriv(s.e.ctx(), "sh -c "+ai.ShellQuote(fmt.Sprintf("[ -f %s ] && head -c %d -- %s", q, writeFileDiffMax+1, q))+" 2>/dev/null")
 		if err != nil || res.Code != 0 {
-			return "", false, false
+			return "", false, false, err
 		}
 		if len(out) > writeFileDiffMax {
-			return "", true, true
+			return "", true, true, nil
 		}
-		return out, true, false
+		return out, true, false, nil
 	}
 	check := func(a args) error {
 		if !strings.HasPrefix(a.Path, "/") {
@@ -1118,7 +1114,10 @@ func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool 
 			if ap.Once == "" && ai.UsesSecrets(a.Content) {
 				ap.Once = "写入你填的密码"
 			}
-			if old, ok, big := read(a.Path); big {
+			if old, ok, big, err := read(a.Path); err != nil {
+				ap.Detail = "未能读取原文件：" + err.Error()
+				ap.Once = "需要核实原文件和操作权限"
+			} else if big {
 				ap.Detail = fmt.Sprintf("（原文件超过 %d MB，不显示差异）新内容：\n%s", writeFileDiffMax>>20, ai.Clip(a.Content, 8000))
 				ap.Title = "修改文件 " + a.Path
 			} else if ok {
@@ -1159,7 +1158,9 @@ func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool 
 			if err != nil {
 				return "", err
 			}
-			if old, ok, big := read(a.Path); ok && !big && strings.TrimRight(old, "\n") == strings.TrimRight(content, "\n") {
+			if old, ok, big, err := read(a.Path); err != nil {
+				return "", err
+			} else if ok && !big && strings.TrimRight(old, "\n") == strings.TrimRight(content, "\n") {
 				return "内容和原文件一样，不用写。", nil
 			}
 			if !strings.HasSuffix(content, "\n") {
@@ -1172,7 +1173,7 @@ func (e *Engine) aiWriteFile(s *session, t *config.Target, conv string) ai.Tool 
 				script += ` && chmod ` + a.Mode + ` "$f"`
 			}
 			serverLog(s, t, conv, "写文件："+a.Path)
-			out, err := runChange(ctx, s, t, sudo+"sh -c "+ai.ShellQuote(script), []byte(content), nil)
+			out, err := runChange(ctx, s, t, "sh -c "+ai.ShellQuote(script), []byte(content), nil, true)
 			if err != nil {
 				return out, err
 			}
@@ -1350,13 +1351,13 @@ func serverLog(s *session, t *config.Target, conv, what string) {
 
 // runReadOnly 执行一条（已检查过的）只读命令，返回输出与退出码。最多 60 秒。
 func runReadOnly(ctx context.Context, s *session, t *config.Target, cmd string) (string, error) {
-	return runWatched(ctx, s, t, cmd, nil, nil, commandTimeout, false)
+	return runWatched(ctx, s, t, cmd, nil, nil, commandTimeout, false, false)
 }
 
 // runChange 执行一条改动服务器的命令（用户已确认）：输出实时交给界面，最多 30 分钟。stdin 不为空时交给命令（写文件用）。
 // env 是命令要用的用户填的值（FERRY_SECRET_*）：经标准输入传过去，不出现在命令行上。
-func runChange(ctx context.Context, s *session, t *config.Target, cmd string, stdin []byte, env map[string]string) (string, error) {
-	return runWatched(ctx, s, t, cmd, stdin, env, changeTimeout, true)
+func runChange(ctx context.Context, s *session, t *config.Target, cmd string, stdin []byte, env map[string]string, privileged bool) (string, error) {
+	return runWatched(ctx, s, t, cmd, stdin, env, changeTimeout, true, privileged)
 }
 
 const pidMark = "@@ferry-ai-pid "
@@ -1393,7 +1394,7 @@ func wrapCommand(cmd string, stdin []byte, env map[string]string, guard string) 
 
 // runWatched 在服务器上执行命令：输出（含 stderr）收集起来，live 时实时交给界面；不能交互（没有 stdin 时接 /dev/null）。
 // 超时或用户停止时马上结束它和它启动的所有进程（只关掉 SSH 会话的话，服务器上的命令会接着运行）。
-func runWatched(ctx context.Context, s *session, t *config.Target, cmd string, stdin []byte, env map[string]string, timeout time.Duration, live bool) (string, error) {
+func runWatched(ctx context.Context, s *session, t *config.Target, cmd string, stdin []byte, env map[string]string, timeout time.Duration, live, privileged bool) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	wrapped, stdin := wrapCommand(cmd, stdin, env, watchdog)
@@ -1427,7 +1428,7 @@ func runWatched(ctx context.Context, s *session, t *config.Target, cmd string, s
 				}
 			case <-ctx.Done():
 				if p := pid.Load(); p > 0 {
-					killTree(s, t, cmd, int(p))
+					killTree(s, t.User != "root" && (privileged || ai.UsesSudo(cmd)), int(p))
 				}
 				return
 			case <-finished:
@@ -1435,7 +1436,11 @@ func runWatched(ctx context.Context, s *session, t *config.Target, cmd string, s
 			}
 		}
 	}()
-	res, err := s.c.RunContext(ctx, wrapped, stdin, func(l string) {
+	run := s.c.RunContext
+	if privileged {
+		run = s.runPriv
+	}
+	res, err := run(ctx, wrapped, stdin, func(l string) {
 		if pid.Load() == 0 && strings.HasPrefix(l, pidMark) {
 			p, _ := strconv.Atoi(strings.TrimPrefix(l, pidMark))
 			pid.Store(int64(p))
@@ -1508,15 +1513,16 @@ func (h *headTail) String() string {
 }
 
 // killTree 结束命令的进程和它启动的所有子进程（命令里用了 sudo 时以 root 结束）。
-func killTree(s *session, t *config.Target, cmd string, pid int) {
+func killTree(s *session, privileged bool, pid int) {
 	script := fmt.Sprintf(killTreeFn+`kt %d TERM; sleep 2; kt %d KILL; true`, pid, pid)
 	run := "sh -c " + ai.ShellQuote(script)
-	if t.User != "root" && ai.UsesSudo(cmd) {
-		run = "sudo -n " + run
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	s.c.RunContext(ctx, run, nil, nil)
+	if privileged {
+		s.runPriv(ctx, run, nil, nil)
+	} else {
+		s.c.RunContext(ctx, run, nil, nil)
+	}
 }
 
 // RunReadOnly 在目标上执行一条只读命令（编程软件经 MCP 用）：按 AI 助手的规则判断确实只读才执行，

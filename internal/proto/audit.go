@@ -10,18 +10,20 @@ import (
 // 服务器上记在 <ferryDir>/audit.jsonl（只有 root 能读写）并写一份到 syslog（logger -t ferry-audit），
 // 这台电脑上也留一份（<数据目录>/audit.jsonl）。
 type AuditEntry struct {
-	Time    time.Time `json:"time"`
-	Actor   string    `json:"actor"`             // 操作人：「张三（zhangsan@PC）」，和部署历史一样
-	Project string    `json:"project,omitempty"` // 项目
-	Target  string    `json:"target,omitempty"`  // 目标（服务器）
-	Host    string    `json:"host,omitempty"`    // 服务器地址（本机那份里有）
-	Session string    `json:"session,omitempty"` // Ferry 的会话：同一次打开的终端的开、关是同一个
-	TaskID  string    `json:"taskId,omitempty"`  // 安装任务 ID
-	Kind    string    `json:"kind"`              // 做了什么，见 AuditKinds
-	Object  string    `json:"object,omitempty"`  // 对象：应用、文件路径、软件实例、端口、数据库……
-	Detail  string    `json:"detail,omitempty"`  // 细节：SQL（截到 2 KB）、大小、时长……（不记文件内容、查询结果、终端里敲的）
-	Result  string    `json:"result"`            // ok | failed
-	Error   string    `json:"error,omitempty"`   // 失败的原因
+	Time     time.Time `json:"time"`
+	Actor    string    `json:"actor"`              // 操作人：「张三（zhangsan@PC）」，和部署历史一样
+	Identity string    `json:"identity,omitempty"` // 远程操作使用的身份
+	Source   string    `json:"source,omitempty"`   // journal 表示 SSH 登录会话报告的事件
+	Project  string    `json:"project,omitempty"`  // 项目
+	Target   string    `json:"target,omitempty"`   // 目标（服务器）
+	Host     string    `json:"host,omitempty"`     // 服务器地址（本机那份里有）
+	Session  string    `json:"session,omitempty"`  // Ferry 的会话：同一次打开的终端的开、关是同一个
+	TaskID   string    `json:"taskId,omitempty"`   // 安装任务 ID
+	Kind     string    `json:"kind"`               // 做了什么，见 AuditKinds
+	Object   string    `json:"object,omitempty"`   // 对象：应用、文件路径、软件实例、端口、数据库……
+	Detail   string    `json:"detail,omitempty"`   // 细节：SQL（截到 2 KB）、大小、时长……（不记文件内容、查询结果、终端里敲的）
+	Result   string    `json:"result"`             // ok | failed
+	Error    string    `json:"error,omitempty"`    // 失败的原因
 }
 
 // AuditQuery 读审计记录的条件。
@@ -35,6 +37,8 @@ type AuditQuery struct {
 // AuditMaxDetail Detail 最长多少字节。
 const AuditMaxDetail = 2048
 
+const AuditJournalMarker = " FERRY_AUDIT_V1="
+
 // AuditKinds 审计记录的类型和中文名。
 var AuditKinds = map[string]string{
 	"deploy": "部署", "rollback": "回滚", "control": "启停应用", "runjob": "运行定时任务", "runtime": "安装 JDK", "runtime-remove": "卸载 JDK",
@@ -43,6 +47,7 @@ var AuditKinds = map[string]string{
 	"secretset":     "更新应用密钥",
 	"terminal-open": "打开终端", "terminal-close": "关闭终端",
 	"file-save": "保存文件", "file-rename": "改名", "file-remove": "删除文件", "file-upload": "上传文件", "file-mkdir": "新建文件夹",
+	"file-compress": "压缩文件", "file-extract": "解压文件",
 	"db-exec": "执行 SQL", "redis-exec": "执行 Redis 命令",
 	"software-install": "安装软件", "software-remove": "卸载软件", "software-upgrade": "升级软件", "software-restore": "恢复软件",
 	"software-control": "启停软件", "software-config": "改软件配置",

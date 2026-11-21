@@ -157,7 +157,7 @@ func (e *Engine) BackupDownload(target, name, file, dir string) (string, error) 
 			return err
 		}
 		pw := &progressWriter{w: w, total: f.Size, report: func(done, total int64) { e.Rep.Progress(file, done, total) }}
-		err = s.c.Stream(s.sudo+"cat "+shQuote(f.Path), pw, false, nil)
+		err = s.streamPriv("cat "+shQuote(f.Path), pw, false, nil)
 		if cerr := w.Close(); err == nil {
 			err = cerr
 		}

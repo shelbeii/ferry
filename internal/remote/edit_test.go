@@ -35,11 +35,11 @@ func TestSaveFileSFTPPreservesFormat(t *testing.T) {
 			}
 			beforeInfo, _ := os.Stat(file)
 			c := previewTestClient(t, dir)
-			p, err := c.PreviewFile(context.Background(), ".env")
+			p, err := c.Files().PreviewFile(context.Background(), ".env")
 			if err != nil {
 				t.Fatal(err)
 			}
-			saved, err := c.SaveFile(context.Background(), ".env", FileEdit{Revision: p.Revision, Content: "新值😀\n第二行\n"})
+			saved, err := c.Files().SaveFile(context.Background(), ".env", FileEdit{Revision: p.Revision, Content: "新值😀\n第二行\n"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -51,12 +51,12 @@ func TestSaveFileSFTPPreservesFormat(t *testing.T) {
 			if afterInfo.Mode() != beforeInfo.Mode() {
 				t.Fatal("保存不能改变文件权限")
 			}
-			again, err := c.PreviewFile(context.Background(), ".env")
+			again, err := c.Files().PreviewFile(context.Background(), ".env")
 			if err != nil || saved.Revision == p.Revision || saved.Revision != again.Revision || saved.Content != again.Content || saved.Size != int64(len(got)) {
 				t.Fatalf("保存结果应能作为下次保存的版本：%+v, %v", saved, err)
 			}
 			// 使用返回的新版本继续保存为空文件。
-			if _, err := c.SaveFile(context.Background(), ".env", FileEdit{Revision: saved.Revision, Content: ""}); err != nil {
+			if _, err := c.Files().SaveFile(context.Background(), ".env", FileEdit{Revision: saved.Revision, Content: ""}); err != nil {
 				t.Fatal(err)
 			}
 			assertNoEditTemps(t, dir)
@@ -71,7 +71,7 @@ func TestSaveFileRejectsChangedContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := previewTestClient(t, dir)
-	p, err := c.PreviewFile(context.Background(), "config.json")
+	p, err := c.Files().PreviewFile(context.Background(), "config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestSaveFileRejectsChangedContent(t *testing.T) {
 	if err := os.WriteFile(file, []byte("new"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.SaveFile(context.Background(), "config.json", FileEdit{Revision: p.Revision, Content: "user edit"})
+	_, err = c.Files().SaveFile(context.Background(), "config.json", FileEdit{Revision: p.Revision, Content: "user edit"})
 	var changed *FileChangedError
 	if !errors.As(err, &changed) {
 		t.Fatalf("应拒绝覆盖外部修改：%v", err)
@@ -91,7 +91,7 @@ func TestSaveFileRejectsChangedContent(t *testing.T) {
 	if err := os.Remove(file); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.SaveFile(context.Background(), "config.json", FileEdit{Revision: p.Revision, Content: "user edit"}); err == nil {
+	if _, err := c.Files().SaveFile(context.Background(), "config.json", FileEdit{Revision: p.Revision, Content: "user edit"}); err == nil {
 		t.Fatal("已删除的文件不能被重新创建")
 	}
 	assertNoEditTemps(t, dir)
@@ -110,7 +110,7 @@ func TestSaveFileRejectsUnsafeContent(t *testing.T) {
 		if err := os.WriteFile(file, []byte(tc.original), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		p, err := c.PreviewFile(context.Background(), "text.txt")
+		p, err := c.Files().PreviewFile(context.Background(), "text.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -118,7 +118,7 @@ func TestSaveFileRejectsUnsafeContent(t *testing.T) {
 		if revision == "" {
 			revision = strings.Repeat("0", 64)
 		}
-		if _, err := c.SaveFile(context.Background(), "text.txt", FileEdit{Revision: revision, Content: tc.edited}); err == nil {
+		if _, err := c.Files().SaveFile(context.Background(), "text.txt", FileEdit{Revision: revision, Content: tc.edited}); err == nil {
 			t.Fatal("不应保存不完整、二进制或过大的文本")
 		}
 		got, _ := os.ReadFile(file)
@@ -126,7 +126,7 @@ func TestSaveFileRejectsUnsafeContent(t *testing.T) {
 			t.Fatal("拒绝保存时必须保留原内容")
 		}
 	}
-	if _, err := c.SaveFile(context.Background(), "text.txt", FileEdit{Content: "new"}); err == nil {
+	if _, err := c.Files().SaveFile(context.Background(), "text.txt", FileEdit{Content: "new"}); err == nil {
 		t.Fatal("没有版本不能保存")
 	}
 	assertNoEditTemps(t, dir)
@@ -139,17 +139,17 @@ func TestSaveFileDeniedAndCanceled(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := previewTestClient(t, dir, sftp.ReadOnly())
-	p, err := c.PreviewFile(context.Background(), "text.txt")
+	p, err := c.Files().PreviewFile(context.Background(), "text.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	edit := FileEdit{Revision: p.Revision, Content: "edited"}
-	if _, err := c.SaveFile(context.Background(), "text.txt", edit); err == nil || !strings.Contains(err.Error(), "没有权限") {
+	if _, err := c.Files().SaveFile(context.Background(), "text.txt", edit); err == nil || !strings.Contains(err.Error(), "没有权限") {
 		t.Fatalf("只读服务器应明确拒绝保存：%v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.SaveFile(ctx, "text.txt", edit); !errors.Is(err, ErrCanceled) {
+	if _, err := c.Files().SaveFile(ctx, "text.txt", edit); !errors.Is(err, ErrCanceled) {
 		t.Fatalf("取消后不能写入：%v", err)
 	}
 	got, _ := os.ReadFile(file)
@@ -165,21 +165,21 @@ func TestSaveFilePreservesSymlink(t *testing.T) {
 	if err := c.sftp.Symlink("real.conf", "/link.conf"); err != nil {
 		t.Fatal(err)
 	}
-	p, err := c.PreviewFile(context.Background(), "/link.conf")
+	p, err := c.Files().PreviewFile(context.Background(), "/link.conf")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.SaveFile(context.Background(), "/link.conf", FileEdit{Revision: p.Revision, Content: "edited"}); err != nil {
+	if _, err := c.Files().SaveFile(context.Background(), "/link.conf", FileEdit{Revision: p.Revision, Content: "edited"}); err != nil {
 		t.Fatal(err)
 	}
 	info, _ := c.sftp.Lstat("/link.conf")
-	got, err := c.PreviewFile(context.Background(), "/real.conf")
+	got, err := c.Files().PreviewFile(context.Background(), "/real.conf")
 	if err != nil || info.Mode()&os.ModeSymlink == 0 || got.Content != "edited" {
 		t.Fatal("必须更新链接的目标并保留链接本身")
 	}
 	// 链接改为指向内容相同的另一个文件，也不能用原版本覆盖它。
 	writeEditFixture(t, c, "/other.conf", "edited")
-	p, err = c.PreviewFile(context.Background(), "/link.conf")
+	p, err = c.Files().PreviewFile(context.Background(), "/link.conf")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestSaveFilePreservesSymlink(t *testing.T) {
 	if err := c.sftp.Symlink("other.conf", "/link.conf"); err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.SaveFile(context.Background(), "/link.conf", FileEdit{Revision: p.Revision, Content: "user edit"})
+	_, err = c.Files().SaveFile(context.Background(), "/link.conf", FileEdit{Revision: p.Revision, Content: "user edit"})
 	var changed *FileChangedError
 	if !errors.As(err, &changed) {
 		t.Fatalf("链接目标变化后不应保存：%v", err)
@@ -205,14 +205,14 @@ func TestSaveFileCommitFailureKeepsOriginal(t *testing.T) {
 	handlers.FileCmd = rejectEditRename{handlers.FileCmd}
 	c := editMemoryClient(t, handlers)
 	writeEditFixture(t, c, "/text.txt", "original")
-	p, err := c.PreviewFile(context.Background(), "/text.txt")
+	p, err := c.Files().PreviewFile(context.Background(), "/text.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.SaveFile(context.Background(), "/text.txt", FileEdit{Revision: p.Revision, Content: "edited"}); err == nil {
+	if _, err := c.Files().SaveFile(context.Background(), "/text.txt", FileEdit{Revision: p.Revision, Content: "edited"}); err == nil {
 		t.Fatal("提交失败应报告错误")
 	}
-	got, err := c.PreviewFile(context.Background(), "/text.txt")
+	got, err := c.Files().PreviewFile(context.Background(), "/text.txt")
 	if err != nil || got.Content != "original" {
 		t.Fatal("原子替换失败必须保留完整原内容")
 	}

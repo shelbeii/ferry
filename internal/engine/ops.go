@@ -81,7 +81,7 @@ func (e *Engine) Preflight(target string, names []string) (*proto.Preflight, err
 		if e.Settings.Deploy.KeepPerms {
 			fix = ""
 		}
-		if err := s.callData("preflight", &proto.Request{Apps: specs, FixPerms: fix}, &out); err != nil {
+		if err := s.callData("preflight", &proto.Request{Apps: specs, FixPerms: fix, AllowPublicPerms: e.Settings.Deploy.AllowPublicPerms}, &out); err != nil {
 			return err
 		}
 		// 单独的预检只列出部署时会自动修正的权限，不修改服务器
@@ -267,7 +267,7 @@ func (e *Engine) Logs(target, app string, o LogOptions, out io.Writer, stop <-ch
 		if t.Stream { // diagLogs 不在应用目录下、要持续看的文件有通配符或还不存在：直接 tail
 			fo := o
 			fo.Follow = o.Follow && t.Run.Current && o.Around == 0 && !isGz(t.Path)
-			return s.c.Stream(s.sudo+followCmd(fo, t.Path), out, fo.Follow, stop)
+			return s.streamPriv(followCmd(fo, t.Path), out, fo.Follow, stop)
 		}
 		switch {
 		case o.Around > 0: // 看某一行附近：告诉从第几行开始（界面据此标行号）
@@ -284,7 +284,7 @@ func (e *Engine) Logs(target, app string, o LogOptions, out io.Writer, stop <-ch
 		if o.Loaded != nil {
 			o.Loaded()
 		}
-		return s.c.Stream(s.sudo+t.Follow, out, true, stop)
+		return s.streamPriv(t.Follow, out, true, stop)
 	})
 }
 
@@ -411,7 +411,7 @@ func (e *Engine) SearchLogs(target, app string, o SearchOptions) (*proto.LogSear
 		}
 		cmd += fmt.Sprintf(" | grep %s -n -m %d -e %s; true", flags, o.Limit+1, shQuote(o.Keyword))
 		var buf strings.Builder
-		if err := s.c.Stream(s.sudo+"sh -c "+shQuote(cmd), &buf, false, nil); err != nil {
+		if err := s.streamPriv("sh -c "+shQuote(cmd), &buf, false, nil); err != nil {
 			return err
 		}
 		out = parseGrep(buf.String(), ctx)
