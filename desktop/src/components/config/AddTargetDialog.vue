@@ -9,7 +9,7 @@ const emit = defineEmits<{ close: []; add: [text: string, name: string] }>()
 const visible = ref(true)
 const form = reactive({
   name: '', title: '', host: '', port: '22', user: 'root', auth: 'key', identityFile: '',
-  sudo: true, root: '', runAs: '', apps: [] as string[], secretSource: 'keyring', secretsFile: '',
+  sudo: true, sudoAuth: 'nopasswd', root: '', runAs: '', apps: [] as string[], secretSource: 'keyring', secretsFile: '',
 })
 const vars = reactive(new Map<string, string>())
 const doc = computed(() => parse(props.text))
@@ -61,6 +61,7 @@ const draft = computed(() => {
   if (form.auth === 'password') entry.auth = 'password'
   else if (form.identityFile.trim()) entry.identityFile = form.identityFile.trim()
   if (nonRoot.value && form.sudo) entry.sudo = true
+  if (form.user.trim() && form.user.trim() !== 'root' && form.sudoAuth === 'password') entry.sudoAuth = 'password'
   if (deploy.value) {
     if (form.root.trim()) entry.root = form.root.trim()
     if (form.runAs.trim() && !runAsInvalid.value) entry.runAs = form.runAs.trim()
@@ -125,8 +126,14 @@ function add() {
       <el-form-item label="服务器地址" required><el-input v-model="form.host" placeholder="IP 或域名" /></el-form-item>
       <el-form-item label="SSH 端口" required :error="portOK ? '' : '请输入 1～65535 的端口'"><el-input v-model.trim="form.port" inputmode="numeric" /></el-form-item>
       <el-form-item label="SSH 用户"><el-input v-model="form.user" placeholder="默认 root" /></el-form-item>
-      <el-form-item v-if="nonRoot" label="权限提升" :error="form.sudo ? '' : '非 root 登录时，部署需要免密 sudo'">
-        <el-checkbox v-model="form.sudo">使用免密 sudo</el-checkbox>
+      <el-form-item v-if="nonRoot" label="权限提升" :error="form.sudo ? '' : '非 root 登录时，部署需要 sudo'">
+        <el-checkbox v-model="form.sudo">使用 sudo</el-checkbox>
+      </el-form-item>
+      <el-form-item v-if="form.user.trim() && form.user.trim() !== 'root' && (!deploy || form.sudo)" label="sudo 认证">
+        <el-radio-group v-model="form.sudoAuth">
+          <el-radio-button value="nopasswd">免密</el-radio-button>
+          <el-radio-button value="password">使用密码</el-radio-button>
+        </el-radio-group>
       </el-form-item>
       <el-form-item label="登录方式">
         <el-select v-model="form.auth">

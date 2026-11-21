@@ -2,14 +2,15 @@
 // 权限详情：文件列表里鼠标停在「权限」格上时，在列表共用的悬停提示里显示（列表行里只显示 filePermissions 的 summary）。
 import type { FilePermissionInfo } from '../filePermissions'
 
-defineProps<{ permissions: FilePermissionInfo; mode: string; dir: boolean }>()
+defineProps<{ permissions: FilePermissionInfo; mode: string; dir: boolean; uid?: number; gid?: number }>()
 </script>
 
 <template>
   <div class="permission-details">
     <div class="permission-heading"><strong>权限详情</strong><span v-if="permissions.octal" class="mono">{{ permissions.octal }}</span></div>
     <div v-for="item in permissions.roles" :key="item.role" class="permission-detail-row"><span>{{ item.role }}</span><strong>{{ item.text }}</strong></div>
-    <p v-if="permissions.roles.length" class="permission-note">所有者是文件所属用户，不一定是当前登录用户。</p>
+    <div v-if="uid !== undefined" class="permission-detail-row"><span>属主（UID）</span><strong>{{ uid === 0 ? 'root (0)' : uid }}</strong></div>
+    <div v-if="gid !== undefined" class="permission-detail-row"><span>属组（GID）</span><strong>{{ gid }}</strong></div>
     <p v-if="dir && permissions.roles.length" class="permission-note">读取：列出名称；写入：创建、删除或改名（还需有“进入”权限）；进入：访问文件夹内的条目。</p>
     <p v-if="permissions.note" class="permission-note">{{ permissions.note }}</p>
     <p v-for="text in permissions.special" :key="text" class="permission-note">{{ text }}</p>

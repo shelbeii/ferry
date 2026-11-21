@@ -4,7 +4,7 @@ import FerryLogo from './FerryLogo.vue'
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, FolderOpened, Link, Plus, View } from '@element-plus/icons-vue'
-import { bytes, call, pkgOrigin, time, type AppSettings, type DataDirInfo, type JdkList, type SecretEntry, type SwPackage, type SwTemplates } from '../ferry'
+import { bytes, call, clearSessionCredential, pkgOrigin, sessionCredentialKeys, time, type AppSettings, type DataDirInfo, type JdkList, type SecretEntry, type SwPackage, type SwTemplates } from '../ferry'
 import AiModels from './AiModels.vue'
 import NotifyChannels from './NotifyChannels.vue'
 import DnsKeys from './DnsKeys.vue'
@@ -45,6 +45,8 @@ const navigationGroups = computed(() => ['常规', '部署与运行', '集成', 
 const currentSection = computed(() => sections.find((s) => s.name === tab.value) ?? sections[0])
 const credentialQuery = ref('')
 const runtimeView = ref('jdk')
+const visitedRuntimeViews = ref(new Set([runtimeView.value]))
+watch(runtimeView, (view) => visitedRuntimeViews.value.add(view))
 const matchingSecrets = computed(() => secrets.value.filter((s) => `${s.label} ${secretKind(s.kind)}`.toLowerCase().includes(credentialQuery.value.trim().toLowerCase())))
 const saving = ref(false)
 const saveError = ref('')
@@ -268,7 +270,7 @@ const jdkJava = ref(17)
 const jdkArch = ref<'x64' | 'aarch64'>('x64')
 const jdkBusy = ref(false)
 
-const secretKind = (k: string) => ({ password: '登录密码', passphrase: '私钥密码', software: '软件密码', ai: 'AI 模型', notify: '部署通知', dns: 'DNS 密钥', 'ai-input': 'AI 助手填写', db: '数据库密码', web: '网页登录' })[k] ?? k
+const secretKind = (k: string) => ({ password: '登录密码', sudo: 'sudo 密码', passphrase: '私钥密码', software: '软件密码', ai: 'AI 模型', notify: '部署通知', dns: 'DNS 密钥', 'ai-input': 'AI 助手填写', db: '数据库密码', web: '网页登录' })[k] ?? k
 
 async function loadJdks() {
   try {
@@ -665,8 +667,24 @@ async function deleteSecret(e: SecretEntry) {
     return
   }
   try {
-    await call(['secret', 'delete', '--account', e.account])
+    const result = await call<{ env?: string }>(['secret', 'delete', '--account', e.account])
+    if (result.env) clearSessionCredential(result.env)
     loadSecrets()
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
+async function forgetSessionCredentials() {
+  try {
+    await ElMessageBox.confirm('清除这次输入的 SSH、私钥和 sudo 密码？正在执行的操作会继续，之后的新操作需要重新连接。', '清除临时凭据', { type: 'warning' })
+  } catch {
+    return
+  }
+  for (const key of sessionCredentialKeys) clearSessionCredential(key)
+  try {
+    await call(['secret', 'forget-session'])
+    ElMessage.success('已清除临时凭据')
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
@@ -690,7 +708,20 @@ async function pickKeyDir() {
     <div v-if="form && info" class="settings-workspace" :inert="saving">
       <aside class="settings-navigation" aria-label="设置分类">
         <el-input v-model="settingsQuery" placeholder="搜索设置" clearable size="small" aria-label="搜索设置分类" />
-        <div v-for="group in navigationGroups" :key="group.label" class="settings-group"><span>{{ group.label }}</span><button v-for="item in group.items" :key="item.name" :class="{ active: tab === item.name }" :aria-current="tab === item.name ? 'page' : undefined" @click="tab = item.name">{{ item.label }}</button></div>
+        <div v-for="group in navigationGroups" :key="group.label" class="settings-group">
+          <span>{{ group.label }}</span>
+          <button
+            v-for="item in group.items"
+            :key="item.name"
+            type="button"
+            data-glass-motion="local"
+            :class="{ active: tab === item.name }"
+            :aria-current="tab === item.name ? 'page' : undefined"
+            @click="tab = item.name"
+          >
+            <span class="settings-option-label">{{ item.label }}</span>
+          </button>
+        </div>
         <p v-if="!navigationGroups.length" class="muted small">没有匹配的设置分类</p>
       </aside>
       <section class="settings-content">
@@ -876,6 +907,7 @@ async function pickKeyDir() {
         <p class="muted small">系统凭据库里保存的密码和密钥。点击「查看」可单独查看内容。</p>
         <el-alert v-if="secretsError" type="error" :title="secretsError" :closable="false" show-icon />
         <el-input v-model="credentialQuery" placeholder="搜索账户或凭据类型" clearable aria-label="搜索已保存的凭据" class="credential-search" />
+        <el-button v-if="sessionCredentialKeys.size" @click="forgetSessionCredentials">清除临时凭据</el-button>
         <el-table :data="matchingSecrets" size="small" border empty-text="没有匹配的凭据">
           <el-table-column label="类型" width="100">
             <template #default="{ row }">{{ secretKind(row.kind) }}</template>
@@ -928,6 +960,7 @@ async function pickKeyDir() {
           <GlassToggle v-model="form.deploy.skipBuild">默认跳过构建</GlassToggle>
           <GlassToggle v-model="form.deploy.full">默认全量上传（不使用增量）</GlassToggle>
           <GlassToggle :model-value="!form.deploy.keepPerms" @update:model-value="(v: boolean) => form && (form.deploy.keepPerms = !v)">部署时自动修正权限</GlassToggle>
+          <GlassToggle :model-value="!!form.deploy.allowPublicPerms" @update:model-value="(v: boolean) => form && (form.deploy.allowPublicPerms = v)">ACL 不可用时允许给其他用户补读或进入权限</GlassToggle>
           <div class="muted small">运行用户访问不了要用的目录、文件时，部署前自动补上权限，并在任务里列出改了什么</div>
         </div>
         <h4>HTTPS 证书的 DNS 密钥</h4>
@@ -1008,7 +1041,7 @@ async function pickKeyDir() {
           </el-table-column>
         </el-table>
 
-        </section><section v-show="runtimeView === 'nginx'">
+        </section><section v-if="visitedRuntimeViews.has('nginx')" v-show="runtimeView === 'nginx'">
         <h4 class="rt-title">nginx（前端网站）</h4>
         <p class="muted small">前端应用设置了 <span class="mono">static.port</span> 时用这里的 nginx 运行网站，不影响服务器上已有的 nginx。</p>
         <el-form v-if="rt" label-width="110px">
@@ -1053,7 +1086,7 @@ async function pickKeyDir() {
           </el-table-column>
         </el-table>
 
-        </section><section v-show="runtimeView === 'packages'">
+        </section><section v-if="visitedRuntimeViews.has('packages')" v-show="runtimeView === 'packages'">
         <h4 class="rt-title">软件安装包</h4>
         <p class="muted small">服务器「软件」里安装时用的安装包，本机没有会先下载。</p>
         <el-form v-if="rt" label-width="110px">
@@ -1099,7 +1132,7 @@ async function pickKeyDir() {
           </el-table-column>
         </el-table>
 
-        </section><section v-show="runtimeView === 'templates'">
+        </section><section v-if="visitedRuntimeViews.has('templates')" v-show="runtimeView === 'templates'">
         <h4 class="rt-title">软件模板</h4>
         <p class="muted small">软件池按这些模板安装；ID 和内置的一样时代替内置的。</p>
         <div class="jdk-bar">
@@ -1287,6 +1320,14 @@ async function pickKeyDir() {
 .settings-group button { text-align: left; padding: 10px 12px; font-size: 13px; border: 0; border-radius: 7px; color: var(--el-text-color-regular); background: transparent; cursor: pointer; }
 .settings-group button:hover { background: var(--el-fill-color-light); }
 .settings-group button.active { background: var(--el-color-primary-light-9); color: var(--el-color-primary); font-weight: 600; }
+@media (prefers-reduced-motion: no-preference) {
+  html.cg-on .settings-option-label {
+    display: inline-block;
+    transform: translateX(0);
+    transition: transform var(--ferry-ease);
+  }
+  html.cg-on .settings-group button:is(.active, :active) .settings-option-label { transform: translateX(4px); }
+}
 .settings-content {
   min-width: 0;
   min-height: 0;

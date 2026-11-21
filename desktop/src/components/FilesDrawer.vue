@@ -26,7 +26,7 @@ watch([open, () => props.path], ([visible, path]) => {
         <el-option v-for="location in locations" :key="location.path" :value="location.path" :label="`${location.label} · ${location.path}`" />
       </el-select>
     </div>
-    <FilePanel :key="visit" :config="config" :target="target" :initial-path="selectedPath" />
+    <FilePanel :key="visit" :config="config" :target="target" :initial-path="selectedPath" :active="open" />
   </el-drawer>
 </template>
 

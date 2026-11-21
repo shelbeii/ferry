@@ -22,7 +22,7 @@ export function useFileSizes() {
     return state && state.stamp === stampOf(entry) ? state : undefined
   }
 
-  async function measure(config: string, target: string, path: string, entry: FileEntry) {
+  async function measure(config: string, target: string, path: string, entry: FileEntry, asSudo = false) {
     const current = get(path, entry)
     if (current?.loading) return
     void running.get(path)?.kill()
@@ -30,7 +30,7 @@ export function useFileSizes() {
     const state = states.get(path)!
     state.loading = true
     state.error = ''
-    const proc = ferry<RemoteFileSize>(['files', 'size', target, path, '-c', config])
+    const proc = ferry<RemoteFileSize>(['files', 'size', target, path, '-c', config, ...(asSudo ? ['--as-sudo'] : [])])
     running.set(path, proc)
     try {
       const response = await proc.done

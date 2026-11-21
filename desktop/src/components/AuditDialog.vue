@@ -132,6 +132,8 @@ async function exportCsv() {
               <div v-if="row.error" class="line"><span>失败原因</span>{{ row.error }}</div>
               <div class="line"><span>项目 / 服务器</span>{{ row.project || '—' }} / {{ row.target || target }}<template v-if="row.host">（{{ row.host }}）</template></div>
               <div v-if="row.session" class="line"><span>会话</span><code>{{ row.session }}</code></div>
+              <div v-if="row.identity" class="line"><span>操作身份</span>{{ row.identity }}</div>
+              <div v-if="row.source" class="line"><span>记录来源</span>{{ row.source }}</div>
             </div>
           </template>
         </el-table-column>

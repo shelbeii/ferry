@@ -1,5 +1,6 @@
 // 调用内置的 ferry 命令行（Tauri sidecar）。--json 模式下每行一个 JSON，最后一行 kind=result。
 import { spawnFerry } from './platform'
+import { reactive } from 'vue'
 
 export interface FerryLine {
   kind: 'step' | 'info' | 'warn' | 'error' | 'event' | 'progress' | 'confirm-required' | 'result' | string
@@ -20,7 +21,7 @@ export interface FerryLine {
 
 /** 结构化的错误信息：需要密码、密码被拒绝、未知主机…… */
 export interface ErrorDetail {
-  kind: 'password-required' | 'password-rejected' | 'passphrase-required' | 'passphrase-rejected' | 'unknown-host' | 'key-missing' | string
+  kind: 'password-required' | 'password-rejected' | 'passphrase-required' | 'passphrase-rejected' | 'sudo-required' | 'sudo-rejected' | 'unknown-host' | 'key-missing' | string
   target?: string
   key?: string
   env?: string
@@ -38,6 +39,7 @@ export interface ErrorDetail {
   local?: boolean
   /** files-exist：要传的文件在那边已经有了 */
   names?: string[]
+  canSudo?: boolean
   /** blocked-dirs：运行用户 user 进不了的上级目录 */
   user?: string
   dirs?: string[]
@@ -103,6 +105,17 @@ export interface Running<T> {
 
 /** 本次运行期间用户输入、但没有要求记住的密码（环境变量名 → 值），每次调用 ferry 都带上。 */
 export const sessionEnv: Record<string, string> = {}
+export const sessionCredentialKeys = reactive(new Set<string>())
+
+export function setSessionCredential(key: string, value: string) {
+  sessionEnv[key] = value
+  sessionCredentialKeys.add(key)
+}
+
+export function clearSessionCredential(key: string) {
+  delete sessionEnv[key]
+  sessionCredentialKeys.delete(key)
+}
 
 /** 运行 ferry <args> --json，逐行回调，返回最终结果。 */
 export function ferry<T = unknown>(args: string[], onLine?: (l: FerryLine) => void, env: Record<string, string> = {}): Running<T> {
@@ -220,6 +233,7 @@ export function openTerminal(
 
 /** 「新建连接」保存的服务器（ferry connection list） */
 export interface Connection {
+  sudoAuth?: 'nopasswd' | 'password' | 'disabled'
   /** 在 connections.yaml 里的名字（命令、凭据、主机公钥核对用） */
   name: string
   /** 显示名 */
@@ -240,6 +254,8 @@ export interface FileEntry {
   dir: boolean
   link?: boolean
   mtime: string
+  uid?: number
+  gid?: number
 }
 
 export interface DirListing {
@@ -248,13 +264,20 @@ export interface DirListing {
   entries: FileEntry[]
   /** 打开的是文件时，在所在目录中定位它。 */
   focus?: string
+  identity?: string
+  canSudo?: boolean
+  login?: string
+  runAs?: string
 }
+
+export interface FileAccess { identity: string; exists: boolean; read: boolean; write: boolean; execute: boolean; parentWrite?: boolean }
 
 /** 按需统计的逻辑大小，目录内部符号链接不展开。 */
 export interface RemoteFileSize { path: string; bytes: number; dir: boolean }
 
 /** 只读文本预览（ferry files preview）；content 最多读取服务器文件的前 limit 字节。 */
 export interface FilePreview {
+  identity?: string
   path: string
   size: number
   content: string
@@ -294,7 +317,7 @@ export class FerryError extends Error {
 }
 
 export function isSecretKind(kind?: string): boolean {
-  return !!kind && /^(password|passphrase)-(required|rejected)$/.test(kind)
+  return !!kind && /^(password|passphrase|sudo)-(required|rejected)$/.test(kind)
 }
 
 /** 与 ferry 的 secret.PasswordEnv 一致：FERRY_PASSWORD_<目标名大写，非字母数字换成 _> */
@@ -305,6 +328,7 @@ export function passwordEnv(target: string): string {
 // ---------------------------------------------------------------- 数据类型（与 Go 端 JSON 一致）
 
 export interface InspectTarget {
+  sudoAuth?: 'nopasswd' | 'password' | 'disabled'
   name: string
   title?: string
   host: string
@@ -1260,7 +1284,7 @@ export interface AppSettings {
   connect: { timeoutSec: number; acceptNewHostKey: boolean; keyDir: string; uploadStreams: number; idleMinutes: number; statusMinutes: number }
   build: { env: Record<string, string> | null; path: string[] | null; verbose: boolean }
   logs: { buildLogDays: number }
-  deploy: { skipBuild: boolean; full: boolean; keepPerms: boolean }
+  deploy: { skipBuild: boolean; full: boolean; keepPerms: boolean; allowPublicPerms?: boolean }
   runtime: { source: string; cacheDir: string; nginxSource: string; githubMirror: string; mysqlSource: string }
   ui: { theme: 'light' | 'dark' | 'system'; taskKeep: number; taskKeepDays: number; taskMaxMB: number; confirmClose: boolean; notify: boolean; glass: boolean; glassTransparency: number; particles: boolean; checkUpdate: boolean }
   ai: { models: AiModel[]; default: string; keepDays: number; maxMB: number }
@@ -1362,6 +1386,8 @@ export interface LogSearch {
 export interface AuditEntry {
   time: string
   actor: string
+  identity?: string
+  source?: string
   project?: string
   target?: string
   host?: string
@@ -1378,7 +1404,7 @@ export interface AuditEntry {
 export const AUDIT_GROUPS: { label: string; kinds: Record<string, string> }[] = [
   { label: '部署、启停', kinds: { deploy: '部署', rollback: '回滚', control: '启停应用', runjob: '运行定时任务', runtime: '安装 JDK', 'runtime-remove': '卸载 JDK', 'runtime-install': '安装运行环境', 'runtime-uninstall': '卸载运行环境', 'https-renew': '续期 HTTPS 证书', secretset: '更新应用密钥' } },
   { label: '终端', kinds: { 'terminal-open': '打开终端', 'terminal-close': '关闭终端' } },
-  { label: '文件', kinds: { 'file-save': '保存文件', 'file-rename': '改名', 'file-remove': '删除文件', 'file-upload': '上传文件', 'file-mkdir': '新建文件夹' } },
+  { label: '文件', kinds: { 'file-save': '保存文件', 'file-rename': '改名', 'file-remove': '删除文件', 'file-upload': '上传文件', 'file-mkdir': '新建文件夹', 'file-compress': '压缩文件', 'file-extract': '解压文件' } },
   { label: '数据库', kinds: { 'db-exec': '执行 SQL', 'redis-exec': '执行 Redis 命令' } },
   {
     label: '软件',

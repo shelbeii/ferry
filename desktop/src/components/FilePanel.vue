@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// 服务器上的文件（SFTP，以登录用户的身份）：浏览目录、查看和编辑内容、上传、下载、新建文件夹、改名、删除。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
-import { ArrowRight, Back, Delete, Document, Download, EditPen, Folder, FolderAdd, HomeFilled, Link, Refresh, Upload, View } from '@element-plus/icons-vue'
-import { bytes, call, ferry, FerryError, isSecretKind, type DirListing, type ErrorDetail, type FileEntry } from '../ferry'
+// 服务器上的文件默认以登录用户的身份操作，新建文件夹权限不足时可用目标配置的 sudo 重试。
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
+import { ElMessage, ElMessageBox, ElNotification, type DropdownInstance } from 'element-plus'
+import { ArrowRight, Back, Box, Delete, Document, Download, EditPen, Folder, FolderAdd, HomeFilled, Link, Refresh, Upload, View } from '@element-plus/icons-vue'
+import { bytes, call, ferry, FerryError, isSecretKind, type DirListing, type ErrorDetail, type FileAccess, type FileEntry } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { validRemoteName } from '../fileNames'
 import { filePermissions, type FilePermissionInfo } from '../filePermissions'
@@ -17,7 +17,7 @@ import { onFileDrop, pickDir, pickMany, reveal } from '../platform'
 import { secretRequest, trustRequest, trustedTick } from '../state'
 import { glass } from '../glass/runtime'
 
-const props = defineProps<{ config: string; target: string; initialPath?: string; initialFocus?: string; directoryOnly?: boolean }>()
+const props = defineProps<{ config: string; target: string; initialPath?: string; initialFocus?: string; directoryOnly?: boolean; active?: boolean }>()
 const emit = defineEmits<{ directoryChange: [path: string] }>()
 
 // 名称排序：每次比较都 localeCompare(…, 'zh-CN') 要现建排序规则，上千个文件要几十毫秒；共用一个
@@ -32,6 +32,14 @@ const entries = ref<FileEntry[]>([])
 const sizes = useFileSizes()
 const loading = ref(false)
 const error = ref('')
+const elevated = ref(false)
+const canSudo = ref(false)
+const identity = ref('')
+const login = ref('')
+const runAs = ref('')
+const canSetOwner = computed(() => elevated.value || identity.value === 'root')
+const identityText = computed(() => elevated.value ? 'sudo（root）' : identity.value)
+const fileArgs = (args: string[]) => [...args, ...(elevated.value ? ['--as-sudo'] : [])]
 /** 勾选的（按名字）；只算当前列表里有的 */
 const selectedNames = ref(new Set<string>())
 let selectAnchor: string | undefined
@@ -49,7 +57,20 @@ const working = ref('')
 const deleting = ref(new Set<string>())
 const isDeleting = (row: FileEntry) => deleting.value.has(join(path.value, row.name))
 const busy = computed(() => loading.value || !!working.value || !!xfer.value)
-const xfer = ref<{ kind: 'upload' | 'download'; what: string; file: string; done: number; total: number; kill: () => Promise<void> }>()
+type FileJob = 'upload' | 'download' | 'compress' | 'extract'
+const xfer = ref<{ kind: FileJob; what: string; file: string; done: number; total: number; kill: () => Promise<void> }>()
+const fileMenu = ref<DropdownInstance>()
+const fileMenuLabel = useId()
+const fileMenuVisible = ref(false)
+const fileMenuAnchor = shallowRef<{ getBoundingClientRect: () => DOMRect }>()
+const fileMenuRows = shallowRef<FileEntry[]>([])
+let fileMenuScroll: { left: number; top: number } | undefined
+const fileMenuRow = computed(() => fileMenuRows.value.length === 1 ? fileMenuRows.value[0] : undefined)
+const archiveSuffix = /\.(tar\.gz|tgz|zip)$/i
+const canExtract = computed(() => {
+  const row = fileMenuRow.value
+  return !!row && !row.dir && !row.link && archiveSuffix.test(row.name)
+})
 const dropOver = ref(false)
 const root = ref<HTMLDivElement>()
 let waitTrust = false
@@ -60,6 +81,7 @@ let context = 0
 let requestedPath = ''
 let requestedFocus: string | undefined
 let disposed = false
+let reopenPath: string | undefined
 
 const join = (dir: string, name: string) => (dir.endsWith('/') ? dir + name : dir + '/' + name)
 const parent = computed(() => (path.value === '/' ? '' : path.value.replace(/\/[^/]+\/?$/, '') || '/'))
@@ -79,10 +101,24 @@ watch(() => [props.config, props.target, props.initialPath, props.initialFocus, 
   working.value = ''
   deleting.value = new Set()
   preview.value = undefined
+  elevated.value = false
+  canSudo.value = false
+  identity.value = ''
+  reopenPath = undefined
   path.value = ''; home.value = ''; entries.value = []; clearSelection(); query.value = ''; editingPath.value = false
   sizes.clear()
   load(props.initialPath ?? '', props.initialFocus)
 }, { immediate: true })
+watch(() => props.active, (active) => {
+  if (active === false && elevated.value) {
+    reopenPath = path.value || requestedPath
+    switchIdentity(false, false)
+  } else if (active && reopenPath !== undefined) {
+    const dir = reopenPath
+    reopenPath = undefined
+    load(dir)
+  }
+})
 watch(trustedTick, () => {
   if (waitTrust) load(requestedPath, requestedFocus)
 })
@@ -128,7 +164,13 @@ const hoverTip = useHoverTip<{ entry: FileEntry; permissions: FilePermissionInfo
 function onListScroll() {
   virtual.onScroll()
   hoverTip.hide()
+  const list = scroller.value
+  if (fileMenuScroll && list && (list.scrollLeft !== fileMenuScroll.left || list.scrollTop !== fileMenuScroll.top)) {
+    fileMenu.value?.handleClose()
+  }
 }
+
+watch([path, query, busy], () => fileMenu.value?.handleClose())
 
 let unlisten: (() => void) | undefined
 onMounted(async () => {
@@ -145,6 +187,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  fileMenuVisibility(false)
   context++; loadSeq++; transferSeq++
   listingReads.cancelAll()
   unlisten?.()
@@ -162,8 +205,32 @@ function handle(e: unknown, retry: () => void): string {
     trustRequest.value = { target: props.target, config: props.config }
   } else if (d && isSecretKind(d.kind)) {
     secretRequest.value = { detail: d, config: props.config, retry }
+  } else if (d?.kind === 'files-permission' && d.canSudo) {
+    canSudo.value = true
+    return msg + '。可切换到「以 sudo 操作」。'
   }
   return msg
+}
+
+function switchIdentity(useSudo: boolean, reload = true) {
+  const dir = useSudo && error.value ? requestedPath : path.value || requestedPath
+  context++
+  loadSeq++
+  transferSeq++
+  listingReads.cancelAll()
+  void xfer.value?.kill()
+  xfer.value = undefined
+  loading.value = false
+  working.value = ''
+  deleting.value = new Set()
+  clearSelection()
+  sizes.clear()
+  preview.value = undefined
+  entries.value = []
+  path.value = ''
+  editingPath.value = false
+  elevated.value = useSudo
+  if (reload) void load(dir)
 }
 
 /**
@@ -179,14 +246,19 @@ async function load(dir: string, initialFocus?: string, soft = false) {
   loading.value = true
   waitTrust = false
   try {
-    const r = await listingReads.run('listing', (s) => readCall<DirListing>(['files', 'ls', props.target, ...(dir ? [dir] : []), '-c', props.config], s))
+    const r = await listingReads.run('listing', (s) => readCall<DirListing>(fileArgs(['files', 'ls', props.target, ...(dir ? [dir] : []), '-c', props.config]), s))
     if (seq !== loadSeq) return
     if (!r) throw new Error('目录读取失败')
     const samePath = path.value === r.path
     if (!samePath) query.value = ''
     path.value = r.path
     pathInput.value = r.path
+    editingPath.value = false
     home.value = r.home
+    identity.value = r.identity || ''
+    canSudo.value = !!r.canSudo
+    login.value = r.login || ''
+    runAs.value = r.runAs || ''
     entries.value = r.entries
     if (soft && samePath) {
       // 还在的留着勾选和焦点
@@ -296,8 +368,99 @@ function rowDblclick(row: FileEntry, event: MouseEvent) {
   openEntry(row)
 }
 
+function openFileMenu(x: number, y: number, row?: FileEntry) {
+  if (props.directoryOnly || busy.value || !path.value || (row && isDeleting(row))) return
+  hoverTip.hide()
+  if (row) {
+    focusedName.value = row.name
+    if (!selectedNames.value.has(row.name)) {
+      selectedNames.value = new Set([row.name])
+      selectAnchor = row.name
+    }
+  }
+  fileMenuRows.value = row ? selected.value.filter((entry) => !isDeleting(entry)) : []
+  // A scroll event queued before opening the menu may arrive after the context click.
+  const list = scroller.value
+  fileMenuScroll = list && { left: list.scrollLeft, top: list.scrollTop }
+  const box = DOMRect.fromRect({ x, y })
+  fileMenuAnchor.value = { getBoundingClientRect: () => box }
+  nextTick(() => fileMenu.value?.handleOpen())
+}
+
+function onFileContext(event: MouseEvent) {
+  if (props.directoryOnly || !(event.target instanceof Element) || event.target.closest('.file-head')) return
+  event.preventDefault()
+  event.stopPropagation()
+  const name = event.target.closest<HTMLElement>('.file-row')?.dataset.name
+  const row = name === undefined ? undefined : shownEntries.value.find((entry) => entry.name === name)
+  if (name !== undefined && !row) return
+  openFileMenu(event.clientX, event.clientY, row)
+}
+
+function openDirectoryMenu(event: MouseEvent) {
+  if (fileMenuVisible.value && !fileMenuRows.value.length) {
+    fileMenu.value?.handleClose()
+    return
+  }
+  if (!(event.currentTarget instanceof HTMLElement)) return
+  const rect = event.currentTarget.getBoundingClientRect()
+  openFileMenu(rect.left, rect.bottom)
+}
+
+function fileMenuCommand(action: string) {
+  if (busy.value) return
+  focusList()
+  const rows = fileMenuRows.value
+  const row = fileMenuRow.value
+  switch (action) {
+    case 'open': if (row) openEntry(row); break
+    case 'download': download(rows); break
+    case 'compress': archive('compress', rows); break
+    case 'extract': if (canExtract.value && row) archive('extract', [row]); break
+    case 'rename': if (row) rename(row); break
+    case 'remove': remove(rows); break
+    case 'upload-files': pickUpload(false); break
+    case 'upload-directory': pickUpload(true); break
+    case 'mkdir': mkdir(); break
+    case 'mkdir-login': mkdir('login'); break
+    case 'mkdir-run-as': mkdir('run-as'); break
+    case 'access': checkAccess(row ? join(path.value, row.name) : path.value); break
+    case 'refresh': load(path.value); break
+  }
+}
+
+function dismissFileMenu(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  fileMenu.value?.handleClose()
+  focusList()
+}
+
+function fileMenuVisibility(open: boolean) {
+  fileMenuVisible.value = open
+  if (open) window.addEventListener('keydown', dismissFileMenu, true)
+  else {
+    fileMenuScroll = undefined
+    window.removeEventListener('keydown', dismissFileMenu, true)
+  }
+}
+
 function listKeydown(event: KeyboardEvent) {
   const target = event.target
+  if (!props.directoryOnly && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
+    event.preventDefault()
+    event.stopPropagation()
+    const name = target instanceof Element ? target.closest<HTMLElement>('.file-row')?.dataset.name : undefined
+    const row = shownEntries.value.find((entry) => entry.name === (name ?? focusedName.value))
+    const el = row && scroller.value?.querySelector<HTMLElement>(`[data-name="${CSS.escape(row.name)}"]`)
+    const viewport = scroller.value?.getBoundingClientRect()
+    const origin = el?.getBoundingClientRect() ?? viewport
+    if (origin && viewport) {
+      openFileMenu(Math.min(viewport.right - 1, origin.left + 24), Math.min(viewport.bottom - 1, Math.max(viewport.top, origin.bottom)), row)
+    }
+    return
+  }
   if (target instanceof Element && target.closest('input, textarea, button, a, [contenteditable="true"]')) return
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
     event.preventDefault()
@@ -339,7 +502,7 @@ async function run(args: string[], ok: string) {
   const dir = path.value
   working.value = '正在处理文件…'
   try {
-    await call([...args, '-c', props.config])
+    await call(fileArgs([...args, '-c', props.config]))
     if (at !== context) return
     if (ok) ElMessage.success(ok)
   } catch (e) {
@@ -352,25 +515,40 @@ async function run(args: string[], ok: string) {
   if (path.value === dir) load(dir, undefined, true)
 }
 
-async function mkdir() {
+async function mkdir(owner?: 'login' | 'run-as') {
   if (busy.value) return
   const at = context
   const dir = path.value
   let name: string
   try {
-    ;({ value: name } = await ElMessageBox.prompt('文件夹名', '新建文件夹', { inputValidator: (v) => validRemoteName(v) || '请输入有效的文件夹名，不能用 .、.. 或 /' }))
+    const field = owner ? `文件夹名（属主 ${owner === 'login' ? login.value : runAs.value}）` : '文件夹名'
+    ;({ value: name } = await ElMessageBox.prompt(field, '新建文件夹', { inputValidator: (v) => validRemoteName(v) || '请输入有效的文件夹名，不能用 .、.. 或 /' }))
   } catch {
     return
   }
   if (at !== context || dir !== path.value) return
-  run(['files', 'mkdir', props.target, join(dir, name.trim())], '文件夹已创建')
+  run(['files', 'mkdir', props.target, join(dir, name.trim()), ...(owner ? ['--owner', owner] : [])], '文件夹已创建')
 }
 
-async function rename() {
+async function checkAccess(p: string) {
+  if (!p || busy.value) return
+  const at = context
+  try {
+    const a = await call<FileAccess>(fileArgs(['files', 'access', props.target, p, '-c', props.config]))
+    if (at !== context) return
+    const allowed = (ok: boolean) => ok ? '允许' : '未通过'
+    const text = a.exists ? `读取 ${allowed(a.read)} · 写入 ${allowed(a.write)} · 执行或进入 ${allowed(a.execute)}` : '当前身份无法确认此路径。路径可能不存在，或上级目录不允许进入。'
+    const parent = a.parentWrite === undefined ? '' : `\n编辑保存还需要写入并进入该文件实际所在的父目录，当前检查${allowed(a.parentWrite)}。`
+    void ElMessageBox.alert(`${p} · ${a.identity}\n${text}${parent}`, '实际访问权限', { customStyle: { whiteSpace: 'pre-line' } }).catch(() => {})
+  } catch (e) {
+    if (at === context) ElMessage.error(handle(e, () => { if (at === context) void checkAccess(p) }))
+  }
+}
+
+async function rename(row = selected.value[0]) {
   if (busy.value) return
   const at = context
   const dir = path.value
-  const row = selected.value[0]
   if (!row) return
   let name: string
   try {
@@ -382,16 +560,15 @@ async function rename() {
   run(['files', 'mv', props.target, join(dir, row.name), join(dir, name.trim())], '已改名')
 }
 
-async function remove() {
+async function remove(rows = selected.value) {
   if (busy.value) return
   const at = context
   const dir = path.value
-  const rows = selected.value
   if (!rows.length) return
   const names = rows.map((r) => r.name + (r.dir ? '/' : ''))
   try {
     await ElMessageBox.confirm(
-      `删除 ${names.slice(0, 5).join('、')}${names.length > 5 ? ` 等 ${names.length} 项` : ''}？文件夹连同里面的东西一起删除，不能恢复。`,
+      `${identityText.value ? `以 ${identityText.value} ` : ''}删除 ${names.slice(0, 5).join('、')}${names.length > 5 ? ` 等 ${names.length} 项` : ''}？文件夹连同里面的东西一起删除，不能恢复。`,
       '删除',
       { type: 'warning', confirmButtonText: '删除' },
     )
@@ -409,7 +586,7 @@ async function remove() {
     deleting.value = left
   }
   try {
-    await call(['files', 'rm', props.target, ...paths, '-c', props.config])
+    await call(fileArgs(['files', 'rm', props.target, ...paths, '-c', props.config]))
     if (at !== context) return
     // 删掉了：直接从列表里去掉，不用等刷新
     if (path.value === dir) {
@@ -421,10 +598,45 @@ async function remove() {
   } catch (e) {
     if (at !== context) return
     done()
-    ElMessage.error({ message: handle(e, () => {}), duration: 6000 })
+    ElMessage.error({ message: handle(e, () => { if (at === context && path.value === dir) void remove(rows) }), duration: 6000 })
   }
   // 还在这个文件夹时在后台刷新一次（可能没删全、或者别人也改了）
   if (path.value === dir && !loading.value) load(dir, undefined, true)
+}
+
+async function archive(operation: 'compress' | 'extract', rows: FileEntry[]) {
+  if (busy.value || !rows.length) return
+  const at = context
+  const dir = path.value
+  const compress = operation === 'compress'
+  const title = compress ? '压缩为 ZIP' : '解压到文件夹'
+  const base = compress
+    ? (rows.length === 1 ? rows[0].name : dir.split('/').filter(Boolean).at(-1) || '归档')
+    : rows[0].name.replace(archiveSuffix, '') || '解压文件'
+  const outputName = (value: string) => {
+    const name = value.trim()
+    return compress && !/\.zip$/i.test(name) ? name + '.zip' : name
+  }
+  let name: string
+  try {
+    ;({ value: name } = await ElMessageBox.prompt(compress ? '压缩包名称' : '新文件夹名称', title, {
+      inputValue: compress ? base + '.zip' : base,
+      inputValidator: (value) => {
+        if (!validRemoteName(value)) return '请输入有效的名称，不能用 .、.. 或 /'
+        if (entries.value.some((entry) => entry.name === outputName(value))) return '这个名称已存在，请换一个'
+        return true
+      },
+    }))
+  } catch {
+    return
+  }
+  if (at !== context || dir !== path.value || busy.value) return
+  name = outputName(name)
+  const args = ['files', operation, props.target, '--to', join(dir, name), ...rows.map((row) => join(dir, row.name))]
+  transfer(operation, args, compress ? `正在压缩到 ${name}` : `正在解压到 ${name}`, () => {
+    ElMessage.success(`已${compress ? '压缩' : '解压'}到 ${name}`)
+    if (path.value === dir) load(dir, undefined, true)
+  })
 }
 
 async function pickUpload(directory: boolean) {
@@ -448,7 +660,7 @@ function upload(locals: string[]) {
 
 const downloadDirKey = 'ferry:downloadDir'
 
-async function download(rows: FileEntry[], remoteDir = path.value) {
+async function download(rows: FileEntry[], remoteDir = path.value, asSudo = false) {
   if (!rows.length) return
   if (busy.value) {
     ElMessage.warning('请等待当前操作完成后再下载')
@@ -464,7 +676,7 @@ async function download(rows: FileEntry[], remoteDir = path.value) {
   }
   const what = rows.length === 1 ? rows[0].name : `${rows.length} 项`
   const first = rows[0].name
-  transfer('download', ['files', 'download', props.target, '--to', dir, ...rows.map((r) => join(remoteDir, r.name))], `下载 ${what}`, () => {
+  transfer('download', ['files', 'download', props.target, '--to', dir, ...(asSudo && !elevated.value ? ['--as-sudo'] : []), ...rows.map((r) => join(remoteDir, r.name))], `下载 ${what}`, () => {
     ElNotification({
       type: 'success',
       title: '下载完成',
@@ -474,12 +686,12 @@ async function download(rows: FileEntry[], remoteDir = path.value) {
   })
 }
 
-/** 上传 / 下载：显示进度，可以取消；那边已有同名的先问要不要覆盖 */
-function transfer(kind: 'upload' | 'download', args: string[], what: string, done: () => void, overwrite = false) {
+/** 文件传输和归档任务共用进度与取消，上传和下载可以在确认后覆盖。 */
+function transfer(kind: FileJob, args: string[], what: string, done: () => void, overwrite = false) {
   if (xfer.value) return
   const seq = ++transferSeq
   const at = context
-  const r = ferry([...args, '-c', props.config, ...(overwrite ? ['--overwrite'] : [])], (l) => {
+  const r = ferry(fileArgs([...args, '-c', props.config, ...(overwrite ? ['--overwrite'] : [])]), (l) => {
     if (seq === transferSeq && l.kind === 'progress' && xfer.value) {
       xfer.value.file = l.label ?? ''
       xfer.value.done = l.done ?? 0
@@ -492,11 +704,11 @@ function transfer(kind: 'upload' | 'download', args: string[], what: string, don
     xfer.value = undefined
     if (res.ok) return done()
     if (res.error === '已取消') return ElMessage.info('已取消')
-    if (res.detail?.kind === 'files-exist') {
+    if ((kind === 'upload' || kind === 'download') && res.detail?.kind === 'files-exist') {
       try {
         const names = res.detail.names ?? []
         await ElMessageBox.confirm(
-          `${kind === 'upload' ? '服务器上' : '本机'}已经有 ${names.slice(0, 5).join('、')}${names.length > 5 ? ` 等 ${names.length} 项` : ''}，覆盖吗？`,
+          `${kind === 'upload' ? '服务器上' : '本机'}已经有 ${names.slice(0, 5).join('、')}${names.length > 5 ? ` 等 ${names.length} 项` : ''}，${kind === 'upload' && identityText.value ? `以 ${identityText.value} ` : ''}覆盖吗？`,
           '已经存在',
           { type: 'warning', confirmButtonText: '覆盖' },
         )
@@ -519,6 +731,12 @@ function time(t: string): string {
 
 <template>
   <div ref="root" class="files" :class="{ over: dropOver, 'glass-head': glass.enabled, 'directory-picker': directoryOnly }">
+    <div v-if="canSudo || identityText" class="bar file-identity">
+      <span v-if="identityText" class="muted small" role="status">操作身份 {{ identityText }}</span>
+      <el-button v-if="canSudo || elevated" size="small" :type="elevated ? 'warning' : undefined" :disabled="busy" @click="switchIdentity(!elevated)">
+        {{ elevated ? '退出 sudo 操作' : '以 sudo 操作' }}
+      </el-button>
+    </div>
     <div class="bar">
       <el-tooltip :show-after="HOVER_DELAY" content="上一级" placement="bottom">
         <el-button size="small" :icon="Back" aria-label="上一级目录" :disabled="!parent" @click="load(parent)" />
@@ -539,24 +757,16 @@ function time(t: string): string {
         <el-button size="small" :icon="Refresh" :loading="loading" aria-label="刷新目录" @click="load(path)" />
       </el-tooltip>
     </div>
-    <div class="bar">
-      <el-dropdown v-if="!directoryOnly" trigger="click" @command="(c: string) => pickUpload(c === 'dir')">
-        <el-button size="small" type="primary" :icon="Upload" :disabled="busy || !path">上传</el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="files">选择文件…</el-dropdown-item>
-            <el-dropdown-item command="dir">选择文件夹…</el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
-      <el-button v-if="!directoryOnly" size="small" :icon="View" :disabled="busy || selected.length !== 1 || selected[0]?.dir || (selected[0] && isDeleting(selected[0]))" @click="viewFile(selected[0])">查看内容</el-button>
-      <el-button v-if="!directoryOnly" size="small" :icon="Download" :disabled="busy || !selected.length" @click="download(selected)">下载</el-button>
-      <el-button size="small" :icon="FolderAdd" :disabled="busy || !path" @click="mkdir">新建文件夹</el-button>
-      <el-button v-if="!directoryOnly" size="small" :icon="EditPen" :disabled="busy || selected.length !== 1" @click="rename">改名</el-button>
-      <el-button v-if="!directoryOnly" size="small" :icon="Delete" :disabled="busy || !selected.length" type="danger" plain @click="remove">删除</el-button>
+    <div v-if="directoryOnly" class="bar">
+      <el-button size="small" :icon="FolderAdd" :disabled="busy || !path" @click="mkdir()">新建文件夹</el-button>
     </div>
 
-    <div class="file-filter"><el-input v-model="query" size="small" :placeholder="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" clearable :aria-label="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" /><span class="muted small">{{ shownEntries.length }} / {{ directoryEntries.length }} 项<span v-if="selected.length"> · 已勾选 {{ selected.length }} 项</span></span><el-button v-if="selected.length" size="small" text @click="clearSelection">取消勾选</el-button></div>
+    <div class="file-filter">
+      <el-input v-model="query" size="small" :placeholder="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" clearable :aria-label="directoryOnly ? '搜索子目录' : '搜索当前文件夹'" />
+      <span class="muted small">{{ shownEntries.length }} / {{ directoryEntries.length }} 项<span v-if="selected.length"> · 已勾选 {{ selected.length }} 项</span></span>
+      <el-button v-if="selected.length" size="small" text @click="clearSelection">取消勾选</el-button>
+      <el-button v-if="!directoryOnly" size="small" text aria-haspopup="menu" :aria-expanded="fileMenuVisible && !fileMenuRows.length" :disabled="busy || !path" @click="openDirectoryMenu">文件夹操作</el-button>
+    </div>
     <el-alert v-if="error" type="error" :closable="false" show-icon class="err" :title="error"><el-button link type="primary" @click="load(requestedPath, requestedFocus)">重试</el-button></el-alert>
     <div v-loading="loading" class="list-wrap">
       <div
@@ -568,6 +778,7 @@ function time(t: string): string {
         :aria-rowcount="shownEntries.length + 1"
         @scroll="onListScroll"
         @click="clearFocusOnBackground"
+        @contextmenu="onFileContext"
         @keydown="listKeydown"
         @mouseover="hoverTip.over"
         @focusin="hoverTip.over"
@@ -611,7 +822,7 @@ function time(t: string): string {
                 :entry="item.row"
                 :state="sizes.get(join(path, item.row.name), item.row)"
                 :disabled="busy || isDeleting(item.row)"
-                @measure="sizes.measure(config, target, join(path, item.row.name), item.row)"
+                @measure="sizes.measure(config, target, join(path, item.row.name), item.row, elevated)"
                 @cancel="sizes.cancel(join(path, item.row.name))"
               />
             </span>
@@ -627,9 +838,47 @@ function time(t: string): string {
         <div v-if="!shownEntries.length && !loading" class="file-empty">{{ emptyText }}</div>
       </div>
     </div>
+    <span v-if="!directoryOnly" :id="fileMenuLabel" hidden>文件操作</span>
+    <el-dropdown
+      v-if="!directoryOnly"
+      ref="fileMenu"
+      :id="fileMenuLabel"
+      class="file-context-anchor"
+      popper-class="file-context-popper"
+      trigger="click"
+      placement="bottom-start"
+      :show-arrow="false"
+      :virtual-ref="fileMenuAnchor"
+      virtual-triggering
+      @command="fileMenuCommand"
+      @visible-change="fileMenuVisibility"
+    >
+      <template #dropdown>
+        <el-dropdown-menu>
+          <template v-if="fileMenuRows.length">
+            <el-dropdown-item v-if="fileMenuRow" command="open" :icon="fileMenuRow.dir ? Folder : View">{{ fileMenuRow.dir ? '打开' : '查看内容' }}</el-dropdown-item>
+            <el-dropdown-item command="download" :icon="Download">下载…</el-dropdown-item>
+            <el-dropdown-item command="compress" :icon="Box" divided>压缩为 ZIP…</el-dropdown-item>
+            <el-dropdown-item v-if="canExtract" command="extract" :icon="FolderAdd">解压到文件夹…</el-dropdown-item>
+            <el-dropdown-item v-if="fileMenuRow" command="rename" :icon="EditPen" divided>改名…</el-dropdown-item>
+            <el-dropdown-item v-if="fileMenuRow" command="access">检查实际访问权限…</el-dropdown-item>
+            <el-dropdown-item command="remove" :icon="Delete" class="file-menu-danger" :divided="!fileMenuRow">删除…</el-dropdown-item>
+          </template>
+          <template v-else>
+            <el-dropdown-item command="upload-files" :icon="Upload">上传文件…</el-dropdown-item>
+            <el-dropdown-item command="upload-directory" :icon="Upload">上传文件夹…</el-dropdown-item>
+            <el-dropdown-item command="mkdir" :icon="FolderAdd">新建文件夹…</el-dropdown-item>
+            <el-dropdown-item v-if="canSetOwner && login && login !== 'root'" command="mkdir-login">新建给登录用户的文件夹…</el-dropdown-item>
+            <el-dropdown-item v-if="canSetOwner && runAs" command="mkdir-run-as">新建给运行用户的文件夹…</el-dropdown-item>
+            <el-dropdown-item command="access">检查目录实际访问权限…</el-dropdown-item>
+            <el-dropdown-item command="refresh" :icon="Refresh" divided>刷新目录</el-dropdown-item>
+          </template>
+        </el-dropdown-menu>
+      </template>
+    </el-dropdown>
     <el-tooltip :visible="!!hoverTip.tip.value" virtual-triggering :virtual-ref="hoverTip.tip.value?.el" :placement="hoverTip.tip.value?.placement ?? 'top'" :effect="hoverTip.tip.value?.effect ?? 'dark'">
       <template #content>
-        <FilePermissionDetails v-if="hoverTip.tip.value?.data" :permissions="hoverTip.tip.value.data.permissions" :mode="hoverTip.tip.value.data.entry.mode" :dir="hoverTip.tip.value.data.entry.dir" />
+        <FilePermissionDetails v-if="hoverTip.tip.value?.data" :permissions="hoverTip.tip.value.data.permissions" :mode="hoverTip.tip.value.data.entry.mode" :dir="hoverTip.tip.value.data.entry.dir" :uid="hoverTip.tip.value.data.entry.uid" :gid="hoverTip.tip.value.data.entry.gid" />
         <span v-else>{{ hoverTip.tip.value?.text }}</span>
       </template>
     </el-tooltip>
@@ -639,16 +888,18 @@ function time(t: string): string {
         <span class="xfer-what">{{ xfer.what }}</span>
         <el-button link size="small" @click="xfer.kill()">取消</el-button>
       </div>
-      <el-progress :percentage="percent" :stroke-width="6" />
+      <el-progress :percentage="percent" :stroke-width="6" :indeterminate="xfer.kind === 'compress' || xfer.kind === 'extract'" :show-text="xfer.kind === 'upload' || xfer.kind === 'download'" />
       <div class="muted small mono">{{ xfer.file }} {{ xfer.total ? `${bytes(xfer.done)} / ${bytes(xfer.total)}` : '' }}</div>
     </div>
-    <div v-else class="muted small tip" role="status">{{ working || (directoryOnly ? '单击选中目录，双击进入；未选中子目录时使用当前目录' : deleting.size ? `正在删除 ${deleting.size} 项，可以继续浏览别的文件夹` : '双击打开文件或文件夹；勾选复选框后可下载、改名或删除；可拖入文件上传') }}</div>
+    <div v-else class="muted small tip" role="status">{{ working || (directoryOnly ? '单击选中目录，双击进入；未选中子目录时使用当前目录' : deleting.size ? `正在删除 ${deleting.size} 项，可以继续浏览别的文件夹` : '右键打开操作菜单，支持勾选多项和拖入文件上传。键盘可按 Shift+F10。') }}</div>
     <div v-if="dropOver" class="drop">松开就上传到 {{ path }}</div>
-    <FilePreviewDialog v-if="preview" :config="config" :target="target" :path="join(preview.dir, preview.entry.name)" @close="preview = undefined" @download="download([preview!.entry], preview!.dir)" @saved="load(path, undefined, true)" />
+    <FilePreviewDialog v-if="preview" :config="config" :target="target" :path="join(preview.dir, preview.entry.name)" :as-sudo="elevated" @close="preview = undefined" @download="download([preview!.entry], preview!.dir, $event)" @saved="load(path, undefined, true)" />
   </div>
 </template>
 
 <style scoped>
+.file-context-anchor { position: absolute; }
+:global(.file-context-popper .file-menu-danger) { color: var(--el-color-danger); }
 /* 液态玻璃：表头吸顶，文件行从它下面滚过，表头是磨砂玻璃 */
 .glass-head .file-head {
   /* 深浅跟着设置里的「玻璃透明度」（--cg-k、--cg-blur-k，见 glass/runtime.ts） */

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { call, sessionEnv, type ErrorDetail } from '../ferry'
+import { call, clearSessionCredential, setSessionCredential, type ErrorDetail } from '../ferry'
 import { useInteractionScope } from '../interactionScope'
 
 const props = defineProps<{ detail: ErrorDetail; config: string }>()
@@ -15,8 +15,9 @@ const saving = ref(false)
 const error = ref('')
 
 const isPassphrase = computed(() => props.detail.kind.startsWith('passphrase'))
+const isSudo = computed(() => props.detail.kind.startsWith('sudo-'))
 const rejected = computed(() => props.detail.kind.endsWith('-rejected'))
-const title = computed(() => (isPassphrase.value ? '私钥密码' : '服务器登录密码'))
+const title = computed(() => isSudo.value ? 'sudo 密码' : isPassphrase.value ? '私钥密码' : '服务器登录密码')
 
 async function submit() {
   if (!value.value || saving.value) return
@@ -29,14 +30,15 @@ async function submit() {
       // 存进系统凭据库：值只经环境变量传给 ferry，不出现在命令行参数里
       const args = isPassphrase.value
         ? ['secret', 'set', '--passphrase', props.detail.key ?? '', '-c', props.config]
-        : ['secret', 'set', props.detail.target ?? '', '-c', props.config]
-      await call(args, { FERRY_SECRET_VALUE: secret })
+        : ['secret', 'set', ...(isSudo.value ? ['--sudo', '--verify'] : []), props.detail.target ?? '', '-c', props.config]
+      const result = await call<{ passwordless?: boolean }>(args, { FERRY_SECRET_VALUE: secret })
       if (!current()) return
-      delete sessionEnv[detail.env ?? '']
-      ElMessage.success('已保存到系统凭据库')
+      clearSessionCredential(detail.env ?? '')
+      if (result.passwordless) ElMessage.info('服务器未要求 sudo 密码')
+      else ElMessage.success('已保存到系统凭据库')
     } else if (detail.env) {
       // 只在本次运行期间记住
-      sessionEnv[detail.env] = secret
+      setSessionCredential(detail.env, secret)
     }
     visible.value = false
     emit('done')
@@ -55,7 +57,7 @@ async function submit() {
       type="error"
       :closable="false"
       show-icon
-      :title="isPassphrase ? '私钥密码不正确，请重新输入' : '服务器拒绝了这个密码，请重新输入'"
+      :title="isSudo ? 'sudo 拒绝了这个密码，请重新输入' : isPassphrase ? '私钥密码不正确，请重新输入' : '服务器拒绝了这个密码，请重新输入'"
       class="mb"
     />
     <p>{{ detail.prompt }}</p>

@@ -10,18 +10,23 @@ import { bytes, ferry, FerryError, isSecretKind, type FilePreview, type Running 
 import { secretRequest, trustRequest, trustedTick } from '../state'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 
-const props = defineProps<{ config: string; target: string; path: string; readArgs?: string[]; saveArgs?: string[]; downloadable?: boolean }>()
-const emit = defineEmits<{ close: []; download: []; saved: [] }>()
+const props = defineProps<{ config: string; target: string; path: string; readArgs?: string[]; saveArgs?: string[]; downloadable?: boolean; asSudo?: boolean }>()
+const readAsSudo = ref(false)
+const elevated = computed(() => props.asSudo || readAsSudo.value)
+const fileArgs = (args: string[]) => [...args, '-c', props.config, ...(elevated.value ? ['--as-sudo'] : [])]
+const emit = defineEmits<{ close: []; download: [asSudo: boolean]; saved: [] }>()
 const visible = ref(true)
 const name = computed(() => props.path.split('/').pop() || props.path)
 const loading = ref(false)
 const error = ref('')
+const canReadAsSudo = ref(false)
 const data = ref<FilePreview>()
 const host = ref<HTMLElement>()
 const wrap = ref(false)
 const editing = ref(false)
 const draft = ref('')
 const saving = ref(false)
+const auditing = ref(false)
 const saveError = ref('')
 const saved = ref(false)
 const canRead = computed(() => !!data.value && !data.value.unsupported && !loading.value)
@@ -45,6 +50,7 @@ function cancel() {
   writing?.kill()
   writing = undefined
   saving.value = false
+  auditing.value = false
   comparing.value = false
   editor?.destroy()
   editor = undefined
@@ -61,8 +67,9 @@ async function load() {
   const at = seq
   loading.value = true
   error.value = ''
+  canReadAsSudo.value = false
   try {
-    const result = await reads.run('preview', (s) => readCall<FilePreview>([...(props.readArgs ?? ['files', 'preview', props.target, props.path]), '-c', props.config], s))
+    const result = await reads.run('preview', (s) => readCall<FilePreview>(fileArgs(props.readArgs ?? ['files', 'preview', props.target, props.path]), s))
     if (at !== seq) return
     if (!result) throw new Error('文件读取失败')
     data.value = result
@@ -76,6 +83,8 @@ async function load() {
       trustRequest.value = { target: props.target, config: props.config }
     } else if (detail && isSecretKind(detail.kind)) {
       secretRequest.value = { detail, config: props.config, retry: () => { if (at === seq) load() } }
+    } else if (!props.readArgs && !elevated.value && detail?.kind === 'files-permission') {
+      canReadAsSudo.value = !!detail.canSudo
     }
   } finally {
     if (at === seq) {
@@ -116,6 +125,12 @@ async function load() {
   })
 }
 
+function retryWithSudo() {
+  if (!canReadAsSudo.value || loading.value) return
+  readAsSudo.value = true
+  void load()
+}
+
 function editExtensions() {
   const writable = editing.value && !saving.value
   return [
@@ -154,10 +169,16 @@ async function refresh() {
 async function save() {
   if (!canEdit.value || !dirty.value || saving.value) return
   const at = seq
-  const value = JSON.stringify({ revision: data.value!.revision, content: draft.value })
+  const revision = data.value!.revision
+  const content = draft.value
+  const value = JSON.stringify({ revision, content })
   saving.value = true
+  auditing.value = false
   saveError.value = ''
-  const proc = ferry<FilePreview>([...(props.saveArgs ?? ['files', 'save', props.target, props.path]), '-c', props.config], undefined, { FERRY_FILE_VALUE: value })
+  const args = props.saveArgs ?? ['files', 'save', props.target, props.path, '--sudo-if-needed']
+  const proc = ferry<FilePreview>(fileArgs(args), (line) => {
+    if (at === seq && line.kind === 'step' && line.msg === '文件已写入，正在记录审计') auditing.value = true
+  }, { FERRY_FILE_VALUE: value })
   writing = proc
   try {
     const result = await proc.done
@@ -167,15 +188,22 @@ async function save() {
     // 保存保留原文件的编码和换行；编辑器内部统一用 LF。
     draft.value = normalize(result.data.content)
     saved.value = true
-    ElMessage.success('文件已保存到服务器')
+    ElMessage.success(result.data.identity === 'sudo:root' ? '已以 sudo 保存到服务器' : '文件已保存到服务器')
     emit('saved')
   } catch (e) {
     if (at !== seq) return
     saveError.value = (e as Error).message
-    // 保存失败时保留草稿，重新登录后仍要由用户主动重试保存。
     const detail = e instanceof FerryError ? e.detail : undefined
-    if (detail && isSecretKind(detail.kind)) secretRequest.value = { detail, config: props.config, retry: () => {} }
-    else if (detail?.kind === 'unknown-host' || (e instanceof FerryError && e.unknownHost)) trustRequest.value = { target: props.target, config: props.config }
+    const needsTrust = detail?.kind === 'unknown-host' || (e instanceof FerryError && e.unknownHost)
+    const needsSecret = detail && isSecretKind(detail.kind)
+    const retry = () => {
+      if (visible.value && at === seq && data.value?.revision === revision && draft.value === content) void save()
+    }
+    if (needsSecret) {
+      secretRequest.value = { detail, config: props.config, retry }
+    } else if (needsTrust) {
+      trustRequest.value = { target: props.target, config: props.config, retry }
+    }
   } finally {
     if (at === seq) { saving.value = false; writing = undefined }
   }
@@ -207,7 +235,10 @@ async function copy() {
 
 watch(wrap, (value) => editor?.dispatch({ effects: wrapping.reconfigure(value ? EditorView.lineWrapping : []) }))
 watch([editing, saving], () => editor?.dispatch({ effects: editMode.reconfigure(editExtensions()) }), { flush: 'sync' })
-watch(() => [props.config, props.target, props.path], load, { immediate: true })
+watch(() => [props.config, props.target, props.path, props.asSudo], () => {
+  readAsSudo.value = false
+  void load()
+}, { immediate: true })
 watch(trustedTick, () => { if (waitTrust) load() })
 onBeforeUnmount(() => { disposed = true; cancel() })
 </script>
@@ -215,27 +246,30 @@ onBeforeUnmount(() => { disposed = true; cancel() })
 <template>
   <el-dialog v-model="visible" :title="`${editing ? '编辑内容' : '查看内容'} · ${name}${dirty ? ' *' : ''}`" width="min(1040px, 94vw)" top="5vh" append-to-body class="file-preview-dialog" :before-close="beforeClose" :close-on-click-modal="false" :close-on-press-escape="false" @opened="editor?.requestMeasure()" @close="cancel" @closed="emit('close')">
     <div class="preview-path mono" :title="path">{{ path }}</div>
+    <el-tag v-if="elevated" type="warning" size="small">此文件以 sudo 操作</el-tag>
     <div class="preview-toolbar">
       <el-button size="small" :icon="EditPen" :disabled="!canEdit || saving" @click="toggleEdit">{{ editing ? '取消编辑' : '编辑' }}</el-button>
-      <el-button v-if="editing" size="small" type="primary" :icon="Finished" :loading="saving" :disabled="!dirty || saving" title="Ctrl+S / ⌘S" @click="save">保存</el-button>
+      <el-button v-if="editing" size="small" type="primary" :icon="Finished" :loading="saving" :disabled="!dirty || saving" title="Ctrl+S / ⌘S" @click="save()">保存</el-button>
       <el-button v-if="editing" size="small" :disabled="!dirty || saving" @click="comparing = true">对比改动</el-button>
       <el-button size="small" :icon="Search" :disabled="!canRead" @click="find">查找</el-button>
       <el-button size="small" :icon="CopyDocument" :disabled="!canRead" @click="copy">复制内容</el-button>
       <el-checkbox v-model="wrap" :disabled="!canRead">自动换行</el-checkbox>
       <span class="preview-spacer" />
       <el-button size="small" :icon="Refresh" :loading="loading" :disabled="saving" @click="refresh">刷新</el-button>
-      <el-button v-if="downloadable !== false" size="small" :icon="Download" :disabled="saving" title="下载服务器上已保存的文件" @click="emit('download')">下载</el-button>
+      <el-button v-if="downloadable !== false" size="small" :icon="Download" :disabled="saving" title="下载服务器上已保存的文件" @click="emit('download', !!elevated)">下载</el-button>
     </div>
     <el-alert v-if="data?.truncated && !data.unsupported" type="warning" :closable="false" show-icon :title="`文件较大，仅预览前 ${bytes(data.limit)}，无法在此编辑；请下载后编辑并上传。`" class="preview-notice" />
-    <el-alert v-if="saveError" type="error" :closable="false" show-icon :title="saveError" class="preview-notice"><el-button link type="primary" :disabled="saving" @click="refresh">重新读取</el-button></el-alert>
+    <el-alert v-if="saveError" type="error" :closable="false" show-icon :title="saveError" class="preview-notice">
+      <el-button link type="primary" :disabled="saving" @click="refresh">重新读取</el-button>
+    </el-alert>
     <el-alert v-if="data?.readOnly" :title="data.readOnly" type="info" :closable="false" class="preview-notice" />
     <div v-loading="loading" class="preview-body" element-loading-text="正在读取文件…">
-      <div v-if="error" class="preview-message" role="alert"><el-alert :title="error" type="error" :closable="false" show-icon /><el-button @click="load">重试</el-button></div>
-      <div v-else-if="data?.unsupported" class="preview-message"><el-empty description="暂不支持预览此文件"><p class="muted">{{ data.unsupported }}</p><el-button :icon="Download" @click="emit('download')">下载文件</el-button></el-empty></div>
+      <div v-if="error" class="preview-message" role="alert"><el-alert :title="error" type="error" :closable="false" show-icon /><el-button v-if="canReadAsSudo" type="primary" @click="retryWithSudo">以 sudo 查看</el-button><el-button v-else @click="load">重试</el-button></div>
+      <div v-else-if="data?.unsupported" class="preview-message"><el-empty description="暂不支持预览此文件"><p class="muted">{{ data.unsupported }}</p><el-button v-if="downloadable !== false" :icon="Download" @click="emit('download', !!elevated)">下载文件</el-button></el-empty></div>
       <div v-else-if="canRead" ref="host" class="preview-editor" />
     </div>
     <template #footer>
-      <div class="preview-footer"><span class="muted"><span :class="{ 'preview-dirty': dirty }">{{ saving ? '正在保存…' : dirty ? '未保存' : saved ? '已保存' : editing ? '编辑中' : '只读' }}</span><span v-if="data"> · {{ bytes(data.size) }}<span v-if="data.encoding"> · {{ data.encoding }}</span><span v-if="canRead && !draft"> · 空文件</span></span></span><el-button :disabled="saving" @click="close">关闭</el-button></div>
+      <div class="preview-footer"><span class="muted"><span :class="{ 'preview-dirty': dirty && !auditing }">{{ saving ? (auditing ? '文件已写入，正在记录审计…' : '正在保存…') : dirty ? '未保存' : saved ? '已保存' : editing ? '编辑中' : '只读' }}</span><span v-if="data"> · {{ bytes(data.size) }}<span v-if="data.encoding"> · {{ data.encoding }}</span><span v-if="saved && data.identity"> · {{ data.identity }}</span><span v-if="canRead && !draft"> · 空文件</span></span></span><el-button :disabled="saving" @click="close">关闭</el-button></div>
     </template>
   </el-dialog>
   <el-dialog v-model="comparing" title="对比改动" width="min(1180px, 94vw)" append-to-body top="5vh"><div class="compare"><section><strong>服务器原内容</strong><pre>{{ normalize(data?.content ?? '') }}</pre></section><section><strong>当前编辑内容</strong><pre>{{ draft }}</pre></section></div></el-dialog>

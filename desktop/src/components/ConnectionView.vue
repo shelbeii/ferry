@@ -96,12 +96,15 @@ onBeforeUnmount(() => tabs.forEach(drop))
         <div class="conn-meta muted">
           <span class="mono">{{ addr }}</span>
           <span class="conn-auth">{{ conn.auth === 'password' ? '密码登录' : '密钥登录' }}</span>
+          <span v-if="conn.user !== 'root' && conn.sudoAuth" class="small">
+            {{ conn.sudoAuth === 'disabled' ? 'sudo 已禁用' : conn.sudoAuth === 'password' ? 'sudo 密码认证' : 'sudo 免密认证' }}
+          </span>
         </div>
       </div>
       <div class="head-actions">
         <GlassButton @click="softwareOpen = true">软件</GlassButton>
         <GlassButton @click="runtimeOpen = true">运行环境</GlassButton>
-        <el-tooltip :show-after="HOVER_DELAY" content="上传、下载、新建文件夹、改名、删除（以登录用户的身份）" placement="bottom">
+        <el-tooltip :show-after="HOVER_DELAY" content="浏览和管理服务器文件" placement="bottom">
           <GlassButton tone="primary" :icon="FolderOpened" @click="filesOpen = true">文件</GlassButton>
         </el-tooltip>
         <el-tooltip :show-after="HOVER_DELAY" content="谁连着这台服务器：登录用户、来源 IP、连了多久、在干什么，可以断开" placement="bottom">

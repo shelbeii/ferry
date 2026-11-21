@@ -14,7 +14,7 @@ const loading = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const label = computed(() => {
-  if (['password', 'passphrase', 'software'].includes(props.entry.kind)) return '密码'
+  if (['password', 'sudo', 'passphrase', 'software'].includes(props.entry.kind)) return '密码'
   if (props.entry.kind === 'ai') return 'API Key'
   if (props.entry.account.startsWith('notify:url:')) return '通知地址'
   if (props.entry.account.startsWith('notify:sign:')) return '加签密钥'

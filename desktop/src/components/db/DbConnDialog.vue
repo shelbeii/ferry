@@ -6,8 +6,8 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Connection, Search } from '@element-plus/icons-vue'
 import GlassToggle from '../glass/GlassToggle.vue'
-import { call, type Inspect, type PortProbe, type SoftwareReport, type Software } from '../../ferry'
-import { projects, connections, connectionsPath } from '../../state'
+import { call, FerryError, type Inspect, type PortProbe, type SoftwareReport, type Software } from '../../ferry'
+import { projects, connections, connectionsPath, secretRequest } from '../../state'
 import { pickFile } from '../../platform'
 import { saveDbConn, testDbConn, connFromSoftware, isDbSoftware, defaultPort, defaultUser, kindLabel, dbCapabilities, dbCreds, type DbConn, type DbKind, type DbFrom } from '../../db'
 
@@ -174,6 +174,11 @@ async function loadCreds(fr: DbFrom) {
     }
   } catch (e) {
     if (seq !== credSeq) return
+    if (e instanceof FerryError && e.needSecret && e.detail) {
+      secretRequest.value = { detail: e.detail, config: fr.via.config, retry: () => { if (seq === credSeq) void loadCreds(fr) } }
+      credMsg.value = { ok: false, text: e.message }
+      return
+    }
     credMsg.value = { ok: false, text: `没能从服务器上读账号密码（${(e as Error).message}）：请填写` }
   } finally {
     if (seq === credSeq) credLoading.value = false

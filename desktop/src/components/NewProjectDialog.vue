@@ -130,6 +130,7 @@ interface TargetForm {
   port: number
   user: string
   sudo: boolean
+  sudoAuth: 'nopasswd' | 'password'
   auth: 'key' | 'password'
   identityFile: string
   root: string
@@ -454,7 +455,7 @@ function onPortChange(a: AppForm, old?: number) {
 
 function newTarget(): TargetForm {
   return {
-    name: targets.value.length ? `server-${targets.value.length + 1}` : 'prod', host: '', port: 22, user: 'root', sudo: false,
+    name: targets.value.length ? `server-${targets.value.length + 1}` : 'prod', host: '', port: 22, user: 'root', sudo: false, sudoAuth: 'nopasswd',
     auth: 'key', identityFile: '', root: `/opt/${project.value || 'myapp'}`, runAs: project.value || 'myapp', arch: '',
     ferryDir: '/usr/local/lib/ferry', connection: '', more: false, probing: false, probeError: '', probedKey: '', creatingUser: false,
     checking: false, preflightError: '',
@@ -481,6 +482,7 @@ function fillFromConnection(t: TargetForm, name: string) {
   t.user = c.user || 'root'
   t.auth = c.auth
   t.sudo = t.user !== 'root'
+  t.sudoAuth = c.sudoAuth === 'password' ? 'password' : 'nopasswd'
   let id = c.identityFile
   if (id && !/^([A-Za-z]:[\\/]|[\\/]|~)/.test(id)) id = connectionsPath.value.replace(/[\\/][^\\/]*$/, '') + '/' + id
   t.identityFile = id
@@ -495,7 +497,7 @@ function pinnedKey(t: TargetForm): string {
 const portList = () => included.value.filter((a) => a.type !== 'static' && usesPort(a) && a.port).map((a) => ({ app: a.name, port: a.port! }))
 
 const targetKey = (t: TargetForm) =>
-  JSON.stringify([t.name, t.host, t.port, t.user, t.auth, t.identityFile, t.root, needsRunAs.value ? t.runAs : '', t.ferryDir, portList()])
+  JSON.stringify([t.name, t.host, t.port, t.user, t.auth, t.identityFile, t.sudo, t.sudoAuth, t.root, needsRunAs.value ? t.runAs : '', t.ferryDir, portList()])
 
 /** 测试连接用的临时配置（ferry probe prepare 写的） */
 const probePath = ref('')
@@ -539,6 +541,7 @@ async function probe(t: TargetForm) {
         projectDir: dir.value,
         targets: targets.value.map((x) => ({
           name: x.name, host: x.host.trim(), port: x.port, user: x.user || 'root', auth: x.auth, identityFile: x.identityFile.trim(), connection: x.connection,
+          sudoAuth: x.user !== 'root' && x.sudo && x.sudoAuth === 'password' ? 'password' : '',
         })),
       }),
     })
@@ -563,13 +566,19 @@ async function probe(t: TargetForm) {
 }
 
 async function createUser(t: TargetForm) {
+  const current = captureContext()
+  const key = targetKey(t)
   t.creatingUser = true
   try {
     await call(['probe', t.name, '-c', probePath.value, '--create-user', t.runAs])
     ElMessage.success(`已创建运行用户 ${t.runAs}`)
     await probe(t)
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    if (current() && key === targetKey(t)) {
+      ElMessage.error(handleConnError(e, probePath.value, t.name, () => {
+        if (current() && key === targetKey(t)) createUser(t)
+      }))
+    }
   } finally {
     t.creatingUser = false
   }
@@ -763,6 +772,7 @@ function spec() {
     project: project.value,
     targets: targets.value.map((t) => ({
       name: t.name, host: t.host.trim(), port: t.port, user: t.user || 'root', sudo: t.user !== 'root' && t.sudo, auth: t.auth,
+      sudoAuth: t.user !== 'root' && t.sudo && t.sudoAuth === 'password' ? 'password' : '',
       identityFile: t.identityFile.trim(), root: t.root, runAs: t.runAs, arch: t.arch, ferryDir: t.ferryDir, hostKey: pinnedKey(t), nginxInstance: needsNginx.value ? t.nginxInstance : '',
     })),
     apps: included.value.map((a) => ({
@@ -1275,7 +1285,13 @@ const levelIcon = { ok: CircleCheckFilled, warn: WarningFilled, error: CircleClo
                 </el-radio-group>
               </el-form-item>
               <el-form-item v-if="t.user && t.user !== 'root'" label="sudo">
-                <el-checkbox v-model="t.sudo">用免密 sudo 执行部署</el-checkbox>
+                <el-checkbox v-model="t.sudo">用 sudo 执行部署</el-checkbox>
+              </el-form-item>
+              <el-form-item v-if="t.user && t.user !== 'root' && t.sudo" label="sudo 认证">
+                <el-radio-group v-model="t.sudoAuth">
+                  <el-radio-button value="nopasswd">免密</el-radio-button>
+                  <el-radio-button value="password">使用密码</el-radio-button>
+                </el-radio-group>
               </el-form-item>
             </div>
             <el-form-item v-if="t.auth === 'key'" label="私钥">

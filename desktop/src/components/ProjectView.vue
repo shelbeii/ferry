@@ -1256,7 +1256,7 @@ async function onSaved(deployment?: DeploymentRequest) {
               <button type="button" class="deployment-field cg-menu-item" @click="openEditor('keepReleases')"><span>版本保留</span><span>{{ target.keepReleases }} 个版本<span v-if="!isSet('keepReleases')" class="dflt">默认</span></span><el-icon><EditPen /></el-icon></button>
             </el-tooltip>
             <el-tooltip v-if="target.sudo" :show-after="HOVER_DELAY" :content="fieldTip('sudo')" placement="left">
-              <button type="button" class="deployment-field cg-menu-item" @click="openEditor('sudo')"><span>权限提升</span><span>sudo</span><el-icon><EditPen /></el-icon></button>
+              <button type="button" class="deployment-field cg-menu-item" @click="openEditor('sudoAuth')"><span>权限提升</span><span>{{ target.sudoAuth === 'password' ? 'sudo（使用密码）' : 'sudo（免密）' }}</span><el-icon><EditPen /></el-icon></button>
             </el-tooltip>
             <el-tooltip :show-after="HOVER_DELAY" :content="fieldTip('auth')" placement="left">
               <button type="button" class="deployment-field cg-menu-item" @click="openEditor('auth')"><span>登录方式</span><span>{{ target.auth === 'password' ? '密码登录' : '密钥登录' }}</span><el-icon><EditPen /></el-icon></button>
@@ -1797,8 +1797,10 @@ async function onSaved(deployment?: DeploymentRequest) {
 .workspace-tabs { display: flex; align-items: center; gap: 12px; overflow-x: auto; flex-shrink: 0; padding: 10px 6px; margin: -10px -6px; }
 .workspace-switch { flex-shrink: 0; }
 .deployment-toggle.active { color: var(--el-color-primary); }
-.deployment-chevron { transition: transform var(--ferry-ease); }
 .deployment-chevron.open { transform: rotate(180deg); }
+@media (prefers-reduced-motion: no-preference) {
+  .deployment-chevron { transition: transform var(--ferry-ease); }
+}
 /* 给滚动区域里的焦点描边和圆角留出空间，负外边距保持原来的内容位置。 */
 .deployment-details { max-height: min(480px, calc(100dvh - 100px)); overflow: auto; padding: 6px; margin: -6px; }
 .deployment-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 8px 12px; border-bottom: 1px solid var(--ferry-stroke); }
