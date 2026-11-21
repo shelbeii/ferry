@@ -877,7 +877,7 @@ function copy(text: string) {
             </el-tooltip>
           </div>
           <div class="ai-actions">
-            <el-popover ref="historyPopover" v-model:visible="historyOpen" popper-class="ai-history-popper" placement="bottom-end" :width="380" trigger="click" :hide-after="0" @before-enter="loadHistory()">
+            <el-popover ref="historyPopover" v-model:visible="historyOpen" role="dialog" popper-class="ai-history-popper" placement="bottom-end" :width="380" trigger="click" :hide-after="0" @before-enter="loadHistory()">
               <template #reference>
                 <el-button text size="small" :icon="Clock" :disabled="running" :aria-expanded="historyOpen">历史</el-button>
               </template>
@@ -897,7 +897,7 @@ function copy(text: string) {
                           {{ when(h.updated) }} · {{ h.messages }} 句<span v-if="h.pending" class="hist-pending"> · 有等确认的操作</span>
                         </div>
                       </div>
-                      <el-popconfirm title="删除这段历史对话？此操作无法撤销。" confirm-button-text="删除" cancel-button-text="取消" @confirm="deleteConv(h.id)"><template #reference><el-button text size="small" :icon="Delete" :aria-label="`删除对话 ${h.title}`" @click.stop @keydown.stop /></template></el-popconfirm>
+                      <el-popconfirm role="dialog" title="删除这段历史对话？此操作无法撤销。" confirm-button-text="删除" cancel-button-text="取消" @confirm="deleteConv(h.id)"><template #reference><el-button text size="small" :icon="Delete" :aria-label="`删除对话 ${h.title}`" @click.stop @keydown.stop /></template></el-popconfirm>
                     </div>
                   </div>
                 </div>

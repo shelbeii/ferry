@@ -6,16 +6,28 @@ describe('玻璃按钮拖动边界', () => {
     expect(fitButtonAxis(200, 120, 0, 400, -8, 1.2)).toEqual({ offset: -8, scale: 1.2 })
   })
 
-  it('在两个边缘限制弹簧回弹和拖动偏移', () => {
-    const left = fitButtonAxis(60, 120, 0, 400, -10, 1.25)
-    const right = fitButtonAxis(340, 120, 0, 400, 10, 1.25)
-    expect(60 + left.offset - 60 * left.scale).toBeCloseTo(7)
-    expect(340 + right.offset + 60 * right.scale).toBeCloseTo(393)
+  it('限制向外拖动，贴边按下和松手时保持原位', () => {
+    for (const scale of [1.25, 1.1, 1.01, 1]) {
+      expect(fitButtonAxis(60, 120, 0, 400, 0, scale)).toEqual({ offset: 0, scale: 1 })
+      expect(fitButtonAxis(340, 120, 0, 400, 0, scale)).toEqual({ offset: 0, scale: 1 })
+    }
+    expect(fitButtonAxis(60, 120, 0, 400, -10, 1.25)).toEqual({ offset: 0, scale: 1 })
+    expect(fitButtonAxis(340, 120, 0, 400, 10, 1.25)).toEqual({ offset: 0, scale: 1 })
   })
 
-  it('可见区较窄时限制放大，按钮完全占满可见区时保持居中', () => {
-    expect(fitButtonAxis(50, 100, 0, 110, 8, 1.25)).toEqual({ offset: 5, scale: 1 })
-    expect(fitButtonAxis(60, 120, 0, 90, -8, 1.25)).toEqual({ offset: -15, scale: .75 })
+  it('向内拖动时按边缘余量连续限制放大', () => {
+    const left = fitButtonAxis(60, 120, 0, 400, 10, 1.25)
+    const right = fitButtonAxis(340, 120, 0, 400, -10, 1.25)
+    expect(left.offset).toBe(10)
+    expect(right.offset).toBe(-10)
+    expect(60 + left.offset - 60 * left.scale).toBeCloseTo(0)
+    expect(340 + right.offset + 60 * right.scale).toBeCloseTo(400)
+  })
+
+  it('可见区较窄时限制放大，保留滚动导致的原始边界', () => {
+    expect(fitButtonAxis(50, 100, 0, 110, 8, 1.25)).toEqual({ offset: 3, scale: 1 })
+    expect(fitButtonAxis(60, 120, 0, 90, -8, 1.25)).toEqual({ offset: 0, scale: 1 })
+    expect(fitButtonAxis(45, 120, 0, 90, 0, 1)).toEqual({ offset: 0, scale: 1 })
   })
 })
 

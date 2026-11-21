@@ -197,12 +197,12 @@ export function rubber(offset: number, limit: number): number {
   return limit * Math.tanh(offset / (limit * 2.5))
 }
 
-/** 在可见区内放大和拖动按钮，有余量时给边缘、阴影和焦点描边留出空间。 */
+/** 只使用按钮原位和可见区边缘之间的空隙，让回弹结束时能平滑回到原位。 */
 export function fitButtonAxis(center: number, size: number, start: number, end: number, offset: number, scale: number) {
-  const room = end - start
-  const inset = Math.min(7, Math.max(0, (room - size) / 2))
-  const fittedScale = Math.min(scale, (room - 2 * inset) / size)
-  const half = size * fittedScale / 2
-  const position = Math.max(start + inset + half, Math.min(end - inset - half, center + offset))
-  return { offset: position - center, scale: fittedScale }
+  const half = size / 2
+  const minOffset = Math.min(0, start + 7 - (center - half))
+  const maxOffset = Math.max(0, end - 7 - (center + half))
+  const fittedOffset = Math.max(minOffset, Math.min(maxOffset, offset))
+  const growth = Math.min(fittedOffset - minOffset, maxOffset - fittedOffset)
+  return { offset: fittedOffset, scale: Math.min(scale, 1 + growth / half) }
 }

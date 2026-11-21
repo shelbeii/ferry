@@ -226,7 +226,7 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
       <el-tooltip v-else :show-after="HOVER_DELAY" content="存到这台电脑上，左边库下面的「查询」里能找到（Ctrl+S）" placement="bottom">
         <el-button size="small" :icon="DocumentChecked" @click="emit('save', false)">保存</el-button>
       </el-tooltip>
-      <el-popover placement="bottom-end" :width="560" trigger="click">
+      <el-popover role="dialog" placement="bottom-end" :width="560" trigger="click">
         <template #reference>
           <el-button size="small" :icon="Clock">历史</el-button>
         </template>
@@ -298,6 +298,7 @@ defineExpose({ focus: () => editor?.focus(), insert: (s: string) => { if (editor
 }
 .bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;

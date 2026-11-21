@@ -1,4 +1,4 @@
-.cg-button-moving { z-index: 2; isolation: isolate; }
+[data-glass-moving] { z-index: 2; isolation: isolate; }
 
 .cg-native-button-effect {
   position: absolute;
@@ -60,6 +60,9 @@ html.dark .cg-glow {
   html.cg-on :where(button, .el-button, [role="button"], .install-template-card):is(:hover, :focus-visible, [aria-pressed="true"], [aria-expanded="true"]):not(:disabled, .is-disabled, .off) {
     --cg-action-hover: 7%;
   }
+  html.cg-on [aria-haspopup]:active:not([aria-haspopup="false"], :disabled, .is-disabled, .off) {
+    --cg-action-hover: 13%;
+  }
 
   html.cg-on .cg-button {
     --cg-bright: 1;
@@ -85,7 +88,10 @@ html.dark .cg-glow {
   html.cg-on .el-button:not(.is-link, .is-text, .is-circle, .el-button-group > *, .el-input-group__append > *, .el-input-group__prepend > *) {
     border-radius: 999px;
   }
-  html.cg-on .el-button:is(.is-link, .is-text):is(:hover, :focus-visible, .cg-button-moving):not(:disabled, .is-disabled) {
+  /* 浮起胶囊底色时字也要跟着换：Element 的链接按钮悬停色（--el-button-hover-link-text-color
+     取 primary-light-5）主题里是往深里调的颜色，压在这层浅底上就看不见了 */
+  html.cg-on .el-button:is(.is-link, .is-text):is(:hover, :focus-visible, [data-glass-moving]):not(:disabled, .is-disabled) {
+    color: var(--cg-action-ink);
     background: var(--cg-action-fill);
     box-shadow: inset 0 1px 1px var(--cg-action-highlight);
   }
@@ -96,7 +102,7 @@ html.dark .cg-glow {
     background: var(--cg-action-fill);
     box-shadow: inset 0 1px 1px var(--cg-action-highlight);
   }
-  html.cg-on :where(button:not(.el-button, .cg-button, .cg-switch, .cg-tab), [role="button"], .install-template-card):is(:hover, :focus-visible, .cg-button-moving):not(:disabled, [aria-disabled="true"]) {
+  html.cg-on :where(button:not(.el-button, .cg-button, .cg-switch, .cg-tab), [role="button"], .install-template-card):is(:hover, :focus-visible, [data-glass-moving]):not(:disabled, [aria-disabled="true"]) {
     background-image: var(--cg-action-sheen);
     box-shadow: inset 0 1px 1px var(--cg-action-highlight);
   }

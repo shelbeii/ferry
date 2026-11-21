@@ -32,7 +32,9 @@ function enabled(button: HTMLElement) {
 
 function targetButton(event: Event) {
   if (!(event.target instanceof Element) || event.target.closest('input, textarea, select, [contenteditable="true"]')) return
-  return event.target.closest<HTMLElement>(buttons) ?? undefined
+  const button = event.target.closest<HTMLElement>(buttons)
+  // 下拉框和弹出面板按触发按钮的边界定位，按压时保留原来的边界。
+  if (button && !button.matches('[data-glass-motion="local"], [aria-haspopup]:not([aria-haspopup="false"])')) return button
 }
 
 function clippingParents(button: HTMLElement) {
@@ -111,7 +113,9 @@ function draw([press, dx, dy]: number[]) {
   const motion = active
   if (!motion) return
   const { button, glow } = motion
-  if ((!press && !dx && !dy) || !enabled(button)) { reset(); return }
+  if ((!press && !dx && !dy) || !button.isConnected) { reset(); return }
+  // 点击后进入加载态的按钮仍然在原位，松手的回弹可以继续跑完。
+  if (motion.trigger && !enabled(button)) release()
   // 用上一帧的偏移还原按钮原位，滚动时按当前可见区重新限制拖动。
   const box = button.getBoundingClientRect()
   const area = visibleArea(motion.clips)
@@ -153,7 +157,7 @@ function reset() {
   layoutFrame = undefined
   if (motion.idle !== undefined) cancelIdleCallback(motion.idle)
   const { button, glow, effect, original } = motion
-  button.classList.remove('cg-button-moving')
+  delete button.dataset.glassMoving
   button.style.translate = original.translate
   button.style.scale = original.scale
   button.style.position = original.position
@@ -190,7 +194,8 @@ function begin(button: HTMLElement, trigger: Trigger) {
   const motion: Motion = { button, trigger, clips, compact: button.matches(compact), glow, effect, original, x: 0, y: 0, scaleX: 1, scaleY: 1 }
   active = motion
   if (getComputedStyle(button).position === 'static') button.style.position = 'relative'
-  button.classList.add('cg-button-moving')
+  // Vue 更新加载态时会重写 class，用独立属性保留回弹期间的层级。
+  button.dataset.glassMoving = ''
   const px = 'x' in trigger ? (trigger.x - box.left) / box.width * 100 : 50
   const py = 'y' in trigger ? (trigger.y - box.top) / box.height * 100 : 50
   glow.style.backgroundPosition = `${100 - px}% ${100 - py}%`
