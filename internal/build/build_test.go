@@ -80,6 +80,21 @@ func TestRunOmitsAppSecretEnvironment(t *testing.T) {
 	}
 }
 
+func TestRunOmitsCredentialEnvironmentPrefixes(t *testing.T) {
+	const name = "FERRY_SUDO_PASSWORD_PROD"
+	t.Setenv(name, "synthetic-build-test-value")
+	dir := t.TempDir()
+	var out bytes.Buffer
+	command := "test -z \"${" + name + "+x}\" && echo passed"
+	if runtime.GOOS == "windows" {
+		command = "if defined " + name + " (exit /b 1) else (echo passed)"
+	}
+	r := &Runner{Out: &out, OmitEnvPrefixes: []string{"FERRY_SUDO_"}, LogDir: filepath.Join(dir, "logs"), LockDir: filepath.Join(dir, "locks")}
+	if _, err := r.Run(&Step{Name: "build", Command: command, Workdir: dir, Lock: "build"}); err != nil || !strings.Contains(out.String(), "passed") {
+		t.Fatalf("build inherited a credential: %v", err)
+	}
+}
+
 func TestPlanRejectsBadWorkdir(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "ferry.yaml")

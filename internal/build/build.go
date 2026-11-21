@@ -135,14 +135,15 @@ func Plan(f *config.File, t *config.Target, apps []*config.App) ([]*Step, error)
 
 // Runner 执行构建。
 type Runner struct {
-	LogDir  string            // 构建日志目录
-	LockDir string            // 构建锁目录（所有项目共用，在数据目录下）
-	Env     []string          // 设置里的构建环境（在构建自身的 env 之前）
-	OmitEnv []string          // 只供 Ferry 使用，不传给构建命令的环境变量
-	Out     io.Writer         // 实时输出（nil = 不输出）
-	OnWait  func(lock string) // 等构建锁时回调
-	LockMax time.Duration     // 最多等锁多久，默认 1 小时
-	Ctx     context.Context   // 取消时结束构建（含子进程）；nil = 不能取消
+	LogDir          string   // 构建日志目录
+	LockDir         string   // 构建锁目录（所有项目共用，在数据目录下）
+	Env             []string // 设置里的构建环境（在构建自身的 env 之前）
+	OmitEnv         []string // 只供 Ferry 使用，不传给构建命令的环境变量
+	OmitEnvPrefixes []string
+	Out             io.Writer         // 实时输出（nil = 不输出）
+	OnWait          func(lock string) // 等构建锁时回调
+	LockMax         time.Duration     // 最多等锁多久，默认 1 小时
+	Ctx             context.Context   // 取消时结束构建（含子进程）；nil = 不能取消
 }
 
 // Run 执行一步构建，返回开始时间（产物修改时间不能早于它）。
@@ -177,11 +178,12 @@ func (r *Runner) Run(s *Step) (time.Time, error) {
 	cmd := shellCommand(s.Shell, s.Command)
 	cmd.Dir = s.Workdir
 	cmd.Env = append(append(os.Environ(), r.Env...), s.Env...)
-	if len(r.OmitEnv) > 0 {
+	if len(r.OmitEnv) > 0 || len(r.OmitEnvPrefixes) > 0 {
 		env := cmd.Env[:0]
 		for _, kv := range cmd.Env {
 			key, _, _ := strings.Cut(kv, "=")
-			if !slices.Contains(r.OmitEnv, strings.ToUpper(key)) {
+			key = strings.ToUpper(key)
+			if !slices.Contains(r.OmitEnv, key) && !slices.ContainsFunc(r.OmitEnvPrefixes, func(prefix string) bool { return strings.HasPrefix(key, prefix) }) {
 				env = append(env, kv)
 			}
 		}
