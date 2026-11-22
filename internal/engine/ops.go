@@ -355,6 +355,7 @@ type SearchOptions struct {
 	Case         bool // 区分大小写
 	Context      int  // 每条结果带前后几行
 	Limit        int  // 最多几条
+	All          bool // 搜完整的日志文件（默认每个大文件只搜最近 128MB）
 }
 
 // SearchLogs 在应用的日志里找包含关键字的行。
@@ -380,7 +381,7 @@ func (e *Engine) SearchLogs(target, app string, o SearchOptions) (*proto.LogSear
 		}
 		if !o.Journal {
 			return s.callData("loggrep", &proto.Request{Apps: specs, LogRelease: o.Release, LogRun: o.Run, LogFile: o.Path,
-				Grep: o.Keyword, GrepCase: o.Case, GrepContext: o.Context, Lines: o.Limit}, &out)
+				Grep: o.Keyword, GrepCase: o.Case, GrepContext: o.Context, GrepAll: o.All, Lines: o.Limit}, &out)
 		}
 		// 服务输出：这次运行期间的 journald，交给服务器上的 grep
 		var runs []proto.LogRun

@@ -270,6 +270,7 @@ type logsIn struct {
 	Lines   int    `json:"lines,omitempty" jsonschema:"最后多少行，默认 200，最多 2000"`
 	Keyword string `json:"keyword,omitempty" jsonschema:"要搜索的关键字；给了就返回包含它的行（带前后两行），最多 100 处。默认不区分大小写（搜 ERROR 也会匹配 error、errors=[]）"`
 	Case    bool   `json:"caseSensitive,omitempty" jsonschema:"搜索区分大小写（如只找大写的 ERROR 级别日志）"`
+	All     bool   `json:"all,omitempty" jsonschema:"搜索完整的日志文件。默认每个大文件只搜最近 128MB（GB 级日志全读一遍要几十秒）；结果里 tailBytes 不为 0 表示只搜了最近这一段"`
 }
 
 func appLogs(ctx context.Context, e *engine.Engine, target string, in logsIn) (any, error) {
@@ -282,7 +283,7 @@ func appLogs(ctx context.Context, e *engine.Engine, target string, in logsIn) (a
 	}
 	if in.Keyword != "" {
 		return e.SearchLogs(target, in.App, engine.SearchOptions{Journal: !file, Path: in.Path,
-			DiagLog: file && in.Path == "", Keyword: in.Keyword, Case: in.Case, Context: 2, Limit: 100})
+			DiagLog: file && in.Path == "", Keyword: in.Keyword, Case: in.Case, All: in.All, Context: 2, Limit: 100})
 	}
 	lines := in.Lines
 	if lines <= 0 {

@@ -141,7 +141,7 @@ const usage = `ferry —— 后端 / 前端部署工具
   logs     <目标> <应用> [-n 200] [-f] [--file | --log <文件>]   当前运行的日志：journald（从这次运行开始），
                                 --file 看 diagLogs 的第一个文件，--log 指定 shared 下的日志文件
   logs     <目标> <应用> --runs                    列出各次运行的日志（每次切换版本时归档）
-  logs     <目标> <应用> --grep <关键字> [--file | --log <文件> | --all-files] [--case] [--context 2] [-n 最多条数]
+  logs     <目标> <应用> --grep <关键字> [--file | --log <文件> | --all-files] [--case] [--grep-all] [--context 2] [-n 最多条数]
                                 搜索：默认搜服务输出；--file 搜 diagLogs 的文件，--all-files 搜这次运行的全部日志文件
   logs     <目标> <应用> --log <文件> --line N        看日志文件第 N 行附近（--log 可以写通配符，如 logs/app-*.log）
   logs     <目标> <应用> --release <版本> [--run <归档>] [--file | --log <文件>]   以往某次运行的日志
@@ -209,7 +209,7 @@ var boolFlags = map[string]bool{
 	"allow-public-perms": true,
 	"y":                  true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
-	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
+	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "grep-all": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
 	"ai": true, "restart": true, "tls": true, "page": true, "facets": true, "all-targets": true, "no-restart": true,
 }
@@ -787,7 +787,7 @@ func run(argv []string, cio *cliIO) int {
 			return 0
 		}
 		if kw := c.flags["grep"]; kw != "" {
-			so := engine.SearchOptions{Release: c.flags["release"], Run: c.flags["run"], Keyword: kw, Case: c.has("case"),
+			so := engine.SearchOptions{Release: c.flags["release"], Run: c.flags["run"], Keyword: kw, Case: c.has("case"), All: c.has("grep-all"),
 				Journal: !c.has("file") && c.flags["log"] == "" && !c.has("all-files"), Path: c.flags["log"], DiagLog: c.has("file") && c.flags["log"] == ""}
 			so.Context = 2 // 默认带前后两行
 			if v := c.flags["context"]; v != "" {
@@ -1433,6 +1433,9 @@ func printSearch(w io.Writer, res *proto.LogSearch) {
 	more := ""
 	if res.Truncated {
 		more = "，结果太多只显示了前面的，可以用 -n 调大或换个更具体的关键字"
+	}
+	if res.TailBytes > 0 {
+		more += fmt.Sprintf("；文件太大，只搜了每个文件最近 %d MiB，要搜更早的加 --grep-all", res.TailBytes/(1<<20))
 	}
 	fmt.Fprintf(w, "\n共 %d 处%s\n", len(res.Matches), more)
 }

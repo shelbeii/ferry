@@ -506,11 +506,13 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			"path":    str("日志文件（相对运行中版本目录，如 logs/xxx/error.log）"),
 			"lines":   map[string]any{"type": "integer", "description": "最后多少行，默认 200，最多 1000"},
 			"keyword": str("要搜索的关键字"),
+			"all":     map[string]any{"type": "boolean", "description": "搜索完整的日志文件；默认每个大文件只搜最近 128MB，结果里 tailBytes 不为 0 就是只搜了最近这一段"},
 		}, "app"),
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
 			var a struct {
 				App, Source, Path, Keyword string
 				Lines                      int
+				All                        bool
 			}
 			if err := json.Unmarshal(in, &a); err != nil {
 				return "", fmt.Errorf("参数格式不对：%v", err)
@@ -523,7 +525,7 @@ func (e *Engine) aiToolList(s *session, t *config.Target, mode, conv string) []a
 			}
 			if a.Keyword != "" {
 				r, err := e.SearchLogs(t.Name, a.App, SearchOptions{Journal: a.Source != "file", Path: a.Path,
-					DiagLog: a.Source == "file" && a.Path == "", Keyword: a.Keyword, Context: 2, Limit: 60})
+					DiagLog: a.Source == "file" && a.Path == "", Keyword: a.Keyword, All: a.All, Context: 2, Limit: 60})
 				if err != nil {
 					return "", err
 				}

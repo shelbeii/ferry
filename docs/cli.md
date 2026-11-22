@@ -57,7 +57,7 @@
 | --- | --- |
 | `logs <目标> <应用> [-n 200] [-f]` | 当前运行的 journald 输出（从这次运行开始）；`-f` 持续输出，Ctrl-C 结束 |
 | `logs <目标> <应用> --file` / `--log <文件>` | `diagLogs` 的第一个文件 / 日志目录下指定的文件（可以用通配符，如 `logs/app-*.log`） |
-| `logs <目标> <应用> --grep <关键字> [--file \| --log <文件> \| --all-files] [--case] [--context 2]` | 搜索：默认搜服务输出，`--all-files` 搜这次运行的全部日志文件 |
+| `logs <目标> <应用> --grep <关键字> [--file \| --log <文件> \| --all-files] [--case] [--grep-all] [--context 2]` | 搜索：默认搜服务输出，`--all-files` 搜这次运行的全部日志文件；大文件默认只搜最近 128 MiB，`--grep-all` 搜完整文件 |
 | `logs <目标> <应用> --log <文件> --line N` | 看日志文件第 N 行附近 |
 | `logs <目标> <应用> --runs` | 列出以往各次运行（每次切换版本时归档） |
 | `logs <目标> <应用> --release <版本> [--run <归档>] [--file \| --log <文件>]` | 看以往某次运行的日志 |

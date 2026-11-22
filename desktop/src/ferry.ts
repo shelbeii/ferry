@@ -1380,6 +1380,8 @@ export interface LogSearch {
   matches: { file: string; line: number; text: string; before?: string[]; after?: string[] }[]
   files: number
   truncated: boolean
+  /** 有文件太大、只搜了每个文件最近这么多字节；没有就是搜的完整文件 */
+  tailBytes?: number
 }
 
 /** 审计记录（ferry audit）：谁、什么时候、在哪台服务器上做了什么改动。 */

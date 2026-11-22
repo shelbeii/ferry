@@ -16,6 +16,7 @@ type fakeSSHD struct {
 	addr  *net.TCPAddr
 	key   ssh.PublicKey
 	conns atomic.Int32 // 建立过的连接数
+	out   string       // exec 的输出；空 = "ok\n"
 }
 
 func newFakeSSHD(t *testing.T, maxSessions int) *fakeSSHD {
@@ -81,7 +82,11 @@ func (d *fakeSSHD) serve(nc net.Conn, cfg *ssh.ServerConfig, maxSessions int) {
 					continue
 				}
 				r.Reply(true, nil)
-				ch.Write([]byte("ok\n"))
+				out := d.out
+				if out == "" {
+					out = "ok\n"
+				}
+				ch.Write([]byte(out))
 				ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 				ch.Close()
 			}

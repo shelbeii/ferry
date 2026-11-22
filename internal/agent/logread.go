@@ -3,6 +3,7 @@ package agent
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -126,7 +127,9 @@ func (src *logSource) match(pattern string) []proto.LogFile {
 }
 
 // each 依次读这些文件，.gz 解压后交给 fn；fn 返回 errStop 时停下。tar.gz 只能按包里的顺序读。
-func (src *logSource) each(files []proto.LogFile, fn func(name string, r io.Reader) error) error {
+// tail > 0 时，没压缩的大文件只读最近 tail 字节（skip 是跳过的字节数，行号要加上前面的行数）；
+// .gz 和 tar.gz 没法从中间开始读，仍然整个读。
+func (src *logSource) each(files []proto.LogFile, tail int64, fn func(name string, r io.Reader, skip int64) error) error {
 	want := map[string]bool{}
 	for _, f := range files {
 		want[f.Path] = true
@@ -137,7 +140,17 @@ func (src *logSource) each(files []proto.LogFile, fn func(name string, r io.Read
 			if err != nil {
 				return fmt.Errorf("%s：%v", f.Path, err)
 			}
-			err = withGz(f.Path, file, func(r io.Reader) error { return fn(f.Path, r) })
+			var r io.Reader = file
+			var skip int64
+			if tail > 0 && f.Size > tail && !strings.HasSuffix(f.Path, ".gz") {
+				if _, err := file.Seek(f.Size-tail, io.SeekStart); err == nil {
+					br := bufio.NewReader(file)
+					head, _ := br.ReadString('\n') // 开头多半是半行，丢掉
+					skip = f.Size - tail + int64(len(head))
+					r = br
+				}
+			}
+			err = withGz(f.Path, r, func(r io.Reader) error { return fn(f.Path, r, skip) })
 			file.Close()
 			if err == errStop {
 				return nil
@@ -169,7 +182,7 @@ func (src *logSource) each(files []proto.LogFile, fn func(name string, r io.Read
 		if h.Typeflag != tar.TypeReg || !want[h.Name] {
 			continue
 		}
-		err = withGz(h.Name, tr, func(r io.Reader) error { return fn(h.Name, r) })
+		err = withGz(h.Name, tr, func(r io.Reader) error { return fn(h.Name, r, 0) })
 		if err == errStop {
 			return nil
 		}
@@ -257,7 +270,7 @@ func (src *logSource) tail(file string, n, around int) (proto.LogText, error) {
 	file = files[0].Path
 	var text proto.LogText
 	found := false
-	err := src.each(files[:1], func(_ string, r io.Reader) error {
+	err := src.each(files[:1], 0, func(_ string, r io.Reader, _ int64) error {
 		found = true
 		switch f, ok := r.(*os.File); {
 		case around > 0:
@@ -365,6 +378,29 @@ func newLineScanner(r io.Reader) *bufio.Scanner {
 
 const maxGrepMatches = 1000
 
+// maxGrepBytes 搜索时每个大文件只看最近这么多字节（测试里改小）。要搜完整文件用 GrepAll。
+var maxGrepBytes = 128 << 20
+
+// countLinesBefore 数文件前 skip 个字节里有多少行：只在搜到结果、要给出真实行号时才读这一段。
+func countLinesBefore(base, name string, skip int64) int {
+	f, err := openRegular(base, filepath.FromSlash(name))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	buf := make([]byte, 256<<10)
+	n := 0
+	for off := int64(0); off < skip; {
+		k, err := f.ReadAt(buf[:min(int64(len(buf)), skip-off)], off)
+		n += bytes.Count(buf[:k], []byte{'\n'})
+		off += int64(k)
+		if err != nil || k == 0 {
+			break
+		}
+	}
+	return n
+}
+
 // loggrep 在某次运行的日志文件里找包含关键字的行（LogFile 为空 = 全部文件，可以写通配符）。
 func (a *Agent) loggrep() int {
 	if len(a.req.Apps) != 1 {
@@ -393,7 +429,13 @@ func (a *Agent) loggrep() int {
 	per := map[string][]proto.LogMatch{}
 	res := proto.LogSearch{Matches: []proto.LogMatch{}}
 	total := 0
-	err = src.each(files, func(name string, r io.Reader) error {
+	// 大文件只搜最近 maxGrepBytes：GB 级日志从头读一遍要几十秒，而要看的多半是最近的。
+	// 搜到结果时再数一遍前面有多少行，行号照样是文件里的真实行号（点进去看前后不受影响）。
+	tail := int64(maxGrepBytes)
+	if a.req.GrepAll {
+		tail = 0
+	}
+	err = src.each(files, tail, func(name string, r io.Reader, skip int64) error {
 		if a.canceled() {
 			return errCanceled
 		}
@@ -401,6 +443,15 @@ func (a *Agent) loggrep() int {
 		ms, more := grepReader(a.cancelable(r), kw, a.req.GrepCase, ctx, limit-total)
 		if a.canceled() {
 			return errCanceled
+		}
+		if skip > 0 {
+			res.TailBytes = tail
+			if len(ms) > 0 {
+				base := countLinesBefore(src.Base, name, skip)
+				for i := range ms {
+					ms[i].Line += base
+				}
+			}
 		}
 		for i := range ms {
 			ms[i].File = name

@@ -639,6 +639,9 @@ type RunResult struct {
 	Stderr string
 }
 
+// runLineLimit 读命令输出时一行的上限（测试里改小，用来验证读不完时会报错而不是悄悄少半截）。
+var runLineLimit = 16 << 20
+
 // Run 执行命令；stdout 逐行回调，stderr 收集。退出码非 0 不算 error（看 Code）。
 func (c *Client) Run(cmd string, stdin []byte, onLine func(string)) (RunResult, error) {
 	return c.RunContext(context.Background(), cmd, stdin, onLine)
@@ -666,16 +669,20 @@ func (c *Client) RunContext(ctx context.Context, cmd string, stdin []byte, onLin
 		return RunResult{}, err
 	}
 	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	sc.Buffer(make([]byte, min(64<<10, runLineLimit)), runLineLimit)
 	for sc.Scan() {
 		if onLine != nil {
 			onLine(sc.Text())
 		}
 	}
+	scanErr := sc.Err() // 单行超过上限、读出错：输出少了半截，不能当作读完了
 	err = s.Wait()
 	res := RunResult{Stderr: stderr.String()}
 	if ctx.Err() != nil {
 		return res, ErrCanceled
+	}
+	if scanErr != nil {
+		return res, fmt.Errorf("命令输出没有读完：%v", scanErr)
 	}
 	var ee *ssh.ExitError
 	switch {

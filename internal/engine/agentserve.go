@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,40 +69,31 @@ func newAgentServer(p *remote.Pipe) *agentServer {
 	return a
 }
 
+// maxServeLine 本机读一行的上限（服务器端 8 MB，这里留了余量）。超过就丢掉这一行接着读：
+// 不能因为一行读不下就把整个常驻 agent 判成退出——那样之后每次查看都要单独起进程，每次多几个往返。
+const maxServeLine = 16 << 20
+
 // read 把输出按请求号分给各个请求，直到常驻的 agent 退出（连接断了、会话关了）。
 func (a *agentServer) read() {
 	defer close(a.done)
-	sc := bufio.NewScanner(a.pipe.Out)
-	sc.Buffer(make([]byte, 64<<10), 32<<20)
-	for sc.Scan() {
-		id, rest, ok := strings.Cut(sc.Text(), " ")
-		if !ok {
-			continue
-		}
-		a.mu.Lock()
-		c := a.calls[id]
-		code, end := strings.CutPrefix(rest, proto.ServeEnd)
-		if end {
-			delete(a.calls, id)
-		}
-		a.mu.Unlock()
-		if c == nil {
-			continue
-		}
-		if end {
-			n, err := strconv.Atoi(code)
-			if err != nil {
-				n = proto.CodeFailed
+	r := bufio.NewReaderSize(a.pipe.Out, 64<<10)
+	var readErr error
+	for {
+		line, tooLong, err := readServeLine(r, maxServeLine)
+		switch {
+		case tooLong:
+			fmt.Fprintln(os.Stderr, "ferry：常驻 agent 的一行输出过大，已丢掉这一行")
+		default:
+			if text := strings.TrimRight(line, "\r\n"); text != "" {
+				a.dispatch(text)
 			}
-			a.served.Add(1)
-			c.end <- n
-			continue
 		}
-		c.mu.Lock()
-		if !c.gone {
-			c.onLine(rest)
+		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
+			break
 		}
-		c.mu.Unlock()
 	}
 	a.pipe.Close()
 	werr := a.pipe.Wait()
@@ -108,10 +101,66 @@ func (a *agentServer) read() {
 	if msg == "" && werr != nil {
 		msg = werr.Error()
 	}
+	if msg == "" && readErr != nil {
+		msg = readErr.Error()
+	}
 	a.mu.Lock()
 	a.err = fmt.Errorf("常驻的 agent 已退出：%s", msg)
 	a.calls = map[string]*serveCall{}
 	a.mu.Unlock()
+}
+
+// dispatch 一行输出：按请求号交给对应的请求，「!end」表示这个请求做完了。
+func (a *agentServer) dispatch(text string) {
+	id, rest, ok := strings.Cut(text, " ")
+	if !ok {
+		return
+	}
+	a.mu.Lock()
+	c := a.calls[id]
+	code, end := strings.CutPrefix(rest, proto.ServeEnd)
+	if end {
+		delete(a.calls, id)
+	}
+	a.mu.Unlock()
+	if c == nil {
+		return
+	}
+	if end {
+		n, err := strconv.Atoi(code)
+		if err != nil {
+			n = proto.CodeFailed
+		}
+		a.served.Add(1)
+		c.end <- n
+		return
+	}
+	c.mu.Lock()
+	if !c.gone {
+		c.onLine(rest)
+	}
+	c.mu.Unlock()
+}
+
+// readServeLine 读一行（带换行）。超过 limit 就把这一行剩下的部分丢掉、返回 tooLong，后面的行照常读；
+// 读到结尾返回 io.EOF（最后一段没有换行也照样返回内容）。
+func readServeLine(r *bufio.Reader, limit int) (line string, tooLong bool, err error) {
+	var buf []byte
+	for {
+		chunk, rerr := r.ReadSlice('\n')
+		switch {
+		case tooLong: // 这一行已经在丢了
+		case len(buf)+len(chunk) > limit:
+			tooLong = true
+			buf = nil
+		default:
+			buf = append(buf, chunk...)
+		}
+		if rerr == bufio.ErrBufferFull {
+			continue
+		}
+		return string(buf), tooLong, rerr
+	}
 }
 
 func (a *agentServer) alive() bool {

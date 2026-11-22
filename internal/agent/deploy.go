@@ -1012,6 +1012,7 @@ func (a *Agent) waitReady(s *proto.AppSpec, unit string) error {
 	pid0 := 0
 	var okSince time.Time
 	var lastErr error
+	round := 0
 	for {
 		now := a.Sys.Now()
 		p := a.Sys.UnitProps(unit)
@@ -1055,7 +1056,23 @@ func (a *Agent) waitReady(s *proto.AppSpec, unit string) error {
 			a.fail(proto.EvFail, s.Name, "%s", msg)
 			return errors.New(msg)
 		}
-		a.Sys.Sleep(2 * time.Second)
+		a.Sys.Sleep(waitBackoff(round))
+		round++
+	}
+}
+
+// waitBackoff 等就绪时两次检查之间的间隔：开头密一点（多数应用一两秒内就绪，固定等 2 秒是白等），
+// 之后拉长到 2 秒，不给 systemd 和健康检查添太多负担。一次部署十个应用能省十几秒。
+func waitBackoff(round int) time.Duration {
+	switch {
+	case round < 2:
+		return 300 * time.Millisecond
+	case round < 4:
+		return 500 * time.Millisecond
+	case round < 8:
+		return time.Second
+	default:
+		return 2 * time.Second
 	}
 }
 
@@ -1066,6 +1083,7 @@ func (a *Agent) waitProbe(s *proto.AppSpec) error {
 		timeout = 30 * time.Second
 	}
 	deadline := a.Sys.Now().Add(timeout)
+	round := 0
 	for {
 		err := a.Sys.Probe(s.Health)
 		if err == nil {
@@ -1075,7 +1093,8 @@ func (a *Agent) waitProbe(s *proto.AppSpec) error {
 		if !a.Sys.Now().Before(deadline) {
 			return fmt.Errorf("健康检查未通过：%v", err)
 		}
-		a.Sys.Sleep(2 * time.Second)
+		a.Sys.Sleep(waitBackoff(round))
+		round++
 	}
 }
 

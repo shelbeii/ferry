@@ -98,6 +98,8 @@ type Request struct {
 	Grep        string `json:"grep,omitempty"`
 	GrepCase    bool   `json:"grepCase,omitempty"`
 	GrepContext int    `json:"grepContext,omitempty"`
+	// GrepAll 搜索完整的日志文件。默认每个文件只搜最近 128MB（GB 级日志全读一遍要几十秒）
+	GrepAll bool `json:"grepAll,omitempty"`
 
 	// FerryDir 服务器上 ferry 组件的目录（agent、运行环境）
 	FerryDir string `json:"ferryDir,omitempty"`
@@ -884,6 +886,8 @@ type LogSearch struct {
 	Matches   []LogMatch `json:"matches"`
 	Files     int        `json:"files"`     // 搜了几个文件
 	Truncated bool       `json:"truncated"` // 结果太多，只返回了前面的
+	// TailBytes 有文件太大、只搜了每个文件最近这么多字节；0 = 搜的是完整文件
+	TailBytes int64 `json:"tailBytes,omitempty"`
 }
 
 // LogMatch 一处搜索结果。

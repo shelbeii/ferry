@@ -253,6 +253,8 @@ function onRunChange() {
 const keyword = ref('')
 const scope = ref<'file' | 'all'>('all')
 const caseSensitive = ref(false)
+// 大文件默认只搜最近 128MB（GB 级日志全读一遍要几十秒）；勾选后搜完整文件
+const searchAll = ref(false)
 const searching = ref(false)
 const result = ref<LogSearch | null>(null)
 const searchError = ref('')
@@ -277,6 +279,7 @@ async function search() {
     else args.push(...(path.value ? ['--log', path.value] : ['--file']))
   }
   if (matchCase) args.push('--case')
+  if (searchAll.value) args.push('--grep-all')
   try {
     const r = await reads.run('search', s => readCall<LogSearch>(args, s))
     if (seq !== searchSeq) return
@@ -299,7 +302,7 @@ function clearSearch() {
   result.value = null
   searchError.value = ''
 }
-watch([runKey, file, path, scope, caseSensitive], clearSearch)
+watch([runKey, file, path, scope, caseSensitive, searchAll], clearSearch)
 
 /** 搜索结果点进去：打开那个文件的这一行附近 */
 function openMatch(m: LogSearch['matches'][number]) {
@@ -429,6 +432,7 @@ onBeforeUnmount(() => {
         <el-radio-button value="file">只搜这个文件</el-radio-button>
       </el-radio-group>
       <el-checkbox v-model="caseSensitive" size="small">区分大小写</el-checkbox>
+      <el-checkbox v-model="searchAll" size="small" title="大文件默认只搜最近 128MB；勾选后搜完整文件，日志很大时会慢不少">搜索全部历史</el-checkbox>
       <el-button size="small" type="primary" :loading="searching" :disabled="!keyword.trim() || noRuns" @click="search">搜索</el-button>
       <span class="muted small">{{ scopeTip }}</span>
     </div>
@@ -445,6 +449,7 @@ onBeforeUnmount(() => {
         <span>
           「{{ searchedFor }}」：找到 {{ result.matches.length }} 处<template v-if="file">（搜了 {{ result.files }} 个文件）</template>
           <template v-if="result.truncated">，太多了只显示前 {{ result.matches.length }} 处：换个更具体的关键字</template>
+          <template v-if="result.tailBytes">，文件太大，只搜了每个文件最近 {{ bytes(result.tailBytes) }}：要搜更早的，勾选「搜索全部历史」</template>
         </span>
         <el-button :icon="Close" size="small" link class="res-close" @click="clearSearch">回到日志</el-button>
       </div>
