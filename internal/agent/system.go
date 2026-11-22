@@ -42,12 +42,16 @@ type UnitProps struct {
 	Restarts            int
 	Result              string
 	ExecMainStatus      int
+	// ExecStart 单元启动命令的原始属性（systemctl 的 { path=... ; argv[]=... }）
+	ExecStart string
 }
 
 // System 对操作系统的全部依赖。真实实现见 realSystem；测试用假实现。
 type System interface {
 	Systemctl(args ...string) error
 	UnitProps(unit string) UnitProps
+	// UnitPropsMany 一次 systemctl show 读多个单元（应用状态、软件列表用，省掉每单元一个进程）。
+	UnitPropsMany(units []string) map[string]UnitProps
 	Journal(unit string, n int, since time.Time) []string
 	LookupUser(name string) (uid, gid int, err error)
 	// AccessAs 以 user 的身份测试 path 有没有 flag（'r' / 'w' / 'x'）权限
@@ -190,12 +194,78 @@ func (realSystem) UserGroups(name string) (int, []int, error) {
 	return uid, gids, nil
 }
 
+// unitPropsTimeout systemctl show 最多等多久：D-Bus 卡住时不能让查看一直挂着。
+const unitPropsTimeout = 5 * time.Second
+
+// unitPropsFields systemctl show 读的属性；单个和批量共用一份列表。
+var unitPropsFields = []string{
+	"Id", "LoadState", "ActiveState", "SubState", "MainPID", "ActiveEnterTimestamp",
+	"UnitFileState", "Restart", "RestartUSec", "NRestarts", "Result", "ExecMainStatus",
+	"FragmentPath", "DropInPaths", "ExecStart",
+}
+
+// systemctlShow 读这些单元的属性；多个单元的输出按空行分段。
+func systemctlShow(units []string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), unitPropsTimeout)
+	defer cancel()
+	args := []string{"show", "--no-pager"}
+	for _, f := range unitPropsFields {
+		args = append(args, "-p", f)
+	}
+	out, _ := exec.CommandContext(ctx, "systemctl", append(args, units...)...).Output()
+	return string(out)
+}
+
 func (realSystem) UnitProps(unit string) UnitProps {
-	out, _ := exec.Command("systemctl", "show", unit,
-		"-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "ActiveEnterTimestamp",
-		"-p", "UnitFileState", "-p", "Restart", "-p", "RestartUSec", "-p", "NRestarts",
-		"-p", "Result", "-p", "ExecMainStatus", "-p", "FragmentPath", "-p", "DropInPaths").Output()
-	return parseProps(string(out))
+	return parseProps(systemctlShow([]string{unit}))
+}
+
+// UnitPropsMany 一次读多个单元：应用状态、软件列表是每台服务器十几个单元，逐个起 systemctl 太费。
+func (realSystem) UnitPropsMany(units []string) map[string]UnitProps {
+	out := map[string]UnitProps{}
+	if len(units) == 0 {
+		return out
+	}
+	text := systemctlShow(units)
+	for id, p := range parsePropsBlocks(text) {
+		out[id] = p
+	}
+	if len(out) == 0 && strings.TrimSpace(text) == "" {
+		// 完全读不到（没有 systemctl、卡住超时）：和逐个查失败一样，不再一个个重试
+		for _, u := range units {
+			out[u] = UnitProps{}
+		}
+		return out
+	}
+	// 没读到的（systemd 太旧、输出格式不同、D-Bus 出错）逐个补，和以前一样
+	for _, u := range units {
+		if _, ok := out[u]; ok {
+			continue
+		}
+		if p := (realSystem{}).UnitProps(u); p.Load != "" {
+			out[u] = p
+		}
+	}
+	return out
+}
+
+// parsePropsBlocks 多个单元的输出按空行分段，每段的 Id= 是单元名。
+func parsePropsBlocks(text string) map[string]UnitProps {
+	out := map[string]UnitProps{}
+	for _, block := range strings.Split(text, "\n\n") {
+		id := ""
+		for _, line := range strings.Split(block, "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "Id="); ok {
+				id = strings.TrimSpace(v)
+				break
+			}
+		}
+		if id == "" {
+			continue
+		}
+		out[id] = parseProps(block)
+	}
+	return out
 }
 
 func parseProps(s string) UnitProps {
@@ -232,6 +302,8 @@ func parseProps(s string) UnitProps {
 			p.Result = v
 		case "ExecMainStatus":
 			p.ExecMainStatus, _ = strconv.Atoi(v)
+		case "ExecStart":
+			p.ExecStart = v
 		}
 	}
 	return p
@@ -971,6 +1043,11 @@ func listenAddrs(tables [][]byte, inodes map[string]bool) []string {
 			hosts[int(port)][hexHost(hostHex)] = true
 		}
 	}
+	return formatListen(hosts)
+}
+
+// formatListen 端口 → 主机集合 → 排好序的「地址:端口」（同一端口有 * 时只留 *）。
+func formatListen(hosts map[int]map[string]bool) []string {
 	ports := make([]int, 0, len(hosts))
 	for p := range hosts {
 		ports = append(ports, p)

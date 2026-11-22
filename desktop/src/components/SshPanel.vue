@@ -4,6 +4,9 @@ import type { SSHReport } from '../ferry'
 
 // 各项目、各连接上次查看的结果（切回来时先显示它，同时重新查）
 const cache = reactive<Record<string, SSHReport>>({})
+// 上次读到的时间：刚打开过（15 秒内）就不再去读服务器，登录用户变得快，不缓存太久
+const loadedAt: Record<string, number> = {}
+const freshMs = 15_000
 const errors = reactive<Record<string, { msg: string; unknownHost: boolean }>>({})
 </script>
 
@@ -48,6 +51,7 @@ async function load(_background = false, signal?: AbortSignal) {
   try {
     await reads.run(k, async (s) => {
       cache[k] = await readCall<typeof cache[string]>(['who', target, '-c', config], s)
+      loadedAt[k] = Date.now()
       delete errors[k]
     }, { signal })
   } catch (e) {
@@ -62,13 +66,13 @@ async function load(_background = false, signal?: AbortSignal) {
   }
 }
 
-// 连着的人随时在变：每次打开都重新查（先显示上次的结果）
+// 连着的人随时在变：打开了就查，但刚查过（15 秒内）先显示上次的结果
 watch(
   key,
   (_, previous) => {
     if (previous) reads.cancel(previous)
     selected.value = []
-    load()
+    if (Date.now() - (loadedAt[key.value] ?? 0) >= freshMs) load()
   },
   { immediate: true },
 )
@@ -155,6 +159,7 @@ async function kick(rows: SSHSession[]) {
   kicking.value = true
   try {
     cache[k] = await call<typeof cache[string]>(['who', 'kick', target, ...rows.map((r) => String(r.pid)), '-y', '-c', config])
+    loadedAt[k] = Date.now()
     if (!current()) return
     ElMessage.success(rows.length === 1 ? '已断开' : `已断开 ${rows.length} 个连接`)
   } catch (e) {

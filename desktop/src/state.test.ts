@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { reactive } from 'vue'
-import { maxTaskLines, pushLine, type Task } from './state'
+import { installPollDelay, maxTaskLines, pushLine, type Task } from './state'
 
 const newTask = () => reactive<Task>({ id: 1, hid: 'abcdef-1', title: 't', status: 'running', lines: [], startedAt: 0, lastAt: 0 }) as Task
+
+describe('中断安装任务的重查间隔', () => {
+  it('连续查询按 5 → 15 → 30 秒退避，之后保持 30 秒', () => {
+    expect([1, 2, 3, 4, 10].map(installPollDelay)).toEqual([5000, 15000, 30000, 30000, 30000])
+  })
+})
 
 describe('任务输出限量', () => {
   it('超过上限时先删较早的普通输出，步骤和错误留着，开头注明省略了几行', () => {

@@ -53,6 +53,21 @@ type Agent struct {
 	cmd         string               // 正在执行的命令（deploy、rollback……）
 	lastMsg     string               // 最近一次返回结果的说明
 	installTask *proto.SoftwareTask
+
+	// props 本次命令里批量读到的单元属性（status 用）；没读到的还是走 Sys.UnitProps。
+	props map[string]UnitProps
+	// bgSys 常驻 agent 里不带请求上下文的系统调用（防火墙缓存的后台刷新用）；一次性运行时为 nil。
+	bgSys System
+	// fw 常驻 agent 里跨请求共用的防火墙结果；一次性运行时为 nil，每次现查。
+	fw *fwCache
+}
+
+// unitProps 单元属性：本次命令批量读到的先用，没读到再单独查。
+func (a *Agent) unitProps(unit string) UnitProps {
+	if p, ok := a.props[unit]; ok {
+		return p
+	}
+	return a.Sys.UnitProps(unit)
 }
 
 // Run 执行命令，返回退出码。内部出错（panic）时各步骤的撤销照常执行（defer），并返回失败的结果，

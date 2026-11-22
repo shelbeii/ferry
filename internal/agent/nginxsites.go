@@ -287,7 +287,7 @@ func (a *Agent) nginxSiteStatus(s *proto.AppSpec, st *proto.AppStatus) {
 		}
 		return
 	}
-	p := a.Sys.UnitProps(in.Unit)
+	p := a.unitProps(in.Unit)
 	st.Unit = in.Unit
 	st.PID = p.PID
 	st.Since = p.Since

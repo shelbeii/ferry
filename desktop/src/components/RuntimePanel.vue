@@ -1,8 +1,14 @@
 <script lang="ts">
 import { reactive } from 'vue'
+import type { InstalledRuntime as RuntimeRow } from '../ferry'
 
 // 安装和卸载任务可能跨过页签切换才结束，通知当前打开的清单重新读取。
 const inventoryRevisions = reactive<Record<string, number>>({})
+
+// 各项目、各服务器上次读到的运行环境清单：切换页签面板会重新挂载，切回来先显示它，
+// 间隔没到（1 分钟）就不再去读服务器
+const cache = reactive<Record<string, { rows: RuntimeRow[]; at: number }>>({})
+const freshMs = 60_000
 </script>
 
 <script setup lang="ts">
@@ -32,7 +38,7 @@ const reads = useReadRequests()
 const loading = computed(() => !!reads.loading.value[key.value])
 const manual = useManualRefresh(() => key.value)
 const refreshing = manual.refreshing
-const rows = ref<InstalledRuntime[]>()
+const rows = computed(() => cache[key.value]?.rows)
 const error = ref<{ message: string; unknownHost: boolean }>()
 const installOpen = ref(false)
 const removing = ref<InstalledRuntime>()
@@ -67,7 +73,7 @@ async function load(_background = false, signal?: AbortSignal) {
     await reads.run(k, async (s) => {
       const result = await readCall<InstalledRuntime[]>(['software', 'runtime', 'list', target, '-c', config], s)
       if (!current()) return
-      rows.value = result
+      cache[k] = { rows: result, at: Date.now() }
       error.value = undefined
     }, { signal })
   } catch (e) {
@@ -82,18 +88,20 @@ async function load(_background = false, signal?: AbortSignal) {
   }
 }
 
-watch([key, () => inventoryRevisions[key.value]], ([nextKey], previous) => {
-  const previousKey = previous?.[0]
+watch([key, () => inventoryRevisions[key.value]], ([nextKey, revision], previous) => {
+  const [previousKey, previousRevision] = previous ?? []
   if (previousKey) reads.cancel(previousKey)
   if (nextKey !== previousKey) {
-    rows.value = undefined
     error.value = undefined
     installOpen.value = false
     removing.value = undefined
     fileLocation.value = undefined
     filesOpen.value = false
   }
-  void load()
+  // 装/卸刚结束（revision 变了）或者上次读的已经过期，才去读服务器
+  const changed = revision !== previousRevision
+  const cached = cache[nextKey]
+  if (changed || !cached || Date.now() - cached.at >= freshMs) void load()
 }, { immediate: true })
 watch(trustedTick, () => { if (error.value?.unknownHost) void load() })
 

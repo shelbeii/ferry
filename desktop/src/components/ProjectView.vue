@@ -605,6 +605,8 @@ const startTimer = () => {
 // 改了设置马上按新的间隔：下面每 10 秒检查一次是否到时间
 const autoMinutes = computed(() => appSettings.value?.connect.statusMinutes ?? 1)
 const statusAt = ref<Record<string, number>>({})
+// 切回项目时刚看过就不再去读服务器（先显示缓存，定时器到点再刷）
+const statusFreshMs = 30_000
 const now = ref(Date.now())
 function autoRefresh() {
   const t = activeTarget.value
@@ -645,7 +647,10 @@ onActivated(async () => {
   await connsFirst()
   if (!active) return
   await loadInspect() // 配置可能在别处改过
-  if (active) await loadStatus()
+  if (!active) return
+  const t = activeTarget.value
+  if (t && Date.now() - (statusAt.value[t] ?? 0) < statusFreshMs) return
+  await loadStatus()
 })
 onDeactivated(() => {
   targetDetails.value = false

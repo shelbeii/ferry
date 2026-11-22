@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"encoding/json"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -102,10 +103,12 @@ type swScan struct {
 	unitDir   string // 判断单元是不是 Ferry 生成的
 	run       func(cmd string, timeout time.Duration) (string, error)
 	unitProps func(unit string) UnitProps
-	readlink  func(string) (string, error)
-	listening func(pid int) []string
-	instances []proto.SoftwareInstance // Ferry 装的软件
-	appUnits  map[string][3]string     // Ferry 部署的应用的单元：里面的进程属于应用，不算软件
+	// unitPropsMany 一次读一批单元属性（含 ExecStart）；nil 时按 unitProps 逐个读（测试）
+	unitPropsMany func(units []string) map[string]UnitProps
+	readlink      func(string) (string, error)
+	listening     func(pid int) []string
+	instances     []proto.SoftwareInstance // Ferry 装的软件
+	appUnits      map[string][3]string     // Ferry 部署的应用的单元：里面的进程属于应用，不算软件
 
 	// cache 存在服务器上的版本缓存（程序文件没变就不再运行它取版本）；nil = 不用（测试）
 	cache *verCache
@@ -126,18 +129,132 @@ type verMemo struct {
 	v, raw string
 }
 
+// unitPatterns list-unit-files 只列出规则里认得的单元：全量列要 0.6~1.5 秒，按名字过滤后不到 0.3 秒。
+func unitPatterns() string {
+	var pats []string
+	seen := map[string]bool{}
+	for _, r := range swRules {
+		for _, u := range r.units {
+			if u == "" {
+				continue
+			}
+			p := u + ".service" // 规则里的单元名不带后缀
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			pats = append(pats, shellQuote(p))
+		}
+	}
+	return strings.Join(pats, " ")
+}
+
+// listUnits 列出规则里认得的 systemd 单元：按单元名过滤，老 systemd 不认参数时退回全量。
+func (sc *swScan) listUnits() (string, error) {
+	const cmd = "systemctl list-unit-files --type=service --no-legend --no-pager"
+	if out, err := sc.run(cmd+" "+unitPatterns(), 15*time.Second); err == nil {
+		return out, nil
+	}
+	return sc.run(cmd, 15*time.Second)
+}
+
+var reSSPid = regexp.MustCompile(`pid=(\d+)`)
+
+// ssListeners 一次 ss -lntp 读出宿主机网络里的监听端口（进程号 → 地址:端口）。
+// 没有 ss、输出认不出、读不到进程号（不是 root）时返回 nil，调用方仍逐个进程扫 /proc。
+func (sc *swScan) ssListeners() map[int][]string {
+	out, err := sc.run("ss -lntp 2>/dev/null", 10*time.Second)
+	if err != nil || !strings.Contains(out, "LISTEN") {
+		return nil
+	}
+	by := map[int][]string{}
+	for _, line := range splitLines(out) {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[0] != "LISTEN" {
+			continue
+		}
+		host, port, ok := splitSSAddr(f[3])
+		if !ok {
+			continue
+		}
+		for _, m := range reSSPid.FindAllStringSubmatch(line, -1) {
+			pid, err := strconv.Atoi(m[1])
+			if err != nil || pid <= 0 {
+				continue
+			}
+			by[pid] = append(by[pid], host+":"+port)
+		}
+	}
+	if len(by) == 0 {
+		return nil
+	}
+	return by
+}
+
+// splitSSAddr ss 的本地地址（*:8080、[::]:8080、127.0.0.1:9201）→ 主机、端口；认不出的不算。
+// 输出和 /proc/net/tcp 那条路一致：通配是 *，IPv4 映射地址写成 IPv4，IPv6 带方括号。
+func splitSSAddr(addr string) (host, port string, ok bool) {
+	i := strings.LastIndexByte(addr, ':')
+	if i < 0 {
+		return "", "", false
+	}
+	host, port = addr[:i], addr[i+1:]
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	switch host {
+	case "", "*", "0.0.0.0", "::":
+		host = "*"
+	default:
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return "", "", false
+		}
+		if v4 := ip.To4(); v4 != nil {
+			host = v4.String()
+		} else {
+			host = "[" + ip.String() + "]"
+		}
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return "", "", false
+	}
+	return host, port, true
+}
+
+// mergeListenAddrs 进程树的若干地址合成 listenAddrs 一样的格式（同一端口有 * 时只留 *）。
+func mergeListenAddrs(addrs []string) []string {
+	hosts := map[int]map[string]bool{}
+	for _, a := range addrs {
+		i := strings.LastIndexByte(a, ':')
+		if i < 0 {
+			continue
+		}
+		port, err := strconv.Atoi(a[i+1:])
+		if err != nil {
+			continue
+		}
+		if hosts[port] == nil {
+			hosts[port] = map[string]bool{}
+		}
+		hosts[port][a[:i]] = true
+	}
+	return formatListen(hosts)
+}
+
 func (a *Agent) software() int {
 	start := time.Now()
 	sc := &swScan{
-		proc:      "/proc",
-		unitDir:   a.Sys.UnitDir(),
-		run:       a.Sys.Shell,
-		unitProps: a.Sys.UnitProps,
-		readlink:  os.Readlink,
-		instances: a.instances(),
-		appUnits:  a.managedUnits(),
-		cache:     loadVerCache(filepath.Join(a.ferryDir(), "cache", "versions.json")),
-		exists:    func(p string) bool { _, err := os.Stat(p); return err == nil },
+		proc:          "/proc",
+		unitDir:       a.Sys.UnitDir(),
+		run:           a.Sys.Shell,
+		unitProps:     a.Sys.UnitProps,
+		unitPropsMany: a.Sys.UnitPropsMany,
+		readlink:      os.Readlink,
+		instances:     a.instances(),
+		appUnits:      a.managedUnits(),
+		cache:         loadVerCache(filepath.Join(a.ferryDir(), "cache", "versions.json")),
+		exists:        func(p string) bool { _, err := os.Stat(p); return err == nil },
 	}
 	// listening 不设：扫描时用读进程时记下的父子关系找端口
 	rep := sc.scan()
@@ -188,7 +305,10 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 	sc.memo = map[string]*verMemo{}
 	sc.readProcs()
 	sc.hostNet, _ = sc.readlink(filepath.Join(sc.proc, "1", "ns", "net"))
-	if sc.listening == nil {
+	// 宿主机网络里的进程：一次 ss -lntp 拿到进程号 → 监听地址，比逐个进程扫 /proc/<pid>/fd 快得多
+	// （几十个进程、几千个 fd 要 700 多毫秒）。容器里的进程在别的网络命名空间，ss 看不到，仍按原来的办法读。
+	ownListen := sc.listening == nil
+	if ownListen {
 		sc.listening = func(pid int) []string {
 			if pid <= 0 {
 				return nil
@@ -196,6 +316,39 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 			return listeningOf(sc.proc, pid, descendants(sc.children, pid))
 		}
 	}
+	var ssPids map[int][]string
+	if ownListen {
+		ssPids = sc.ssListeners()
+	}
+	// 读监听端口（扫 fd 或跑 ss）的总耗时；同一个进程这次只算一次（容器里的进程会被
+	// 「整理进程」和「整理容器」各查一遍）。
+	baseListen := sc.listening
+	listenMemo := map[int][]string{}
+	var listenNs int64
+	sc.listening = func(pid int) []string {
+		if ownListen {
+			if out, ok := listenMemo[pid]; ok {
+				return out
+			}
+		}
+		t := time.Now()
+		var out []string
+		if ssPids != nil && pid > 0 && sc.sameNet(pid) {
+			var addrs []string
+			for p := range descendants(sc.children, pid) {
+				addrs = append(addrs, ssPids[p]...)
+			}
+			out = mergeListenAddrs(addrs)
+		} else {
+			out = baseListen(pid)
+		}
+		listenNs += time.Since(t).Nanoseconds()
+		if ownListen {
+			listenMemo[pid] = out
+		}
+		return out
+	}
+	defer func() { rep.Took["读监听端口"] = listenNs / int64(time.Millisecond) }()
 	instVer := map[string]string{} // Ferry 装的软件：单元 → 安装时记下的版本（不用再运行程序取）
 	for _, in := range sc.instances {
 		if in.Version != "" && in.Unit != "" {
@@ -210,6 +363,7 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 		pids = append(pids, pid)
 	}
 	sort.Ints(pids)
+	seenContainerRule := map[string]bool{}
 	for _, pid := range pids {
 		p := sc.procs[pid]
 		if p.rule < 0 {
@@ -220,6 +374,14 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 		}
 		if _, ok := sc.appUnits[p.unit]; ok && p.unit != "" {
 			continue // 前端站点自带的 nginx 等：在「应用」里看
+		}
+		// 同一个容器里同一种软件有多个顶层进程（EMQX 会另起一个 beam）：只留最先看到的那个
+		if p.container != "" {
+			key := p.container + "\x00" + strconv.Itoa(p.rule)
+			if seenContainerRule[key] {
+				continue
+			}
+			seenContainerRule[key] = true
 		}
 		found = append(found, p)
 	}
@@ -232,7 +394,7 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 	tasks := []func(){
 		func() { dk = sc.dockerFetch() },
 		func() {
-			unitFiles, unitErr = sc.run("systemctl list-unit-files --type=service --no-legend --no-pager", 15*time.Second)
+			unitFiles, unitErr = sc.listUnits()
 		},
 	}
 	for _, p := range found {
@@ -251,12 +413,15 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 		}
 		rep.Items = append(rep.Items, it)
 	}
+	took("整理进程")
 
 	// 3. Docker 容器
 	rep.Docker = sc.docker(rep, byContainer, dk)
+	took("整理容器")
 
 	// 4. 装了但没在运行（或进程没认出来）的系统服务
 	sc.units(rep, unitFiles, unitErr, instVer)
+	took("整理系统服务")
 
 	// 5. Ferry 装的软件：标上实例名（可以启停、卸载）；没在运行的也列出来
 	for _, in := range sc.instances {
@@ -292,6 +457,7 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 			it.Name = in.Name
 		}
 	}
+	took("整理Ferry实例")
 
 	// Docker 那一行不列容器的端口：那是 docker-proxy 替容器监听的，容器那一行已经有了
 	published := map[string]bool{}
@@ -339,7 +505,7 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 	if os.Geteuid() != 0 && sc.proc == "/proc" {
 		rep.Notes = append(rep.Notes, "agent 没有以 root 运行，其他用户的进程可能看不到")
 	}
-	took("整理")
+	took("排序")
 	return rep
 }
 
@@ -1007,13 +1173,20 @@ func (sc *swScan) units(rep *proto.SoftwareReport, out string, err error, instVe
 			cands = append(cands, cand{unit: f[0], rule: r})
 		}
 	}
-	// 各单元的状态、程序、版本互不相干：同时读
+	// 单元的属性和程序路径一次读出来：不用每个单元起两次 systemctl
+	units := make([]string, len(cands))
+	for i := range cands {
+		units[i] = cands[i].unit
+	}
+	props := sc.propsMany(units)
+	// 各单元的状态、版本互不相干：同时读
 	eachParallel(len(cands), 8, func(i int) {
 		c := &cands[i]
-		if c.p = sc.unitProps(c.unit); c.p.Load == "not-found" {
+		c.p = props[c.unit]
+		if c.p.Load == "not-found" {
 			return
 		}
-		c.exe = sc.execStart(c.unit)
+		c.exe = execStartPath(c.p.ExecStart)
 		c.bundled = sc.isInactiveNginxPackageUnit(c.unit, c.exe, c.p)
 		if !c.bundled && c.exe != "" && instVer[c.unit] == "" {
 			sc.version(swRules[c.rule], c.exe)
@@ -1083,16 +1256,24 @@ func unitRule(name string) int {
 
 var reExecPath = regexp.MustCompile(`path=([^ ;]+)`)
 
-// execStart 单元 ExecStart 的程序。
-func (sc *swScan) execStart(unit string) string {
-	out, err := sc.run("systemctl show -p ExecStart --no-pager "+shellQuote(unit), 5*time.Second)
-	if err != nil {
-		return ""
-	}
-	if m := reExecPath.FindStringSubmatch(out); m != nil {
+// execStartPath ExecStart 属性里的程序（{ path=/usr/bin/x ; argv[]=... }）。
+func execStartPath(v string) string {
+	if m := reExecPath.FindStringSubmatch(v); m != nil {
 		return m[1]
 	}
 	return ""
+}
+
+// propsMany 一次读一批单元的属性；没有批量实现时逐个读。
+func (sc *swScan) propsMany(units []string) map[string]UnitProps {
+	if sc.unitPropsMany != nil {
+		return sc.unitPropsMany(units)
+	}
+	out := make(map[string]UnitProps, len(units))
+	for _, unit := range units {
+		out[unit] = sc.unitProps(unit)
+	}
+	return out
 }
 
 // osFamily 不写 ID_LIKE（或写得不全）的发行版属于哪一系：模板的装法按 rhel、debian 选。

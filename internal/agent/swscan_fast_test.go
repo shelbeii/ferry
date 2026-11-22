@@ -139,10 +139,124 @@ func TestSoftwareKnownAndReplaced(t *testing.T) {
 			t.Errorf("程序文件删了：%+v", it)
 		}
 	}
-	for _, k := range []string{"读进程", "取版本、读容器和系统服务", "整理"} {
+	for _, k := range []string{"读进程", "取版本、读容器和系统服务", "整理进程", "整理容器", "整理系统服务", "整理Ferry实例", "排序", "读监听端口"} {
 		if _, ok := rep.Took[k]; !ok {
 			t.Errorf("没有记下 %s 用的时间：%v", k, rep.Took)
 		}
+	}
+}
+
+// 单元枚举按规则里的单元名过滤（全量列一次要 0.6~1.5 秒）。
+func TestListUnitsFiltered(t *testing.T) {
+	sc := newFastScan(t).scanner(nil)
+	var cmds []string
+	sc.run = func(cmd string, _ time.Duration) (string, error) {
+		cmds = append(cmds, cmd)
+		if strings.HasPrefix(cmd, "systemctl list-unit-files --type=service --no-legend --no-pager ") {
+			return "docker.service enabled disabled\n", nil
+		}
+		return "", errors.New("unexpected")
+	}
+	out, err := sc.listUnits()
+	if err != nil || !strings.Contains(out, "docker.service") {
+		t.Fatalf("listUnits：%q %v", out, err)
+	}
+	if len(cmds) != 1 || !strings.Contains(cmds[0], "'docker.service'") || !strings.Contains(cmds[0], "'postgresql*.service'") {
+		t.Errorf("没有按规则里的单元名过滤：%q", cmds)
+	}
+}
+
+// 老 systemd 不认参数：退回全量枚举。
+func TestListUnitsFallback(t *testing.T) {
+	sc := newFastScan(t).scanner(nil)
+	var cmds []string
+	sc.run = func(cmd string, _ time.Duration) (string, error) {
+		cmds = append(cmds, cmd)
+		if strings.HasSuffix(cmd, "--no-pager") {
+			return "nginx.service enabled disabled\n", nil
+		}
+		return "", errors.New("invalid option")
+	}
+	out, err := sc.listUnits()
+	if err != nil || !strings.Contains(out, "nginx.service") {
+		t.Fatalf("退回全量后：%q %v", out, err)
+	}
+	if len(cmds) != 2 {
+		t.Errorf("应该先过滤、失败后全量：%q", cmds)
+	}
+}
+
+// 同一个容器里同一种软件有多个顶层进程（EMQX 会另起一个 beam）：只列一条。
+func TestContainerDuplicateRule(t *testing.T) {
+	f := newFastScan(t)
+	id := strings.Repeat("a", 64)
+	cg := "0::/system.slice/docker-" + id + ".scope\n"
+	f.fp.add(t, 1, 0, "/usr/lib/systemd/systemd", "0::/init.scope\n", "net:[1]")
+	f.fp.add(t, 300, 1, "/opt/emqx/bin/beam.smp", cg, "net:[2]", "beam.smp -e emqx")
+	f.fp.add(t, 400, 1, "/opt/emqx/bin/beam.smp", cg, "net:[2]", "beam.smp -e emqx")
+	items := f.scanner(nil).scan().Items
+	n := 0
+	for _, it := range items {
+		if it.Kind != "emqx" {
+			continue
+		}
+		n++
+		if it.PID != 300 {
+			t.Errorf("留的不是最先看到的那个：%+v", it)
+		}
+	}
+	if n != 1 {
+		t.Fatalf("同一容器同一种软件应只列一条：%+v", items)
+	}
+}
+
+// ss -lntp 一次读出进程的监听地址；认不出的地址不要。
+func TestSSListeners(t *testing.T) {
+	sc := newFastScan(t).scanner(nil)
+	sc.run = func(cmd string, _ time.Duration) (string, error) {
+		if cmd != "ss -lntp 2>/dev/null" {
+			return "", errors.New("unexpected")
+		}
+		return "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n" +
+			"LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"java\",pid=123,fd=45))\n" +
+			"LISTEN 0 511 [::]:8000 [::]:* users:((\"nginx\",pid=200,fd=6),(\"nginx\",pid=201,fd=6))\n" +
+			"LISTEN 0 128 127.0.0.1:9201 0.0.0.0:* users:((\"java\",pid=123,fd=46))\n" +
+			"LISTEN 0 128 [::1]:9000 [::]:* users:((\"minio\",pid=300,fd=3))\n" +
+			"LISTEN 0 128 ::ffff:127.0.0.1:8005 [::]:* users:((\"tomcat\",pid=500,fd=8))\n" +
+			"LISTEN 0 128 [fe80::1%eth0]:7000 [::]:* users:((\"x\",pid=400,fd=7))\n", nil
+	}
+	got := sc.ssListeners()
+	if !reflect.DeepEqual(got[123], []string{"*:8080", "127.0.0.1:9201"}) {
+		t.Errorf("123：%v", got[123])
+	}
+	if !reflect.DeepEqual(got[200], []string{"*:8000"}) || !reflect.DeepEqual(got[201], []string{"*:8000"}) {
+		t.Errorf("同一端口多个进程：%v %v", got[200], got[201])
+	}
+	if !reflect.DeepEqual(got[300], []string{"[::1]:9000"}) {
+		t.Errorf("300：%v", got[300])
+	}
+	if !reflect.DeepEqual(got[500], []string{"127.0.0.1:8005"}) {
+		t.Errorf("IPv4 映射地址：%v", got[500])
+	}
+	if _, ok := got[400]; ok {
+		t.Errorf("带网卡的地址不该认：%v", got[400])
+	}
+}
+
+// 没有 ss 时返回 nil，调用方退回逐个进程扫 /proc。
+func TestSSListenersFallback(t *testing.T) {
+	sc := newFastScan(t).scanner(nil)
+	sc.run = func(string, time.Duration) (string, error) { return "", errors.New("no ss") }
+	if got := sc.ssListeners(); got != nil {
+		t.Errorf("没有 ss：%v", got)
+	}
+}
+
+func TestMergeListenAddrs(t *testing.T) {
+	got := mergeListenAddrs([]string{"127.0.0.1:8080", "*:8080", "::1:9000", "127.0.0.1:9000"})
+	want := []string{"*:8080", "127.0.0.1:9000", "::1:9000"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%v", got)
 	}
 }
 

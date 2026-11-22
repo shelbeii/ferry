@@ -31,8 +31,10 @@ func (f *infoFields) section(id, title string) proto.AppInfoSection {
 	return proto.AppInfoSection{ID: id, Title: title, Fields: f.fields}
 }
 
+// appInfoUnitCommand 一次读出详情要的全部属性（含应用状态用的 ActiveState、MainPID 等，不再另查一次）。
 func appInfoUnitCommand(unit string) string {
-	return "systemctl show --no-pager -p LoadState -p FragmentPath -p DropInPaths -p ExecStart -p WorkingDirectory -p User -p Group -p EnvironmentFiles -p EnvironmentFile -p Restart -p NRestarts -p NeedDaemonReload " + shellQuote(unit)
+	return "systemctl show --no-pager -p LoadState -p FragmentPath -p DropInPaths -p ExecStart -p WorkingDirectory -p User -p Group -p EnvironmentFiles -p EnvironmentFile -p Restart -p RestartUSec -p NRestarts -p NeedDaemonReload " +
+		"-p ActiveState -p SubState -p MainPID -p ActiveEnterTimestamp -p UnitFileState -p Result -p ExecMainStatus " + shellQuote(unit)
 }
 
 func appInfoUnitProperties(out string) map[string]string {
@@ -46,11 +48,23 @@ func appInfoUnitProperties(out string) map[string]string {
 				value = previous + "\n" + value
 			}
 			props["EnvironmentFiles"] = value
-		case "Id", "LoadState", "FragmentPath", "DropInPaths", "ExecStart", "WorkingDirectory", "User", "Group", "Restart", "NRestarts", "NeedDaemonReload":
+		case "Id", "LoadState", "FragmentPath", "DropInPaths", "ExecStart", "WorkingDirectory", "User", "Group", "Restart", "RestartUSec", "NRestarts", "NeedDaemonReload",
+			"ActiveState", "SubState", "MainPID", "ActiveEnterTimestamp", "UnitFileState", "Result", "ExecMainStatus":
 			props[key] = value
 		}
 	}
 	return props
+}
+
+// unitPropsOf 把详情里读到的属性换成 UnitProps（和详情同一次 systemctl show 的结果，不再单独查）。
+func unitPropsOf(props map[string]string) UnitProps {
+	atoi := func(s string) int { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
+	return UnitProps{
+		Load: props["LoadState"], Active: props["ActiveState"], Sub: props["SubState"], PID: atoi(props["MainPID"]),
+		Since: props["ActiveEnterTimestamp"], Enabled: props["UnitFileState"], Restart: props["Restart"],
+		RestartSec: props["RestartUSec"], Restarts: atoi(props["NRestarts"]), Result: props["Result"],
+		ExecMainStatus: atoi(props["ExecMainStatus"]),
+	}
 }
 
 func appInfoCommandError(err error, out string) string {
@@ -165,7 +179,12 @@ func (a *Agent) appInfo() int {
 	var processes []ProcessSnapshot
 	var unitState UnitProps
 	if unit != "" {
-		unitState = a.Sys.UnitProps(unit)
+		if props["ActiveState"] != "" {
+			unitState = unitPropsOf(props)
+		} else {
+			// 老 systemd 的输出里没有状态属性：单独查一次
+			unitState = a.unitProps(unit)
+		}
 		processes = a.Sys.Processes(unitState.PID)
 	}
 	p := runtimeProcess(s.Type, processes, s.FileName)

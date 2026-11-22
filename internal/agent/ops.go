@@ -530,6 +530,33 @@ func (a *Agent) bootOff(unit string) error {
 	return err
 }
 
+// prefetchProps 把 status 要看的单元属性一次读出来（各应用、开机定时器、冲突单元）。
+func (a *Agent) prefetchProps() {
+	var units []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		if u == "" || seen[u] {
+			return
+		}
+		seen[u] = true
+		units = append(units, u)
+	}
+	for i := range a.req.Apps {
+		s := &a.req.Apps[i]
+		if !isService(s) {
+			continue
+		}
+		add(s.Unit)
+		add(bootTimer(s.Unit))
+		for _, c := range s.Conflict {
+			add(c)
+		}
+	}
+	if len(units) > 0 {
+		a.props = a.Sys.UnitPropsMany(units)
+	}
+}
+
 // bootTimerDelay 开机延迟启动的定时器里写的秒数（OnBootSec=）；没有时 0。
 func (a *Agent) bootTimerDelay(unit string) int {
 	b, _ := os.ReadFile(a.unitPath(bootTimer(unit)))
@@ -545,7 +572,7 @@ func (a *Agent) bootTimerDelay(unit string) int {
 // bootEnabled 开机会不会自己起来：服务 enable 了，或者开机延迟启动的定时器 enable 了。
 func (a *Agent) bootEnabled(unit, unitState string) string {
 	if unitState != "enabled" && unitState != "enabled-runtime" && a.hasBootTimer(unit) {
-		if t := a.Sys.UnitProps(bootTimer(unit)).Enabled; t == "enabled" || t == "enabled-runtime" {
+		if t := a.unitProps(bootTimer(unit)).Enabled; t == "enabled" || t == "enabled-runtime" {
 			return t
 		}
 	}
@@ -558,6 +585,9 @@ func (a *Agent) status() int {
 	busy := a.lockHolder()
 	// 各应用共用一份进程表；nginx 配置只读一次，多个静态站点共用
 	defer a.shareProcs()()
+	// 各应用的单元属性一次读出来（含开机定时器、冲突单元），不用每个应用起一次 systemctl
+	a.prefetchProps()
+	defer func() { a.props = nil }()
 	var ngText string
 	var ngErr error
 	var ngOnce sync.Once
@@ -568,9 +598,7 @@ func (a *Agent) status() int {
 	// 不宜对外的端口监听了所有地址时，要看防火墙拦没拦（firewall-cmd 较慢）：
 	// 只在有这种端口时才查，和各应用的查看同时进行；上次有的话一开始就查（常驻 agent 里记着）
 	fw := &statusFW{scan: func() *fwState {
-		sc := a.fwScanner()
-		sc.runtimeOnly = true
-		return sc.firewall()
+		return a.firewallState(true)
 	}}
 	if riskyHint.Load() {
 		fw.start()
@@ -673,7 +701,7 @@ func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.
 	if s.NginxInstance != "" && st.Current != nil {
 		a.nginxSiteStatus(s, &st)
 	} else if isService(s) {
-		p := a.Sys.UnitProps(s.Unit)
+		p := a.unitProps(s.Unit)
 		st.Active, st.Sub, st.PID, st.Since = p.Active, p.Sub, p.PID, p.Since
 		st.Restart, st.RestartSec, st.Restarts = p.Restart, p.RestartSec, p.Restarts
 		switch boot := a.bootEnabled(s.Unit, p.Enabled); boot {
@@ -711,7 +739,7 @@ func (a *Agent) appStatus(s *proto.AppSpec, nginx func() (string, error)) proto.
 		}
 		if st.Current == nil {
 			for _, c := range s.Conflict {
-				if cp := a.Sys.UnitProps(c); isRunning(cp) {
+				if cp := a.unitProps(c); isRunning(cp) {
 					st.Problem = "未接管，旧服务 " + c + " 在运行"
 				}
 			}

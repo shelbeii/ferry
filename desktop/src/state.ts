@@ -498,7 +498,7 @@ function trimTasks() {
 const saved = new Map<string, { lines: number; progress?: number; chain: Promise<void> }>()
 let saveTimer: number | undefined
 
-/** 保存任务记录：开始时、进行中每隔几秒（有新输出时）、结束时各存一次。保存失败不影响任务本身。 */
+/** 保存任务记录：开始时、进行中每 15 秒（有新输出时）、结束时各存一次。保存失败不影响任务本身。 */
 function saveTask(t: Task) {
   const s = saved.get(t.hid) ?? { lines: -1, chain: Promise.resolve() }
   s.lines = t.received ?? t.lines.length
@@ -534,7 +534,7 @@ function saveTask(t: Task) {
       clearInterval(saveTimer)
       saveTimer = undefined
     }
-  }, 5000)
+  }, 15000)
 }
 
 /** 按设置清理掉的记录：面板里也去掉（进行中的不动） */
@@ -586,6 +586,14 @@ export async function loadTaskHistory() {
   }
 }
 
+// 重启后对中断的安装任务查状态：连续查询按 5 → 15 → 30 秒退避，别一直每 5 秒打服务器
+const reconcileWaits = new Map<string, number>()
+
+/** 第 n 次查询之后隔多久再查（毫秒）。 */
+export function installPollDelay(tries: number): number {
+  return tries <= 1 ? 5000 : tries === 2 ? 15000 : 30000
+}
+
 export async function reconcileInstallTask(t: Task) {
   if (!t.installId || !t.target || !t.config) return
   try {
@@ -605,9 +613,12 @@ export async function reconcileInstallTask(t: Task) {
       if (hadEnded || changedPhase) {
         saveTask(t)
       }
-      setTimeout(() => void reconcileInstallTask(t), 5000)
+      const tries = (reconcileWaits.get(t.hid) ?? 0) + 1
+      reconcileWaits.set(t.hid, tries)
+      setTimeout(() => void reconcileInstallTask(t), installPollDelay(tries))
       return
     }
+    reconcileWaits.delete(t.hid)
     if (t.status === 'failed' && state.status === 'failed') return // 保留当前任务的完整失败原因
     await loadTaskDetail(t)
     t.status = state.status === 'needs-confirmation' ? 'failed' : state.status

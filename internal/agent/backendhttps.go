@@ -91,7 +91,7 @@ func (a *Agent) backendHTTPSStatus(s *proto.AppSpec) *proto.HTTPSStatus {
 		out.Domains, out.Port, out.Custom = s.HTTPS.TLS.Domains, s.HTTPS.Port, s.HTTPS.Cert != ""
 		out.Problem = "HTTPS 尚未配置成功"
 	} else {
-		out.Active = isRunning(a.Sys.UnitProps(state.Unit))
+		out.Active = isRunning(a.unitProps(state.Unit))
 		dir := a.tlsDir(s.Name)
 		if state.Custom {
 			dir = filepath.Join(a.appMetaDir(s.Name), "tls-custom")
@@ -197,7 +197,7 @@ func (a *Agent) configureBackendHTTPS(s *proto.AppSpec, port int) error {
 	if port == 0 {
 		_, upstreamPort, _ := net.SplitHostPort(h.Upstream)
 		n, _ := strconv.Atoi(upstreamPort)
-		if pid := a.Sys.UnitProps(s.Unit).PID; n > 0 && pid > 0 {
+		if pid := a.unitProps(s.Unit).PID; n > 0 && pid > 0 {
 			for _, listen := range a.Sys.Listening(pid) {
 				addr, bound := splitSiteListen(listen)
 				if bound == n && (addr == "*" || addr == "0.0.0.0" || addr == "[::]" || addr == "::") {
@@ -363,7 +363,7 @@ func (a *Agent) installBackendProxy(s *proto.AppSpec, conf string, text []byte, 
 		return restoreUnit(err)
 	}
 	action := "start"
-	if isRunning(a.Sys.UnitProps(h.Unit)) {
+	if isRunning(a.unitProps(h.Unit)) {
 		action = "reload"
 	}
 	if err := a.Sys.Systemctl(action, h.Unit); err != nil {
@@ -561,7 +561,7 @@ func (a *Agent) renewSavedBackendHTTPS(app string, force bool) error {
 	if state.Unit == "" || state.Custom {
 		return errors.New("此应用没有由 Ferry 自动续期的 HTTPS 证书")
 	}
-	if !isRunning(a.Sys.UnitProps(state.Unit)) {
+	if !isRunning(a.unitProps(state.Unit)) {
 		if force {
 			return errors.New("HTTPS 的 nginx 未运行")
 		}

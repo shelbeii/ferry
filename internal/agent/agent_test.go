@@ -63,6 +63,9 @@ type fakeSys struct {
 	// Pipe：pipeOut 命令的输出、pipeFail 命令失败的错误；收到的标准输入记在 pipeIn，环境变量记在 pipeEnv
 	pipeOut, pipeFail, pipeIn map[string]string
 	pipeEnv                   map[string][]string
+
+	// 统计 UnitProps / UnitPropsMany 的调用（测试批量查询用）
+	propsCalls, propsBatchCalls int
 }
 
 func newFake(t *testing.T) *fakeSys {
@@ -148,6 +151,7 @@ func (f *fakeSys) isManaged(unit string) bool {
 }
 
 func (f *fakeSys) UnitProps(unit string) UnitProps {
+	f.propsCalls++
 	u := f.unit(unit)
 	load := "loaded"
 	if _, err := os.Stat(filepath.Join(f.unitDir, unit)); err != nil {
@@ -158,6 +162,25 @@ func (f *fakeSys) UnitProps(unit string) UnitProps {
 		enabled = "enabled"
 	}
 	return UnitProps{Load: load, Active: u.active, Sub: u.sub, PID: u.pid, Since: u.since, Enabled: enabled}
+}
+
+// UnitPropsMany 和真实实现一样一次读一批（不计入 propsCalls，测试用来确认没有逐个查）。
+func (f *fakeSys) UnitPropsMany(units []string) map[string]UnitProps {
+	f.propsBatchCalls++
+	out := make(map[string]UnitProps, len(units))
+	for _, unit := range units {
+		u := f.unit(unit)
+		load := "loaded"
+		if _, err := os.Stat(filepath.Join(f.unitDir, unit)); err != nil {
+			load = "not-found"
+		}
+		enabled := "disabled"
+		if u.enabled {
+			enabled = "enabled"
+		}
+		out[unit] = UnitProps{Load: load, Active: u.active, Sub: u.sub, PID: u.pid, Since: u.since, Enabled: enabled}
+	}
+	return out
 }
 
 func (f *fakeSys) Journal(string, int, time.Time) []string {

@@ -86,6 +86,8 @@ type fwScan struct {
 	// runtimeOnly 只读运行时的规则、不和永久配置对比（看不出哪些规则只在运行时）：
 	// 应用状态里只要知道拦没拦，少起一次 firewall-cmd
 	runtimeOnly bool
+	// cached 用常驻 agent 里的缓存版结果（应用状态、端口页）；nil 时现查（改防火墙的命令要最新的）
+	cached func(runtimeOnly bool) *fwState
 
 	ssh map[int]bool // sshd 监听的端口
 }
@@ -95,8 +97,18 @@ func (a *Agent) fwScanner() *fwScan {
 }
 
 func (a *Agent) ports() int {
-	rep, _ := a.fwScanner().report()
+	sc := a.fwScanner()
+	sc.cached = a.firewallState
+	rep, _ := sc.report()
 	return a.result(proto.CodeOK, "", rep)
+}
+
+// firewallState 读防火墙：有缓存版就用缓存版，否则现查。
+func (sc *fwScan) firewallState() *fwState {
+	if sc.cached != nil {
+		return sc.cached(sc.runtimeOnly)
+	}
+	return sc.firewall()
 }
 
 const fwTimeout = 30 * time.Second
@@ -111,7 +123,7 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 	// 读防火墙（要起 firewall-cmd，最慢）和读监听的端口、Docker 同时做：两边互不相干
 	eachParallel(2, 2, func(i int) {
 		if i == 0 {
-			st = sc.firewall()
+			st = sc.firewallState()
 			return
 		}
 		sc.scanListen(byKey)

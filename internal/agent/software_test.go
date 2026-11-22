@@ -159,13 +159,11 @@ func TestSoftwareScan(t *testing.T) {
 		"docker ps -a --no-trunc --format '{{json .}}'": ps + "\n",
 		"systemctl list-unit-files --type=service --no-legend --no-pager": "mysqld.service enabled enabled\nnginx.service enabled enabled\n" +
 			"redis.service disabled enabled\ntomcat.service disabled disabled\nmysql.service alias -\ngetty@.service static -\nsshd.service enabled enabled\n",
-		"systemctl show -p ExecStart --no-pager 'redis.service'":  "ExecStart={ path=/usr/bin/redis-server ; argv[]=/usr/bin/redis-server /etc/redis.conf ; }\n",
-		"'/usr/sbin/mysqld' --version 2>&1":                       "/usr/sbin/mysqld  Ver 8.0.36 for Linux on x86_64 (MySQL Community Server - GPL)\n",
-		"'/usr/sbin/nginx' -v 2>&1":                               "nginx version: nginx/1.24.0\n",
-		"systemctl show -p ExecStart --no-pager 'tomcat.service'": "ExecStart={ path=/usr/libexec/tomcat/server ; argv[]=/usr/libexec/tomcat/server start ; }\n",
-		"'/opt/1panel/bin/1panel-core' version 2>&1":              "系统版本: v2.2.5\n系统模式: stable\n",
-		"'/usr/bin/dockerd' --version 2>&1":                       "Docker version 29.7.2, build 1234567\n",
-		"'/usr/bin/redis-server' --version 2>&1":                  "Redis server v=7.2.4 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64\n",
+		"'/usr/sbin/mysqld' --version 2>&1":          "/usr/sbin/mysqld  Ver 8.0.36 for Linux on x86_64 (MySQL Community Server - GPL)\n",
+		"'/usr/sbin/nginx' -v 2>&1":                  "nginx version: nginx/1.24.0\n",
+		"'/opt/1panel/bin/1panel-core' version 2>&1": "系统版本: v2.2.5\n系统模式: stable\n",
+		"'/usr/bin/dockerd' --version 2>&1":          "Docker version 29.7.2, build 1234567\n",
+		"'/usr/bin/redis-server' --version 2>&1":     "Redis server v=7.2.4 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64\n",
 	}
 	sc := &swScan{
 		proc:    fp.dir,
@@ -191,8 +189,9 @@ func TestSoftwareScan(t *testing.T) {
 		},
 		appUnits: map[string][3]string{"shop-web.service": {"shop", "web", "prod"}},
 		unitProps: func(unit string) UnitProps {
-			if unit == "redis.service" || unit == "tomcat.service" {
-				return UnitProps{Load: "loaded", Active: "inactive", Sub: "dead"}
+			exe := map[string]string{"redis.service": "/usr/bin/redis-server", "tomcat.service": "/usr/libexec/tomcat/server"}[unit]
+			if exe != "" {
+				return UnitProps{Load: "loaded", Active: "inactive", Sub: "dead", ExecStart: "{ path=" + exe + " ; argv[]=" + exe + " ; }"}
 			}
 			return UnitProps{Load: "loaded", Active: "active", Sub: "running"}
 		},
@@ -286,6 +285,7 @@ func TestSoftwareScanNginxPackageUnit(t *testing.T) {
 				fp.add(t, 200, 1, managedBinary, "0::/system.slice/"+managedUnit+"\n", "net:[1]")
 			}
 			system := stock
+			system.ExecStart = "{ path=" + binary + " ; argv[]=" + binary + " ; }"
 			if tc.changeStock != nil {
 				tc.changeStock(&system)
 			}
@@ -295,8 +295,6 @@ func TestSoftwareScanNginxPackageUnit(t *testing.T) {
 					switch cmd {
 					case "systemctl list-unit-files --type=service --no-legend --no-pager":
 						return stockUnit + " " + system.Enabled + " enabled\n" + managedUnit + " enabled enabled\n", nil
-					case "systemctl show -p ExecStart --no-pager 'nginx.service'":
-						return "ExecStart={ path=" + binary + " ; argv[]=" + binary + " ; }\n", nil
 					case "'/usr/sbin/nginx' -v 2>&1":
 						return "nginx version: nginx/1.24.0\n", nil
 					}

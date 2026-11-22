@@ -28,6 +28,8 @@ func Serve(sys System, in io.Reader, out io.Writer) int {
 	w := &serveOut{w: out}
 	light := make(chan struct{}, serveLight)
 	heavy := make(chan struct{}, serveHeavy)
+	// 跨请求共用：防火墙结果（应用状态每分钟刷新，不用每次都起 firewall-cmd）
+	fw := &fwCache{}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	cancels := map[string]context.CancelFunc{}
@@ -78,7 +80,7 @@ func Serve(sys System, in io.Reader, out io.Writer) int {
 					}
 					defer func() { <-sem }()
 					lw := &serveLines{id: sr.ID, out: w}
-					a := &Agent{Sys: ctxSys{System: sys, ctx: ctx}, Out: lw}
+					a := &Agent{Sys: ctxSys{System: sys, ctx: ctx}, Out: lw, bgSys: sys, fw: fw}
 					code := a.Run(sr.Cmd, sr.Req) // Run 自己拦下 panic，返回失败的结果
 					lw.flush()
 					w.end(sr.ID, code)
@@ -115,11 +117,23 @@ func (o *serveOut) end(id string, code int) {
 	o.line(id, proto.ServeEnd+strconv.Itoa(code))
 }
 
+// maxServeLine 一行输出的上限。超过就丢掉这一行、发一条提示，不让常驻 agent 的内存被一行撑爆，
+// 也不让本机那边因为读不下这一行而把整个常驻 agent 判成退出。
+var maxServeLine = 8 << 20
+
+// serveTooLong 丢掉超长行时发给本机的提示（本机按普通事件显示）。
+var serveTooLong = func() string {
+	b, _ := json.Marshal(proto.Event{T: "ev", Level: "warn", Code: proto.EvWarn,
+		Msg: "有一行输出超过 8 MB，已丢弃（这次查看的结果可能不完整）"})
+	return string(b)
+}()
+
 // serveLines 一个请求的输出：按行切开，每行加上请求号。
 type serveLines struct {
-	id  string
-	out *serveOut
-	buf []byte
+	id   string
+	out  *serveOut
+	buf  []byte
+	over bool // 这一行超过上限：丢掉它剩下的部分
 }
 
 func (l *serveLines) Write(p []byte) (int, error) {
@@ -127,17 +141,30 @@ func (l *serveLines) Write(p []byte) (int, error) {
 	for {
 		i := bytes.IndexByte(l.buf, '\n')
 		if i < 0 {
+			if len(l.buf) > maxServeLine {
+				l.over = true
+				l.buf = l.buf[:0]
+			}
 			break
 		}
-		l.out.line(l.id, string(l.buf[:i]))
+		if l.over {
+			l.out.line(l.id, serveTooLong)
+			l.over = false
+		} else {
+			l.out.line(l.id, string(l.buf[:i]))
+		}
 		l.buf = l.buf[i+1:]
 	}
 	return len(p), nil
 }
 
 func (l *serveLines) flush() {
-	if len(l.buf) > 0 {
+	switch {
+	case l.over:
+		l.out.line(l.id, serveTooLong)
+		l.over = false
+	case len(l.buf) > 0:
 		l.out.line(l.id, string(l.buf))
-		l.buf = nil
 	}
+	l.buf = nil
 }
