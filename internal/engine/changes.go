@@ -6,9 +6,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/captain/ferry/internal/artifact"
 	"github.com/captain/ferry/internal/config"
+	"github.com/captain/ferry/internal/safe"
 
 	"github.com/captain/ferry/internal/gitinfo"
 	"github.com/captain/ferry/internal/jdk"
@@ -123,9 +125,15 @@ func diffFiles(old, now map[string]string) (added, changed, removed []string) {
 
 const maxChangeCommits = 20
 
+// betweenCommits 两个提交之间的差距（测试里换掉，用来数调用次数）。
+var betweenCommits = gitinfo.Between
+
 // changesFrom 按各应用线上的版本算出改动：每个应用和它自己代码所在的仓库比。local 是这次要部署的单元文件、附带文件（可以为 nil）。
 func changesFrom(gits DeployGit, rels []proto.AppReleases, local map[string]localApp) []AppChange {
 	var out []AppChange
+	// 同一个仓库、同一对提交的应用只查一次 git：一次预览里十几个应用不用各跑一遍
+	type rangeKey struct{ top, from, to string }
+	ranges := map[rangeKey]gitinfo.Range{}
 	for _, r := range rels {
 		git := gits[r.App]
 		c := AppChange{App: r.App, Local: git}
@@ -146,7 +154,13 @@ func changesFrom(gits DeployGit, rels []proto.AppReleases, local map[string]loca
 			c.Note = "和线上是同一个提交"
 			c.Known = true
 		default:
-			c.Range = gitinfo.Between(git.Top, c.Online.Commit, git.Commit, maxChangeCommits)
+			k := rangeKey{git.Top, c.Online.Commit, git.Commit}
+			r, ok := ranges[k]
+			if !ok {
+				r = betweenCommits(git.Top, c.Online.Commit, git.Commit, maxChangeCommits)
+				ranges[k] = r
+			}
+			c.Range = r
 			switch {
 			case !c.Known:
 				c.Note = fmt.Sprintf("线上的提交 %s 不在本地仓库里（别的电脑上提交的？先 git pull 再部署）", short(c.Online.Commit))
@@ -301,27 +315,43 @@ func (e *Engine) Changes(target string, names []string) ([]AppChange, error) {
 		for _, sp := range specs {
 			specOf[sp.Name] = sp
 		}
-		// 端口有没有被别的程序占着、服务器上已有哪些 JDK 和 nginx（读不到——服务器上的组件太旧等——不影响看改动）
-		var got proto.PortCheck
-		if err := s.callData("portcheck", &proto.Request{Apps: specs}, &got); err == nil {
-			pc = &got
-		}
-		if err := s.callData("releases", &proto.Request{Apps: specs, Detail: true}, &rels); err != nil {
-			return err
-		}
 		var withKeep []proto.AppSpec
 		for _, sp := range specs {
 			if len(sp.Keep) > 0 {
 				withKeep = append(withKeep, sp)
 			}
 		}
-		if len(withKeep) > 0 {
-			// 读不到（服务器上的 agent 太旧等）不影响看改动
-			if err := s.callData("keepscan", &proto.Request{Apps: withKeep}, &keeps); err != nil {
-				keeps = nil
+		// 三条查看互不相干：同时发给常驻 agent（以前一条一条等，一次预览多花两个往返）
+		var wg sync.WaitGroup
+		var relsErr error
+		wg.Add(3)
+		safe.Go("读取线上版本", func() {
+			defer wg.Done()
+			if err := s.callData("releases", &proto.Request{Apps: specs, Detail: true}, &rels); err != nil {
+				relsErr = err
 			}
-		}
-		return nil
+		})
+		safe.Go("检查端口占用", func() {
+			defer wg.Done()
+			// 端口有没有被别的程序占着、服务器上已有哪些 JDK 和 nginx（读不到——服务器上的组件太旧等——不影响看改动）
+			var got proto.PortCheck
+			if err := s.callData("portcheck", &proto.Request{Apps: specs}, &got); err == nil {
+				pc = &got
+			}
+		})
+		safe.Go("检查保留文件", func() {
+			defer wg.Done()
+			if len(withKeep) == 0 {
+				return
+			}
+			// 读不到（服务器上的 agent 太旧等）不影响看改动
+			var got []proto.KeepScan
+			if err := s.callData("keepscan", &proto.Request{Apps: withKeep}, &got); err == nil {
+				keeps = got
+			}
+		})
+		wg.Wait()
+		return relsErr
 	})
 	if err != nil {
 		return nil, err

@@ -223,24 +223,39 @@ func (e *Engine) ensureAgent(s *session) error {
 	// 以及这个版本的 agent 在不在、能不能运行（在的话不用再单独问一次）
 	paths := map[string]string{}
 	sums := map[string]string{}
+	sizes := map[string]int64{}
 	for _, arch := range []string{"amd64", "arm64"} {
 		if b, err := agentbin.Get(arch); err == nil {
 			paths[arch] = s.ferryDir + "/ferry-agent-" + b.SHA256[:12]
 			sums[arch] = b.SHA256
+			sizes[arch] = int64(len(b.Data))
 		}
+	}
+	// 以前完整核对过这个 agent（同一台服务器、同一组件目录、同一个 sha 和大小）：
+	// 这次只核对属主、权限和大小，不再读十几 MB 算 sha256。
+	trustPath := agentTrustPath(s.t, s.ferryDir)
+	trust := readAgentTrust(trustPath)
+	trustFlag := 0
+	if trust.SHA != "" {
+		trustFlag = 1
 	}
 	prefix := s.sudo
 	if s.passwordSudo() {
 		prefix = ""
 	}
 	check := fmt.Sprintf(`uname -m; command -v gzip >/dev/null 2>&1 && echo has-gzip || echo no-gzip; `+
-		`unsafe=0; d=%s; while [ -n "$d" ] && [ "$d" != / ]; do if [ -e "$d" ] || [ -L "$d" ]; then u=$(stat -c %%u "$d"); m=$(stat -c %%a "$d"); `+
+		`unsafe=0; d=%[1]s; while [ -n "$d" ] && [ "$d" != / ]; do if [ -e "$d" ] || [ -L "$d" ]; then u=$(stat -c %%u "$d"); m=$(stat -c %%a "$d"); `+
 		`if [ "$u" != 0 ] || [ $((0$m & 022)) -ne 0 ]; then echo "unsafe $d $u $m"; unsafe=1; fi; fi; d=$(dirname "$d"); done; `+
-		`case "$(uname -m)" in x86_64|amd64) a=%s; want=%s;; aarch64|arm64) a=%s; want=%s;; *) a=;; esac; `+
-		`if [ "$unsafe" = 0 ] && [ -n "$a" ] && [ -f "$a" ] && [ -x "$a" ] && [ ! -L "$a" ]; then `+
-		`actual=$(sha256sum < "$a") && [ "${actual%%%% *}" = "$want" ] || exit 0; `+
-		`t0=$(date +%%s%%N); echo @@agent; %s"$a" version 2>/dev/null; t1=$(date +%%s%%N); echo; echo "@@took $t0 $t1"; fi`,
-		shQuote(s.ferryDir), shQuote(paths["amd64"]), shQuote(sums["amd64"]), shQuote(paths["arm64"]), shQuote(sums["arm64"]), prefix)
+		`case "$(uname -m)" in x86_64|amd64) arch=amd64; a=%[2]s; want=%[3]s; size=%[4]d;; aarch64|arm64) arch=arm64; a=%[5]s; want=%[6]s; size=%[7]d;; *) arch=;; esac; `+
+		`if [ "$unsafe" = 0 ] && [ -n "$arch" ]; then `+
+		`if [ %[8]d = 1 ] && [ %[9]s = "$want" ] && [ %[10]s = "$arch" ] && [ %[11]d = "$size" ] && [ -f "$a" ] && [ -x "$a" ] && [ ! -L "$a" ] `+
+		`&& [ "$(stat -c %%u "$a")" = 0 ] && [ $((0$(stat -c %%a "$a") & 022)) -eq 0 ]; then `+
+		`echo @@agent; echo trusted; `+
+		`else actual=$(sha256sum < "$a" 2>/dev/null) && [ "${actual%%%% *}" = "$want" ] || exit 0; echo @@agent; `+
+		`t0=$(date +%%s%%N); %[12]s"$a" version 2>/dev/null; t1=$(date +%%s%%N); echo; echo "@@took $t0 $t1"; fi; fi`,
+		shQuote(s.ferryDir), shQuote(paths["amd64"]), shQuote(sums["amd64"]), sizes["amd64"],
+		shQuote(paths["arm64"]), shQuote(sums["arm64"]), sizes["arm64"],
+		trustFlag, shQuote(trust.SHA), shQuote(trust.Arch), trust.Size, prefix)
 	var out string
 	var res remote.RunResult
 	var err error
@@ -282,10 +297,15 @@ func (e *Engine) ensureAgent(s *session) error {
 		return err
 	}
 	s.agent = s.ferryDir + "/ferry-agent-" + bin.SHA256[:12]
+	if strings.HasPrefix(strings.TrimSpace(version), "trusted") {
+		// 上次完整核对过这个 agent：这次只核对了属主、权限和大小，不再读十几 MB 算 sha256
+		return nil
+	}
 	if version != "" {
 		version, took, _ := strings.Cut(version, "@@took ")
 		e.warnSlowSudo(s.conn, took)
 		if agentVersionOK(version, bin.SHA256) {
+			saveAgentTrust(trustPath, agentTrust{SHA: bin.SHA256, Arch: s.arch, Size: int64(len(bin.Data))})
 			return nil
 		}
 	}
@@ -341,6 +361,7 @@ func (e *Engine) ensureAgent(s *session) error {
 	if err := s.agentOK(bin.SHA256); err != nil {
 		return err
 	}
+	saveAgentTrust(trustPath, agentTrust{SHA: bin.SHA256, Arch: s.arch, Size: int64(len(bin.Data))})
 	return nil
 }
 

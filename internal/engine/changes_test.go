@@ -11,6 +11,27 @@ import (
 	"github.com/captain/ferry/internal/proto"
 )
 
+// 同一个仓库、同一对提交的应用只查一次 git（一次预览里十几个应用不用各跑一遍）。
+func TestChangesFromCachesGitRanges(t *testing.T) {
+	calls := 0
+	saved := betweenCommits
+	betweenCommits = func(dir, from, to string, max int) gitinfo.Range {
+		calls++
+		return gitinfo.Range{Known: true, Ahead: 1}
+	}
+	defer func() { betweenCommits = saved }()
+	git := gitinfo.Info{Top: "/repo", Commit: "local"}
+	rels := []proto.AppReleases{
+		{App: "a", Releases: []proto.ReleaseInfo{{ReleaseMeta: proto.ReleaseMeta{Commit: "online"}, Current: true}}},
+		{App: "b", Releases: []proto.ReleaseInfo{{ReleaseMeta: proto.ReleaseMeta{Commit: "online"}, Current: true}}},
+		{App: "c", Releases: []proto.ReleaseInfo{{ReleaseMeta: proto.ReleaseMeta{Commit: "older"}, Current: true}}},
+	}
+	changesFrom(DeployGit{"a": git, "b": git, "c": git}, rels, nil)
+	if calls != 2 {
+		t.Fatalf("git 查询了 %d 次，应只查 2 次（同一起点只查一次）", calls)
+	}
+}
+
 func TestChangesFrom(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("没有 git")
