@@ -90,9 +90,11 @@ func (c *FileClient) ListDir(dir string) (string, []FileEntry, error) {
 		}
 		out = append(out, e)
 	}
-	// 链接指向的是目录还是文件：每个都要问一次服务器，同时问（/usr/lib64 这样的目录有几百个链接，一个个问要几十秒）
-	eachLimit(len(links), 32, func(i int) {
-		e := &out[links[i]]
+	// 链接指向的是目录还是文件：一条命令问清（/usr/lib64 这样的目录有几百个链接，一个个问要几十秒）；
+	// 命令用不了、没问到名字的，再逐个问。
+	rest := c.linkTargets(dir, out, links)
+	eachLimit(len(rest), 32, func(i int) {
+		e := &out[rest[i]]
 		if st, err := s.Stat(path.Join(dir, e.Name)); err == nil {
 			e.Dir, e.Size = st.IsDir(), st.Size()
 		}
