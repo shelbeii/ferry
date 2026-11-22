@@ -307,6 +307,13 @@ t "status 显示实际监听的端口" ok '"listen":["127.0.0.1:18080"]' -- F st
 t "status 带配置的健康检查端口" ok '"port":"18080"' -- F status e2e-a api --json
 t "status 其他端口算附加端口" ok '"extra":[{"addr":"*:18719"}]' -- F status e2e-a api --json
 t "状态表下列出附加端口" ok '用途未识别' -- F status e2e-a api
+# 应用详情：单元属性和启动命令由一次 systemctl show 读出（不再单独查一次），字段和 systemd 一致
+ins=$(F app-info e2e-a api --json 2>&1)
+printf '\n### app-info --json\n%s\n' "$ins" >> "$LOG"
+has "app-info：主进程 PID 与 systemd 一致" '"label":"主进程 PID","value":"'$(dx a 'systemctl show -p MainPID --value e2e-api.service')'"' "$ins"
+has "app-info：服务配置的启动程序" '"label":"服务配置的启动程序","value":"/opt/e2e/apps/api/running/api"' "$ins"
+has "app-info：服务用户" '"label":"服务用户","value":"demo"' "$ins"
+has "app-info：重启策略" '"label":"重启策略","value":"on-failure' "$ins"
 # 静态站点的端口看 nginx：没有 nginx → 提示；装上一个只会 -T 的假 nginx → 找出指向站点的 server
 t "静态站点：没有 nginx 时提示" ok '"serving":"服务器上没有找到 nginx"' -- F status e2e-a web --json
 dx a 'cat > /usr/local/sbin/nginx <<"EOS"
@@ -1329,6 +1336,14 @@ t "没有权限的目录说清楚" fail "没有权限" -- FC files upload deploy
 t "连接不能用来部署" fail "只能打开终端" -- FC deploy deployer-127.0.0.1 --json
 unset FERRY_PASSWORD_DEPLOYER_127_0_0_1
 t "项目里的目标也能管理文件" ok '"name":"etc"' -- F files ls e2e-a / --json
+# 目录里的符号链接：一条命令问清指向目录还是文件（以前每个链接一次 Stat）
+dx a 'mkdir -p /opt/linktest/real && printf "x" > /opt/linktest/real/f.txt && ln -sfn real /opt/linktest/dlink && ln -sf real/f.txt /opt/linktest/flink && ln -sf nothing /opt/linktest/broken'
+lk=$(F files ls e2e-a /opt/linktest --json 2>&1)
+printf '\n### files ls 符号链接\n%s\n' "$lk" >> "$LOG"
+has "指向目录的链接算目录" '"dir":true' "$(printf '%s' "$lk" | grep -o '{"name":"dlink"[^}]*}')"
+has "指向文件的链接算文件" '"dir":false' "$(printf '%s' "$lk" | grep -o '{"name":"flink"[^}]*}')"
+has "指向文件的链接用目标的大小" '"size":1' "$(printf '%s' "$lk" | grep -o '{"name":"flink"[^}]*}')"
+has "断链不影响别的条目" '"name":"broken"' "$lk"
 t "删除连接" ok '"removed":"deployer-127.0.0.1"' -- env FERRY_HOME="$OUT/home" "$FERRY" connection remove deployer-127.0.0.1 --json
 
 step "服务器上已有的软件（只读查看）"
@@ -1677,6 +1692,7 @@ has "搜全部文件：昨天的在前" "── logs/app-2026-10-18.log:2" "$sr"
 has "搜全部文件：也搜 .gz 里的" "── logs/app-2026-10-17.log.gz:2" "$sr"
 has "搜索结果带前后的行" "   18 第 1 行" "$sr"
 t "区分大小写" ok "共 1 处" -- F logs e2e-a api --grep ERROR --case --all-files
+t "搜索全部历史（--grep-all）" ok "共 1 处" -- F logs e2e-a api --grep ERROR --case --all-files --grep-all
 t "只搜通配符匹配的文件" ok "共 1 处" -- F logs e2e-a api --grep error --log 'logs/*.gz'
 t "搜服务输出" ok "listening 18080" -- F logs e2e-a api --grep LISTENING
 t "看某一行附近" ok "==> logs/app-2026-10-18.log 第 1 行起" -- F logs e2e-a api --log logs/app-2026-10-18.log --line 2
