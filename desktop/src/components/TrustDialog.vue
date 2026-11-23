@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import LoadingBlock from './LoadingBlock.vue'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { call, type HostKey } from '../ferry'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
@@ -17,6 +17,18 @@ const loading = ref(true)
 const saving = ref(false)
 const key = ref<HostKey>()
 const error = ref('')
+const publicKeyFile = computed(() => {
+  switch (key.value?.type) {
+    case 'ssh-ed25519': return '/etc/ssh/ssh_host_ed25519_key.pub'
+    case 'ecdsa-sha2-nistp256':
+    case 'ecdsa-sha2-nistp384':
+    case 'ecdsa-sha2-nistp521': return '/etc/ssh/ssh_host_ecdsa_key.pub'
+    case 'ssh-rsa':
+    case 'rsa-sha2-256':
+    case 'rsa-sha2-512': return '/etc/ssh/ssh_host_rsa_key.pub'
+    default: return ''
+  }
+})
 
 onMounted(async () => {
   try {
@@ -63,7 +75,8 @@ function close() {
           第一次连接 <strong>{{ key.host }}:{{ key.port }}</strong>。为防止连到冒充的服务器，请通过可信渠道（服务器控制台、云厂商面板）核对公钥指纹：
         </p>
         <div class="fp mono">{{ key.type }}<br />{{ key.fingerprint }}</div>
-        <p class="muted">在服务器上执行：<span class="mono">ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub</span></p>
+        <p v-if="publicKeyFile" class="muted">在可信的服务器控制台执行 <span class="mono">ssh-keygen -l -E sha256 -f {{ publicKeyFile }}</span>。使用自定义主机密钥时，核对 SSH 服务配置中的对应公钥。</p>
+        <p v-else class="muted">从 SSH 服务配置确认正在使用的主机公钥，再核对其 SHA-256 指纹。</p>
         <el-alert v-if="key.state === 'known'" type="success" title="这个公钥已经记录过了" :closable="false" show-icon />
         <el-alert
           v-if="key.state === 'mismatch'"

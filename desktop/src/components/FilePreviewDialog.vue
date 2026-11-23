@@ -119,6 +119,8 @@ async function load() {
           '.cm-searchMatch': { backgroundColor: '#ffcc0040' },
           '.cm-searchMatch-selected': { backgroundColor: '#ff990080' },
           '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': { backgroundColor: 'var(--el-color-primary-light-7)' },
+          // CodeMirror 基础主题的光标写死黑色，深色主题下看不见
+          '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--el-text-color-primary)' },
         }),
       ],
     }),

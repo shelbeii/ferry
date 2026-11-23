@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 服务器上的文件默认以登录用户的身份操作，新建文件夹权限不足时可用目标配置的 sudo 重试。
+// 文件管理先用登录用户列目录，权限不足时可用目标配置的 sudo 重试。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification, type DropdownInstance } from 'element-plus'
 import { ArrowRight, Back, Box, Delete, Document, Download, EditPen, Folder, FolderAdd, HomeFilled, Link, Refresh, Upload, View } from '@element-plus/icons-vue'
@@ -17,7 +17,7 @@ import { onFileDrop, pickDir, pickMany, reveal } from '../platform'
 import { secretRequest, trustRequest, trustedTick } from '../state'
 import { glass } from '../glass/runtime'
 
-const props = defineProps<{ config: string; target: string; initialPath?: string; initialFocus?: string; directoryOnly?: boolean; active?: boolean }>()
+const props = withDefaults(defineProps<{ config: string; target: string; initialPath?: string; initialFocus?: string; directoryOnly?: boolean; active?: boolean }>(), { active: true })
 const emit = defineEmits<{ directoryChange: [path: string] }>()
 
 // 名称排序：每次比较都 localeCompare(…, 'zh-CN') 要现建排序规则，上千个文件要几十毫秒；共用一个
@@ -82,6 +82,7 @@ let requestedPath = ''
 let requestedFocus: string | undefined
 let disposed = false
 let reopenPath: string | undefined
+let autoSudo = true
 
 const join = (dir: string, name: string) => (dir.endsWith('/') ? dir + name : dir + '/' + name)
 const parent = computed(() => (path.value === '/' ? '' : path.value.replace(/\/[^/]+\/?$/, '') || '/'))
@@ -93,7 +94,8 @@ const chosenDirectory = computed(() => {
 })
 watch(chosenDirectory, (dir) => emit('directoryChange', dir), { immediate: true })
 
-watch(() => [props.config, props.target, props.initialPath, props.initialFocus, props.directoryOnly], () => {
+watch(() => [props.config, props.target, props.initialPath, props.initialFocus, props.directoryOnly], ([config, target], previous) => {
+  if (config !== previous?.[0] || target !== previous?.[1]) autoSudo = true
   context++
   transferSeq++
   xfer.value?.kill()
@@ -110,13 +112,24 @@ watch(() => [props.config, props.target, props.initialPath, props.initialFocus, 
   load(props.initialPath ?? '', props.initialFocus)
 }, { immediate: true })
 watch(() => props.active, (active) => {
-  if (active === false && elevated.value) {
-    reopenPath = path.value || requestedPath
-    switchIdentity(false, false)
-  } else if (active && reopenPath !== undefined) {
-    const dir = reopenPath
-    reopenPath = undefined
-    load(dir)
+  if (active === false) {
+    if (elevated.value || loading.value || error.value) {
+      reopenPath = loading.value || error.value ? requestedPath : path.value
+    }
+    waitTrust = false
+    if (elevated.value) switchIdentity(false, false)
+    else {
+      loadSeq++
+      listingReads.cancelAll()
+      loading.value = false
+    }
+  } else if (active) {
+    autoSudo = true
+    if (reopenPath !== undefined) {
+      const dir = reopenPath
+      reopenPath = undefined
+      load(dir, requestedFocus)
+    }
   }
 })
 watch(trustedTick, () => {
@@ -196,6 +209,10 @@ onBeforeUnmount(() => {
   hoverTip.hide()
 })
 
+function canElevateListing(e: unknown): boolean {
+  return e instanceof FerryError && e.detail?.kind === 'files-permission' && e.detail.canSudo === true
+}
+
 /** 连接问题：没核对主机公钥、要密码时弹出对应的框，处理好后自动重试 */
 function handle(e: unknown, retry: () => void): string {
   const msg = (e as Error).message
@@ -205,7 +222,7 @@ function handle(e: unknown, retry: () => void): string {
     trustRequest.value = { target: props.target, config: props.config }
   } else if (d && isSecretKind(d.kind)) {
     secretRequest.value = { detail: d, config: props.config, retry }
-  } else if (d?.kind === 'files-permission' && d.canSudo) {
+  } else if (canElevateListing(e)) {
     canSudo.value = true
     return msg + '。可切换到「以 sudo 操作」。'
   }
@@ -214,6 +231,7 @@ function handle(e: unknown, retry: () => void): string {
 
 function switchIdentity(useSudo: boolean, reload = true) {
   const dir = useSudo && error.value ? requestedPath : path.value || requestedPath
+  if (!useSudo && reload) autoSudo = false
   context++
   loadSeq++
   transferSeq++
@@ -237,18 +255,37 @@ function switchIdentity(useSudo: boolean, reload = true) {
  * 列出目录。soft：改名、删除、上传等操作后刷新同一个目录——留着勾选、焦点和已经统计的大小（条目变了的大小自动作废）；
  * 否则（换目录、点刷新）全部重来。
  */
-async function load(dir: string, initialFocus?: string, soft = false) {
-  const seq = ++loadSeq
+async function load(dir: string, initialFocus?: string, soft = false, asSudo = elevated.value) {
+  if (props.active === false) {
+    reopenPath = dir
+    requestedFocus = initialFocus
+    return
+  }
+  let seq = ++loadSeq
   if (!soft) sizes.clear()
   listingReads.cancelAll()
   requestedPath = dir
   requestedFocus = initialFocus
   loading.value = true
   waitTrust = false
+  const args = ['files', 'ls', props.target, ...(dir ? [dir] : []), '-c', props.config]
   try {
-    const r = await listingReads.run('listing', (s) => readCall<DirListing>(fileArgs(['files', 'ls', props.target, ...(dir ? [dir] : []), '-c', props.config]), s))
+    const r = await listingReads.run('listing', async (signal) => {
+      try {
+        return await readCall<DirListing>(asSudo ? [...args, '--as-sudo'] : args, signal)
+      } catch (e) {
+        if (asSudo || !autoSudo || props.directoryOnly || seq !== loadSeq || signal.aborted || !canElevateListing(e)) throw e
+        canSudo.value = true
+        asSudo = true
+        return readCall<DirListing>([...args, '--as-sudo'], signal)
+      }
+    })
     if (seq !== loadSeq) return
     if (!r) throw new Error('目录读取失败')
+    if (asSudo && !elevated.value) {
+      switchIdentity(true, false)
+      seq = loadSeq
+    }
     const samePath = path.value === r.path
     if (!samePath) query.value = ''
     path.value = r.path
@@ -283,7 +320,7 @@ async function load(dir: string, initialFocus?: string, soft = false) {
     error.value = ''
   } catch (e) {
     if (seq !== loadSeq || e instanceof ReadCanceled) return
-    error.value = handle(e, () => { if (seq === loadSeq) load(dir, initialFocus) })
+    error.value = handle(e, () => { if (seq === loadSeq) load(dir, initialFocus, soft, asSudo) })
     pathInput.value = dir
     if (!path.value) editingPath.value = true
   } finally {

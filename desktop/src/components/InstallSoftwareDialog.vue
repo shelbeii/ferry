@@ -82,11 +82,12 @@ const vi = ref(0)
 const variant = computed(() => tpl.value?.variants[vi.value])
 const params = computed<SwParam[]>(() => tpl.value?.params ?? [])
 const form = ref({ name: '', in: '/opt/ferry-software', user: '', version: '', java: 0, pkg: '', javaDir: '', network: 'auto' as Network })
-const directoryPickerOpen = ref(false)
-watch(() => [props.config, props.target], () => { directoryPickerOpen.value = false })
+const directoryField = ref<'in' | 'javaDir'>()
+watch(() => [props.config, props.target], () => { directoryField.value = undefined })
 function selectDirectory(path: string) {
-  form.value.in = path
-  directoryPickerOpen.value = false
+  if (!directoryField.value) return
+  form.value[directoryField.value] = path
+  directoryField.value = undefined
 }
 // 服务器要下载东西（从软件源装包、步骤里的下载）时走谁的网络
 type Network = 'auto' | 'local' | 'server'
@@ -301,14 +302,14 @@ const gb = (mb: number) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb}
 const jdkReady = (n: number) => !!props.report?.runtimes?.[String(n)]
 // JDK 安装目录：留空 = Ferry 的公共目录（多个软件、应用共用）
 const sharedJdk = (n: number) => `${props.report?.ferryDir || '/usr/local/lib/ferry'}/runtimes/java-${n}`
-const javaDirError = computed(() => {
-  const d = form.value.javaDir.trim().replace(/\/+$/, '')
-  if (!d) return ''
+function javaInstallLocationError(path: string): string {
+  const d = path.trim().replace(/\/+$/, '')
   if (!/^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)+$/.test(d)) return '写绝对路径，至少两级，只能用字母、数字、点、下划线、横线'
   const dir = installDir.value
   if (d === dir || d.startsWith(dir + '/') || dir.startsWith(d + '/')) return '不能和安装目录重叠'
   return ''
-})
+}
+const javaDirError = computed(() => form.value.javaDir.trim() ? javaInstallLocationError(form.value.javaDir) : '')
 function javaDirHint(n: number): string {
   const d = form.value.javaDir.trim().replace(/\/+$/, '')
   if (d) return `JDK 装在这个目录下以版本命名的文件夹里（如 ${d}/jdk-${n}.0.x-x64），里面已有 Ferry 装的 JDK ${n} 时直接用`
@@ -824,7 +825,7 @@ async function installCustom() {
         </el-form-item>
         <el-form-item label="安装位置" :error="inError">
           <el-input v-model="form.in" class="mono" placeholder="/opt/ferry-software" aria-label="安装位置">
-            <template #append><el-button :icon="FolderOpened" @click="directoryPickerOpen = true">选择服务器目录</el-button></template>
+            <template #append><el-button :icon="FolderOpened" @click="directoryField = 'in'">选择服务器目录</el-button></template>
           </el-input>
           <div class="muted small">
             装到 <span class="mono">{{ installDir }}</span>（文件夹名是名称加版本），程序、配置、数据、日志都放在里面。
@@ -866,7 +867,9 @@ async function installCustom() {
           <span class="muted small ml">{{ jdkReady(form.java) && !form.javaDir.trim() ? '服务器上已有 Ferry 提供的' : '会先装到服务器上（本机没有时先下载，约 190 MB）' }}</span>
         </el-form-item>
         <el-form-item v-if="variant.java" label="JDK 安装目录" :error="javaDirError">
-          <el-input v-model="form.javaDir" class="mono" clearable :placeholder="`留空：${sharedJdk(form.java)}（公共目录）`" />
+          <el-input v-model="form.javaDir" class="mono" clearable :placeholder="`留空：${sharedJdk(form.java)}（公共目录）`" aria-label="JDK 安装目录">
+            <template #append><el-button :icon="FolderOpened" aria-label="为 JDK 安装目录选择服务器目录" @click="directoryField = 'javaDir'">选择服务器目录</el-button></template>
+          </el-input>
           <div class="muted small">{{ javaDirHint(form.java) }}</div>
         </el-form-item>
         <el-form-item v-if="extras.length" label="更多配置">
@@ -957,7 +960,7 @@ async function installCustom() {
         </el-form-item>
         <el-form-item label="安装位置" :error="shownErrors.in">
           <el-input v-model="form.in" class="mono" placeholder="/opt/ferry-software" aria-label="安装位置">
-            <template #append><el-button :icon="FolderOpened" @click="directoryPickerOpen = true">选择服务器目录</el-button></template>
+            <template #append><el-button :icon="FolderOpened" @click="directoryField = 'in'">选择服务器目录</el-button></template>
           </el-input>
           <div class="muted small">
             装到 <span class="mono">{{ installDir }}</span><template v-if="shownVersion">（文件夹名是名称加版本）</template><template v-else>（安装包没有版本，文件夹名就是名称）</template>。
@@ -981,7 +984,9 @@ async function installCustom() {
           </el-select>
         </el-form-item>
         <el-form-item v-if="custom.java" label="JDK 安装目录" :error="javaDirError">
-          <el-input v-model="form.javaDir" class="mono" clearable :placeholder="`留空：${sharedJdk(custom.java)}（公共目录）`" />
+          <el-input v-model="form.javaDir" class="mono" clearable :placeholder="`留空：${sharedJdk(custom.java)}（公共目录）`" aria-label="JDK 安装目录">
+            <template #append><el-button :icon="FolderOpened" aria-label="为 JDK 安装目录选择服务器目录" @click="directoryField = 'javaDir'">选择服务器目录</el-button></template>
+          </el-input>
           <div class="muted small">{{ javaDirHint(custom.java) }}</div>
         </el-form-item>
         <el-form-item label="运行用户">
@@ -1013,7 +1018,15 @@ async function installCustom() {
     <p class="muted small desc-line">按现在填的参数和更多配置生成；密码已遮住，JDK、安装包的位置是占位。</p>
     <pre class="mono extra-file">{{ extraFile.content || extraFile.exec }}</pre>
   </el-dialog>
-  <RemoteDirectoryPicker v-if="directoryPickerOpen" :config="config" :target="target" :path="form.in" :validate="installLocationError" @select="selectDirectory" @close="directoryPickerOpen = false" />
+  <RemoteDirectoryPicker
+    v-if="directoryField"
+    :config="config"
+    :target="target"
+    :path="form[directoryField]"
+    :validate="directoryField === 'javaDir' ? javaInstallLocationError : installLocationError"
+    @select="selectDirectory"
+    @close="directoryField = undefined"
+  />
 </template>
 
 <style scoped>
