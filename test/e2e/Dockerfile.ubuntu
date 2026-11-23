@@ -1,0 +1,11 @@
+# 端到端测试的 Ubuntu 目标：真实 apt / dpkg，用来测离线 DEB 系统包安装。
+# 运行：docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw -p 127.0.0.1:2224:22 ferry-e2e:ubuntu2204
+FROM ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      systemd systemd-sysv openssh-server sudo iproute2 curl zip procps passwd ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && systemctl enable ssh \
+ && ssh-keygen -A \
+ && mkdir -p /root/.ssh && chmod 700 /root/.ssh
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

@@ -40,13 +40,29 @@ func TestOfflinePackageExtractionAndManager(t *testing.T) {
 			if err != nil || len(files) != 1 || filepath.Dir(files[0]) != dir {
 				t.Fatalf("离线包未放进指定目录：%v %v", files, err)
 			}
-			args := packageManagerArgs(test.manager, files, false)
-			if !(strings.Contains(args, "--disablerepo") || strings.Contains(args, "--no-download")) {
-				t.Fatalf("离线安装命令没有关闭下载：%s", args)
+			args := packageManagerArgs(test.manager, files)
+			switch test.manager {
+			case "apt-get":
+				// apt 2.4 的 --no-download 和本地 .deb 一起用会报 Pathname to install is not absolute
+				if strings.Contains(args, "--no-download") || !strings.Contains(args, "Dir::Etc::sourcelist=/dev/null") || !strings.Contains(args, "Dir::Etc::sourceparts=/dev/null") {
+					t.Fatalf("apt 离线安装命令没有关掉软件源：%s", args)
+				}
+			default:
+				if !strings.Contains(args, "--disablerepo") {
+					t.Fatalf("离线安装命令没有关闭软件源：%s", args)
+				}
 			}
 			if err := checkSystemBundle(test.manager, test.kind); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestPackageManagerArgsOnline(t *testing.T) {
+	for _, manager := range []string{"apt-get", "dnf", "yum"} {
+		if got := packageManagerArgs(manager, nil); got != manager {
+			t.Fatalf("在线安装时不该改命令：%s", got)
+		}
 	}
 }

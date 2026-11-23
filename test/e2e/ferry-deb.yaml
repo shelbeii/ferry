@@ -1,0 +1,18 @@
+# 端到端测试的 Ubuntu 目标（真实的 apt / dpkg）：只用于离线 DEB 系统包安装。
+# 单独一份配置：不改主配置 ferry.yaml，免得影响别的用例（比如「另一台电脑上的配置」会检查所有目标的私钥）。
+# 容器由 run.sh 在本用例里启动（127.0.0.1:2224）。
+version: 1
+project: e2e-deb
+targets:
+  e2e-u:
+    host: 127.0.0.1
+    port: 2224
+    identityFile: out/id_test
+    root: /opt/e2e
+    confirm: false
+# 软件安装用不到应用；配置校验要求至少有一个
+apps:
+  - name: unused
+    type: static
+    artifact: {path: out/site}
+    static: {port: 18999}

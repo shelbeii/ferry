@@ -92,15 +92,15 @@ func packageArguments(pkgs, offline []string) string {
 	return strings.Join(args, " ")
 }
 
-func packageManagerArgs(manager string, offline []string, dryRun bool) string {
+// packageManagerArgs 离线包安装时关掉软件源：只用包里的本地文件，依赖不齐时直接说装不上。
+// apt 的 --no-download 在 apt 2.4（Ubuntu 22.04）里和本地 .deb 一起用会报
+// "Pathname to install is not absolute"，所以 apt 改用不加载任何软件源。
+func packageManagerArgs(manager string, offline []string) string {
 	if len(offline) == 0 {
 		return manager
 	}
 	if manager == "apt-get" {
-		if dryRun {
-			return manager
-		}
-		return manager + " --no-download"
+		return manager + " -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=/dev/null"
 	}
 	return manager + " --disablerepo='*'"
 }

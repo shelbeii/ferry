@@ -860,9 +860,9 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	} else {
 		a.installPhase(name, fmt.Sprintf("下载并安装系统软件包（%s，%s）", mgr, via))
 	}
-	cmd := env + packageManagerArgs(mgr, offline, false) + " install -y " + packageArguments(pkgs, offline)
+	cmd := env + packageManagerArgs(mgr, offline) + " install -y " + packageArguments(pkgs, offline)
 	if mgr == "apt-get" {
-		cmd = env + "DEBIAN_FRONTEND=noninteractive " + packageManagerArgs(mgr, offline, false) + " install -y --no-upgrade " + packageArguments(pkgs, offline)
+		cmd = env + "DEBIAN_FRONTEND=noninteractive " + packageManagerArgs(mgr, offline) + " install -y --no-upgrade " + packageArguments(pkgs, offline)
 	}
 	out, err := a.installShell(name, "安装系统软件包", cmd+" 2>&1", 20*time.Minute)
 	if err != nil {
@@ -915,7 +915,7 @@ type packageShell func(phase, cmd string, timeout time.Duration) (string, error)
 // 演练必须得出事务结果；仓库错误或超时不能当作没有包变更。
 func pkgChanges(run packageShell, mgr, env string, pkgs, offline []string) ([]string, error) {
 	list := packageArguments(pkgs, offline)
-	base := packageManagerArgs(mgr, offline, true)
+	base := packageManagerArgs(mgr, offline)
 	cmd := env + "LC_ALL=C " + base + " install --assumeno " + list + " 2>&1"
 	if mgr == "apt-get" {
 		cmd = env + "LC_ALL=C DEBIAN_FRONTEND=noninteractive " + base + " -s install --no-upgrade " + list + " 2>&1"

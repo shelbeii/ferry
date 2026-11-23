@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ferry 端到端测试：两个带 systemd + sshd 的容器，用真实的 ferry 走一遍主要场景。
 #   e2e-a（127.0.0.1:2222）root 登录；e2e-b（127.0.0.1:2223）deployer 登录 + sudo
+#   e2e-u（127.0.0.1:2224）真实的 Ubuntu：离线 DEB 系统包安装（apt）
 #
 #   test/e2e/run.sh          需要 docker、go；Windows 上用 Git Bash
 #   KEEP=1 test/e2e/run.sh   结束后保留容器（便于排查）
@@ -47,7 +48,7 @@ die() { echo "错误：$*" >&2; exit 2; }
 
 finish() {
   if [[ ${KEEP:-} != 1 ]]; then
-    docker rm -f "$containerPrefix-a" "$containerPrefix-b" >/dev/null 2>&1
+    docker rm -f "$containerPrefix-a" "$containerPrefix-b" "$containerPrefix-u" >/dev/null 2>&1
   fi
   printf '\n通过 %d，失败 %d（详细输出：%s）\n' "$PASS" "$FAILED" "$LOG"
   (( FAILED == 0 ))
@@ -1674,6 +1675,95 @@ dx a 'rm -f /etc/yum.repos.d/ferry-e2e.repo /tmp/redis.rpm'
 kill $REPOPID 2>/dev/null
 dx a 'rm -f /usr/local/bin/dnf /usr/bin/redis-server /etc/systemd/system/redis.service; systemctl daemon-reload'
 dx a 'rm -rf /opt/ferry-software /tmp/mysqlpkg /tmp/mysql-init-seen.sql'
+
+step "离线 DEB 系统包：真实的 apt（Ubuntu 目标）"
+UB_IMAGE=ferry-e2e:ubuntu2204
+docker build -q -t "$UB_IMAGE" -f "$E2E/Dockerfile.ubuntu" "$E2E" >/dev/null || die "构建 Ubuntu 镜像失败"
+docker rm -f "$containerPrefix-u" >/dev/null 2>&1
+docker run -d --name "$containerPrefix-u" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+  -p "127.0.0.1:2224:22" "$UB_IMAGE" >/dev/null || die "启动容器 u 失败"
+for _ in $(seq 1 40); do [[ $(dx u 'systemctl is-active ssh' 2>/dev/null) == active ]] && break; sleep 1; done
+docker exec -i "$containerPrefix-u" sh -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh \
+  && cat > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys' < "$OUT/id_test.pub"
+docker cp "$OUT/demo-v1" "$containerPrefix-u:/usr/local/bin/demoserver" >/dev/null
+dx u 'chmod 755 /usr/local/bin/demoserver'
+FU() { FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry-deb.yaml" "$@"; }
+t "trust e2e-u" ok "已记录" -- FU trust e2e-u --yes
+
+# 记下 agent 调 apt-get 的命令：修过的问题（--no-download 装本地 .deb 报 Pathname to install is not absolute）不能再出现
+dx u 'mv /usr/bin/apt-get /usr/bin/apt-get.real && cat > /usr/bin/apt-get <<"EOS"
+#!/bin/sh
+echo "apt-get $*" >> /tmp/apt-calls
+exec /usr/bin/apt-get.real "$@"
+EOS
+chmod 755 /usr/bin/apt-get'
+
+# 在容器里做两个真实的 .deb：ferry-e2e-listen 依赖 ferry-e2e-dep；打成离线系统包 ZIP（另一份故意不带依赖）
+dx u 'set -e
+rm -rf /tmp/ferry-e2e-dep /tmp/ferry-e2e-listen /tmp/ferry-e2e-*.deb /tmp/ferry-e2e-*.zip
+mkdir -p /tmp/ferry-e2e-dep/DEBIAN /tmp/ferry-e2e-dep/usr/share/ferry-e2e
+cat > /tmp/ferry-e2e-dep/DEBIAN/control <<"EOD"
+Package: ferry-e2e-dep
+Version: 1.0
+Architecture: all
+Maintainer: ferry e2e <e2e@test>
+Description: ferry e2e dependency
+EOD
+echo dep-ok > /tmp/ferry-e2e-dep/usr/share/ferry-e2e/dep.txt
+dpkg-deb --build /tmp/ferry-e2e-dep /tmp/ferry-e2e-dep_1.0_all.deb >/dev/null
+mkdir -p /tmp/ferry-e2e-listen/DEBIAN /tmp/ferry-e2e-listen/usr/local/bin
+cat > /tmp/ferry-e2e-listen/DEBIAN/control <<"EOD"
+Package: ferry-e2e-listen
+Version: 1.0
+Architecture: all
+Depends: ferry-e2e-dep (= 1.0)
+Maintainer: ferry e2e <e2e@test>
+Description: ferry e2e listener
+EOD
+cat > /tmp/ferry-e2e-listen/usr/local/bin/ferry-e2e-listen <<"EOS"
+#!/bin/sh
+exec /usr/local/bin/demoserver -Dserver.port="$1"
+EOS
+chmod 755 /tmp/ferry-e2e-listen/usr/local/bin/ferry-e2e-listen
+dpkg-deb --build /tmp/ferry-e2e-listen /tmp/ferry-e2e-listen_1.0_all.deb >/dev/null
+cd /tmp && zip -q ferry-e2e-debs.zip ferry-e2e-listen_1.0_all.deb ferry-e2e-dep_1.0_all.deb \
+  && zip -q ferry-e2e-main-only.zip ferry-e2e-listen_1.0_all.deb'
+docker cp "$containerPrefix-u:/tmp/ferry-e2e-debs.zip" "$OUT/pkg/" >/dev/null
+docker cp "$containerPrefix-u:/tmp/ferry-e2e-main-only.zip" "$OUT/pkg/" >/dev/null
+
+t "导入 DEB 离线系统包" ok "已导入 DEB 离线系统包" -- FU software lib import "$OUT/pkg/ferry-e2e-debs.zip"
+FU software lib import "$OUT/pkg/ferry-e2e-main-only.zip" >/dev/null 2>&1
+DEB_TPL='id: debdemo
+name: 演示服务（deb 离线包）
+category: 自定义
+params:
+  - {key: port, label: 端口, type: port, default: "18895"}
+variants:
+  - label: 系统软件源（apt）
+    os: [debian, ubuntu]
+    user: debsw
+    system: {apt: [ferry-e2e-listen], require: /usr/local/bin/ferry-e2e-listen}
+    service:
+      exec: /usr/local/bin/ferry-e2e-listen ${port}
+      workdir: /tmp
+      ready: {port: "${port}"}'
+debinstall() { env FERRY_SOFTWARE_TEMPLATE="$DEB_TPL" FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry-deb.yaml" software install e2e-u - "$@"; }
+# 缺依赖的离线包：装不上；软件源是关掉的，不会去下载依赖
+t "离线包缺依赖：装不上，不会去下载" fail "ferry-e2e-dep" -- debinstall --package ferry-e2e-main-only.zip --name debdemo-miss
+t "缺依赖时服务器上没有留下目录和单元" ok "gone gone" -- dx u 'echo $(test -e /opt/ferry-software/debdemo-miss && echo left || echo gone) $(test -e /etc/systemd/system/ferry-debdemo-miss.service && echo left || echo gone)'
+sw=$(debinstall --package ferry-e2e-debs.zip --name debdemo 2>&1)
+printf '\n### software install deb\n%s\n' "$sw" >> "$LOG"
+has "按服务器系统选了 apt 的装法" "系统软件源（apt）" "$sw"
+has "离线包装好并启动" "已安装 debdemo" "$sw"
+t "服务在运行（程序来自 DEB）" ok "UP" -- health u 18895
+t "主包已安装" ok "install ok installed" -- dx u 'dpkg-query -W -f="\${Status}" ferry-e2e-listen'
+t "依赖包也装上了" ok "install ok installed" -- dx u 'dpkg-query -W -f="\${Status}" ferry-e2e-dep'
+t "依赖包的文件在" ok "dep-ok" -- dx u 'cat /usr/share/ferry-e2e/dep.txt'
+t "程序文件属于装上的 DEB" ok "ferry-e2e-listen" -- dx u 'dpkg -S /usr/local/bin/ferry-e2e-listen'
+t "apt 不再用 --no-download（回归）" ok "no" -- dx u 'grep -q -- "--no-download" /tmp/apt-calls && echo yes || echo no'
+t "apt 关掉软件源、只认本地 DEB" ok "flags" -- dx u 'grep -q "Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=/dev/null" /tmp/apt-calls && echo flags || echo none'
+t "列表里有 Ferry 装的实例" ok '"instance":"debdemo"' -- FU software e2e-u --json
+t "卸载" ok "" -- FU software remove e2e-u debdemo --purge
 
 step "按天切分的日志：.gz、通配符、按修改时间排序、搜索"
 L=/opt/e2e/apps/api/running/logs
