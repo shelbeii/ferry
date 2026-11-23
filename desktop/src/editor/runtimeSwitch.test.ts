@@ -35,6 +35,12 @@ describe('切换运行环境配置',()=>{
     const out=runtimeSwitchDraft(text,'prod','api','static',{id:'static:edge',path:'edge',source:'Ferry'},'8090')
     expect(parse(out).toJS().targets.prod.appRuntimes.api).toEqual({nginxInstance:'edge',port:'8090'})
   })
+  it('选中实际提供服务的 Nginx 时保留原来的只发布文件配置',()=>{
+    const text=source.replace('type: java','type: static').replace('    service: {runtime: {java: 17}}','    static: {port: 8000}')
+      .replace('{host: 192.0.2.1, runAs: app}', '{host: 192.0.2.1, runAs: app, vars: {publishDir: ""}, appRuntimes: {api: {siteDir: "${publishDir}", port: "8000"}}}')
+    const current:AppRuntimeChoice={id:'static:edge',path:'edge',source:'Ferry',current:true,existingSiteInUse:true}
+    expect(runtimeSwitchDraft(text,'prod','api','static',current)).toBe(text)
+  })
   it('改成只换已有站点的文件：写 siteDir 和站点端口；同一端口多个站点时不写端口',()=>{
     const text=source.replace('type: java','type: static').replace('    service: {runtime: {java: 17}}','    static: {port: 8000}')
     const site={server:'OpenResty（容器 1Panel-openresty）',ports:[8000],root:'/www/sites/web/index',dir:'/opt/1panel/apps/openresty/openresty/www/sites/web/index'}

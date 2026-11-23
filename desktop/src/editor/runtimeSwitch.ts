@@ -7,6 +7,7 @@ const fields: Record<string,string> = { java:'java', static:'nginxInstance', pyt
 /** 只写当前服务器的当前应用，保留其他目标、应用和无关的 YAML 内容。 */
 export function runtimeSwitchDraft(raw: string, target: string, app: string, type: string, choice: AppRuntimeChoice, port = ''): string {
   if (choice.disabled) throw new Error(choice.disabled)
+  if (type === 'static' && choice.existingSiteInUse) return raw
   const site = type === 'static' && choice.id.startsWith('static:site:')
   if (site && (!choice.path.startsWith('/') || /[\r\n\0]/.test(choice.path))) throw new Error('网站目录必须是服务器上的绝对路径')
   const field = site ? 'siteDir' : fields[type]

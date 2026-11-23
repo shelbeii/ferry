@@ -570,7 +570,7 @@ export interface JobStatus {
 }
 
 export interface AppInfoField { label: string; value: string; path?: boolean }
-export interface AppRuntimeChoice { id: string; path: string; version?: string; source: string; unit?: string; state?: string; current?: boolean; disabled?: string; site?: NginxSite }
+export interface AppRuntimeChoice { id: string; path: string; version?: string; source: string; unit?: string; state?: string; current?: boolean; disabled?: string; existingSiteInUse?: boolean; site?: NginxSite }
 /** 服务器上已有的 nginx / OpenResty（容器里的也算）里的一个站点：选它部署时只换网站目录里的文件 */
 export interface NginxSite { server: string; container?: string; unit?: string; pid?: number; ports: number[] | null; ssl?: boolean; names?: string[] | null; root: string; dir?: string; owner?: string; conf?: string; shared?: boolean; disabled?: string }
 /** 部署前检查：要用的端口被别的程序占着 */

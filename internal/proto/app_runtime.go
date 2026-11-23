@@ -15,6 +15,8 @@ type AppRuntimeChoice struct {
 	State    string `json:"state,omitempty"`
 	Current  bool   `json:"current,omitempty"`
 	Disabled string `json:"disabled,omitempty"`
+	// ExistingSiteInUse 此实例已有站点直接服务此应用，选中它无需生成新的站点配置。
+	ExistingSiteInUse bool `json:"existingSiteInUse,omitempty"`
 	// Site 静态站点：选的是服务器上已有的站点（只换网站目录里的文件）
 	Site *NginxSite `json:"site,omitempty"`
 }

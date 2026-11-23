@@ -187,12 +187,13 @@ func (a *Agent) nginxRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoices
 		r.Current = s.NginxInstance
 	}
 	independent := s.NginxInstance == "" && s.Unit != ""
-	if current := a.current(s.Name); current != "" {
+	current := a.current(s.Name)
+	if current != "" {
 		if text, err := infoReadFile(a.verFile(s.Name, current, "unit.service"), 256*1024); err == nil && len(text) > 0 {
 			independent = true
 		}
 	}
-	deployed := a.current(s.Name) != ""
+	deployed := current != ""
 	switch {
 	case s.SiteDir != "":
 		independent = false
@@ -202,6 +203,12 @@ func (a *Agent) nginxRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoices
 	case independent:
 		r.Current = "项目独立 Nginx"
 	}
+	sites, notes := DiscoverNginxSites(a.Sys.Shell)
+	var servingUnit string
+	if deployed && r.Current == "" && s.Unit == "" {
+		servingUnit = a.nginxServingUnit(s, sites)
+	}
+
 	instances := a.instances()
 	if system, err := a.loadHostingInstance(proto.SystemNginxInstance); err == nil {
 		instances = append(instances, *system)
@@ -220,6 +227,10 @@ func (a *Agent) nginxRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoices
 		choice.Version = strings.TrimSpace(choice.Version + "\n" + in.Hosting.Binary + "\n站点目录：" + in.Hosting.Sites)
 		if !isRunning(state) {
 			choice.Disabled = "该 Nginx 实例未运行，请先在软件中启动它"
+		} else if servingUnit != "" && in.Unit == servingUnit {
+			r.Current = in.Name
+			choice.Current = true
+			choice.ExistingSiteInUse = true
 		}
 		r.Choices = append(r.Choices, choice)
 	}
@@ -227,7 +238,6 @@ func (a *Agent) nginxRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoices
 		r.Notes = append(r.Notes, "当前使用项目独立 Nginx；切换后会迁移到所选共享实例，仅重载本站点，不重启共享实例。")
 	}
 	// 服务器上已有的 nginx / OpenResty 里的站点（1Panel、宝塔、容器里的……）：选它就只换网站目录里的文件
-	sites, notes := DiscoverNginxSites(a.Sys.Shell)
 	r.Notes = append(r.Notes, notes...)
 	for i := range sites {
 		site := sites[i]
@@ -256,4 +266,20 @@ func (a *Agent) nginxRuntimeChoices(s *proto.AppSpec, r *proto.AppRuntimeChoices
 	sort.SliceStable(r.Choices, func(i, j int) bool {
 		return fmt.Sprint(!r.Choices[i].Current, r.Choices[i].Path) < fmt.Sprint(!r.Choices[j].Current, r.Choices[j].Path)
 	})
+}
+
+// nginxServingUnit 只在能把所有指向应用的站点归到同一 systemd 实例时，将该实例标为当前。
+func (a *Agent) nginxServingUnit(s *proto.AppSpec, sites []proto.NginxSite) string {
+	matchesRoot := a.staticSiteRootMatcher(s)
+	unit := ""
+	for _, site := range sites {
+		if site.Dir == "" || !matchesRoot(site.Dir) {
+			continue
+		}
+		if site.Unit == "" || (unit != "" && unit != site.Unit) {
+			return ""
+		}
+		unit = site.Unit
+	}
+	return unit
 }

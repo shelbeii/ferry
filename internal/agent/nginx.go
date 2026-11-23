@@ -200,8 +200,8 @@ func nginxListen(a string) string {
 	return host + ":" + port
 }
 
-// nginxSites 指向这个静态站点的 server：root / alias 等于站点目录（current、link 或当前版本目录）或在它下面。
-func (a *Agent) nginxSites(s *proto.AppSpec, servers []nginxServer) []proto.Site {
+// staticSiteRootMatcher 判断一个网站目录是否指向本应用的运行目录、额外链接或当前版本。
+func (a *Agent) staticSiteRootMatcher(s *proto.AppSpec) func(string) bool {
 	targets := []string{a.runningDir(s.Name)}
 	if s.Link != "" {
 		targets = append(targets, s.Link)
@@ -214,7 +214,7 @@ func (a *Agent) nginxSites(s *proto.AppSpec, servers []nginxServer) []proto.Site
 			targets = append(targets, r)
 		}
 	}
-	under := func(p string) bool {
+	return func(p string) bool {
 		if strings.Contains(p, "$") { // 带变量的路径看不出指向哪里
 			return false
 		}
@@ -232,10 +232,15 @@ func (a *Agent) nginxSites(s *proto.AppSpec, servers []nginxServer) []proto.Site
 		}
 		return false
 	}
+}
+
+// nginxSites 指向这个静态站点的 server：root / alias 等于站点目录或在它下面。
+func (a *Agent) nginxSites(s *proto.AppSpec, servers []nginxServer) []proto.Site {
+	matchesRoot := a.staticSiteRootMatcher(s)
 	var out []proto.Site
 	for _, sv := range servers {
 		for _, r := range sv.roots {
-			if under(r.path) {
+			if matchesRoot(r.path) {
 				out = append(out, proto.Site{Listen: sv.listen, SSL: sv.ssl, Names: sv.names, Location: r.location, File: sv.file})
 				break
 			}

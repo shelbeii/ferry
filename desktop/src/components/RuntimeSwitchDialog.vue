@@ -85,13 +85,14 @@ async function save(deploy:boolean) {
           </el-radio>
         </el-radio-group>
         <el-empty v-else-if="data.canSwitch" description="没有检测到可用的运行环境" :image-size="60" />
-        <p v-if="hasSites && !siteChosen" class="muted small">标着「已有站点」的是服务器上原来就有的 nginx / OpenResty（1Panel、宝塔、容器里的也算）里的站点：选它，部署时只把每一版的文件换进它的网站目录，不改它的配置。</p>
+        <el-alert v-if="choice?.existingSiteInUse" title="此 Nginx 已在为本应用提供服务，部署时只更新静态文件。" type="info" :closable="false" show-icon class="site-port" />
+        <p v-else-if="hasSites && !siteChosen" class="muted small">标着「已有站点」的是服务器上原来就有的 nginx / OpenResty（1Panel、宝塔、容器里的也算）里的站点：选它，部署时只把每一版的文件换进它的网站目录，不改它的配置。</p>
         <el-alert v-if="siteChosen && choice?.site" type="info" :closable="false" show-icon class="site-port">
           <template #title>部署时把每一版的文件换进 <span class="mono">{{ choice.path }}</span>，不改 {{ choice.site.server }}的配置，也不重启它。</template>
           <div class="small">第一次部署前，目录里原来的文件会备份到服务器上 Ferry 的应用目录：部署失败自动换回去，以后也能在「版本」里「回到接管前」。<template v-if="choice.site.ports?.length && !choice.site.shared">部署后检查 {{ choice.site.ports[0] }} 端口的首页能打开。</template><template v-else-if="choice.site.shared">这个端口上还有别的站点（按域名区分），部署后不检查首页；需要时在配置里写 static.health。</template></div>
         </el-alert>
-        <el-form v-if="data.canSwitch && data.type==='static' && !siteChosen" label-width="100px" class="site-port"><el-form-item label="网站端口"><div class="full"><el-input v-model="port" placeholder="如 8081 或 127.0.0.1:8081" /><div class="muted small">不同 Nginx 实例不能同时占用相同地址和端口；原端口被其他站点共用时，请改用空闲端口。</div></div></el-form-item></el-form>
-        <p v-if="data.canSwitch" class="muted small">只修改 {{ target }} 上 {{ app }} 的运行环境。保存配置后，重新部署才会生效；“保存并部署”会打开部署审阅，并使用当前本地产物，保留健康检查与失败回滚。</p>
+        <el-form v-if="data.canSwitch && data.type==='static' && !siteChosen && !choice?.existingSiteInUse" label-width="100px" class="site-port"><el-form-item label="网站端口"><div class="full"><el-input v-model="port" placeholder="如 8081 或 127.0.0.1:8081" /><div class="muted small">不同 Nginx 实例不能同时占用相同地址和端口；原端口被其他站点共用时，请改用空闲端口。</div></div></el-form-item></el-form>
+        <p v-if="data.canSwitch && !choice?.existingSiteInUse" class="muted small">只修改 {{ target }} 上 {{ app }} 的运行环境。保存配置后，重新部署才会生效；“保存并部署”会打开部署审阅，并使用当前本地产物，保留健康检查与失败回滚。</p>
         <el-collapse v-if="diff.length" class="config-diff"><el-collapse-item title="查看配置修改" name="diff"><pre class="mono"><template v-for="(h,index) in diff" :key="index"><span v-for="(line,lineIndex) in h.lines" :key="lineIndex" :class="line.t==='+'?'added':line.t==='-'?'removed':''">{{ line.t }} {{ line.text }}{{ '\n' }}</span></template></pre></el-collapse-item></el-collapse>
       </template>
       <el-alert v-if="error || draft.error" :title="error || draft.error" type="error" :closable="false" show-icon class="switch-error" />

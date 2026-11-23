@@ -2,8 +2,10 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -77,5 +79,82 @@ func TestStoppedRuntimeChoicesUseDeployedUnit(t *testing.T) {
 	json.Unmarshal(result.result.Data, &data)
 	if result.code != 0 || data.Current != "/old/java17/bin/java" {
 		t.Fatal("停止时不应把待部署的环境标成当前：", result.dump())
+	}
+}
+
+type nginxRuntimeScanFixture struct {
+	*fakeSys
+	masters   string
+	dump      string
+	directory string
+}
+
+func (s *nginxRuntimeScanFixture) Shell(cmd string, timeout time.Duration) (string, error) {
+	switch {
+	case strings.Contains(cmd, "^nginx: master process"):
+		return s.masters, nil
+	case strings.Contains(cmd, ngxDumpMark):
+		return "nginx version: nginx/1.21.5\n" + ngxDumpMark + "\n" + s.dump, nil
+	case strings.HasPrefix(cmd, "for d in "):
+		return "D\t" + s.directory + "\troot:root\n", nil
+	default:
+		return s.fakeSys.Shell(cmd, timeout)
+	}
+}
+
+func TestRuntimeChoicesDetectNginxServingPublishedFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Nginx 运行环境使用 Linux 路径")
+	}
+	for _, tc := range []struct {
+		name        string
+		unrelated   bool
+		anotherUnit bool
+		managed     bool
+		wantCurrent bool
+		wantInUse   bool
+	}{
+		{name: "existing site", wantCurrent: true, wantInUse: true},
+		{name: "another app", unrelated: true},
+		{name: "ambiguous", anotherUnit: true},
+		{name: "managed site", managed: true, wantCurrent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, a, in, spec := hostedFixture(t)
+			if !tc.managed {
+				spec.NginxInstance = ""
+				spec.SitePort = ""
+			}
+			if err := a.writeRunning(spec.Name, id1); err != nil {
+				t.Fatal(err)
+			}
+			root := a.runningDir(spec.Name)
+			if tc.unrelated {
+				root += "-other"
+			}
+			masters := "M\t1234\tnginx: master process /opt/nginx/sbin/nginx\t0::/system.slice/" + in.Unit + "|\n"
+			if tc.anotherUnit {
+				masters += "M\t1235\tnginx: master process /opt/nginx/sbin/nginx\t0::/system.slice/other.service|\n"
+			}
+			a.Sys = &nginxRuntimeScanFixture{fakeSys: f, masters: masters,
+				dump: fmt.Sprintf("# configuration file /opt/nginx/sites/web.conf:\nserver { listen 8000; root %q; }\n", root), directory: root}
+			result := execConfigured(t, a, "appruntimes", &proto.Request{FerryDir: a.req.FerryDir, Apps: []proto.AppSpec{spec}})
+			var data proto.AppRuntimeChoices
+			if result.code != 0 || json.Unmarshal(result.result.Data, &data) != nil {
+				t.Fatal(result.dump())
+			}
+			if (data.Current == in.Name) != tc.wantCurrent {
+				t.Fatalf("当前实例：%q", data.Current)
+			}
+			for _, choice := range data.Choices {
+				if choice.ID == "static:"+in.Name {
+					if choice.Current != tc.wantCurrent || choice.ExistingSiteInUse != tc.wantInUse || choice.Disabled != "" {
+						t.Fatalf("Nginx 候选项：%+v", choice)
+					}
+					return
+				}
+			}
+			t.Fatalf("Nginx 候选项缺失：%+v", data)
+		})
 	}
 }
