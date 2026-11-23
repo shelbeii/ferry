@@ -20,9 +20,17 @@ params:
     type: memory
     default: 512m
   - key: password
-    label: 密码
+    label: 管理员密码
     type: password
-    help: 控制台账号固定是 nacos（Nacos 只允许第一次启动后给 nacos 设置密码，别的账号装好后在控制台里添加）
+    help: 控制台内置管理员账号为 nacos
+  - key: consoleUser
+    label: 普通用户名
+    type: text
+    help: 选填。安装时创建一个普通用户，之后可用 nacos 登录控制台给它分配角色
+  - key: consolePassword
+    label: 普通用户密码
+    type: password
+    help: 请记下这个密码，Ferry 的安装凭据保存的是 nacos 管理员密码
 variants:
   - label: 官方安装包
     note: Nacos 监听所有地址（其他服务器上的应用要连它）：不需要对外的话，用防火墙限制
@@ -96,7 +104,7 @@ variants:
       - {label: Nacos 主配置, path: "${dir}/nacos/conf/application.properties", format: properties, apply: restart}
       - {label: 日志配置, path: "${dir}/nacos/conf/nacos-logback.xml", apply: restart}
     notes:
-      - 控制台：http://${host}:${console}/ ，用户 nacos，密码见「密码」
+      - 控制台：http://${host}:${console}/ ，管理员 nacos，密码见「密码」
       - 应用连接 ${host}:${port}（还会用到 ${port+1000}）
 
 # 安装时可以补充的配置（参数没有的设置）：合并进 application.properties

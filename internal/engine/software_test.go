@@ -71,6 +71,46 @@ func TestNacosVersionedAuthPlan(t *testing.T) {
 	}
 }
 
+func TestNacosOptionalConsoleUser(t *testing.T) {
+	for _, tc := range []struct{ user, password, want string }{
+		{},
+		{user: "team_user", password: "Member+123!"},
+		{password: "Member+123!", want: "填写普通用户名"},
+		{user: "team_user", want: "填写普通用户密码"},
+		{user: "NACOS", password: "Member+123!", want: "内置管理员"},
+		{user: "team user", password: "Member+123!", want: "3～32 位"},
+	} {
+		err := validateNacosConsoleUser(tc.user, tc.password)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("验证 %q：%v，期望 %q", tc.user, err, tc.want)
+		}
+	}
+	tpl, err := swtpl.Find(t.TempDir(), "nacos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := swtpl.Vars{"dir": "/opt/qa/nacos", "host": "localhost", "java": "/usr/bin/java", "port": "8848", "console": "8080",
+		"memory": "512m", "password": "Admin-123!", "version": "3.2.4", "consoleUser": "team_user", "consolePassword": "Member+123!"}
+	plan, err := renderPlan(tpl, &tpl.Variants[0], vars, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "http://127.0.0.1:8848/nacos/v3/auth/user"
+	if len(plan.Steps) != 5 {
+		t.Fatalf("安装步骤数量：%d", len(plan.Steps))
+	}
+	create, verify := plan.Steps[3], plan.Steps[4]
+	if create.At != "ready" || create.HTTP.Post != base || create.HTTP.Login.Post != base+"/login" || create.HTTP.Login.Form["username"] != "nacos" || create.HTTP.Login.Form["password"] != "Admin-123!" {
+		t.Fatal("创建用户前应通过本机接口登录内置管理员")
+	}
+	if verify.At != "ready" || verify.HTTP.Post != base+"/login" || verify.HTTP.Form["username"] != "team_user" || verify.HTTP.Form["password"] != "Member+123!" || verify.HTTP.ResponseField != "accessToken" || verify.Soft != "" {
+		t.Fatal("安装成功前应验证普通用户能登录")
+	}
+	if notes := strings.Join(plan.Notes, "\n"); !strings.Contains(notes, "team_user") || strings.Contains(notes, "Member+123!") || strings.Contains(notes, "Admin-123!") {
+		t.Fatal("安装结果应说明已创建的账号，且不含密码")
+	}
+}
+
 // 每个内置模板的每种装法都能渲染出安装计划（没有漏掉的变量、端口是数字）。
 func TestRenderBuiltin(t *testing.T) {
 	for _, tpl := range swtpl.Builtin() {

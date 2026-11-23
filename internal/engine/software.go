@@ -264,6 +264,12 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	var ports, udpPorts []int
 	portMap := map[string]int{}
 	password, account := "", ""
+	if tpl.Builtin && tpl.ID == "nacos" {
+		if err := validateNacosConsoleUser(o.Params["consoleUser"], o.Params["consolePassword"]); err != nil {
+			return nil, err
+		}
+		account = "nacos"
+	}
 	known := map[string]bool{}
 	for _, p := range tpl.Params {
 		known[p.Key] = true
@@ -944,7 +950,42 @@ func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swp
 	for _, n := range v.Notes {
 		pl.Notes = append(pl.Notes, x(n))
 	}
+	if tpl.Builtin && tpl.ID == "nacos" && vars["consoleUser"] != "" {
+		addNacosConsoleUser(pl, vars)
+	}
 	return pl, firstErr
+}
+
+func validateNacosConsoleUser(user, password string) error {
+	switch {
+	case user == "" && password != "":
+		return errors.New("设置普通用户密码时，请填写普通用户名")
+	case user == "":
+		return nil
+	case strings.EqualFold(user, "nacos"):
+		return errors.New("nacos 是内置管理员，请使用其他用户名")
+	case !reAccount.MatchString(user):
+		return errors.New("普通用户名要 3～32 位，字母开头，只能用字母、数字、下划线")
+	case password == "":
+		return errors.New("请填写普通用户密码")
+	}
+	return nil
+}
+
+func addNacosConsoleUser(pl *proto.SoftwarePlan, vars swtpl.Vars) {
+	base := "http://127.0.0.1:" + vars["port"] + "/nacos/v3/auth/user"
+	user := vars["consoleUser"]
+	credentials := map[string]string{"username": user, "password": vars["consolePassword"]}
+	pl.Steps = append(pl.Steps,
+		proto.PlanStep{At: "ready", Soft: "Nacos 用户创建接口未确认成功，继续验证登录", HTTP: &proto.PlanHTTP{
+			Post: base, Form: credentials, ResponseField: "data",
+			Login: &proto.PlanHTTP{Post: base + "/login", Form: map[string]string{"username": "nacos", "password": vars["password"]}, Retry: 15, ResponseField: "accessToken"},
+		}},
+		proto.PlanStep{At: "ready", Error: "Nacos 普通用户登录验证失败", HTTP: &proto.PlanHTTP{
+			Post: base + "/login", Form: credentials, Retry: 30, ResponseField: "accessToken",
+		}},
+	)
+	pl.Notes = append(pl.Notes, fmt.Sprintf("普通用户 %s 已通过登录验证，可用 nacos 登录控制台为它分配角色", user))
 }
 
 // SoftwareLatest 模板的最新版本（只有要上传安装包的装法有）。

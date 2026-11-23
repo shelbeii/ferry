@@ -104,6 +104,8 @@ const offlineImportError = ref('')
 const offlineImportBusy = ref(false)
 const downloads = computed(() => !(offlineOption.value && form.value.pkg) && (!!variant.value?.system || !!variant.value?.steps?.some((st) => st.run)))
 const values = ref<Record<string, string | number | boolean>>({})
+const builtinNacos = computed(() => tpl.value?.builtin && tpl.value.id === 'nacos')
+const visibleParams = computed(() => params.value.filter((p) => !builtinNacos.value || p.key !== 'consolePassword' || !!values.value.consoleUser))
 
 // ---------------------------------------------------------------- 更多配置（模板参数没有的设置）
 
@@ -401,11 +403,17 @@ const summary = computed<string[]>(() => {
   }
   if (v.selinux) out.push('服务器开着 SELinux 时，给安装目录和端口加上 SELinux 标签（程序才能读写、监听）')
   out.push('启动后等端口能连上；有密码的软件再用设置的账号和密码登录一次，登录不上就撤销安装')
+  if (builtinNacos.value && values.value.consoleUser) out.push(`创建普通用户 ${values.value.consoleUser} 并验证登录`)
   return out
 })
 const pkgMgrApt = computed(() => props.report?.pkgMgr === 'apt-get')
 function paramError(p: SwParam): string {
   const v = values.value[p.key]
+  if (builtinNacos.value && p.key === 'consoleUser' && v) {
+    if (String(v).toLowerCase() === 'nacos') return 'nacos 是内置管理员，请使用其他用户名'
+    if (!/^[A-Za-z][A-Za-z0-9_]{2,31}$/.test(String(v))) return '3～32 位，字母开头，只能用字母、数字、下划线'
+  }
+  if (builtinNacos.value && p.key === 'consolePassword' && !v) return '请填写普通用户密码'
   switch (p.type) {
     case 'port': {
       const n = Number(v)
@@ -436,7 +444,7 @@ const nameError = computed(() =>
 const misfit = computed(() => (variant.value ? variantMisfit(variant.value, os.value, arch.value) : ''))
 const needPkg = computed(() => !!variant.value?.package && !variant.value.package.url && !form.value.pkg)
 const canInstall = computed(
-  () => tpl.value && !misfit.value && !nameError.value && !inError.value && !needPkg.value && !javaDirError.value && !extrasInvalid.value && params.value.every((p) => !paramError(p)),
+  () => tpl.value && !misfit.value && !nameError.value && !inError.value && !needPkg.value && !javaDirError.value && !extrasInvalid.value && visibleParams.value.every((p) => !paramError(p)),
 )
 
 async function importPkg(after?: (m: SwPackage) => void) {
@@ -485,7 +493,7 @@ function installEnv(): Record<string, string> {
 
 function paramsJSON(): string {
   const out: Record<string, string> = {}
-  for (const p of params.value) {
+  for (const p of visibleParams.value) {
     const v = values.value[p.key]
     if (p.type === 'password' && !v) continue // 不填 = 随机生成
     out[p.key] = String(v)
@@ -827,7 +835,7 @@ async function installCustom() {
           </div>
         </el-form-item>
 
-        <el-form-item v-for="p in params" :key="p.key" :label="p.type === 'bool' ? '' : p.label || p.key" :error="paramError(p)">
+        <el-form-item v-for="p in visibleParams" :key="p.key" :label="p.type === 'bool' ? '' : p.label || p.key" :error="paramError(p)">
           <el-input-number v-if="p.type === 'port' || p.type === 'number'" v-model="values[p.key] as number" :min="1" :max="65535" :controls="false" class="port" />
           <el-checkbox v-else-if="p.type === 'bool'" v-model="values[p.key] as boolean">{{ p.label || p.key }}</el-checkbox>
           <el-select v-else-if="p.type === 'memory'" v-model="values[p.key] as string" class="short" filterable allow-create>
@@ -836,7 +844,7 @@ async function installCustom() {
           <el-select v-else-if="p.type === 'select'" v-model="values[p.key] as string" class="short">
             <el-option v-for="o in p.options ?? []" :key="o" :value="o" :label="o" />
           </el-select>
-          <el-input v-else-if="p.type === 'password'" v-model="values[p.key] as string" show-password class="mono" placeholder="不填 = 随机生成" />
+          <el-input v-else-if="p.type === 'password'" v-model="values[p.key] as string" show-password class="mono" :placeholder="builtinNacos && p.key === 'consolePassword' ? '填写普通用户密码' : '不填 = 随机生成'" />
           <el-input v-else v-model="values[p.key] as string" class="mono" />
           <span v-if="p.type === 'memory' && report?.memAvailMB" class="muted small ml">服务器内存 {{ gb(report.memTotalMB ?? 0) }}，现在可用约 {{ gb(report.memAvailMB) }}</span>
           <el-button v-if="p.type === 'port' && paramError(p) && nextFree(p)" link type="primary" size="small" class="ml" @click="values[p.key] = nextFree(p)">换成 {{ nextFree(p) }}</el-button>

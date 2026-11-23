@@ -1235,6 +1235,7 @@ type PlanHTTP struct {
 	Form          map[string]string `json:"form,omitempty"`
 	Retry         int               `json:"retry,omitempty"`
 	ResponseField string            `json:"responseField,omitempty"`
+	Login         *PlanHTTP         `json:"login,omitempty"` // 同源登录，取 ResponseField 作为本次请求的 accessToken
 }
 
 // SoftwareInstance Ferry 安装的一个软件（<ferryDir>/software/<名称>.json）。

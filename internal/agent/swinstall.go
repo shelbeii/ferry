@@ -1384,49 +1384,83 @@ func firstLine(s string) string {
 
 // stepHTTP 就绪后调用接口（只能调本机）。
 func (a *Agent) stepHTTP(h *proto.PlanHTTP) error {
-	u, err := url.Parse(h.Post)
-	if err != nil || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost") {
-		return fmt.Errorf("只能调用本机的接口：%s", h.Post)
-	}
-	form := url.Values{}
-	for k, v := range h.Form {
-		form.Set(k, v)
+	u, err := stepURL(h.Post)
+	if err != nil {
+		return err
 	}
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
+	var token string
+	if login := h.Login; login != nil {
+		loginURL, err := stepURL(login.Post)
+		if err != nil || loginURL.Scheme != u.Scheme || loginURL.Host != u.Host || login.ResponseField == "" || login.Login != nil {
+			return errors.New("登录和调用必须使用同一本机接口地址，并指定令牌字段")
+		}
+		token, err = a.postStepHTTP(client, login, "")
+		if err != nil {
+			return fmt.Errorf("调用接口前登录失败：%w", err)
+		}
+	}
+	_, err = a.postStepHTTP(client, h, token)
+	return err
+}
+
+func stepURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost") {
+		return nil, errors.New("只能调用本机的 HTTP 或 HTTPS 接口")
+	}
+	return u, nil
+}
+
+func (a *Agent) postStepHTTP(client *http.Client, h *proto.PlanHTTP, token string) (string, error) {
+	form := url.Values{}
+	for k, v := range h.Form {
+		form.Set(k, v)
+	}
+	body := form.Encode()
 	deadline := a.Sys.Now().Add(time.Duration(h.Retry) * time.Second)
 	for {
-		resp, err := client.PostForm(h.Post, form)
+		req, err := http.NewRequest(http.MethodPost, h.Post, strings.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if token != "" {
+			req.Header.Set("accessToken", token)
+		}
+		resp, err := client.Do(req)
 		if err == nil {
+			var value string
 			if resp.StatusCode/100 == 2 {
-				err = checkResponseField(resp.Body, h.ResponseField)
+				value, err = readResponseField(resp.Body, h.ResponseField)
 			} else {
 				err = fmt.Errorf("%s 返回 %d", h.Post, resp.StatusCode)
 			}
 			resp.Body.Close()
 			if err == nil {
-				return nil
+				return value, nil
 			}
 		}
 		if !a.Sys.Now().Before(deadline) {
-			return err
+			return "", err
 		}
 		a.Sys.Sleep(2 * time.Second)
 	}
 }
 
-func checkResponseField(body io.Reader, field string) error {
+func readResponseField(body io.Reader, field string) (string, error) {
 	if field == "" {
-		return nil
+		return "", nil
 	}
 	var response map[string]json.RawMessage
 	var value string
 	if err := json.NewDecoder(io.LimitReader(body, 64<<10)).Decode(&response); err != nil ||
 		json.Unmarshal(response[field], &value) != nil || value == "" {
-		return fmt.Errorf("接口未返回有效的 %s 字段", field)
+		return "", fmt.Errorf("接口未返回有效的 %s 字段", field)
 	}
-	return nil
+	return value, nil
 }
 
 // swUnitText 软件的 systemd 单元。

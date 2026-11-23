@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,9 +78,56 @@ func TestCheckResponseField(t *testing.T) {
 		`{"message":"authentication failed"}`: false,
 		`<html>gateway error</html>`:          false,
 	} {
-		if got := checkResponseField(strings.NewReader(body), "accessToken") == nil; got != want {
-			t.Errorf("响应 %s 验证结果 = %v", body, got)
+		if _, err := readResponseField(strings.NewReader(body), "accessToken"); (err == nil) != want {
+			t.Errorf("响应 %s 验证错误 = %v", body, err)
 		}
+	}
+}
+
+func TestStepHTTPWithLogin(t *testing.T) {
+	var created atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			if r.FormValue("username") != "nacos" || r.FormValue("password") != "Admin-123!" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			io.WriteString(w, `{"accessToken":"test-token"}`)
+		case "/user":
+			if r.Header.Get("accessToken") != "test-token" || r.FormValue("username") != "team_user" || r.FormValue("password") != "Member+123!" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			created.Store(true)
+			io.WriteString(w, `{"data":"create user ok!"}`)
+		case "/verify":
+			if !created.Load() || r.FormValue("username") != "team_user" || r.FormValue("password") != "Member+123!" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			io.WriteString(w, `{"accessToken":"member-token"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("令牌请求发到了另一个服务")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer other.Close()
+	a := &Agent{Sys: &fakeSys{}}
+	login := &proto.PlanHTTP{Post: server.URL + "/login", Form: map[string]string{"username": "nacos", "password": "Admin-123!"}, ResponseField: "accessToken"}
+	form := map[string]string{"username": "team_user", "password": "Member+123!"}
+	if err := a.stepHTTP(&proto.PlanHTTP{Post: other.URL + "/user", Form: form, Login: login}); err == nil {
+		t.Fatal("应拒绝跨源发送令牌")
+	}
+	if err := a.stepHTTP(&proto.PlanHTTP{Post: server.URL + "/user", Form: form, Login: login, ResponseField: "data"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.stepHTTP(&proto.PlanHTTP{Post: server.URL + "/verify", Form: form, ResponseField: "accessToken"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
