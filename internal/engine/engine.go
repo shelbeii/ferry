@@ -47,11 +47,12 @@ type Reporter interface {
 
 // Engine 一个配置文件上的操作。
 type Engine struct {
-	File             *config.File
-	Rep              Reporter
-	Yes              bool // 跳过确认
-	AcceptNewHostKey bool
-	Settings         settings.Settings
+	DisableAgentInstall bool // Refuse to install or replace the agent for AI and MCP requests.
+	File                *config.File
+	Rep                 Reporter
+	Yes                 bool // 跳过确认
+	AcceptNewHostKey    bool
+	Settings            settings.Settings
 	// Pool 连接池（ferry serve 里）；为空时每次操作新建连接、用完关闭
 	Pool *Pool
 	// Ctx 本次请求的上下文：取消时中断正在执行的远程命令、上传与构建
@@ -107,6 +108,26 @@ type DeployOptions struct {
 }
 
 // DeployReport 部署结果。
+// DeployOptionNotes 部署可选项在确认框里的说明（全量上传、失败保留、不改权限、这次保留的文件）。
+func DeployOptionNotes(o DeployOptions) []string {
+	var out []string
+	if o.Full {
+		out = append(out, "上传：全量上传（不用增量）")
+	}
+	if o.NoRollback {
+		out = append(out, "失败时：保留失败版本，不自动回滚（排查用）")
+	}
+	if o.KeepPerms {
+		out = append(out, "权限：不自动修正（按服务器上现有的）")
+	}
+	if len(o.Keep) > 0 {
+		if b, err := json.Marshal(o.Keep); err == nil {
+			out = append(out, "这次保留服务器上的："+string(b))
+		}
+	}
+	return out
+}
+
 type DeployReport struct {
 	Target  string `json:"target"`
 	Release string `json:"release"`

@@ -122,7 +122,7 @@ func TestRecoverAfterCrash(t *testing.T) {
 			}
 			return "ok", nil
 		}}
-	l := &Loop{Provider: p, System: "s", Tools: []Tool{tool}, Emit: func(Event) {}, Save: func() { conv.Save(dir) }}
+	l := &Loop{Provider: p, System: "s", Tools: []Tool{tool}, Emit: func(Event) {}, Save: func() error { return conv.Save(dir) }}
 	l.Send(context.Background(), conv, "装 a 和 b", nil)
 	if conv.Pending == nil {
 		t.Fatal("应停在确认上")

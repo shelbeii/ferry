@@ -104,9 +104,9 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `ai <目标> <要问的话> [--conv <对话>] [--model <模型 ID>] [--effort low\|medium\|high\|xhigh\|max\|none]` | 向助手提问；`--conv` 接着某个对话问 |
+| `ai <目标> <要问的话> [--conv <对话>] [--model <模型 ID>] [--effort low\|medium\|high\|xhigh\|max\|none]` | 向助手提问；`--conv` 接着某个对话问。`--share-data` 允许读取日志、配置及查询明细并发送给模型 |
 | `ai … --image <图片>[;<图片>…]` | 附上截图等图片（PNG、JPEG、GIF、WebP，多张用 `;` 分开，Linux / macOS 用 `:`） |
-| `ai … --mode confirm` | 允许改动服务器：遇到改动时停下，用 `ai <目标> --conv <对话> --decide approve\|always\|reject` 执行 / 本次对话同类不再询问 / 不执行 |
+| `ai … --mode confirm` | 允许改动服务器：遇到改动时停下，用 `ai <目标> --conv <对话> --mode confirm --approval <确认 ID> --decide approve\|reject` 单次执行或拒绝，编号由该次确认输出 |
 | `ai-key set\|delete\|status --model <ID>` | 各模型的 API Key（存在系统凭据库） |
 | `ai-test [--model <ID>]` | 发一句话测试模型配置 |
 | `ai-history list\|show\|export\|delete\|clean` | 历史对话 |

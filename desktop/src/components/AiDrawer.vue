@@ -5,22 +5,25 @@
 // 能看图片的模型可以附图片：粘贴截图、选文件、拖进输入框。
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import { ElMessage, type PopoverInstance } from 'element-plus'
-import { Promotion, VideoPause, Plus, Setting, CaretRight, CaretBottom, Loading, WarningFilled, Clock, Delete, Cpu, Opportunity, ArrowDown, EditPen, Download, Close, Picture, FullScreen, Lock } from '@element-plus/icons-vue'
+import { Promotion, VideoPause, Plus, Setting, CaretRight, CaretBottom, Loading, WarningFilled, Clock, Delete, Cpu, Opportunity, ArrowDown, EditPen, Download, Close, Picture, FullScreen, Lock, InfoFilled } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import { auditKindText, call, ferry, isSecretKind, type FerryLine } from '../ferry'
 import { onFileDrop, openUrl, pickSaveFile } from '../platform'
 import { appSettings, secretRequest, trustRequest, settingsRequest, noteConfigWritten } from '../state'
 import { defaultEffort, effortLabel, effortOptions, modelEffort, addUsage, zeroUsage, usageText, findModelByName, cost, money, tokens, type AiQuestion, type Usage } from '../ai'
 import { supportsImages, prepareImage, base64Blob, imageUrl, MAX_IMAGES, type AiImage } from '../ai'
+import { useAiAccess, type AiAccessServer } from '../aiAccess'
 import GlassPane from './glass/GlassPane.vue'
 import { glass, setVar } from '../glass/runtime'
 import { glassMotionKey } from '../glass/context'
 import GlassSwitch from './glass/GlassSwitch.vue'
+import GlassButton from './glass/GlassButton.vue'
 import SecretForm, { type SecretField, type SecretValue } from './SecretForm.vue'
 
 const props = defineProps<{
   config: string
   target: string
+  server?: AiAccessServer
   title: string
   question?: AiQuestion
   plain?: boolean
@@ -42,6 +45,8 @@ interface Call {
   input: Record<string, unknown>
 }
 interface Approval {
+  id?: string
+  destination?: string
   kind: string
   title: string
   detail?: string
@@ -63,7 +68,7 @@ interface Item {
   expanded?: boolean
   approval?: Approval // 要确认的改动
   waiting?: boolean // 等用户确认
-  decision?: 'approve' | 'always' | 'reject' | 'skipped' | 'allowed'
+  decision?: 'approve' | 'always' | 'reject' | 'skipped' | 'allowed' | 'auto'
 }
 
 const items = ref<Item[]>([])
@@ -78,25 +83,8 @@ let conversationSeq = 0
 let disposed = false
 let kill: (() => Promise<void>) | undefined
 
-// 允许改动：记住上次的选择（只在本机）
-const CHANGE_KEY = 'ferry.ai.allowChange'
-function loadAllow(): boolean {
-  try {
-    return localStorage.getItem(CHANGE_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-// 生产服务器不沿用上次的选择，每次从「只读」开始；不允许改动的服务器一直是只读
-const allowChange = ref(props.production || props.noChanges ? false : loadAllow())
-watch(allowChange, (v) => {
-  if (props.production || props.noChanges) return
-  try {
-    localStorage.setItem(CHANGE_KEY, v ? '1' : '0')
-  } catch {
-    /* 存不了就算了 */
-  }
-})
+const { allowChange, shareData, autoConfirm } = useAiAccess(props, () => open.value)
+const autoConfirmAvailable = computed(() => !props.production && !props.noChanges && !props.plain)
 
 const waitingItem = computed(() => items.value.find((x) => x.waiting))
 
@@ -353,6 +341,7 @@ function onLine(l: FerryLine) {
     isError?: boolean
     approval?: Approval
     allowed?: boolean
+    autoApproved?: boolean
     usage?: Usage
     model?: string
   }
@@ -387,8 +376,8 @@ function onLine(l: FerryLine) {
       items.value.push({
         kind: 'tool',
         call: ev.call,
-        approval: ev.allowed ? ev.approval : undefined,
-        decision: ev.allowed ? 'allowed' : undefined,
+        approval: ev.allowed || ev.autoApproved ? ev.approval : undefined,
+        decision: ev.autoApproved ? 'auto' : ev.allowed ? 'allowed' : undefined,
       })
     }
   } else if (ev.type === 'confirm' && ev.call) {
@@ -421,17 +410,20 @@ function onLine(l: FerryLine) {
 }
 
 // 调用一次 ferry ai：说一句话（message，可以附图片），或对待确认的操作做决定（decide）
-async function run(message: string, decide?: string, retry?: () => void, rewind = 0, images: AiImage[] = [], secrets: SecretValue[] = []) {
+async function run(message: string, decide?: { choice: string; id: string }, retry?: () => void, rewind = 0, images: AiImage[] = [], secrets: SecretValue[] = []) {
   running.value = true
   turnUsage = zeroUsage()
   turnModel = ''
   scroll()
-  // 对等确认的操作做决定时总按「允许改动」执行（用户已经明确同意或拒绝了）
-  const mode = decide || allowChange.value ? 'confirm' : 'readonly'
+  const mode = allowChange.value && !props.noChanges ? 'confirm' : 'readonly'
   const args = ['-c', props.config, 'ai', props.target, '--mode', mode]
   if (curModel.value) args.push('--model', curModel.value.id, '--effort', effort.value || 'none')
   if (conv.value) args.push('--conv', conv.value)
-  if (decide) args.push('--decide', decide)
+  if (decide) args.push('--decide', decide.choice, '--approval', decide.id)
+  if (shareData.value) args.push('--share-data')
+  if (!decide && mode === 'confirm' && autoConfirmAvailable.value) {
+    for (const level of autoConfirm.value) args.push(`--auto-confirm-${level}`)
+  }
   if (rewind > 0) args.push('--rewind', String(rewind))
   const env: Record<string, string> = {}
   if (!decide) {
@@ -439,7 +431,7 @@ async function run(message: string, decide?: string, retry?: () => void, rewind 
     if (images.length) env.FERRY_AI_IMAGES = JSON.stringify(images)
   }
   if (secrets.length) env.FERRY_AI_SECRETS = JSON.stringify(secrets)
-  const r0 = ferry<{ conv?: string; pending?: boolean }>(args, onLine, env)
+  const r0 = ferry<{ conv?: string; pending?: boolean; approvalId?: string }>(args, onLine, env)
   kill = r0.kill
   const r = await r0.done
   if (disposed) return
@@ -465,6 +457,7 @@ async function run(message: string, decide?: string, retry?: () => void, rewind 
     }
   }
   scroll()
+  return r
 }
 
 // 改第几句话（从 1 数）重新发；0 = 没有在改
@@ -520,13 +513,33 @@ async function send(text = input.value, retry = false, images = attachments.valu
   }, rewind, images, secrets)
 }
 
-async function decide(it: Item, choice: 'approve' | 'always' | 'reject', secrets: SecretValue[] = []) {
+function canApprove(it: Item) {
+  return it.call?.name === 'files_list_sudo' ? shareData.value : allowChange.value && !props.noChanges
+}
+
+async function decide(it: Item, choice: 'approve' | 'reject', secrets: SecretValue[] = []) {
   if (running.value) return
+  if (!it.approval?.id) {
+    ElMessage.warning('这是旧版待确认操作，请重新发起。')
+    return
+  }
+  if (choice === 'approve' && !canApprove(it)) {
+    ElMessage.warning(it.call?.name === 'files_list_sudo' ? '请先开启「允许读取并发送排查明细」。' : '请先核对服务器，并打开「允许改动」。')
+    return
+  }
+  const id = it.approval.id
   it.waiting = false
   it.decision = choice
-  if (choice === 'reject') it.done = true
   const conversation = conversationSeq
-  await run('', choice, () => { if (!disposed && conversation === conversationSeq) decide(it, choice, secrets) }, 0, [], secrets)
+  const result = await run('', { choice, id }, () => {
+    if (!disposed && conversation === conversationSeq) decide(it, choice, secrets)
+  }, 0, [], secrets)
+  if (disposed || conversation !== conversationSeq) return
+  if (!result?.ok && result?.data?.approvalId === id) {
+    it.waiting = true
+    it.done = false
+    it.decision = undefined
+  }
 }
 
 async function stop() {
@@ -716,7 +729,7 @@ function callTitle(c: Call): string {
       return '查看各应用的状态'
     case 'app_logs':
       return `看 ${i.app} 的${i.source === 'file' ? '日志文件' : '服务输出'}${i.path ? '（' + i.path + '）' : ''}${i.keyword ? '，搜索「' + i.keyword + '」' : ''}`
-    case 'list_software':
+    case 'server_software':
       return '列出服务器上已有的软件'
     case 'app_releases':
       return `查看${i.app ? ' ' + i.app + ' ' : '应用'}保留的版本`
@@ -730,7 +743,7 @@ function callTitle(c: Call): string {
       const apps = (c.input.apps as string[] | undefined) ?? []
       return `${verbs[i.action] ?? i.action}应用 ${apps.join('、')}`
     }
-    case 'app_rollback':
+    case 'rollback':
       return `回滚 ${i.app}${i.to ? ' 到 ' + i.to : ''}`
     case 'software_install':
       return `安装软件 ${i.template || '（自定义模板）'}${i.version ? ' ' + i.version : ''}`
@@ -805,6 +818,28 @@ function callTitle(c: Call): string {
       return `Redis：${String(i.command ?? '').slice(0, 60)}`
     case 'redis_execute':
       return `改 Redis${i.connection ? ' ' + i.connection : ''}（${String(i.commands ?? '').split('\n').filter((l) => l.trim()).length} 条命令）`
+    case 'files_list':
+      return i.path ? `列目录 ${i.path}` : '列目录'
+    case 'files_list_sudo':
+      return `用 sudo 列目录 ${i.path ?? ''}`
+    case 'files_preview':
+      return `查看文件 ${i.path ?? ''}`
+    case 'files_size':
+      return `文件大小 ${i.path ?? ''}`
+    case 'files_access':
+      return `检查权限 ${i.path ?? ''}`
+    case 'files_download':
+      return `下载 ${((c.input as { paths?: string[] }).paths ?? []).map((p) => p.split('/').pop()).join('、')}`
+    case 'files_upload':
+      return `上传 ${((c.input as { locals?: string[] }).locals ?? []).length} 个文件到 ${i.dir ?? ''}`
+    case 'server_info':
+      return '查看服务器信息'
+    case 'app_info':
+      return `查看 ${i.app ?? ''} 的运行情况`
+    case 'app_log_runs':
+      return `查看 ${i.app ?? ''} 的历史运行`
+    case 'keep_scan':
+      return `查看 ${i.app ?? ''} 要保留的文件`
   }
   return c.name
 }
@@ -817,6 +852,7 @@ const decisionText: Record<string, string> = {
   unfilled: '没有填写',
   skipped: '没有执行（你接着说了别的）',
   allowed: '同类已允许，直接执行',
+  auto: '已按设置自动确认',
 }
 
 // 差异里的行上色：+ 加上的、- 删掉的
@@ -854,27 +890,12 @@ function copy(text: string) {
 
 <template>
   <el-drawer v-model="open" direction="rtl" :size="expandedPanel ? 'min(1120px, 94vw)' : 'min(720px, 92vw)'" append-to-body class="ai-drawer" :class="{ 'ai-glass': glass.enabled }" @open="onOpen" @opened="onOpened" @close="onClose">
-    <template #header>
+    <template #header="{ titleId, titleClass }">
       <div class="ai-head">
-        <div class="ai-title-row">
-          <span class="ai-title el-drawer__title" :title="`AI 助手 · ${title}`">AI 助手 · {{ title }}</span>
-        </div>
-        <div class="ai-toolbar">
-          <div class="ai-permission">
+        <div class="ai-main-row">
+          <div class="ai-title-row">
+            <span :id="titleId" :class="titleClass" class="ai-title" :title="`AI 助手 · ${title}`">AI 助手 · {{ title }}</span>
             <el-tag v-if="production" size="small" type="danger" effect="dark">生产</el-tag>
-            <el-tooltip
-              :show-after="HOVER_DELAY"
-              :content="
-                noChanges
-                  ? '配置里设成了不允许 AI 改动这台服务器（aiChanges: false），只能查看'
-                  : allowChange
-                    ? '助手可以改动服务器，每个改动都先给你看，你同意后才执行'
-                    : '助手只查看服务器，不做改动'
-              "
-              placement="bottom"
-            >
-              <GlassSwitch v-model="allowChange" size="small" active-text="允许改动" inactive-text="只读" :disabled="running || noChanges" aria-label="允许 AI 改动服务器" />
-            </el-tooltip>
           </div>
           <div class="ai-actions">
             <el-popover ref="historyPopover" v-model:visible="historyOpen" role="dialog" popper-class="ai-history-popper" placement="bottom-end" :width="380" trigger="click" :hide-after="0" @before-enter="loadHistory()">
@@ -921,9 +942,83 @@ function copy(text: string) {
             </div>
           </div>
         </div>
+        <div class="ai-access-row">
+          <div class="ai-permission">
+            <el-tooltip
+              :show-after="HOVER_DELAY"
+              :content="
+                noChanges
+                  ? '配置里设成了不允许 AI 改动这台服务器（aiChanges: false），只能查看'
+                  : allowChange
+                    ? 'Ferry 会根据自动确认设置处理应用启停，其余改动逐项确认'
+                    : '只使用 Ferry 内置的查看工具和固定诊断命令'
+              "
+              placement="bottom"
+            >
+              <GlassSwitch v-model="allowChange" size="small" active-text="允许改动" inactive-text="只读" :disabled="running || noChanges" aria-label="允许 AI 改动服务器" />
+            </el-tooltip>
+            <div class="ai-data-option">
+              <GlassSwitch
+                v-model="shareData"
+                size="small"
+                active-text="允许读取并发送排查明细"
+                inactive-text="不共享排查明细"
+                :disabled="running"
+                aria-label="允许读取并发送排查明细"
+              />
+              <el-popover placement="bottom-start" :width="365" trigger="click" :hide-after="0" transition="ai-access-popper" popper-class="ai-access-popper">
+                <template #reference>
+                  <button type="button" class="ai-info-button" aria-label="查看排查明细的范围和限制">
+                    <el-icon aria-hidden="true"><InfoFilled /></el-icon>
+                  </button>
+                </template>
+                <div class="ai-disclosure-copy">
+                  <p><strong>开启后，AI 可按需读取这些明细并发送给模型</strong></p>
+                  <ul>
+                    <li>应用、软件和构建日志，服务器审计记录</li>
+                    <li>Ferry 项目配置、本机项目设置、部署差异</li>
+                    <li>已授权的数据库结构、SQL 和 Redis 查询结果</li>
+                    <li>SSH 登录用户、来源 IP，以及你批准执行的自定义命令输出</li>
+                    <li>你单次批准使用 sudo 查看时，指定目录的条目名称和属性</li>
+                  </ul>
+                  <p>是否能读到仍取决于服务器权限、数据库授权和日志是否可用。</p>
+                  <p>关闭时，AI 仍可检查应用状态、端口和磁盘等基础信息。</p>
+                </div>
+              </el-popover>
+            </div>
+            <el-popover v-if="!plain" placement="bottom-start" :width="344" trigger="click" :hide-after="0" transition="ai-access-popper" popper-class="cg-menu-popover ai-access-popper">
+              <template #reference>
+                <GlassButton size="small" aria-label="自动确认设置">
+                  <span class="ai-auto-label">自动确认{{ autoConfirmAvailable && autoConfirm.length ? ` · ${autoConfirm.length}` : '' }}<el-icon><ArrowDown /></el-icon></span>
+                </GlassButton>
+              </template>
+              <div class="ai-disclosure-copy">
+                <p v-if="production || noChanges">{{ production ? '生产服务器的操作逐项确认。' : '这个目标设为只读。' }}</p>
+                <el-checkbox-group v-model="autoConfirm" class="ai-auto-choices" :disabled="running || !autoConfirmAvailable" aria-label="应用操作自动确认等级">
+                  <el-checkbox value="warning" class="cg-menu-item"><span class="ai-auto-dot warning" aria-hidden="true" />黄色 · 启动、重启应用</el-checkbox>
+                  <el-checkbox value="danger" class="cg-menu-item"><span class="ai-auto-dot danger" aria-hidden="true" />红色 · 停止应用</el-checkbox>
+                </el-checkbox-group>
+                <p>开启「允许改动」后，在当前消息里直接指定一个应用，例如「重启应用 api」。每条消息最多自动确认一次。</p>
+                <p>自定义命令、对外探测、删除和数据库改动逐项确认。需要凭据时会提示填写。</p>
+              </div>
+            </el-popover>
+          </div>
+          <el-popover placement="bottom-end" :width="365" trigger="click" :hide-after="0" transition="ai-access-popper" popper-class="ai-access-popper">
+            <template #reference>
+              <button type="button" class="ai-disclosure" :aria-label="`查看会发送哪些数据，当前模型 ${curModel?.name || '所选模型服务'}`">
+                <span>发送给 {{ curModel?.name || '所选模型服务' }}</span>
+                <el-icon aria-hidden="true"><InfoFilled /></el-icon>
+              </button>
+            </template>
+            <div class="ai-disclosure-copy">
+              <p><strong>接收方是 {{ curModel?.name || '所选模型服务' }}</strong></p>
+              <p>对话过程中，Ferry 会向该模型发送你的消息、你附上的截图和工具结果。即使关闭明细共享，磁盘用量等基础诊断结果也会发送。</p>
+              <p>开启明细共享后，按需读取的日志、配置和查询结果等也可能发给该模型。</p>
+              <p>继续旧对话时，之前共享过的明细可能作为上下文再次发送，即使你现在已关闭共享。</p>
+            </div>
+          </el-popover>
+        </div>
       </div>
-      <!-- 放在后面：抽屉标题栏让第一个子元素占满宽度，那得是上面这一行。
-           抽屉自己的底色是固定的，不跟着背后内容换深浅（深色代码块滚过时也不会闪） -->
       <GlassPane v-if="glass.enabled" class="ai-head-glass" :radius="0" :adaptive="false" aria-hidden="true" />
     </template>
 
@@ -983,29 +1078,28 @@ function copy(text: string) {
             <span v-if="it.call?.name === 'run_command'" class="mono cmd">$ {{ callTitle(it.call!) }}</span>
             <span v-else class="cmd">{{ callTitle(it.call!) }}</span>
           </div>
-          <div v-if="it.call?.input?.purpose" class="muted small purpose">{{ it.call.input.purpose }}</div>
+          <div v-if="it.call?.input?.purpose" class="muted small purpose">AI 提供的理由：{{ it.call.input.purpose }}</div>
 
-          <!-- 要确认的改动 -->
+          <!-- 要确认的操作 -->
           <div v-if="it.waiting && it.approval" class="confirm">
             <div class="confirm-title">
               <span>{{ it.approval.title }}</span>
               <el-tag v-if="it.approval.asRoot" size="small" type="warning" effect="plain">以 root 执行</el-tag>
               <el-tag v-if="it.approval.danger" size="small" type="danger" effect="dark">危险：{{ it.approval.danger }}</el-tag>
             </div>
-            <SecretForm v-if="it.approval.fields?.length" :fields="it.approval.fields" :disabled="running" @submit="(v) => decide(it, 'approve', v)" @cancel="decide(it, 'reject')" />
+            <div v-if="it.approval.destination" class="muted small">{{ it.approval.destination }}</div>
+            <div v-if="!it.approval.id" class="muted small">这项旧版确认已失效，请重新发起。</div>
+            <SecretForm v-if="it.approval.fields?.length" :fields="it.approval.fields" :disabled="running || !canApprove(it) || !it.approval.id" @submit="(v) => decide(it, 'approve', v)" @cancel="decide(it, 'reject')" />
             <template v-else>
             <div v-if="it.approval.once && !it.approval.danger" class="muted small once">每次都要确认：{{ it.approval.once }}</div>
             <pre v-if="it.approval.detail" class="tool-out mono detail"><span v-for="(ln, k) in detailLines(it.approval.detail)" :key="k" :class="ln.c">{{ ln.t }}
 </span></pre>
-            <div class="confirm-btns">
-              <el-button size="small" :type="it.approval.danger ? 'danger' : 'primary'" :disabled="running" @click="decide(it, 'approve')">执行</el-button>
-              <el-tooltip v-if="!it.approval.danger && !it.approval.once" :show-after="HOVER_DELAY" :content="`本次对话里「${it.approval.kind}」不再询问`" placement="top">
-                <el-button size="small" :disabled="running" @click="decide(it, 'always')">执行，同类不再询问</el-button>
-              </el-tooltip>
-              <el-button size="small" :disabled="running" @click="decide(it, 'reject')">不执行</el-button>
+            <div v-if="it.call?.name === 'files_list_sudo'" class="muted small">
+              {{ shareData ? `接收方：${curModel?.name || '所选模型服务'}` : '查看前请开启「允许读取并发送排查明细」。' }}
             </div>
-            <div v-if="!it.approval.danger && !it.approval.once" class="muted small scope">
-              同类指：{{ it.approval.kind.replace(/^命令：/, '') }}
+            <div class="confirm-btns">
+              <el-button size="small" :type="it.approval.danger ? 'danger' : 'primary'" :disabled="running || !canApprove(it) || !it.approval.id" @click="decide(it, 'approve')">{{ it.call?.name === 'files_list_sudo' ? '同意本次查看' : '执行此操作' }}</el-button>
+              <el-button size="small" :disabled="running || !it.approval.id" @click="decide(it, 'reject')">{{ it.call?.name === 'files_list_sudo' ? '不查看' : '不执行' }}</el-button>
             </div>
             </template>
           </div>
@@ -1152,7 +1246,17 @@ function copy(text: string) {
   background: var(--ferry-surface);
   color: var(--el-text-color-regular);
 }
-.ai-drawer .el-drawer__header { padding: 18px 20px 14px; }
+.ai-drawer .el-drawer__header { padding: 10px 16px 8px; }
+.ai-drawer .el-drawer__close-btn { top: 10px; right: 12px; }
+.ai-history-popper.el-popper, .ai-access-popper.el-popper {
+  box-sizing: border-box;
+  max-width: calc(100vw - 24px);
+}
+.ai-access-popper-leave-active { visibility: hidden; pointer-events: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .ai-access-popper-enter-active { animation: ai-access-popper-in .12s ease-out; }
+  @keyframes ai-access-popper-in { from { opacity: 0; } }
+}
 /* 液态玻璃：标题栏、提示条、输入框浮在对话上，对话占满整个抽屉、从它们下面滚过（比下面 scoped 的规则多一个类，才能盖过它们） */
 .ai-drawer.ai-glass .el-drawer__header { position: absolute; top: 0; left: 0; right: 0; z-index: 3; border-bottom: 0; }
 .ai-drawer.ai-glass .el-drawer__body { position: relative; }
@@ -1180,14 +1284,27 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
 .ai-head {
   display: flex;
   flex-direction: column;
+  width: 100%;
   min-width: 0;
-  gap: 14px;
+  gap: 6px;
+  container-type: inline-size;
+}
+.ai-main-row,
+.ai-access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.ai-main-row {
+  min-height: 32px;
+  padding-right: 38px;
 }
 .ai-title-row {
   display: flex;
-  justify-content: center;
+  align-items: center;
   min-width: 0;
-  padding-inline: 40px;
+  gap: 8px;
 }
 .ai-title {
   flex: 0 1 auto;
@@ -1195,45 +1312,116 @@ html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 /
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 16px;
   font-weight: 600;
+  text-align: left;
   color: var(--el-text-color-primary);
 }
-.ai-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px 12px;
-}
-.ai-permission,
+.ai-title-row .el-tag { flex: none; }
 .ai-actions,
-.ai-tools {
+.ai-tools,
+.ai-permission {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.ai-permission { flex: none; }
-.ai-actions {
-  margin-left: auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
+.ai-actions { flex-shrink: 0; }
 .ai-head .el-button {
-  height: 32px;
+  height: 30px;
   margin: 0;
-  padding: 0 10px;
-  border-radius: 10px;
+  padding: 0 8px;
+  border-radius: 8px;
   font-size: 13px;
 }
 .ai-tools {
   gap: 2px;
-  padding-left: 8px;
+  padding-left: 6px;
   border-left: 1px solid var(--ferry-overlay-line);
 }
 .ai-tools .el-button {
-  width: 32px;
+  width: 30px;
   padding: 0;
   font-size: 15px;
+}
+.ai-access-row {
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px solid var(--ferry-overlay-line);
+}
+.ai-permission {
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  min-width: 0;
+}
+.ai-data-option {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 2px;
+}
+.ai-auto-label { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.ai-auto-choices { display: grid; gap: 2px; }
+.ai-auto-choices .el-checkbox { margin: 0; padding: 0 8px; }
+.ai-auto-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--el-color-warning); }
+.ai-auto-dot.danger { background: var(--el-color-danger); }
+.ai-disclosure,
+.ai-info-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ai-disclosure {
+  gap: 5px;
+  min-width: 0;
+  max-width: min(32ch, 100%);
+  margin-left: auto;
+  padding: 0 2px;
+  text-align: left;
+}
+.ai-info-button {
+  flex: none;
+  justify-content: center;
+  width: 24px;
+  padding: 0;
+}
+.ai-disclosure:hover,
+.ai-info-button:hover { color: var(--el-text-color-primary); }
+.ai-disclosure span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-disclosure .el-icon { flex: none; }
+.ai-disclosure-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 65vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+.ai-disclosure-copy p,
+.ai-disclosure-copy ul { margin: 0; }
+.ai-disclosure-copy ul { padding-left: 20px; }
+@container (max-width: 430px) {
+  .ai-main-row {
+    flex-direction: column;
+    align-items: stretch;
+    padding-right: 0;
+  }
+  .ai-title-row {
+    min-height: 32px;
+    padding-right: 38px;
+  }
+  .ai-actions { flex-wrap: wrap; }
+  .ai-disclosure { margin-left: 0; }
 }
 .spacer {
   flex: 1;

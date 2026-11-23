@@ -64,14 +64,6 @@ watch(
   { immediate: true },
 )
 
-// 改动在哪里确认：空 = 在 Ferry 里弹窗，client = 编程软件支持时在编程软件里
-const confirmIn = computed({
-  get: () => props.mcp.confirmIn ?? '',
-  set: (v: string) => {
-    props.mcp.confirmIn = v
-  },
-})
-
 function toggleTarget(key: string, on: boolean) {
   const list = new Set(props.mcp.targets ?? [])
   if (on) list.add(key)
@@ -229,17 +221,7 @@ onMounted(loadCallCount)
       生产服务器（配置里 <span class="mono">production: true</span>）和设了 <span class="mono">aiChanges: false</span> 的服务器始终不允许。改完点「保存」生效。
     </p>
     <div v-if="props.mcp.allowChanges" class="scope">
-      <div class="confirm-in">
-        <span class="small">在哪里确认：</span>
-        <el-radio-group v-model="confirmIn" size="small">
-          <el-radio value="">在 Ferry 里弹窗</el-radio>
-          <el-radio value="client">在编程软件里</el-radio>
-        </el-radio-group>
-      </div>
-      <p v-if="confirmIn === 'client'" class="muted small">
-        编程软件支持时（MCP 的表单确认），确认框显示在编程软件里，你在那里点同意，Ferry 不再弹窗、直接执行；不支持的编程软件仍在 Ferry 里确认。编程软件没把确认框给你看就回答了（2 秒内），或者你关掉了确认框，也改在 Ferry 里弹窗；调用记录里能看到它每次回答了什么。
-        这样确认的可靠程度取决于编程软件：它能执行命令时，也可能绕过确认，所以只在你信任的编程软件里这样用。密码始终在 Ferry 里填，改数据库也始终在 Ferry 里确认（改错了数据撤不回）。
-      </p>
+      <p class="muted small">每次改动都在 Ferry 桌面端单独确认。</p>
       <el-radio-group v-model="scope" size="small">
         <el-radio value="all">全部非生产服务器</el-radio>
         <el-radio value="selected">只允许下面打开的服务器</el-radio>

@@ -154,7 +154,7 @@ onBeforeUnmount(() => tabs.forEach(drop))
     <el-drawer v-if="serverUsed" v-model="serverOpen" direction="rtl" size="80%" append-to-body :title="`服务器信息：${conn.title}`" @open="serverPanel?.load()">
       <ServerInfoPanel ref="serverPanel" :config="config" :target="conn.name" :connected="tabs.some((t) => t.state === 'open')" :active="shown && serverOpen" bar />
     </el-drawer>
-    <AiDrawer v-if="aiUsed" v-model="aiOpen" :config="config" :target="conn.name" :title="conn.title" plain />
+    <AiDrawer v-if="aiUsed" v-model="aiOpen" :config="config" :target="conn.name" :server="conn" :title="conn.title" plain />
   </div>
 </template>
 

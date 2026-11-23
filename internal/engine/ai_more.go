@@ -133,7 +133,7 @@ func (e *Engine) aiMoreTools(t *config.Target, change bool) []ai.Tool {
 		},
 	}, {
 		Name: "software_logs",
-		Description: "服务器上软件（MySQL、Redis、Nacos 等）的日志，取最后 lines 行。Ferry 装的用 name（list_software 里的实例名），" +
+		Description: "服务器上软件（MySQL、Redis、Nacos 等）的日志，取最后 lines 行。Ferry 装的用 name（server_software 里的实例名），" +
 			"file 为 true 时看软件自己的日志文件；不是 Ferry 装的，用 unit（systemd 服务）或 container（Docker 容器）。",
 		Schema: schema(map[string]any{
 			"name":      str("Ferry 装的软件的实例名"),
@@ -249,6 +249,11 @@ func (e *Engine) aiChangeTools(t *config.Target) []ai.Tool {
 	type deployArgs struct {
 		Apps      []string
 		SkipBuild bool
+		// 和 CLI / 部署对话框一致的可选项
+		Full       bool
+		NoRollback bool
+		KeepPerms  bool
+		Keep       map[string][]*config.KeepItem
 	}
 	return []ai.Tool{{
 		Name: "port_control",
@@ -403,8 +408,13 @@ func (e *Engine) aiChangeTools(t *config.Target) []ai.Tool {
 		Description: "把项目里的应用部署到这台服务器：先在用户电脑上构建（skipBuild 时跳过），上传，逐个切换到新版本并等健康检查通过；失败自动回滚该应用。" +
 			"先用 deploy_changes 看会带上线什么。构建可能要几分钟，输出实时显示给用户；失败时用 build_log 看完整的构建输出。生产服务器不能用，要用户自己在 Ferry 里点「部署」。",
 		Schema: schema(map[string]any{
-			"apps":      strList("要部署的应用（必须写明）"),
-			"skipBuild": map[string]any{"type": "boolean", "description": "跳过本机构建，直接用现有的产物（确认产物已经是最新的才用）"},
+			"apps":       strList("要部署的应用（必须写明）"),
+			"skipBuild":  map[string]any{"type": "boolean", "description": "跳过本机构建，直接用现有的产物（确认产物已经是最新的才用）"},
+			"full":       map[string]any{"type": "boolean", "description": "全量上传（不用增量；怀疑服务器上的文件不对时用）"},
+			"noRollback": map[string]any{"type": "boolean", "description": "失败时保留失败版本，不自动回滚（排查用）"},
+			"keepPerms":  map[string]any{"type": "boolean", "description": "不自动修正权限（默认会把运行用户访问不了的目录、不安全的部署目录改好）"},
+			"keep": map[string]any{"type": "object", "description": "这次保留服务器上的文件，代替 ferry.yaml 里的 artifact.keep，如 {\"api\":[{\"path\":\"config.js\"},{\"path\":\"uploads\",\"shared\":true}]}",
+				"additionalProperties": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}, "shared": map[string]any{"type": "boolean"}}}}},
 		}, "apps"),
 		Approve: func(ctx context.Context, in json.RawMessage) *ai.Approval {
 			var a deployArgs
@@ -422,6 +432,7 @@ func (e *Engine) aiChangeTools(t *config.Target) []ai.Tool {
 					}
 				}
 			}
+			d = append(d, DeployOptionNotes(DeployOptions{Full: a.Full, NoRollback: a.NoRollback, KeepPerms: a.KeepPerms, Keep: a.Keep})...)
 			return &ai.Approval{Kind: "部署", Title: "部署 " + strings.Join(a.Apps, "、"), Detail: strings.Join(d, "\n"), AsRoot: true}
 		},
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
@@ -433,7 +444,7 @@ func (e *Engine) aiChangeTools(t *config.Target) []ai.Tool {
 				return "", err
 			}
 			r, err := withProgress(e, ctx, func() (any, error) {
-				return e.Deploy([]string{t.Name}, a.Apps, DeployOptions{SkipBuild: a.SkipBuild})
+				return e.Deploy([]string{t.Name}, a.Apps, DeployOptions{SkipBuild: a.SkipBuild, Full: a.Full, NoRollback: a.NoRollback, KeepPerms: a.KeepPerms, Keep: a.Keep})
 			})
 			if err != nil {
 				return toJSON(r), fmt.Errorf("%v（构建失败时用 build_log 看完整输出）", err)

@@ -143,6 +143,12 @@ func (e *Engine) Releases(target string, names []string) ([]proto.AppReleases, e
 
 // Rollback 回滚一个应用到 to（空 = 上一个可用版本；legacy = 接管前）。
 func (e *Engine) Rollback(target, app, to string) error {
+	return e.RollbackReviewed(target, app, to, nil)
+}
+
+// RollbackReviewed binds the rollback to the version inspected by the approver.
+// The remote agent checks it while holding the deployment lock.
+func (e *Engine) RollbackReviewed(target, app, to string, current *string) error {
 	return e.withSession(target, []string{app}, func(s *session, specs []proto.AppSpec) error {
 		if len(specs) != 1 {
 			return fmt.Errorf("回滚一次只能指定一个应用")
@@ -166,10 +172,40 @@ func (e *Engine) Rollback(target, app, to string) error {
 		e.Rep.Step("回滚 %s", specs[0].Name)
 		start := time.Now()
 		var out proto.AppOutcome
-		err := s.callData("rollback", &proto.Request{Apps: specs, To: to}, &out)
+		err := s.callData("rollback", &proto.Request{Apps: specs, To: to, ExpectCurrent: current}, &out)
 		e.notifyRollback(s.t, specs[0].Name, out.Release, start, err)
 		return err
 	})
+}
+
+// RollbackPreview resolves the exact destination using the agent's ordering.
+func (e *Engine) RollbackPreview(target, app, to string) (current, destination string, err error) {
+	reports, err := e.Releases(target, []string{app})
+	if err != nil {
+		return "", "", err
+	}
+	if len(reports) != 1 {
+		return "", "", fmt.Errorf("无法确认应用 %s 的版本", app)
+	}
+	report := reports[0]
+	for _, r := range report.Releases {
+		if r.Current {
+			current = r.ID
+			break
+		}
+	}
+	if to == current && to != "" {
+		return "", "", fmt.Errorf("%s 就是当前版本", to)
+	}
+	for _, r := range report.Releases {
+		if !r.Failed && (to == r.ID || (to == "" && (current == "" || r.ID < current))) {
+			return current, r.ID, nil
+		}
+	}
+	if report.Legacy && (to == "legacy" || to == "") {
+		return current, "legacy", nil
+	}
+	return "", "", fmt.Errorf("没有可回滚的版本")
 }
 
 // History 服务器上的部署历史。

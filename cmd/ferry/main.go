@@ -194,20 +194,24 @@ type cli struct {
 var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": true, "limit": true, "offset": true, "tool": true, "client": true, "result": true, "since": true, "until": true, "q": true, "n": true, "expect": true, "key": true, "passphrase": true, "account": true,
 	"release": true, "run": true, "log": true, "java": true, "arch": true, "nginx": true, "nginx-version": true,
 	"version": true, "channel": true, "component": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
-	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "mem": true, "load": true, "ping": true, "keep-files": true, "query": true,
+	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "approval": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "mem": true, "load": true, "ping": true, "keep-files": true, "query": true,
 	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true, "action": true, "snapshot": true, "app": true,
 	"conf": true, "owner": true}
 
 // repeatFlags 可以写几次的选项：值按行连起来
 var repeatFlags = map[string]bool{"conf": true}
 var boolFlags = map[string]bool{
-	"with-secrets":       true,
-	"sudo":               true,
-	"as-sudo":            true,
-	"sudo-if-needed":     true,
-	"verify":             true,
-	"allow-public-perms": true,
-	"y":                  true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
+	"share-data":           true,
+	"auto-confirm-warning": true,
+	"auto-confirm-danger":  true,
+	"preview":              true,
+	"with-secrets":         true,
+	"sudo":                 true,
+	"as-sudo":              true,
+	"sudo-if-needed":       true,
+	"verify":               true,
+	"allow-public-perms":   true,
+	"y":                    true, "yes": true, "v": true, "verbose": true, "json": true, "skip-build": true, "full": true,
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "grep-all": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
@@ -563,7 +567,7 @@ func run(argv []string, cio *cliIO) int {
 	case "ai-exec": // ai-exec <目标> <工具> --scope <范围>（编程软件请求、用户同意后桌面版执行）
 		return aiExecCmd(e, c, cio, js, fail)
 
-	case "ai": // ai <目标> <要问的话…> [--conv <对话>] [--mode readonly|confirm] [--decide approve|always|reject]
+	case "ai": // ai <目标> <要问的话…> [--conv <对话>] [--mode readonly|confirm] [--approval ID --decide approve|reject]
 		return aiCmd(e, c, cio, js, st, fail)
 
 	case "validate":

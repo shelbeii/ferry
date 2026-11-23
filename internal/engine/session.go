@@ -309,6 +309,9 @@ func (e *Engine) ensureAgent(s *session) error {
 			return nil
 		}
 	}
+	if e.DisableAgentInstall {
+		return errors.New("服务器组件需要由用户在 Ferry 中安装或更新，AI 工具不会自动安装")
+	}
 	data, ext := bin.Data, ""
 	if hasGzip {
 		data, ext = gzipAgent(s.arch, bin.Data), ".gz"

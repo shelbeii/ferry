@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/captain/ferry/internal/flock"
 )
 
 // 历史对话：列出、打开（转成界面显示的条目）、删除，按保留天数和总大小清理。
@@ -87,12 +90,28 @@ func shorten(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
+// LockConversation serializes conversation state changes across Ferry processes.
+func LockConversation(dir, id string) (func(), error) {
+	if !ValidConversationID(id) {
+		return nil, fmt.Errorf("对话 ID 无效：%q", id)
+	}
+	// Shards keep the number of lock files bounded without unlinking a held lock.
+	key := sha256.Sum256([]byte(id))
+	unlock, err := flock.Lock(filepath.Join(dir, "locks", fmt.Sprintf("%x", key[:2])), 0, nil)
+	if errors.Is(err, flock.ErrTimeout) {
+		return nil, errors.New("这段对话正在处理另一项请求，请稍后重试")
+	}
+	return unlock, err
+}
+
 // Delete 删除一个对话。
 func Delete(dir, id string) error {
-	if !reConvID.MatchString(id) {
-		return fmt.Errorf("对话 ID 无效：%q", id)
+	unlock, err := LockConversation(dir, id)
+	if err != nil {
+		return err
 	}
-	err := os.Remove(filepath.Join(dir, id+".json"))
+	defer unlock()
+	err = os.Remove(filepath.Join(dir, id+".json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -147,7 +166,7 @@ func Clean(dir string, days int, maxBytes int64, keep string) int {
 		if !old && !big {
 			continue
 		}
-		if os.Remove(filepath.Join(dir, x.name)) == nil {
+		if Delete(dir, strings.TrimSuffix(x.name, ".json")) == nil {
 			removed++
 			total -= x.size
 		}
@@ -160,7 +179,7 @@ func CleanAll(dir string) int {
 	ents, _ := os.ReadDir(dir)
 	n := 0
 	for _, e := range ents {
-		if strings.HasSuffix(e.Name(), ".json") && os.Remove(filepath.Join(dir, e.Name())) == nil {
+		if id, ok := strings.CutSuffix(e.Name(), ".json"); ok && Delete(dir, id) == nil {
 			n++
 		}
 	}
@@ -300,7 +319,7 @@ func (c *Conversation) Markdown() string {
 	for model, u := range c.UsageByModel() {
 		fmt.Fprintf(&b, "- 用量（%s）：输入 %d、缓存 %d、输出 %d tokens\n", model, u.Input, u.CacheRead+u.CacheWrite, u.Output)
 	}
-	decision := map[string]string{"approve": "已同意执行", "always": "已同意，本次对话同类不再询问", "allowed": "同类已允许，直接执行",
+	decision := map[string]string{"approve": "已同意执行", "always": "已同意，本次对话同类不再询问", "allowed": "同类已允许，直接执行", AutoApproved: "已按设置自动确认",
 		"reject": "没有执行（拒绝了）", "skipped": "没有执行（接着说了别的）"}
 	for _, it := range c.Items() {
 		switch it.Kind {
@@ -348,21 +367,30 @@ func RelinkConfig(dir, from, to string) int {
 		if !ok || !reConvID.MatchString(id) {
 			continue
 		}
-		c, err := Load(dir, id)
-		if err != nil || !samePath(c.Config, from) {
-			continue
-		}
-		c.Config = to
-		b, err := json.Marshal(c)
-		if err != nil {
-			continue
-		}
-		p := filepath.Join(dir, id+".json")
-		if os.WriteFile(p+".tmp", b, 0o600) == nil && os.Rename(p+".tmp", p) == nil {
+		if relinkConversation(dir, id, from, to) {
 			n++
 		}
 	}
 	return n
+}
+
+func relinkConversation(dir, id, from, to string) bool {
+	unlock, err := LockConversation(dir, id)
+	if err != nil {
+		return false
+	}
+	defer unlock()
+	c, err := Load(dir, id)
+	if err != nil || !samePath(c.Config, from) {
+		return false
+	}
+	c.Config = to
+	b, err := json.Marshal(c)
+	if err != nil {
+		return false
+	}
+	p := filepath.Join(dir, id+".json")
+	return os.WriteFile(p+".tmp", b, 0o600) == nil && os.Rename(p+".tmp", p) == nil
 }
 
 func samePath(a, b string) bool {

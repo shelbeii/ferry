@@ -71,6 +71,10 @@ func (s *session) canSudoFiles() bool {
 }
 
 func (s *session) fileClient(asSudo bool) (*remote.FileClient, func(), error) {
+	return s.openFileClient(asSudo, false)
+}
+
+func (s *session) openFileClient(asSudo, readOnly bool) (*remote.FileClient, func(), error) {
 	s.fileIdentity = s.t.User
 	if !asSudo || s.t.User == "root" {
 		return s.c.Files(), func() {}, nil
@@ -99,6 +103,9 @@ func (s *session) fileClient(asSudo bool) (*remote.FileClient, func(), error) {
 	}
 	var pipe *remote.Pipe
 	var err error
+	if readOnly {
+		server += " -R"
+	}
 	if s.passwordSudo() {
 		pipe, err = s.c.StartSudoPipe(s.e.ctx(), "exec "+server, s.sudoPassword)
 	} else {
@@ -108,7 +115,7 @@ func (s *session) fileClient(asSudo bool) (*remote.FileClient, func(), error) {
 		return nil, nil, s.sudoError(err)
 	}
 	files, closeFiles, err := remote.FilesOverPipe(s.e.ctx(), pipe)
-	if err == nil {
+	if err == nil && !readOnly {
 		files.FileCommands(s.runPriv)
 	}
 	return files, closeFiles, err

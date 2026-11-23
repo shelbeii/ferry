@@ -678,6 +678,13 @@ func TestManualRollbackAndControl(t *testing.T) {
 			t.Fatal(r.dump())
 		}
 	}
+	reviewedCurrent := id1
+	stale := exec1(t, f, "rollback", &proto.Request{
+		Apps: []proto.AppSpec{sys}, To: id1, ExpectCurrent: &reviewedCurrent,
+	})
+	if stale.code != proto.CodeBadInput || f.current("System") != id2 {
+		t.Fatalf("过期的确认不应切换当前版本：\n%s", stale.dump())
+	}
 	r := exec1(t, f, "rollback", &proto.Request{Apps: []proto.AppSpec{sys}})
 	if r.code != 0 || f.current("System") != id1 {
 		t.Fatalf("\n%s", r.dump())

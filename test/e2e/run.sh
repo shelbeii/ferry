@@ -203,6 +203,13 @@ step "连接"
 t "未核对主机公钥时拒绝连接" fail "未知主机" -- F status e2e-a
 t "trust e2e-a" ok "已记录" -- F trust e2e-a --yes
 t "trust e2e-b" ok "已记录" -- F trust e2e-b --yes
+ai_security_tests() {
+  (cd "$ROOT" && FERRY_E2E_AI_BIN="$FERRY" FERRY_E2E_AI_CONFIG="$E2E/ferry.yaml" \
+    FERRY_E2E_AI_SUDO_CONFIG="$sudoFixture/ferry.yaml" \
+    FERRY_HOME="$OUT/home" go test -count=1 -v ./test/e2e/ai)
+}
+t "AI 助手 CLI、模型工具、SSH 和确认端到端" ok "PASS" -- ai_security_tests
+t "AI 诊断和审批前不安装 agent" ok "" -- dx a 'test ! -d /usr/local/lib/ferry'
 t "首次连接上传压缩后的 agent" ok "已压缩" -- F status e2e-a api
 noagent() { ! F status e2e-a api 2>&1 | grep -q "上传 ferry 的服务器端组件"; }
 t "第二次连接不再上传 agent" ok "" -- noagent
@@ -712,6 +719,22 @@ step "MCP（编程软件）：部署会带上线的改动、服务器告警、�
 MC() { FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" "$@"; }
 t "list_projects：当前目录的项目" ok '"currentDir": true' -- MC list_projects
 t "app_status" ok '"name": "hk"' -- MC app_status '{"target":"e2e-a","apps":["hk"]}'
+# 这一批新加的工具：服务器信息、应用详情、历史运行、保留扫描、文件查看与下载
+t "server_info：内存与挂载点" ok '"memory": {' -- MC server_info '{"target":"e2e-a"}'
+t "app_info：服务与部署位置" ok '"label": "systemd 服务"' -- MC app_info '{"target":"e2e-a","app":"hk"}'
+t "app_log_runs：返回数组" ok '[' -- MC app_log_runs '{"target":"e2e-a","app":"hk"}'
+t "keep_scan：应用名" ok '"app": "hk"' -- MC keep_scan '{"target":"e2e-a","app":"hk"}'
+t "files_list：列目录" ok '"name": "apps"' -- MC files_list '{"target":"e2e-a","path":"/opt/e2e"}'
+t "files_preview：读文本" ok '"path": "/etc/hostname"' -- MC files_preview '{"target":"e2e-a","path":"/etc/hostname"}'
+t "files_size：有字节数" ok '"bytes": ' -- MC files_size '{"target":"e2e-a","path":"/etc/hostname"}'
+t "files_access：可读" ok '"read": true' -- MC files_access '{"target":"e2e-a","path":"/etc/passwd"}'
+dl=$(MC files_download '{"target":"e2e-a","paths":["/etc/hostname"]}')
+has "files_download：给了本机目录" '"dir":' "$dl"
+has "files_download：目录在 downloads 下" 'downloads' "$dl"
+t "files_download：内容和服务器一致" ok "$(dx a 'cat /etc/hostname')" -- sh -c 'cat "$1"/downloads/*/hostname' _ "$OUT/home"
+t "files_download：目录不给下（用桌面版）" fail "目录请用" -- MC files_download '{"target":"e2e-a","paths":["/etc"]}'
+t "app_log_runs：列出归档的运行" ok '"release": "' -- MC app_log_runs '{"target":"e2e-b","app":"api"}'
+t "app_logs 用 release/run 读归档" ok "started v2" -- MC app_logs "{\"target\":\"e2e-b\",\"app\":\"api\",\"source\":\"file\",\"release\":\"$rel2\",\"run\":\"$run2\"}"
 t "deploy_history：谁做的" ok '"actor":' -- MC deploy_history '{"target":"e2e-a","apps":["hk"],"limit":3}'
 t "audit_log：部署也在审计记录里" ok '"kind": "deploy"' -- MC audit_log '{"target":"e2e-a","kind":"deploy","limit":3}'
 t "deploy_changes：线上的版本和本地比" ok '"app": "hk"' -- MC deploy_changes '{"target":"e2e-a","apps":["hk"]}'
@@ -724,18 +747,49 @@ t "backup_status files：备份文件" ok '"name": "kv-' -- MC backup_status '{"
 t "backup_status：名字不对" fail "名字不对" -- MC backup_status '{"target":"e2e-a","files":true,"name":"../x"}'
 t "backup_status remote：没设传到异地" fail "没有设置传到异地" -- MC backup_status '{"target":"e2e-a","remote":true}'
 t "backup_run：没允许编程软件改动时不做" fail "允许编程软件" -- MC backup_run '{"target":"e2e-a","name":"kv","reason":"e2e"}'
-t "run_change_command：只读命令直接执行" ok "e2e-mcp-readonly" -- MC run_change_command '{"target":"e2e-a","command":"echo e2e-mcp-readonly","reason":"e2e"}'
+t "run_change_command：Ferry 固定诊断直接执行" ok "Filesystem" -- MC run_change_command '{"target":"e2e-a","command":"df -h","reason":"e2e"}'
+t "run_change_command：自定义诊断也须确认" fail "允许编程软件" -- MC run_change_command '{"target":"e2e-a","command":"echo diagnostic","reason":"e2e"}'
 t "run_change_command：改动的命令没允许时不做" fail "允许编程软件" -- MC run_change_command '{"target":"e2e-a","command":"touch /tmp/e2e-mcp-x","reason":"e2e"}'
 t "write_file：没允许时不做" fail "允许编程软件" -- MC write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-x","content":"x","reason":"e2e"}'
+t "files_upload：没允许时不做" fail "允许编程软件" -- MC files_upload "$(printf '{"target":"e2e-a","locals":["%s/ferry.yaml"],"dir":"/tmp","reason":"e2e"}' "$E2E")"
 t "software_templates：模板库" ok '"redis"' -- MC software_templates '{"target":"e2e-a"}'
 t "ask_secret：名字不对" fail "名字" -- MC ask_secret '{"target":"e2e-a","fields":[{"name":"Bad","label":"x"}],"purpose":"e2e"}'
 # 用户同意后桌面版用 ferry ai-exec 执行：写文件（先备份原文件）、执行命令；输出里遮住用户填的密码（这里没有）
 dx a 'printf "old\n" > /tmp/e2e-aiexec.conf'
-t "ai-exec write_file：写文件、备份原文件" ok "已写入 /tmp/e2e-aiexec.conf" -- env FERRY_AI_INPUT='{"path":"/tmp/e2e-aiexec.conf","content":"new\n"}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a write_file --scope mcp-e2e
+write_preview() {
+  env FERRY_AI_INPUT='{"path":"/tmp/e2e-aiexec.conf","content":"new\n"}' FERRY_HOME="$OUT/home" \
+    "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a write_file --scope mcp-e2e --preview
+}
+write_reviewed() {
+  local preview
+  preview=$(write_preview) || return 1
+  env FERRY_AI_STATE="$(sed -n 's/^快照：//p' <<< "$preview" | tr -d '\r')" \
+    FERRY_AI_INPUT='{"path":"/tmp/e2e-aiexec.conf","content":"new\n"}' FERRY_HOME="$OUT/home" \
+    "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a write_file --scope mcp-e2e
+}
+t "ai-exec write_file：写文件、备份原文件" ok "已写入 /tmp/e2e-aiexec.conf" -- write_reviewed
 t "ai-exec write_file：内容和备份" ok "new old" -- dx a 'echo $(cat /tmp/e2e-aiexec.conf) $(cat /tmp/e2e-aiexec.conf.ferry-bak-*)'
 t "ai-exec run_command：改动的命令" ok "e2e-aiexec-ok" -- env FERRY_AI_INPUT='{"command":"touch /tmp/e2e-aiexec-x && echo e2e-aiexec-ok"}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a run_command --scope mcp-e2e
 t "ai-exec run_command：用到没填的密码时不执行" fail "ask_secret" -- env FERRY_AI_INPUT='{"command":"echo \"$FERRY_SECRET_NOPE\""}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a run_command --scope mcp-e2e
 t "ai-exec：不支持的工具" fail "不支持的工具" -- env FERRY_AI_INPUT='{}' FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a app_status --scope mcp-e2e
+# 部署的可选项在 mcp-tools 里能查到（确认框里的说明用 engine.DeployOptionNotes，有单测）
+mt=$(F mcp-tools 2>&1)
+has "mcp-tools：deploy 有全量上传" "全量上传" "$mt"
+has "mcp-tools：deploy 有失败不自动回滚" "不自动回滚" "$mt"
+has "mcp-tools：deploy 有不改权限" "不自动修正权限" "$mt"
+# 上传文件：确认框里写清来源和去向；同意后真的传上去
+printf 'upload-check\n' > "$OUT/upload-src.txt"
+up_json=$(printf '{"locals":["%s/upload-src.txt"],"dir":"/tmp"}' "$OUT")
+up_preview() { env FERRY_AI_INPUT="$up_json" FERRY_HOME="$OUT/home" "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a files_upload --scope mcp-e2e --preview; }
+has "ai-exec files_upload：预览写了来源" "upload-src.txt" "$(up_preview 2>&1)"
+up_reviewed() {
+  local preview
+  preview=$(up_preview) || return 1
+  env FERRY_AI_STATE="$(sed -n 's/^快照：//p' <<< "$preview" | tr -d '\r')" FERRY_AI_INPUT="$up_json" FERRY_HOME="$OUT/home" \
+    "$FERRY" -c "$E2E/ferry.yaml" ai-exec e2e-a files_upload --scope mcp-e2e
+}
+t "ai-exec files_upload：上传" ok "已上传" -- up_reviewed
+t "上传后的内容" ok "upload-check" -- dx a 'cat /tmp/upload-src.txt'
 t "调用记在 mcp/calls.jsonl" ok "backup_status" -- cat "$OUT/home/mcp/calls.jsonl"
 
 step "更多应用类型：Python、Node 服务端（上传目录，依赖在服务器上装）"

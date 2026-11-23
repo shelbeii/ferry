@@ -70,7 +70,8 @@ type Request struct {
 	RestartSecrets bool `json:"restartSecrets,omitempty"`
 
 	// rollback
-	To string `json:"to,omitempty"` // 目标版本 ID；空 = 当前版本之前最近一个没失败的版本
+	ExpectCurrent *string `json:"expectCurrent,omitempty"` // Rollback approval snapshot.
+	To            string  `json:"to,omitempty"`            // 目标版本 ID；空 = 当前版本之前最近一个没失败的版本
 
 	// libcache
 	Seed bool `json:"seed,omitempty"` // 从各 Java 应用的当前版本抽取依赖到缓存

@@ -46,12 +46,17 @@ func TestAIToolsByMode(t *testing.T) {
 		return m
 	}
 	ro, cf := names(AIReadOnly), names(AIConfirm)
-	for _, n := range []string{"write_file", "app_control", "app_rollback", "software_install", "software_control", "save_software_template"} {
+	for _, n := range []string{"write_file", "app_control", "rollback", "software_install", "software_control", "save_software_template", "files_upload"} {
 		if ro[n] {
 			t.Errorf("只读模式不应有 %s", n)
 		}
 		if !cf[n] {
 			t.Errorf("确认模式应有 %s", n)
+		}
+	}
+	for _, n := range []string{"files_list", "files_preview", "files_size", "files_access", "files_download", "server_info", "app_info", "app_log_runs", "keep_scan"} {
+		if !ro[n] || !cf[n] {
+			t.Errorf("查看工具 %s 应当在两种模式里都有", n)
 		}
 	}
 	plain := map[string]bool{}
@@ -194,7 +199,7 @@ func TestAISecretTools(t *testing.T) {
 	if ap := run.Approve(context.Background(), json.RawMessage(`{"command":"echo \"$FERRY_SECRET_NOPE\""}`)); ap != nil {
 		t.Fatal("没填过的不用问用户，执行时告诉模型")
 	}
-	if ap := run.Approve(context.Background(), json.RawMessage(`{"command":"ls /"}`)); ap != nil {
-		t.Fatal("普通只读命令不用确认")
+	if ap := run.Approve(context.Background(), json.RawMessage(`{"command":"df -h"}`)); ap != nil {
+		t.Fatal("内置诊断命令不用确认")
 	}
 }

@@ -38,6 +38,9 @@ func (a *Agent) rollback() int {
 	defer unlock()
 
 	cur := a.current(s.Name)
+	if a.req.ExpectCurrent != nil && cur != *a.req.ExpectCurrent {
+		return a.result(proto.CodeBadInput, "当前版本在确认期间发生变化，请重新确认回滚", nil)
+	}
 	to := a.req.To
 	if to == "" {
 		to = a.previousGood(s.Name, cur)

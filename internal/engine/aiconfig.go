@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/config"
@@ -431,9 +430,6 @@ func (e *Engine) aiConfigTools(t *config.Target, change bool) []ai.Tool {
 	if !change {
 		return tools
 	}
-	// 用户确认时算好的修改：执行时按它写（文件在确认后被改过就不写）
-	var mu sync.Mutex
-	plans := map[string]*config.EditPlan{}
 	plan := func(in json.RawMessage) (*config.EditPlan, error) {
 		var a ConfigEditInput
 		if err := json.Unmarshal(in, &a); err != nil {
@@ -463,29 +459,23 @@ func (e *Engine) aiConfigTools(t *config.Target, change bool) []ai.Tool {
 			if err != nil || ConfigPlanProblem(p) != nil {
 				return nil // 执行时把原因告诉模型，不用打扰用户
 			}
-			mu.Lock()
-			plans[string(in)] = p
-			mu.Unlock()
 			title := "改项目配置 ferry.yaml"
 			if p.Local {
 				title = "改这台电脑的本机设置"
 			}
 			d := ConfigPlanDetail(p)
-			return &ai.Approval{Kind: title, Title: title, Detail: d[0] + "\n" + d[1], Danger: p.Danger}
+			return &ai.Approval{Kind: title, Title: title, Detail: d[0] + "\n" + d[1], Danger: p.Danger, State: "config:" + p.Base}
 		},
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
-			mu.Lock()
-			p := plans[string(in)]
-			delete(plans, string(in))
-			mu.Unlock()
-			if p == nil {
-				var err error
-				if p, err = plan(in); err != nil {
-					return "", err
-				}
+			p, err := plan(in)
+			if err != nil {
+				return "", err
 			}
 			if err := ConfigPlanProblem(p); err != nil {
 				return "", err
+			}
+			if ai.ApprovedState(ctx) != "config:"+p.Base {
+				return "", errors.New("配置在确认期间发生变化，请重新查看差异并确认")
 			}
 			if err := p.Write(); err != nil {
 				return "", err

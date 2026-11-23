@@ -1768,6 +1768,7 @@ async function onSaved(deployment?: DeploymentRequest) {
       v-model="aiOpen[tn]"
       :config="project.path"
       :target="tn"
+      :server="info?.targets.find((x) => x.name === tn)"
       :title="tn"
       :question="aiQuestions.get(tn)"
       :production="info?.targets.find((x) => x.name === tn)?.production"

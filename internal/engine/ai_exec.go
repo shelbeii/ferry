@@ -17,7 +17,10 @@ import (
 var AIExecTools = map[string]bool{
 	"run_command": false, "write_file": false, "software_install": false, "save_software_template": false,
 	"software_upgrade": false, "software_restore": false, "software_backup": false, "run_job": false, "backup_fetch": false,
+	"files_upload":       false,
 	"software_templates": true, "template_guide": true,
+	"files_list": true, "files_preview": true, "files_size": true, "files_access": true, "files_download": true,
+	"server_info": true, "app_info": true, "app_log_runs": true, "keep_scan": true,
 }
 
 // MCPScope 编程软件这次连接（ferry mcp 进程）在用户填的密码里的范围：mcp-<连接标识>。
@@ -49,7 +52,7 @@ func (e *Engine) AIApproval(target, scope, tool string, input json.RawMessage) (
 	if err != nil {
 		return nil, err
 	}
-	s, err := e.connect(t)
+	s, err := e.connectSSH(t)
 	if err != nil {
 		return nil, err
 	}
@@ -61,15 +64,26 @@ func (e *Engine) AIApproval(target, scope, tool string, input json.RawMessage) (
 	if x.Approve == nil {
 		return nil, nil
 	}
-	return x.Approve(e.ctx(), input), nil
+	ap := x.Approve(e.ctx(), input)
+	if ap == nil {
+		return nil, nil
+	}
+	ap.Scope, err = e.aiTargetScope(s, false)
+	return ap, err
 }
 
 // AIExec 执行这次调用，progress 收实时输出。输出、错误里出现用户填的密码时遮住（它们会交回编程软件）。
-func (e *Engine) AIExec(target, scope, tool string, input json.RawMessage, progress func(string)) (string, error) {
+func (e *Engine) AIExec(target, scope, tool string, input json.RawMessage, state, approvedScope string, progress func(string)) (string, error) {
 	t, err := e.File.Target(target)
 	if err != nil {
 		return "", err
 	}
+	if readOnly, ok := AIExecTools[tool]; ok && !readOnly && (!t.AllowAIChanges() || t.Production) {
+		return "", errors.New("这台服务器不允许经 MCP 执行改动")
+	}
+	agentPolicy := e.DisableAgentInstall
+	e.DisableAgentInstall = true
+	defer func() { e.DisableAgentInstall = agentPolicy }()
 	if e.Pool == nil {
 		e.Pool = NewPool(0)
 		defer func() { e.Pool.Close(); e.Pool = nil }()
@@ -77,7 +91,7 @@ func (e *Engine) AIExec(target, scope, tool string, input json.RawMessage, progr
 	if err := takeAISecrets(scope, nil); err != nil { // 读回记住的
 		return "", err
 	}
-	s, err := e.connect(t)
+	s, err := e.connectSSH(t)
 	if err != nil {
 		return "", err
 	}
@@ -86,15 +100,24 @@ func (e *Engine) AIExec(target, scope, tool string, input json.RawMessage, progr
 	if err != nil {
 		return "", err
 	}
-	ctx := ai.WithProgress(e.ctx(), func(text string) {
+	if approvedScope != "" {
+		current, err := e.aiTargetScope(s, false)
+		if err != nil {
+			return "", err
+		}
+		if current != approvedScope {
+			return "", errors.New("服务器身份或配置已经变化，请重新确认")
+		}
+	}
+	ctx := ai.WithProgress(ai.WithApprovedState(e.ctx(), state), func(text string) {
 		if progress != nil {
-			progress(ai.MaskSecrets(scope, text))
+			progress(ai.Redact(ai.MaskSecrets(scope, text)))
 		}
 	})
 	out, err := x.Run(ctx, input)
-	out = ai.Clip(ai.MaskSecrets(scope, out), ai.ResultLimit)
+	out = ai.Clip(ai.Redact(ai.MaskSecrets(scope, out)), ai.ResultLimit)
 	if err != nil {
-		return out, errors.New(ai.MaskSecrets(scope, err.Error()))
+		return out, errors.New(ai.Redact(ai.MaskSecrets(scope, err.Error())))
 	}
 	return out, nil
 }

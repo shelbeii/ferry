@@ -177,7 +177,12 @@ func TestDeployTargets(t *testing.T) {
 	if got := opTitle(r); got != "部署 api（test、test3）" {
 		t.Errorf("标题：%s", got)
 	}
-	hub.Decide(r.ID, approve.Decision{Note: "不了"})
+	if err := hub.Decide(r.ID, approve.Decision{Note: "不了"}); err != nil {
+		t.Fatal(err)
+	}
+	if text, isErr := callText(t, cs, "task_status", map[string]any{"id": r.ID, "wait": 2}); !isErr || !strings.Contains(text, "不了") {
+		t.Fatalf("拒绝结果未送达：%v %s", isErr, text)
+	}
 	// 桌面版那边再检查一遍：每台都要允许改动
 	bad := r
 	bad.Targets = []string{"test", "prod"}

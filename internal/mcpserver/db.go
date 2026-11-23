@@ -143,7 +143,7 @@ func (s *server) addDBChangeTools(m *mcp.Server) {
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "db_execute", func(ctx context.Context, req *mcp.CallToolRequest, in dbExecIn) (any, error) {
 			if req != nil && req.Params != nil && req.Params.RequestState != "" {
-				return s.confirmed(ctx, req)
+				return nil, errors.New("旧的客户端确认已失效，请重新发起并在 Ferry 里确认")
 			}
 			return s.dbChange(ctx, req, in.Connection, in.Database, in.SQL, in.Reason, false)
 		}))
@@ -153,7 +153,7 @@ func (s *server) addDBChangeTools(m *mcp.Server) {
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "redis_execute", func(ctx context.Context, req *mcp.CallToolRequest, in redisExecIn) (any, error) {
 			if req != nil && req.Params != nil && req.Params.RequestState != "" {
-				return s.confirmed(ctx, req)
+				return nil, errors.New("旧的客户端确认已失效，请重新发起并在 Ferry 里确认")
 			}
 			return s.dbChange(ctx, req, in.Connection, in.Database, in.Commands, in.Reason, true)
 		}))
@@ -184,7 +184,7 @@ func (s *server) dbChange(ctx context.Context, req *mcp.CallToolRequest, conn, d
 	r := approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "db-exec",
 		Database: db, Stmts: stmts, Reason: strings.TrimSpace(reason)}
 	fillDB(&r, cn, f, t)
-	return s.ask(ctx, req, r, false) // 改数据库始终在 Ferry 里确认：编程软件的确认框可能被它自己点掉
+	return s.ask(ctx, req, r)
 }
 
 // DBChangeAllowed 这个数据库连接能不能经 MCP 改：设置里允许编程软件请求改动，连接允许 AI 修改、不是只读；

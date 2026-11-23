@@ -30,7 +30,7 @@ func parseLifeArgs(in json.RawMessage) (softwareLifeArgs, error) {
 		return a, fmt.Errorf("参数格式不对：%v", err)
 	}
 	if !reSoftwareName.MatchString(a.Name) {
-		return a, fmt.Errorf("要给出 name：Ferry 装的软件的实例名（list_software 里的 instance）")
+		return a, fmt.Errorf("要给出 name：Ferry 装的软件的实例名（server_software 里的 instance）")
 	}
 	return a, nil
 }
@@ -38,11 +38,11 @@ func parseLifeArgs(in json.RawMessage) (softwareLifeArgs, error) {
 func (e *Engine) aiSoftwareLife(t *config.Target) []ai.Tool {
 	return []ai.Tool{{
 		Name: "software_upgrade",
-		Description: "把 Ferry 用安装包装的软件（list_software 里 upgradable 为 true 的）升级到新版本：换掉程序，配置、数据带到新版本，" +
+		Description: "把 Ferry 用安装包装的软件（server_software 里 upgradable 为 true 的）升级到新版本：换掉程序，配置、数据带到新版本，" +
 			"新版本放不上、起不来时自动换回旧版本。version 不填 = 最新；没有下载地址的软件先让用户在 Ferry 里导入新版本的安装包，用 package 指定。" +
 			"跨大版本升级（如 2.x → 3.x）可能不兼容：先告诉用户风险、建议先备份，用户同意后再填 major: true。数据库升级前先 backup_run 备份。从软件源装的软件不能在这里升级。",
 		Schema: schema(map[string]any{
-			"name":    str("Ferry 装的软件的实例名（list_software 里的 instance）"),
+			"name":    str("Ferry 装的软件的实例名（server_software 里的 instance）"),
 			"version": str("要升到的版本；不填 = 最新"),
 			"package": str("用本机安装包库里的这个文件（software_templates 的 library 里的 file）"),
 			"major":   map[string]any{"type": "boolean", "description": "跨大版本升级：只有告诉用户风险、用户同意后才填 true"},
@@ -82,8 +82,8 @@ func (e *Engine) aiSoftwareLife(t *config.Target) []ai.Tool {
 		},
 	}, {
 		Name:        "software_restore",
-		Description: "恢复卸载时保留了数据的 Ferry 软件（list_software 结果里 kept 列出的）：照原样建回系统服务、启动，密码还是原来的。",
-		Schema:      schema(map[string]any{"name": str("卸载时保留了数据的软件的实例名（list_software 结果里 kept 的 name）")}, "name"),
+		Description: "恢复卸载时保留了数据的 Ferry 软件（server_software 结果里 kept 列出的）：照原样建回系统服务、启动，密码还是原来的。",
+		Schema:      schema(map[string]any{"name": str("卸载时保留了数据的软件的实例名（server_software 结果里 kept 的 name）")}, "name"),
 		Approve: func(ctx context.Context, in json.RawMessage) *ai.Approval {
 			a, err := parseLifeArgs(in)
 			if err != nil {
@@ -107,7 +107,7 @@ func (e *Engine) aiSoftwareLife(t *config.Target) []ai.Tool {
 		Description: "给 Ferry 装的 MySQL、MariaDB、PostgreSQL 设置数据备份：在服务器上写好只有 root 能读的备份密码文件，在项目的 ferry.yaml 的 backups 里加上一项。" +
 			"加好后要用户在 Ferry 的「数据备份」里打开才按时备份（你不能替用户打开）；现在就要备份一份用 backup_run。",
 		Schema: schema(map[string]any{
-			"name":     str("Ferry 装的数据库的实例名（list_software 里的 instance）"),
+			"name":     str("Ferry 装的数据库的实例名（server_software 里的 instance）"),
 			"database": str("备份哪个库；不填 = 全部库"),
 		}, "name"),
 		Approve: func(ctx context.Context, in json.RawMessage) *ai.Approval {

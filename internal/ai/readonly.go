@@ -8,7 +8,30 @@ import (
 	"github.com/captain/ferry/internal/proto"
 )
 
-// ReadOnly 检查模型要执行的命令是不是只读的：只看、不改服务器。不是的返回原因（交回给模型）。
+// FixedDiagnostic maps an exact, normalized diagnostic request to a Ferry-owned
+// command. No argument or path supplied by the caller reaches the remote shell.
+func FixedDiagnostic(request string) (string, error) {
+	switch strings.Join(strings.Fields(request), " ") {
+	case "df -h":
+		return "/usr/bin/df -h", nil
+	case "free -h":
+		return "/usr/bin/free -h", nil
+	case "uptime":
+		return "/usr/bin/uptime", nil
+	case "uname -r":
+		return "/usr/bin/uname -r", nil
+	case "uname -m":
+		return "/usr/bin/uname -m", nil
+	default:
+		return "", fmt.Errorf("自动诊断只支持 df -h、free -h、uptime、uname -r、uname -m；请优先使用 Ferry 的状态、日志和端口工具")
+	}
+}
+
+// FixedDiagnosticHelp is shared by the model and MCP tool descriptions.
+const FixedDiagnosticHelp = "自动诊断支持 df -h、free -h、uptime、uname -r、uname -m。"
+
+// ReadOnly preserves the legacy command classifier for regression tests.
+// Automated execution uses FixedDiagnostic, which never executes a caller-supplied command.
 //
 // 规则偏严：只认识的命令、只认识的用法才放行；拿不准的一律拒绝，由用户自己在终端里执行。
 //   - 可以用 | && || ; 连接多条命令，每一条都要通过；

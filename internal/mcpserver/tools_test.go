@@ -47,11 +47,27 @@ func TestTools(t *testing.T) {
 	for _, p := range byName["deploy"].Params {
 		names = append(names, p.Name)
 	}
-	if !slices.Equal(names, []string{"project", "target", "apps", "skipBuild", "reason", "targets", "batch", "canary", "observeSec", "onFailure"}) {
+	if !slices.Equal(names, []string{"project", "target", "apps", "skipBuild", "reason", "full", "noRollback", "keepPerms", "keep", "targets", "batch", "canary", "observeSec", "onFailure"}) {
 		t.Errorf("deploy 的参数：%v", names)
 	}
 	if p := byName["deploy"].Params[2]; p.Type != "string[]" || !p.Required || p.Description == "" {
 		t.Errorf("apps：%+v", p)
+	}
+	// 文件与查看类工具：上传要确认、其余只读；参数齐全
+	if u := byName["files_upload"]; !u.Change || !u.Server {
+		t.Errorf("files_upload：%+v", u)
+	}
+	var lp []string
+	for _, p := range byName["files_list"].Params {
+		lp = append(lp, p.Name)
+	}
+	if !slices.Equal(lp, []string{"project", "target", "path", "limit"}) {
+		t.Errorf("files_list 的参数：%v", lp)
+	}
+	for _, n := range []string{"files_preview", "files_size", "files_access", "server_info", "app_info", "app_log_runs", "keep_scan"} {
+		if ti := byName[n]; ti.Change || !ti.Server || ti.Title == "" || ti.Description == "" {
+			t.Errorf("%s：%+v", n, ti)
+		}
 	}
 	found := map[string]ParamInfo{}
 	for _, p := range byName["create_project"].Params {

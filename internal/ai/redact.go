@@ -14,7 +14,7 @@ const mask = "******"
 var (
 	rePEM = regexp.MustCompile(`-----BEGIN ([A-Z ]*)PRIVATE KEY-----[\s\S]*?-----END ([A-Z ]*)PRIVATE KEY-----`)
 	// key = value、key: value、"key": "value"（名字里带 password、secret、token、apikey……）
-	reKV = regexp.MustCompile(`(?i)([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|requirepass|masterauth)[\w.-]*["']?\s*[:=]\s*)(["']?)([^\s"',;}]+)`)
+	reKV = regexp.MustCompile(`(?i)([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|requirepass|masterauth)[\w.-]*["']?[ \t]*[:=][ \t]*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s"',;}]+)`)
 	// 配置文件里「名字 值」一行（如 redis 的 requirepass xxx）
 	reLineKV = regexp.MustCompile(`(?im)^(\s*[\w.-]*(?:password|passwd|secret|token|requirepass|masterauth)[\w.-]*[ \t]+)(\S+)[ \t]*$`)
 	reURL    = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]+):([^\s@/]+)@`)
@@ -55,10 +55,15 @@ func redact(s string) string {
 	s = rePEM.ReplaceAllString(s, "-----BEGIN ${1}PRIVATE KEY-----（已隐藏）-----END ${2}PRIVATE KEY-----")
 	s = reKV.ReplaceAllStringFunc(s, func(m string) string {
 		sub := reKV.FindStringSubmatch(m)
-		if notSecret[strings.ToLower(sub[3])] || strings.HasPrefix(sub[3], "$") {
-			return m // 布尔、变量引用（$PASSWORD）不遮
+		value := sub[2]
+		quote := ""
+		if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+			quote, value = value[:1], value[1:len(value)-1]
 		}
-		return sub[1] + sub[2] + mask
+		if notSecret[strings.ToLower(value)] || strings.HasPrefix(value, "$") || strings.HasPrefix(value, "\x00") {
+			return m
+		}
+		return sub[1] + quote + mask + quote
 	})
 	s = reLineKV.ReplaceAllStringFunc(s, func(m string) string {
 		sub := reLineKV.FindStringSubmatch(m)

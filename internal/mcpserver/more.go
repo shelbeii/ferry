@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/engine"
@@ -113,9 +114,7 @@ func (s *server) addMoreTools(m *mcp.Server) {
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(true)}
 
 	addTool(s, m, &mcp.Tool{Name: "run_command", Title: "执行只读命令",
-		Description: "在服务器上执行一条只读的 shell 命令（看磁盘、内存、进程、端口、配置文件、systemctl status、journalctl、docker ps 等），返回输出和退出码。" +
-			"只放行确定不改东西的命令（和 Ferry 的 AI 助手只读模式同一套规则），改东西的、交互式的、一直不结束的会被拒绝；访问本机和内网以外的地址也不行。" +
-			"最多运行 60 秒，输出太长保留开头和结尾。「新建连接」的服务器也能用。",
+		Description: "执行 Ferry 提供的固定服务器诊断。" + ai.FixedDiagnosticHelp,
 		Annotations: readOnly},
 		logged(s, "run_command", func(ctx context.Context, in commandIn) (any, error) {
 			return s.withEngineAny(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
@@ -318,7 +317,7 @@ func (s *server) addPrompts(m *mcp.Server) {
 1. list_projects 确认项目、服务器和应用名（没指定服务器时问我用哪台，生产服务器只看不改）。
 2. app_status 看是否在运行、端口、健康检查、当前版本。
 3. app_logs 看最近的日志；用 keyword 搜 ERROR、Exception、Caused by，找到第一处出错。需要时看 source=file 的日志文件。
-4. 需要看系统情况时用 run_command 执行只读命令（磁盘、内存、端口、配置文件）。
+4. 用 run_command 运行固定诊断，端口和日志请使用相应的结构化工具。
 5. 对照代码找原因，给出结论和依据（哪条日志、哪个命令的输出）和修改建议。不要自己部署或重启，要做的话先问我。`,
 				where(a), a["app"], orDash(a["symptom"]))), nil
 		})

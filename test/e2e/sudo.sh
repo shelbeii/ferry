@@ -20,6 +20,9 @@ dx b '
   chmod 0440 /etc/sudoers.d/ferry-sudo
   install -m 0600 /dev/null /root/ferry-sudo-e2e.txt
   echo ferry-sudo-backup-content > /root/ferry-sudo-e2e.txt
+  install -d -m 0700 /root/ferry-e2e-ai/releases/fixture-v1/logs
+  ln -s releases/fixture-v1 /root/ferry-e2e-ai/running
+  printf "fixture log contents must not be sent by listing\n" > /root/ferry-e2e-ai/running/logs/fixture-app.log
 ' || die "创建 sudo 测试用户失败"
 
 cat > "$sudoFixture/ferry.yaml" <<EOF

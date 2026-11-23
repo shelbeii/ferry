@@ -201,35 +201,42 @@ type ToolCall struct {
 
 // Tool 交给模型的工具。
 type Tool struct {
-	Name        string
-	Description string
-	Schema      map[string]any // JSON Schema（object）
-	Run         func(ctx context.Context, input json.RawMessage) (string, error)
+	RequireApproval bool // Skip execution when a required preview cannot be prepared.
+	Name            string
+	Description     string
+	Schema          map[string]any // JSON Schema（object）
+	Run             func(ctx context.Context, input json.RawMessage) (string, error)
 	// Approve 这次调用要不要用户确认：返回 nil 表示不用（只读）；没有设置也不用。
 	Approve func(ctx context.Context, input json.RawMessage) *Approval
 }
 
 // Approval 要用户确认的一个改动。
 type Approval struct {
-	Kind   string `json:"kind"`             // 同类操作的标识：用户选「本次对话同类不再询问」后按它放行
-	Title  string `json:"title"`            // 一句话说明，如「执行命令」「重启应用 System」
-	Detail string `json:"detail,omitempty"` // 完整的命令、要写的文件内容（或差异）等
-	Danger string `json:"danger,omitempty"` // 危险的原因：非空时每次都要确认
-	Once   string `json:"once,omitempty"`   // 每次都要确认的原因（执行别的命令或代码、访问外部地址……），不能「同类不再询问」
-	AsRoot bool   `json:"asRoot,omitempty"` // 以 root 执行
+	Scope       string `json:"scope,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	ID          string `json:"id,omitempty"`     // Ferry-generated identity of this pending approval.
+	State       string `json:"state,omitempty"`  // Opaque snapshot used by the tool at execution.
+	Kind        string `json:"kind"`             // 同类操作的标识：用户选「本次对话同类不再询问」后按它放行
+	Title       string `json:"title"`            // 一句话说明，如「执行命令」「重启应用 System」
+	Detail      string `json:"detail,omitempty"` // 完整的命令、要写的文件内容（或差异）等
+	Danger      string `json:"danger,omitempty"` // 危险的原因：非空时每次都要确认
+	Once        string `json:"once,omitempty"`   // 每次都要确认的原因（执行别的命令或代码、访问外部地址……），不能「同类不再询问」
+	AsRoot      bool   `json:"asRoot,omitempty"` // 以 root 执行
 	// Fields 要用户填的密码、账号（ask_secret）：界面上显示输入框，用户填好了才执行
 	Fields []SecretField `json:"fields,omitempty"`
 }
 
 // 用户的决定
 const (
-	Approve = "approve" // 执行
-	Always  = "always"  // 执行，并且本次对话里同类的不再询问
-	Reject  = "reject"  // 不执行
+	Approve      = "approve" // 执行
+	Always       = "always"  // 执行，并且本次对话里同类的不再询问
+	Reject       = "reject"  // 不执行
+	AutoApproved = "auto"    // 按本机自动确认设置执行
 )
 
 // Pending 等用户确认的工具调用：第一个要确认，后面的是模型同一轮里要的其余调用。
 type Pending struct {
+	Scope    string     `json:"scope,omitempty"` // Snapshot of the effective target and the verified SSH identity.
 	Calls    []ToolCall `json:"calls"`
 	Approval Approval   `json:"approval"`
 }
@@ -244,7 +251,7 @@ type AuditEntry struct {
 	Input    string    `json:"input"` // 调用的参数（遮住了密码）
 	Kind     string    `json:"kind"`
 	Danger   string    `json:"danger,omitempty"`
-	Decision string    `json:"decision"` // approve | always | allowed（同类已放行）| reject | skipped（没确认就说了别的）
+	Decision string    `json:"decision"` // approve | always | allowed | auto | reject | skipped
 	Result   string    `json:"result,omitempty"`
 	IsError  bool      `json:"isError,omitempty"`
 }
@@ -262,8 +269,9 @@ type Event struct {
 	Result  string    `json:"result,omitempty"`
 	IsError bool      `json:"isError,omitempty"`
 	// Approval confirm：要用户确认的内容；call：同类已放行、直接执行的改动（Allowed 为 true）
-	Approval *Approval `json:"approval,omitempty"`
-	Allowed  bool      `json:"allowed,omitempty"`
+	Approval     *Approval `json:"approval,omitempty"`
+	Allowed      bool      `json:"allowed,omitempty"`
+	AutoApproved bool      `json:"autoApproved,omitempty"`
 	// usage：这次请求的用量和模型
 	Usage *Usage `json:"usage,omitempty"`
 	Model string `json:"model,omitempty"`
@@ -304,6 +312,9 @@ func (c *Conversation) Recover() bool {
 	return true
 }
 
+// ValidConversationID reports whether an ID can be used for a local history entry.
+func ValidConversationID(id string) bool { return reConvID.MatchString(id) }
+
 var reConvID = regexp.MustCompile(`^[0-9a-z-]{8,40}$`)
 
 // NewID 新对话的 ID。
@@ -315,7 +326,7 @@ func NewID() string {
 
 // Load 读对话；不存在时返回新的空对话。
 func Load(dir, id string) (*Conversation, error) {
-	if !reConvID.MatchString(id) {
+	if !ValidConversationID(id) {
 		return nil, fmt.Errorf("对话 ID 无效：%q", id)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, id+".json"))
@@ -358,20 +369,42 @@ const ResultLimit = 16 << 10
 
 // Loop 一段对话的执行：模型、系统提示、工具。
 type Loop struct {
-	Provider Provider
-	System   string
-	Tools    []Tool
-	Emit     func(Event)
+	Scope      string
+	ApprovalID string
+	Provider   Provider
+	System     string
+	Tools      []Tool
+	Emit       func(Event)
+	// AutoApprove is a local policy for newly proposed, structured operations.
+	AutoApprove func(ToolCall, *Approval) bool
+	// ModelOutput can withhold tool details while retaining the local result.
+	ModelOutput func(ToolCall, string, bool) string
 	// Audit 记下每个要确认的调用（可以为空）
 	Audit func(AuditEntry)
 	// Save 保存对话（可以为空）：每执行一步就存一次，中途退出也不会丢掉已经做了的决定
-	Save func()
+	Save func() error
 }
 
-func (l *Loop) save() {
-	if l.Save != nil {
-		l.Save()
+func (l *Loop) save() error {
+	if l.Save == nil {
+		return nil
 	}
+	if err := l.Save(); err != nil {
+		return fmt.Errorf("无法保存对话，操作已暂停：%w", err)
+	}
+	return nil
+}
+
+// WithApprovedState binds execution to the snapshot that the user reviewed.
+func WithApprovedState(ctx context.Context, state string) context.Context {
+	return context.WithValue(ctx, approvedStateKey{}, state)
+}
+
+type approvedStateKey struct{}
+
+func ApprovedState(ctx context.Context) string {
+	state, _ := ctx.Value(approvedStateKey{}).(string)
+	return state
 }
 
 // Run 简写：把用户的话交给模型，直到它给出回答。
@@ -392,8 +425,10 @@ func (l *Loop) Send(ctx context.Context, conv *Conversation, user string, images
 		conv.Pending = nil
 	}
 	// 用户又在对话里直接打了填过的值：也遮住
-	conv.Messages = append(conv.Messages, Message{Role: "user", Text: MaskSecrets(conv.ID, user), Images: images})
-	l.save()
+	conv.Messages = append(conv.Messages, Message{Role: "user", Text: Redact(MaskSecrets(conv.ID, user)), Images: images})
+	if err := l.save(); err != nil {
+		return err
+	}
 	return l.loop(ctx, conv)
 }
 
@@ -402,6 +437,9 @@ func (l *Loop) Decide(ctx context.Context, conv *Conversation, decision string) 
 	pd := conv.Pending
 	if pd == nil || len(pd.Calls) == 0 {
 		return errors.New("没有等待确认的操作（可能已经处理过了）")
+	}
+	if l.Scope != "" && (pd.Approval.ID == "" || l.ApprovalID != pd.Approval.ID || (decision != Reject && l.Scope != pd.Scope)) {
+		return errors.New("确认已失效或服务器状态已变更，请重新发起操作")
 	}
 	if decision != Approve && decision != Always && decision != Reject {
 		return fmt.Errorf("不认识的决定：%s", decision)
@@ -461,7 +499,9 @@ func (l *Loop) runCalls(ctx context.Context, conv *Conversation, calls []ToolCal
 				l.audit(conv, c, ap, Reject, "", false)
 				l.Emit(Event{Type: "result", Call: &c, Result: out, IsError: true})
 				conv.Messages = append(conv.Messages, Message{Role: "tool", CallID: c.ID, Text: out, IsError: true})
-				l.save()
+				if err := l.save(); err != nil {
+					return false, err
+				}
 				continue
 			}
 			if decision == Always && ap.Danger == "" && ap.Once == "" {
@@ -475,14 +515,30 @@ func (l *Loop) runCalls(ctx context.Context, conv *Conversation, calls []ToolCal
 				ap = t.Approve(ctx, c.Input)
 			}
 			switch {
+			case ap == nil && byName[c.Name].RequireApproval:
+				out := "没有执行：无法生成可确认的操作预览，请检查参数和当前状态。"
+				l.Emit(Event{Type: "call", Call: &c})
+				l.Emit(Event{Type: "result", Call: &c, Result: out, IsError: true})
+				conv.Messages = append(conv.Messages, Message{Role: "tool", CallID: c.ID, Text: out, IsError: true})
+				if err := l.save(); err != nil {
+					return false, err
+				}
+				continue
 			case ap == nil:
 				l.Emit(Event{Type: "call", Call: &c})
+			case l.AutoApprove != nil && l.AutoApprove(c, ap):
+				how = AutoApproved
 			case ap.Danger == "" && ap.Once == "" && conv.Allowed[ap.Kind]:
 				how = "allowed"
 				l.Emit(Event{Type: "call", Call: &c, Approval: ap, Allowed: true})
 			default:
-				conv.Pending = &Pending{Calls: calls[i:], Approval: *ap}
-				l.save()
+				if l.Scope != "" {
+					ap.ID = rand.Text()
+				}
+				conv.Pending = &Pending{Calls: calls[i:], Approval: *ap, Scope: l.Scope}
+				if err := l.save(); err != nil {
+					return false, err
+				}
 				l.Emit(Event{Type: "call", Call: &c})
 				l.Emit(Event{Type: "confirm", Call: &c, Approval: ap})
 				return true, nil
@@ -491,8 +547,17 @@ func (l *Loop) runCalls(ctx context.Context, conv *Conversation, calls []ToolCal
 		// 先记下「正在执行」再执行：中途退出时不会被当成还没确认
 		record(conv, c, ap, how)
 		conv.Executing = calls[i:]
-		l.save()
-		out, isErr := runTool(withProgress(ctx, l.Emit, c), byName, c)
+		if err := l.save(); err != nil {
+			return false, err
+		}
+		if how == AutoApproved {
+			l.Emit(Event{Type: "call", Call: &c, Approval: ap, AutoApproved: true})
+		}
+		runCtx := withProgress(ctx, l.Emit, c)
+		if ap != nil {
+			runCtx = WithApprovedState(runCtx, ap.State)
+		}
+		out, isErr := runTool(runCtx, byName, c)
 		conv.Executing = nil
 		if ctx.Err() != nil {
 			// 停止了：这个调用和后面的都没有结果，补上，免得对话接不下去
@@ -505,8 +570,14 @@ func (l *Loop) runCalls(ctx context.Context, conv *Conversation, calls []ToolCal
 		l.audit(conv, c, ap, how, out, isErr)
 		l.Emit(Event{Type: "result", Call: &c, Result: out, IsError: isErr})
 		// 交给模型（也存进对话记录）的输出遮住密码、密钥和用户填过的值；界面上实时显示的是完整的
-		conv.Messages = append(conv.Messages, Message{Role: "tool", CallID: c.ID, Text: Clip(Redact(MaskSecrets(conv.ID, out)), ResultLimit), IsError: isErr})
-		l.save()
+		modelOut := out
+		if l.ModelOutput != nil {
+			modelOut = l.ModelOutput(c, modelOut, isErr)
+		}
+		conv.Messages = append(conv.Messages, Message{Role: "tool", CallID: c.ID, Text: Clip(Redact(MaskSecrets(conv.ID, modelOut)), ResultLimit), IsError: isErr})
+		if err := l.save(); err != nil {
+			return false, err
+		}
 	}
 	return false, nil
 }

@@ -35,6 +35,14 @@ func TestRedact(t *testing.T) {
 	}
 }
 
+func TestRedactQuotedValues(t *testing.T) {
+	in := "password=\"sample with spaces\"\napiKey: 'sample with quote \\' inside'\npassword={{secret:demo}}"
+	want := "password=\"******\"\napiKey: '******'\npassword={{secret:demo}}"
+	if got := Redact(in); got != want {
+		t.Fatalf("Redact = %q, want %q", got, want)
+	}
+}
+
 // 用通配符、{a,b} 写敏感文件也不能自动读
 func TestSensitivePatterns(t *testing.T) {
 	if ReadOnly("cat /root/.ss?/id_*") == nil || ReadOnly("cat ~/.ssh/{id_rsa,x}") == nil {

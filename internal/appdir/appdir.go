@@ -42,19 +42,27 @@ type Info struct {
 }
 
 var (
-	once   sync.Once
-	cached Info
-	err0   error
+	cacheMu sync.Mutex
+	cached  *Info
 )
 
 // Current 当前数据目录（进程内只解析一次；Reset 后重新解析）。
 func Current() Info {
-	once.Do(func() { cached, err0 = resolve() })
-	return cached
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if cached == nil {
+		info, _ := resolve()
+		cached = &info
+	}
+	return *cached
 }
 
 // Reset 清除缓存（修改位置后、测试中使用）。
-func Reset() { once = sync.Once{} }
+func Reset() {
+	cacheMu.Lock()
+	cached = nil
+	cacheMu.Unlock()
+}
 
 // Dir 数据目录。
 func Dir() string { return Current().Dir }

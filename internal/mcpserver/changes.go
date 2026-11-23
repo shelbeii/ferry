@@ -37,6 +37,11 @@ type deployIn struct {
 	Apps      []string `json:"apps" jsonschema:"要部署的应用（必须写明，不会默认部署全部）"`
 	SkipBuild bool     `json:"skipBuild,omitempty" jsonschema:"跳过本机构建，直接用现有的产物（确认产物已经是最新的才用）"`
 	Reason    string   `json:"reason" jsonschema:"为什么要部署（显示在 Ferry 的确认框里）"`
+	// 和 CLI / 部署对话框一致的可选项
+	Full       bool            `json:"full,omitempty" jsonschema:"全量上传（不用增量；怀疑服务器上的文件不对时用）"`
+	NoRollback bool            `json:"noRollback,omitempty" jsonschema:"失败时保留失败版本，不自动回滚（排查用）"`
+	KeepPerms  bool            `json:"keepPerms,omitempty" jsonschema:"不自动修正权限（默认会把运行用户访问不了的目录、不安全的部署目录改好）"`
+	Keep       json.RawMessage `json:"keep,omitempty" jsonschema:"这次保留服务器上的文件，代替 ferry.yaml 里的 artifact.keep，如 {\"api\":[{\"path\":\"config.js\"},{\"path\":\"uploads\",\"shared\":true}]}"`
 	// 一次部署到几台
 	Targets    []string `json:"targets,omitempty" jsonschema:"一次部署到几台服务器时写全（按切换的顺序；写了就不用 target）。构建一次，同时上传，再按切换方式切换"`
 	Batch      int      `json:"batch,omitempty" jsonschema:"部署到几台时：一次同时切换几台；不填 = 用 ferry.yaml 的 rollout（默认 1）"`
@@ -152,6 +157,7 @@ func (s *server) addChangeTools(m *mcp.Server) {
 				return nil, errors.New("要用 apps 写明部署哪些应用")
 			}
 			r := approve.Request{Action: "deploy", Apps: in.Apps, SkipBuild: in.SkipBuild, Reason: in.Reason,
+				Full: in.Full, NoRollback: in.NoRollback, KeepPerms: in.KeepPerms, Keep: in.Keep,
 				Batch: in.Batch, Canary: in.Canary, ObserveSec: in.ObserveSec, OnFailure: in.OnFailure}
 			if len(in.Targets) > 0 {
 				if in.Target != "" && in.Target != in.Targets[0] {
@@ -246,8 +252,8 @@ func PrepareRequest(r *approve.Request) error {
 	if _, ok := actionNames[r.Action]; !ok {
 		return fmt.Errorf("不支持的操作：%s", r.Action)
 	}
-	if r.ClientConfirmed && (r.Action == "create" || r.Action == "secret") {
-		return errors.New("新建项目、填写密码只能在 Ferry 里确认")
+	if r.ClientConfirmed {
+		return errors.New("此操作需要在 Ferry 里确认")
 	}
 	if r.Action == "db-exec" {
 		return prepareDB(r)
@@ -275,9 +281,7 @@ func PrepareRequest(r *approve.Request) error {
 	if err := ChangeAllowed(st, f, t); err != nil {
 		return err
 	}
-	if r.ClientConfirmed && st.MCP.ConfirmIn != "client" {
-		return errors.New("Ferry 设置里没有选在编程软件里确认改动：要在 Ferry 里确认")
-	}
+	r.Config, r.Project, r.Target, r.Host = f.Path, f.Project, t.Name, t.Host
 	if _, ok := aiActionTool[r.Action]; ok {
 		e := &engine.Engine{File: f, Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Ctx: context.Background(), Getenv: os.Getenv}
 		return prepareAI(e, r)
@@ -343,9 +347,8 @@ func PrepareRequest(r *approve.Request) error {
 // change 检查是否允许，补上给人看的信息，交给桌面版；最多等 waitCap，没结束就返回 id。
 func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in targetIn, r approve.Request) (any, error) {
 	if req != nil && req.Params != nil && req.Params.RequestState != "" {
-		return s.confirmed(ctx, req)
+		return nil, errors.New("旧的客户端确认已失效，请重新发起并在 Ferry 里确认")
 	}
-	inClient := false
 	_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, target string) (any, error) {
 		t, _ := e.File.Target(target)
 		if err := ChangeAllowed(e.Settings, e.File, t); err != nil {
@@ -371,139 +374,17 @@ func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in target
 		} else {
 			r.Detail = preview(e, target, r)
 		}
-		inClient = e.Settings.MCP.ConfirmIn == "client"
 		return nil, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return s.ask(ctx, req, r, inClient)
+	return s.ask(ctx, req, r)
 }
 
-// ask 交给用户确认：设置里选了在编程软件里确认、编程软件也支持时先在编程软件里问，否则交给桌面版；最多等 waitCap。
-func (s *server) ask(ctx context.Context, req *mcp.CallToolRequest, r approve.Request, inClient bool) (any, error) {
-	// 设置里选了在编程软件里确认、编程软件也支持时，先让编程软件问用户（用户在编程软件的界面里回答，不经过模型），
-	// 回答后编程软件带着回答再调一次（见上面）；密码始终在 Ferry 里填
-	if inClient && r.Action != "secret" && canElicit(req) {
-		state := newID() + newID()
-		s.mu.Lock()
-		s.confirms[state] = pendingConfirm{r: r, at: time.Now()}
-		s.mu.Unlock()
-		return &mcp.CallToolResult{InputRequests: mcp.InputRequestMap{confirmKey: confirmForm(r)}, RequestState: state}, nil
-	}
+// ask waits for the local Ferry approver.
+func (s *server) ask(ctx context.Context, req *mcp.CallToolRequest, r approve.Request) (any, error) {
 	return s.submit(r).wait(ctx, req, waitCap)
-}
-
-// confirmKey 交给编程软件的确认表单的标识。
-const confirmKey = "ferry-confirm"
-
-// confirmed 编程软件带着用户的回答再调一次：按第一次准备好的请求执行（同意时）。
-func (s *server) confirmed(ctx context.Context, req *mcp.CallToolRequest) (any, error) {
-	p := req.Params
-	s.mu.Lock()
-	c, ok := s.confirms[p.RequestState]
-	delete(s.confirms, p.RequestState)
-	s.mu.Unlock()
-	if !ok {
-		return nil, errors.New("这次确认已经失效（ferry mcp 重启过，或者已经回答过）：要做的话重新调用")
-	}
-	r := c.r
-	res, _ := p.InputResponses[confirmKey].(*mcp.ElicitResult)
-	took := time.Since(c.at)
-	answer, how := judgeAnswer(res, took)
-	// 记下编程软件回答了什么、用了多久（编程软件没把确认框给用户看时，从这里看得出来）
-	args, _ := json.Marshal(map[string]any{"project": r.Project, "target": r.Target, "action": actionNames[r.Action], "answer": answer})
-	writeLog(callEntry{Time: time.Now(), Client: r.Client, Tool: r.Action + "（编程软件里确认）", Op: r.ID, Args: args,
-		OK: how == answerYes, Decision: answerText[how], Ms: took.Milliseconds()})
-	switch how {
-	case answerYes:
-		r.ClientConfirmed = true
-	case answerNo:
-		return nil, fmt.Errorf("没有执行%s：用户在 %s 里拒绝了。不要换个办法做同样的事，先问用户怎么办", opTitle(r), orDash(r.Client))
-	default:
-		// 编程软件没让用户确认（回答得太快、没有明确的选择）：改在 Ferry 里弹窗确认
-		r.Detail = append([]string{fmt.Sprintf("%s 没有让你确认（%s），改在 Ferry 里确认", orDash(r.Client), answer)}, r.Detail...)
-	}
-	return s.submit(r).wait(ctx, req, waitCap)
-}
-
-// pendingConfirm 等用户在编程软件里确认的改动，和交给编程软件的时间。
-type pendingConfirm struct {
-	r  approve.Request
-	at time.Time
-}
-
-// minAnswer 编程软件的回答至少要隔这么久才算用户看过、点过：更快的是编程软件自己回的（没显示确认框，或者按默认值自动提交）。
-var minAnswer = 2 * time.Second
-
-const (
-	answerYes   = "yes"   // 用户同意
-	answerNo    = "no"    // 用户明确拒绝
-	answerFerry = "ferry" // 编程软件没让用户确认：改在 Ferry 里确认
-)
-
-var answerText = map[string]string{answerYes: "在编程软件里同意", answerNo: "在编程软件里拒绝", answerFerry: "编程软件没让用户确认，改在 Ferry 里确认"}
-
-// judgeAnswer 编程软件交回的回答算什么：只有用户看过之后明确点了同意 / 拒绝才算数，其余的改在 Ferry 里确认。
-// 返回给人看的回答说明（动作、内容、用时）和结论。
-func judgeAnswer(res *mcp.ElicitResult, took time.Duration) (string, string) {
-	if res == nil {
-		return fmt.Sprintf("没有回答，%.1f 秒", took.Seconds()), answerFerry
-	}
-	content, _ := json.Marshal(res.Content)
-	desc := fmt.Sprintf("回答 %s %s，%.1f 秒", orDash(res.Action), content, took.Seconds())
-	if took < minAnswer {
-		return desc, answerFerry
-	}
-	switch res.Action {
-	case "accept":
-		v, ok := res.Content["approve"].(bool)
-		if !ok || v { // 没有这一项（编程软件不显示勾选框）也算同意：用户点的是提交
-			return desc, answerYes
-		}
-		return desc, answerNo
-	case "decline":
-		return desc, answerNo
-	}
-	return desc, answerFerry // cancel：关掉了，没有选
-}
-
-// canElicit 编程软件支不支持在它的界面里弹出表单（MCP 的 elicitation）。
-func canElicit(req *mcp.CallToolRequest) bool {
-	if req == nil || req.Session == nil {
-		return false
-	}
-	p := req.Session.InitializeParams()
-	if p == nil || p.Capabilities == nil || p.Capabilities.Elicitation == nil {
-		return false
-	}
-	el := p.Capabilities.Elicitation
-	return el.Form != nil || el.URL == nil // 两个都没写时按支持表单算
-}
-
-// confirmForm 在编程软件里给用户看的确认表单：要做什么、在哪台服务器、详情、理由，一个「同意执行」。
-func confirmForm(r approve.Request) *mcp.ElicitParams {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Ferry：%s 请求%s\n", orDash(r.Client), opTitle(r))
-	if r.Target != "" {
-		fmt.Fprintf(&b, "服务器：%s（%s）\n", r.Target, r.Host)
-	}
-	if r.Danger != "" {
-		fmt.Fprintf(&b, "危险：%s\n", r.Danger)
-	}
-	for _, d := range r.Detail {
-		b.WriteString(d + "\n")
-	}
-	if r.Reason != "" {
-		fmt.Fprintf(&b, "理由：%s\n", r.Reason)
-	}
-	b.WriteString("同意后由 Ferry 桌面版执行（任务面板里能看到）。看不明白要做什么时请拒绝。")
-	return &mcp.ElicitParams{Mode: "form", Message: ai.Clip(b.String(), 8000), RequestedSchema: map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"approve": map[string]any{"type": "boolean", "title": "同意执行（取消勾选再提交 = 不同意）", "default": true},
-		},
-	}}
 }
 
 func appsOn(f *config.File, t *config.Target) []string {
@@ -546,6 +427,11 @@ func preview(e *engine.Engine, target string, r approve.Request) []string {
 				out = append(out, fmt.Sprintf("构建 %s：%s", st.Name, st.Command))
 			}
 		}
+		var keep map[string][]*config.KeepItem
+		if len(r.Keep) > 0 {
+			_ = json.Unmarshal(r.Keep, &keep)
+		}
+		out = append(out, engine.DeployOptionNotes(engine.DeployOptions{Full: r.Full, NoRollback: r.NoRollback, KeepPerms: r.KeepPerms, Keep: keep})...)
 		// 部署钩子会在服务器上执行命令：确认前要让人看到
 		if t, err := e.File.Target(target); err == nil {
 			if apps, err := e.File.Select(t, r.Apps); err == nil {
@@ -783,12 +669,6 @@ func (s *server) submit(r approve.Request) *op {
 				o.mu.Unlock()
 			},
 			o.addProgress)
-		o.mu.Lock()
-		o.state, o.outcome, o.err = "done", out, err
-		if o.decision == nil && err == nil {
-			o.decision = &d
-		}
-		o.mu.Unlock()
 		args, _ := json.Marshal(map[string]any{"project": r.Project, "target": r.Target, "apps": r.Apps, "name": cmp.Or(r.Software, r.Backup), "port": r.Port, "action": actionNames[r.Action]})
 		entry := callEntry{Time: time.Now(), Client: r.Client, Tool: r.Action + "（结果）", Op: r.ID, Args: args, Ms: time.Since(o.started).Milliseconds()}
 		switch {
@@ -807,7 +687,13 @@ func (s *server) submit(r approve.Request) *op {
 			}
 		}
 		writeLog(entry)
-		close(o.done) // 记下结果之后再告诉等着的调用
+		o.mu.Lock()
+		o.state, o.outcome, o.err = "done", out, err
+		if o.decision == nil && err == nil {
+			o.decision = &d
+		}
+		o.mu.Unlock()
+		close(o.done) // 日志落盘后，等待和轮询的调用都可以看到完成状态。
 	})
 	return o
 }

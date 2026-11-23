@@ -49,6 +49,12 @@ type Request struct {
 	Host      string    `json:"host"`
 	Apps      []string  `json:"apps,omitempty"`
 	SkipBuild bool      `json:"skipBuild,omitempty"` // deploy：跳过构建
+	// deploy：全量上传（不用增量）、失败时保留失败版本（不自动回滚）、不自动修正权限
+	Full       bool `json:"full,omitempty"`
+	NoRollback bool `json:"noRollback,omitempty"`
+	KeepPerms  bool `json:"keepPerms,omitempty"`
+	// Keep 这次保留服务器上的（应用 → 列表，JSON），代替 ferry.yaml 里的 artifact.keep
+	Keep json.RawMessage `json:"keep,omitempty"`
 	// deploy 到多台：Targets 是全部服务器（按切换的顺序，Target 是第一台）；Batch、Canary、ObserveSec、OnFailure 是切换方式
 	// （0 / 空 = 用 ferry.yaml 的 rollout；Canary 为空 = 用配置）
 	Targets    []string `json:"targets,omitempty"`
@@ -70,10 +76,12 @@ type Request struct {
 	Content string          `json:"content,omitempty"`
 	// exec | write-file | install | tpl-save：用服务器助手的工具 Tool 执行，Input 是它的参数（确认框里的内容由桌面版按它重新算）；
 	// secret：让用户在 Ferry 里填 Fields，值只记在桌面版
-	Tool   string           `json:"tool,omitempty"`
-	Input  json.RawMessage  `json:"input,omitempty"`
-	Fields []ai.SecretField `json:"fields,omitempty"`
-	Danger string           `json:"danger,omitempty"` // 危险的原因（桌面版算的）
+	Tool    string           `json:"tool,omitempty"`
+	Input   json.RawMessage  `json:"input,omitempty"`
+	AIState string           `json:"aiState,omitempty"` // File snapshot captured by Ferry.
+	AIScope string           `json:"aiScope,omitempty"` // Effective target and verified SSH identity.
+	Fields  []ai.SecretField `json:"fields,omitempty"`
+	Danger  string           `json:"danger,omitempty"` // 危险的原因（桌面版算的）
 	// db-exec：在数据库连接 DB（ID；DBName 是它的名称）的库 Database 里执行 Stmts（经服务器连时 Config、Target 是那台服务器）
 	DB       string   `json:"db,omitempty"`
 	DBName   string   `json:"dbName,omitempty"`

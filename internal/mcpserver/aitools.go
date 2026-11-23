@@ -21,7 +21,7 @@ import (
 // aiActionTool 请求的操作 → 用服务器助手的哪个工具执行。
 var aiActionTool = map[string]string{"exec": "run_command", "write-file": "write_file", "install": "software_install", "tpl-save": "save_software_template",
 	"sw-upgrade": "software_upgrade", "sw-restore": "software_restore", "sw-backup": "software_backup",
-	"run-job": "run_job", "backup-fetch": "backup_fetch"}
+	"run-job": "run_job", "backup-fetch": "backup_fetch", "upload-file": "files_upload"}
 
 type changeCmdIn struct {
 	targetIn
@@ -99,7 +99,7 @@ func (s *server) addAITools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "run_change_command", Title: "执行改动服务器的命令",
 		Description: "在服务器上执行一条会改动服务器的 shell 命令（以登录用户执行，需要 root 时加 sudo），返回输出与退出码，最多 30 分钟。" +
-			"只读的命令直接执行、不用确认（和 run_command 一样）。命令不能需要交互，不要在前台运行长期服务；改配置文件用 write_file，装软件先看 software_templates。" +
+			"Ferry 的固定诊断命令直接执行（和 run_command 一样），其他命令逐项在 Ferry 确认。命令不能需要交互，不要在前台运行长期服务；改配置文件用 write_file，装软件先看 software_templates。" +
 			secrets + "命令里写环境变量 \"$FERRY_SECRET_<名字大写>\"（带双引号），执行时由 Ferry 赋值，用到它的命令每次都要确认。" + how,
 		Annotations: change()},
 		loggedReq(s, "run_change_command", func(ctx context.Context, req *mcp.CallToolRequest, in changeCmdIn) (any, error) {
@@ -107,7 +107,7 @@ func (s *server) addAITools(m *mcp.Server) {
 			if cmd == "" {
 				return nil, errors.New("command 是空的")
 			}
-			if ai.ReadOnly(cmd) == nil && !ai.UsesSecrets(cmd) {
+			if _, err := ai.FixedDiagnostic(cmd); err == nil {
 				return s.withEngineAny(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
 					return e.RunReadOnly(t, cmd)
 				})
@@ -117,7 +117,7 @@ func (s *server) addAITools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "write_file", Title: "写文件",
 		Description: "在服务器上写一个文本文件（整个内容），改配置文件用它：确认框里显示和原文件的差异，写之前自动把原文件备份为 <文件>.ferry-bak-<时间>，以 root 写。" +
-			"先用 run_command 的 cat 看原内容，在原内容基础上改。" + secrets + "内容里写代号 {{secret:名字}}，写入时换成真值。" + how,
+			"先请用户核对原文件位置及内容。" + secrets + "内容里写代号 {{secret:名字}}，写入时换成真值。" + how,
 		Annotations: change()},
 		loggedReq(s, "write_file", func(ctx context.Context, req *mcp.CallToolRequest, in writeFileIn) (any, error) {
 			if !strings.HasPrefix(in.Path, "/") {
@@ -230,7 +230,7 @@ func (s *server) aiChange(ctx context.Context, req *mcp.CallToolRequest, in targ
 // aiReadOnly 只读的工具：ferry mcp 自己执行。
 func (s *server) aiReadOnly(ctx context.Context, in targetIn, tool string) (any, error) {
 	return s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
-		out, err := e.AIExec(t, engine.MCPScope(s.session), tool, json.RawMessage("{}"), nil)
+		out, err := e.AIExec(t, engine.MCPScope(s.session), tool, json.RawMessage("{}"), "", "", nil)
 		if err != nil {
 			return nil, err
 		}
@@ -246,6 +246,9 @@ func aiDetail(ap *ai.Approval) []string {
 		head += "（以 root 执行）"
 	}
 	out = append(out, head)
+	if ap.Destination != "" {
+		out = append(out, ap.Destination)
+	}
 	if ap.Once != "" && ap.Danger == "" {
 		out = append(out, "每次都要确认："+ap.Once)
 	}
@@ -269,6 +272,7 @@ func prepareAI(e *engine.Engine, r *approve.Request) error {
 		return errors.New("没有要确认的改动：参数不对、文件内容没变，或者用到的密码还没填（先用 ask_secret）")
 	}
 	r.Detail, r.Danger = aiDetail(ap), ap.Danger
+	r.AIState, r.AIScope = ap.State, ap.Scope
 	return nil
 }
 

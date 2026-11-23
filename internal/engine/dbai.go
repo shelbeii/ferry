@@ -544,12 +544,15 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 				}
 				detail := fmt.Sprintf("连接：%s（Redis），库：db%s\n%s\n\n%s", cn.Name, orDefault(db, "0"), strings.Join(dbx.AIRedisNotes(), "\n"), strings.Join(lines, "\n"))
 				return &ai.Approval{Kind: "数据库：" + cn.ID, Title: fmt.Sprintf("改 Redis %s：%d 条命令", cn.Name, len(lines)), Detail: detail,
-					Danger: dbx.AIRedisDanger(lines), Once: "改数据库的每条命令都要你看过"}
+					Danger: dbx.AIRedisDanger(lines), Once: "改数据库的每条命令都要你看过", State: toJSON([2]string{cn.ApprovalKey(), db})}
 			},
 			Run: func(ctx context.Context, in json.RawMessage) (string, error) {
 				cn, db, lines, err := e.parseDBExec(find, in, true)
 				if err != nil {
 					return "", err
+				}
+				if ai.ApprovedState(ctx) != toJSON([2]string{cn.ApprovalKey(), db}) {
+					return "", errors.New("数据库连接在确认期间发生变化，请重新确认")
 				}
 				r, err := e.AIDBExec(ctx, cn, db, lines)
 				if err != nil {
@@ -590,12 +593,15 @@ func (e *Engine) aiDBTools(t *config.Target, change bool) []ai.Tool {
 			detail := fmt.Sprintf("连接：%s，库：%s\n%s\n\n%s", where, orDefault(db, "（默认）"),
 				strings.Join(notes, "\n"), dbx.AIWriteText(cn.Kind, stmts))
 			return &ai.Approval{Kind: "数据库：" + cn.ID, Title: fmt.Sprintf("改数据库 %s：%d 条语句", cn.Name, len(stmts)), Detail: detail,
-				Danger: dbx.AIWriteDanger(cn.Kind, stmts), Once: "改数据库的每条 SQL 都要你看过"}
+				Danger: dbx.AIWriteDanger(cn.Kind, stmts), Once: "改数据库的每条 SQL 都要你看过", State: toJSON([2]string{cn.ApprovalKey(), db})}
 		},
 		Run: func(ctx context.Context, in json.RawMessage) (string, error) {
 			cn, db, stmts, err := e.parseDBExec(find, in, false)
 			if err != nil {
 				return "", err
+			}
+			if ai.ApprovedState(ctx) != toJSON([2]string{cn.ApprovalKey(), db}) {
+				return "", errors.New("数据库连接在确认期间发生变化，请重新确认")
 			}
 			r, err := e.AIDBExec(ctx, cn, db, stmts)
 			if err != nil {

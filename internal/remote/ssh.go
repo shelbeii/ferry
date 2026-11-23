@@ -70,9 +70,10 @@ func (e *UnknownHostError) Error() string {
 
 // Client 一条 SSH 连接（以及按需创建的 SFTP 会话）。
 type Client struct {
-	ssh  *ssh.Client
-	sftp *sftp.Client
-	Addr string
+	ssh             *ssh.Client
+	sftp            *sftp.Client
+	Addr            string
+	HostFingerprint string // SHA-256 of the verified SSH host key
 
 	sftpMu sync.Mutex
 	dead   atomic.Bool  // 保活失败或已关闭
@@ -127,7 +128,15 @@ func Dial(o Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &ssh.ClientConfig{User: o.User, Auth: auth, HostKeyCallback: hk, HostKeyAlgorithms: algos, Timeout: o.Timeout}
+	var fingerprint string
+	verified := func(host string, addr net.Addr, key ssh.PublicKey) error {
+		if err := hk(host, addr, key); err != nil {
+			return err
+		}
+		fingerprint = ssh.FingerprintSHA256(key)
+		return nil
+	}
+	cfg := &ssh.ClientConfig{User: o.User, Auth: auth, HostKeyCallback: verified, HostKeyAlgorithms: algos, Timeout: o.Timeout}
 	c, err := dialSSH(addr, cfg, hd)
 	if err != nil {
 		var uh *UnknownHostError
@@ -144,7 +153,7 @@ func Dial(o Options) (*Client, error) {
 		}
 		return nil, dialError("连接 "+o.User+"@"+addr+" 失败", err)
 	}
-	cl := &Client{ssh: c, Addr: addr, opts: o}
+	cl := &Client{ssh: c, Addr: addr, HostFingerprint: fingerprint, opts: o}
 	cl.opts.OnNewHostKey = nil // 再建连接（会话数到了上限）时：主机公钥这次已经核对过
 	cl.markOK()
 	// 保活：长时间等待服务启动时不被中间设备断开；失败说明连接已断，标记后复用前会重连

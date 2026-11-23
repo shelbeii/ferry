@@ -10,6 +10,10 @@ RUN dnf install -y systemd openssh-server procps-ng iproute iptables-nft shadow-
  && chown deployer: /home/deployer/.ssh \
  && echo 'deployer:ferry-e2e-pw' | chpasswd \
  && printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' > /etc/ssh/sshd_config.d/10-e2e.conf
+# The host reaches the test containers through one address. Several cases intentionally fail authentication.
+RUN if /usr/sbin/sshd -G 2>/dev/null | grep -q '^persourcepenalties '; then \
+      printf 'PerSourcePenalties no\n' >> /etc/ssh/sshd_config.d/10-e2e.conf; \
+    fi
 # 测试用的「java」：-version 报 /etc/fakejava-version 里的版本（默认 17），其他情况启动测试服务
 COPY fakejava.sh /usr/local/bin/fakejava
 RUN chmod 755 /usr/local/bin/fakejava

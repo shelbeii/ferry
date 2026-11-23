@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/captain/ferry/internal/ai"
+
 	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/config"
 )
@@ -32,12 +34,15 @@ func TestAIConfigTools(t *testing.T) {
 	}, bool) {
 		for _, x := range e.aiConfigTools(tg, change) {
 			if x.Name == name {
+				var state string
 				x := x
 				return &struct {
 					run     func(string) (string, error)
 					approve func(string) (string, string, bool)
 				}{
-					run: func(in string) (string, error) { return x.Run(context.Background(), json.RawMessage(in)) },
+					run: func(in string) (string, error) {
+						return x.Run(ai.WithApprovedState(context.Background(), state), json.RawMessage(in))
+					},
 					approve: func(in string) (string, string, bool) {
 						if x.Approve == nil {
 							return "", "", false
@@ -46,6 +51,7 @@ func TestAIConfigTools(t *testing.T) {
 						if ap == nil {
 							return "", "", false
 						}
+						state = ap.State
 						return ap.Detail, ap.Danger, true
 					},
 				}, true

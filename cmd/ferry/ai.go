@@ -240,7 +240,7 @@ func aiImageCmd(c *cli, cio *cliIO, js *ui.JSON, fail func(error) int) int {
 	return 0
 }
 
-// aiCmd ferry ai <目标> <要问的话…> [--conv <对话>] [--mode readonly|confirm] [--decide approve|always|reject] [--image <图片;…>]：
+// aiCmd ferry ai <目标> <要问的话…> [--conv <对话>] [--mode readonly|confirm] [--approval ID --decide approve|reject] [--image <图片;…>]：
 // 和服务器助手对话一轮。桌面版用环境变量 FERRY_AI_MESSAGE 传话，FERRY_AI_IMAGES 传图片（[{"media","data"}] 的 JSON）。确认模式下遇到改动服务器的操作会停下（结果的 pending），用 --decide 接着执行。
 func aiCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, st settings.Settings, fail func(error) int) int {
 	if len(c.pos) == 0 {
@@ -276,8 +276,8 @@ func aiCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, st settings.Settin
 	if msg == "" && decide == "" && len(images) == 0 {
 		return fail(errors.New("要问什么？"))
 	}
-	if decide != "" && c.flags["conv"] == "" {
-		return fail(errors.New("--decide 要和 --conv 一起用"))
+	if decide != "" && (c.flags["conv"] == "" || c.flags["approval"] == "") {
+		return fail(errors.New("--decide 要和 --conv、--approval 一起用"))
 	}
 	cfg, err := aiConfig(st, cio, c.flags["model"], c.flags["effort"])
 	if err != nil {
@@ -293,7 +293,8 @@ func aiCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, st settings.Settin
 		rewind = n
 	}
 	r, err := e.AIChat(c.pos[0], engine.AIOptions{Conv: c.flags["conv"], Message: msg, Images: images, Decide: decide, Mode: c.flags["mode"],
-		Rewind: rewind, Secrets: secrets, Model: cfg, Emit: emit})
+		ApprovalID: c.flags["approval"], ShareData: c.has("share-data"), Rewind: rewind, Secrets: secrets, Model: cfg, Emit: emit,
+		AutoConfirmWarning: c.has("auto-confirm-warning"), AutoConfirmDanger: c.has("auto-confirm-danger")})
 	if err != nil {
 		if js != nil {
 			js.Result(false, r, err)
@@ -309,8 +310,11 @@ func aiCmd(e *engine.Engine, c *cli, cio *cliIO, js *ui.JSON, st settings.Settin
 	if c.flags["mode"] != "" {
 		mode = " --mode " + c.flags["mode"]
 	}
+	if c.has("share-data") {
+		mode += " --share-data"
+	}
 	if r.Pending {
-		fmt.Fprintf(cio.stdout, "\n（执行：ferry ai %s --conv %s%s --decide approve；同类不再询问用 always，不执行用 reject）\n", c.pos[0], r.Conv, mode)
+		fmt.Fprintf(cio.stdout, "\n（执行：ferry ai %s --conv %s%s --approval %s --decide approve；不执行用 reject）\n", c.pos[0], r.Conv, mode, r.ApprovalID)
 	} else {
 		fmt.Fprintf(cio.stdout, "\n（接着问：ferry ai %s <问题> --conv %s%s）\n", c.pos[0], r.Conv, mode)
 	}
@@ -372,6 +376,9 @@ func aiEmit(js *ui.JSON, cio *cliIO) func(ai.Event) {
 			if ev.Approval != nil {
 				f["approval"] = ev.Approval
 				f["allowed"] = ev.Allowed
+				if ev.AutoApproved {
+					f["autoApproved"] = true
+				}
 			}
 			if ev.Type == "result" {
 				f["result"] = ai.Clip(ev.Result, 64<<10)
@@ -405,6 +412,8 @@ func aiEmit(js *ui.JSON, cio *cliIO) func(ai.Event) {
 			fmt.Fprintf(cio.stdout, "  ▶ %s %s\n", ev.Call.Name, string(ev.Call.Input))
 			if ev.Allowed {
 				fmt.Fprintf(cio.stdout, "    （同类已允许：%s）\n", ev.Approval.Kind)
+			} else if ev.AutoApproved {
+				fmt.Fprintln(cio.stdout, "    （按设置自动确认）")
 			}
 		case "output":
 			for _, l := range strings.Split(ev.Text, "\n") {
@@ -413,6 +422,9 @@ func aiEmit(js *ui.JSON, cio *cliIO) func(ai.Event) {
 		case "confirm":
 			a := ev.Approval
 			fmt.Fprintf(cio.stdout, "\n  ？ 需要确认：%s\n", a.Title)
+			if a.Destination != "" {
+				fmt.Fprintln(cio.stdout, "    "+a.Destination)
+			}
 			if a.AsRoot {
 				fmt.Fprintln(cio.stdout, "    以 root 执行")
 			}

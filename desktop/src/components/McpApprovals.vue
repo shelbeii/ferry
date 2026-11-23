@@ -4,10 +4,9 @@
 // 一直挂着 ferry mcp-approvals 收请求；ferry serve 重启后重新挂上。
 //
 // 这里还记着（只在这次打开 Ferry 期间）：
-//   - 授权：「30 分钟内，这次连接对这个目标的这种操作不再询问」
 //   - 拒绝过的：同一个请求 2 分钟内再来直接拒绝；选了「这次连接不再接受」的，这次连接的请求都直接拒绝
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage, ElNotification } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { call, ferry, type FerryLine, type Running } from '../ferry'
 import { isTauri } from '../platform'
@@ -22,13 +21,18 @@ interface McpRequest {
   action:
     | 'deploy' | 'start' | 'stop' | 'restart' | 'rollback' | 'sw-start' | 'sw-stop' | 'sw-restart' | 'port-open' | 'port-close' | 'fw-enable' | 'ssh-kick' | 'backup-run' | 'create'
     | 'exec' | 'write-file' | 'install' | 'tpl-save' | 'secret' | 'sw-upgrade' | 'sw-restore' | 'sw-backup' | 'db-exec' | 'config-edit'
-    | 'run-job' | 'backup-fetch'
+    | 'run-job' | 'backup-fetch' | 'upload-file'
   project: string
   config: string
   target: string
   host: string
   apps?: string[]
   skipBuild?: boolean
+  /** deploy 的可选项：全量上传、失败不自动回滚、不自动修正权限，以及这次保留的文件 */
+  full?: boolean
+  noRollback?: boolean
+  keepPerms?: boolean
+  keep?: Record<string, { path: string; shared?: boolean }[]>
   /** deploy 到多台：全部服务器（按切换的顺序）和切换方式（不填 = 用 ferry.yaml 的 rollout） */
   targets?: string[]
   batch?: number
@@ -54,10 +58,10 @@ interface McpRequest {
   tool?: string
   input?: Record<string, unknown>
   danger?: string
+  aiState?: string
+  aiScope?: string
   /** secret：让用户填的项（值只交给 Ferry，编程软件只拿到代号） */
   fields?: SecretField[]
-  /** 用户已经在编程软件里确认（设置里选了在编程软件里确认时） */
-  clientConfirmed?: boolean
   detail?: string[]
   reason?: string
   /** db-exec：在数据库连接 db（dbName 是名称）的库 database 里执行 stmts；经服务器连时 target 是那台服务器 */
@@ -70,7 +74,6 @@ interface McpRequest {
 }
 
 const TIMEOUT_MS = 5 * 60 * 1000
-const GRANT_MS = 30 * 60 * 1000
 const REJECT_REPEAT_MS = 2 * 60 * 1000
 const VERBS: Record<string, string> = {
   deploy: '部署',
@@ -83,6 +86,7 @@ const VERBS: Record<string, string> = {
   'sw-restart': '重启软件',
   'port-open': '放行端口',
   'port-close': '关闭端口',
+  'upload-file': '上传文件',
   'fw-enable': '打开防火墙',
   'ssh-kick': '断开 SSH 连接',
   'backup-run': '现在备份',
@@ -101,7 +105,7 @@ const VERBS: Record<string, string> = {
   'backup-fetch': '取回异地的备份',
 }
 // 用服务器助手的工具执行的操作：确认内容按命令、差异整块显示，每次都要确认
-const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save', 'sw-upgrade', 'sw-restore', 'sw-backup', 'run-job', 'backup-fetch']
+const AI_ACTIONS = ['exec', 'write-file', 'install', 'tpl-save', 'sw-upgrade', 'sw-restore', 'sw-backup', 'run-job', 'backup-fetch', 'upload-file']
 const isAI = (r: McpRequest) => AI_ACTIONS.includes(r.action)
 const isDB = (r: McpRequest) => r.action === 'db-exec'
 const isCfg = (r: McpRequest) => r.action === 'config-edit'
@@ -116,7 +120,6 @@ const shown = ref<McpRequest>()
 watch(current, (r) => {
   if (r) {
     shown.value = r
-    grant.value = false
     if (isDB(r)) void estimateRows(r)
   }
 })
@@ -136,7 +139,6 @@ async function estimateRows(r: McpRequest) {
   }
 }
 const deciding = ref(false)
-const grant = ref(false)
 const now = ref(Date.now())
 const left = computed(() => {
   if (!current.value) return ''
@@ -146,17 +148,12 @@ const left = computed(() => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} 后自动拒绝`
 })
 
-const grants = new Map<string, number>() // 授权到期时间
 const rejected = new Map<string, number>() // 拒绝的时间
 const blocked = new Set<string>() // 不再接受请求的连接
 const watchers = new Map<number, () => void>() // 执行中的任务：步骤变了就报给编程软件
 const keyOf = (r: McpRequest) =>
   [r.session, r.config, r.target, r.action, (r.apps ?? []).join(','), r.software, r.port, (r.allow ?? []).join(','), (r.pids ?? []).join(','), r.backup, String(r.input?.app ?? r.input?.file ?? '')].join('|')
-const grantKey = (r: McpRequest) => [r.session, r.config, r.target, r.action].join('|')
 const clientOf = (r: McpRequest) => r.client || '编程软件'
-// 改防火墙、断开别人的连接、新建项目每次都问：不给「不再询问」
-const canGrant = (r: McpRequest) =>
-  r.action !== 'create' && !r.action.startsWith('port-') && r.action !== 'fw-enable' && r.action !== 'ssh-kick' && r.action !== 'secret' && !isBlock(r)
 const titleOf = (r: McpRequest) => {
   if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条${r.dbKind === 'redis' ? '命令' : r.dbKind === 'mongodb' ? '操作' : '语句'}）`
   if (r.action === 'create') return `新建项目 ${r.project}`
@@ -169,6 +166,7 @@ const titleOf = (r: McpRequest) => {
   if (r.action === 'write-file') return `${VERBS[r.action]} ${String(r.input?.path ?? '')}`
   if (r.action === 'run-job') return `${VERBS[r.action]} ${String(r.input?.app ?? '')}`
   if (r.action === 'backup-fetch') return `${VERBS[r.action]} ${String(r.input?.file ?? '')}`
+  if (r.action === 'upload-file') return `${VERBS[r.action]} ${(r.input?.locals as string[] | undefined)?.length ?? 0} 个文件`
   if (r.action === 'install') return `${VERBS[r.action]} ${String(r.input?.template || '（自定义模板）')}`
   if (r.action === 'secret') return `${VERBS[r.action]}：${(r.fields ?? []).map((f) => f.label).join('、')}`
   if (isAI(r)) return VERBS[r.action]
@@ -202,22 +200,6 @@ async function arrive(r: McpRequest) {
   const last = rejected.get(keyOf(r))
   if (last && Date.now() - last < REJECT_REPEAT_MS) {
     await reply(r, false, '2 分钟内刚拒绝过同样的请求')
-    return
-  }
-  if (r.clientConfirmed) {
-    // 用户已经在编程软件里确认过（Ferry 检查过设置里允许这样）：直接执行，告诉用户一声
-    if (await reply(r, true, `用户已在 ${clientOf(r)} 里确认`)) {
-      execute(r)
-      ElNotification({ type: 'info', title: `${clientOf(r)} 请求的操作开始执行`, message: `${titleOf(r)}${r.target ? '（' + r.target + '）' : ''}：你在 ${clientOf(r)} 里同意了`, duration: 6000 })
-    }
-    return
-  }
-  const until = session && canGrant(r) ? grants.get(grantKey(r)) : undefined
-  if (until && until > Date.now()) {
-    if (await reply(r, true, '按用户的授权自动同意（30 分钟内同类不再询问）')) {
-      execute(r)
-      ElNotification({ type: 'info', title: `${clientOf(r)} 请求的操作已自动执行`, message: `${titleOf(r)}${r.target ? '（' + r.target + '）' : ''}：按你 30 分钟内不再询问的授权`, duration: 6000 })
-    }
     return
   }
   queue.value.push(r)
@@ -255,8 +237,7 @@ async function decide(approve: boolean, blockSession = false) {
   deciding.value = true
   try {
     if (approve) {
-      if (await reply(r, true, grant.value ? '用户同意，并授权 30 分钟内同类不再询问' : '')) {
-        if (grant.value && r.session && canGrant(r)) grants.set(grantKey(r), Date.now() + GRANT_MS)
+      if (await reply(r, true)) {
         execute(r)
       }
     } else {
@@ -322,6 +303,8 @@ function execute(r: McpRequest) {
     const task: Task = startTask(title, args, (t) => finish(r, t), {
       FERRY_VIA: `${clientOf(r)} · MCP`,
       FERRY_AI_INPUT: JSON.stringify(r.input ?? {}),
+      FERRY_AI_STATE: r.aiState ?? '',
+      FERRY_AI_SCOPE: r.aiScope ?? '',
       ...(r.action === 'install' ? { FERRY_TASK_ID: r.id } : {}),
     })
     watchProgress(r, task)
@@ -350,6 +333,10 @@ function execute(r: McpRequest) {
       break
     case 'deploy':
       args = ['deploy', (r.targets?.length ? r.targets : [r.target]).join(','), apps.join(','), '-c', r.config, '--yes', ...(r.skipBuild ? ['--skip-build'] : [])]
+      if (r.full) args.push('--full')
+      if (r.noRollback) args.push('--no-rollback')
+      if (r.keepPerms) args.push('--keep-perms')
+      if (r.keep && Object.keys(r.keep).length) args.push('--keep-files', JSON.stringify(r.keep))
       if (r.batch) args.push('--batch', String(r.batch))
       if (r.canary !== undefined && r.canary !== null) args.push('--canary', String(r.canary))
       if (r.observeSec) args.push('--observe', `${r.observeSec}s`)
@@ -519,9 +506,7 @@ const actionType = (a: string) =>
         <div class="muted small">将写入的 ferry.yaml（已有文件不会覆盖）：</div>
         <pre class="mono">{{ shown.content }}</pre>
       </div>
-      <el-checkbox v-if="canGrant(shown)" v-model="grant" class="grant">
-        30 分钟内，{{ clientOf(shown) }} 这次连接对 {{ shown.target }} 的「{{ VERBS[shown.action] }}」不再询问
-      </el-checkbox>
+
       <p class="muted small note">
         <template v-if="shown.action === 'create'">同意后生成这个文件，并加进 Ferry 的项目列表；不连服务器、不部署。</template>
         <template v-else-if="shown.action === 'secret'">填的内容只记在这次打开的 Ferry 里，执行时才用上；{{ clientOf(shown) }} 只拿到代号，看不到内容。Ferry 退出或这次连接断开后要重新填。</template>
