@@ -125,6 +125,7 @@ type Request struct {
 
 	// 软件：swinstall 的内容；swcontrol / swremove / swlogs 的实例名（Action、Lines 同上）
 	Install        *SoftwarePlan          `json:"install,omitempty"`
+	DBTools        string                 `json:"dbTools,omitempty"`
 	Instance       string                 `json:"instance,omitempty"`
 	SoftwareConfig *SoftwareConfigRequest `json:"softwareConfig,omitempty"`
 	Purge          bool                   `json:"purge,omitempty"`   // swremove：连安装目录（数据）一起删除

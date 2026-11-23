@@ -7,12 +7,18 @@ on:
       - '**/*.go'
       - go.mod
       - go.sum
+      - test/e2e/database-migration.sh
+      - test/e2e/database-native-migration.sh
+      - test/e2e/Dockerfile.db-native
       - .github/workflows/test.yml
   pull_request:
     paths:
       - '**/*.go'
       - go.mod
       - go.sum
+      - test/e2e/database-migration.sh
+      - test/e2e/database-native-migration.sh
+      - test/e2e/Dockerfile.db-native
       - .github/workflows/test.yml
   workflow_dispatch:
 
@@ -39,3 +45,15 @@ jobs:
           go-version-file: go.mod
       - name: 测试（禁用测试结果缓存）
         run: go test -count=1 ./...
+
+  database-migration-e2e:
+    name: 数据库迁移端到端
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: bash test/e2e/database-migration.sh
+      - run: bash test/e2e/database-native-migration.sh

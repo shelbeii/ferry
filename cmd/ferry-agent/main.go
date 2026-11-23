@@ -6,17 +6,23 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/captain/ferry/internal/agent"
+	"github.com/captain/ferry/internal/dbnative"
 	"github.com/captain/ferry/internal/proto"
 )
 
@@ -48,6 +54,9 @@ func main() {
 		signal.Ignore(syscall.SIGPIPE)
 		os.Exit(agent.Serve(agent.NewSystem(), os.Stdin, os.Stdout))
 	}
+	if cmd == "db-transfer" {
+		os.Exit(dbTransfer())
+	}
 	// 连接断开也要做完：本机取消、网络中断时 SSH 连接关掉，再往 stdout 写会收到 SIGPIPE，Go 默认因此退出，
 	// 部署可能停在「旧服务已停、新服务还没起来」。忽略它：写不出去的输出丢掉，照常做完（失败照常回滚），结果记在部署历史里。
 	// agent 不在终端里运行、也没有一直不结束的命令，忽略 SIGHUP 不会留下进程。
@@ -64,6 +73,40 @@ func main() {
 	}
 	a := &agent.Agent{Sys: agent.NewSystem(), Out: os.Stdout}
 	os.Exit(a.Run(cmd, &req))
+}
+
+func dbTransfer() int {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	input := bufio.NewScanner(os.Stdin)
+	input.Buffer(make([]byte, 64<<10), 4<<20)
+	var request proto.DBTransfer
+	if !input.Scan() || json.Unmarshal(input.Bytes(), &request) != nil {
+		return proto.CodeBadInput
+	}
+	// Keeping the input stream open makes desktop cancellation and SSH loss
+	// visible to the running native process without relying on a pseudo-terminal.
+	go func() {
+		input.Scan()
+		cancel()
+	}()
+	output := json.NewEncoder(os.Stdout)
+	res, err := dbnative.Run(ctx, request, func(e proto.DBTransferEvent) { _ = output.Encode(e) })
+	if err != nil {
+		message := err.Error()
+		for _, password := range []string{request.Source.Password, request.Target.Password} {
+			if password != "" {
+				message = strings.ReplaceAll(message, password, "***")
+				message = strings.ReplaceAll(message, strings.TrimPrefix(url.UserPassword("", password).String(), ":"), "***")
+			}
+		}
+		var problem *proto.DBTransferProblem
+		errors.As(err, &problem)
+		_ = output.Encode(proto.DBTransferEvent{Kind: "error", Text: message, Problem: problem})
+		return proto.CodeFailed
+	}
+	_ = output.Encode(proto.DBTransferEvent{Kind: "result", Result: &res})
+	return proto.CodeOK
 }
 
 func selfSHA() string {

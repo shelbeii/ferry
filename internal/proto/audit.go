@@ -111,6 +111,8 @@ func AuditOf(cmd string, q *Request) (kind, object, detail string, ok bool) {
 		return "runtime-remove", "", "", true
 	case "runtimeremove":
 		return "runtime-uninstall", q.RuntimePath, "", true
+	case "db-tools-install":
+		return "db-tools-install", q.DBTools, "", true
 	case "swinstall", "swupgrade":
 		k := map[string]string{"swinstall": "software-install", "swupgrade": "software-upgrade"}[cmd]
 		if p := q.Install; p != nil {

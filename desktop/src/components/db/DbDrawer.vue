@@ -16,10 +16,12 @@ import DbRedisConsole from './DbRedisConsole.vue'
 import DbConnDialog from './DbConnDialog.vue'
 import DbSqlConfirm from './DbSqlConfirm.vue'
 import DbCsvImport from './DbCsvImport.vue'
+import DbMigrate from './DbMigrate.vue'
+import DbNativeMigration from './DbNativeMigration.vue'
 import {
   dbOpen, dbConns, closeOnOutside, dbOpened, isDbOpened, markDbOpened, refreshDbOpened, dbRequest, dbPasswordRequest, loadDbConns, dbCall, saveDbConn, removeDbConn, closeDbConn, confirmSql, passwordEnv,
   humanSize, kindLabel, dbCapabilities, exportTo, routineCallSql, nextQueryTitle, type ExportKind, type DbConn, type DbDatabase, type DbTable, type DbResult, type DbFrom,
-  type DbRoutine, type DbFileItem, type DbObjItem, type DbObjWhat,
+  type DbRoutine, type DbFileItem, type DbObjItem, type DbObjWhat, type DbMigrationTable,
 } from '../../db'
 import { sessionEnv } from '../../ferry'
 import { pickFile, reveal } from '../../platform'
@@ -670,12 +672,15 @@ const menuItems = computed<{ k: string; t: string; sep?: boolean; off?: boolean;
     case 'conn':
       return [
         { k: 'query', t: '新建查询' }, { k: 'refresh', t: '刷新' }, { k: 'create-db', t: '新建库…', off: ro },
+        { k: 'clone-instance', t: '实例物理克隆…', sep: true },
         { k: 'edit', t: '修改连接…', sep: true }, { k: 'copy', t: '复制一份连接…' }, { k: 'close', t: '断开', off: !dbOpened[d.conn.id] }, { k: 'remove', t: '删除连接', danger: true, sep: true },
       ]
     case 'db':
       return [
         { k: 'query', t: '新建查询' }, { k: 'new-table', t: '新建表…', off: ro }, ...(d.conn.kind === 'postgres' ? [{ k: 'create-schema', t: '新建模式…', off: ro }] : []), { k: 'refresh', t: '刷新' },
         { k: 'close-db', t: '关闭库', off: !isDbOpened(d.conn.id, d.db!) },
+        ...(!d.system ? [{ k: 'migrate', t: '迁移到另一个数据库…', sep: true }] : []),
+        ...(!d.system ? [{ k: 'native-migrate', t: '服务器端迁移…' }] : []),
         { k: 'export-struct', t: '导出全部表的结构', sep: true }, { k: 'export-dump', t: '导出全部表的结构和数据' }, { k: 'import-sql', t: '执行 SQL 文件…', off: ro },
         { k: 'backup', t: '新建备份（存在这台电脑上）', sep: true },
         { k: 'copy-name', t: '复制库名', sep: true }, { k: 'drop-db', t: '删除库…', danger: true, off: ro, sep: true },
@@ -713,6 +718,8 @@ const menuItems = computed<{ k: string; t: string; sep?: boolean; off?: boolean;
       return [
         { k: 'open', t: '打开' }, ...(d.type === 'table' ? [{ k: 'design', t: '设计表', off: ro }] : []), { k: 'select', t: '新建查询（SELECT）' },
         { k: 'rename', t: '重命名…', off: ro, sep: true }, { k: 'copy-name', t: '复制名称' },
+        ...(d.type === 'table' ? [{ k: 'migrate', t: '迁移到另一个数据库…', sep: true }] : []),
+        ...(d.type === 'table' ? [{ k: 'native-migrate', t: '服务器端迁移…' }] : []),
         ...(d.type === 'table' ? [{ k: 'export-struct', t: '导出结构', sep: true }, { k: 'export-dump', t: '导出结构和数据' }] : [{ k: 'export-struct', t: '导出视图定义', sep: true }]),
         { k: 'export-csv', t: '导出数据为 CSV' }, { k: 'export-insert', t: '导出数据为 SQL（INSERT）' },
         ...(d.type === 'table' ? [{ k: 'import-csv', t: '导入 CSV…', off: ro }] : []),
@@ -815,6 +822,15 @@ async function menuDo(k: string) {
 
 async function doAction(d: TreeData, k: string) {
   switch (k) {
+    case 'clone-instance':
+      nativeSource.value = { conn: d.conn, db: '', instance: true }
+      return
+    case 'native-migrate':
+      if (d.db) nativeSource.value = { conn: d.conn, db: d.db, table: d.type === 'table' && d.name ? { schema: d.schema, name: d.name } : undefined }
+      return
+    case 'migrate':
+      if (d.db) migrationSource.value = { conn: d.conn, db: d.db, table: d.type === 'table' && d.name ? { schema: d.schema, name: d.name } : undefined }
+      return
     case 'query': return openQuery(d.conn, d.db)
     case 'rcmd': return openRedisConsole(d.conn, d.db)
     case 'new-key': {
@@ -934,6 +950,8 @@ function parentId(d: TreeData) {
 // ---------------------------------------------------------------- 连接对话框、密码
 
 const connDialog = ref<(Partial<DbConn> & { from?: DbFrom }) | null>(null)
+const migrationSource = ref<{ conn: DbConn; db: string; table?: DbMigrationTable } | null>(null)
+const nativeSource = ref<{ conn: DbConn; db: string; table?: DbMigrationTable; instance?: boolean } | null>(null)
 async function onSaved(c: DbConn) {
   const openAfterSave = !connDialog.value?.id && (!!connDialog.value?.from || c.kind === 'sqlite')
   connDialog.value = null
@@ -1200,6 +1218,8 @@ function nodeIcon(d: TreeData) {
     <DbConnDialog :conn="connDialog" @close="connDialog = null" @saved="onSaved" />
     <DbSqlConfirm />
     <DbCsvImport :target="csvTarget" @close="csvTarget = null" @done="refreshNode(csvNode)" />
+    <DbMigrate :source="migrationSource" @close="migrationSource = null" @done="(conn, db) => refreshNode(`d:${conn}:${db}`)" />
+    <DbNativeMigration :source="nativeSource" @close="nativeSource = null" @done="(conn, db) => refreshNode(`d:${conn}:${db}`)" />
     <el-dialog :model-value="!!dbPasswordRequest" title="数据库密码" width="420px" append-to-body :close-on-click-modal="false" @close="submitPassword(false)">
       <template v-if="dbPasswordRequest">
         <p class="pw-tip">

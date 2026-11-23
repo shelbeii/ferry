@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -729,9 +730,29 @@ func clearDir(dir string) {
 	}
 }
 
-// systemInstall 用服务器的软件源装包；装包时被自动启动的系统自带服务停掉并禁用（原来就在运行的不动）。
-// env 不为空时下载经这台电脑（proxyEnvPrefix）。deps 为 true 时只是安装包需要的系统库：没有包管理器时跳过（后面的检查会说缺什么）。
-// 包名可以写几个候选（a|b）：用已经装着的，或软件源里有的第一个（不同发行版、版本包名不同，如 libaio1t64|libaio1）。
+func (a *Agent) installDBTools() int {
+	pkg := a.req.DBTools
+	var binaries []string
+	switch pkg {
+	case "mydumper":
+		binaries = []string{"mydumper", "myloader"}
+	case "mysql-shell":
+		binaries = []string{"mysqlsh"}
+	default:
+		return a.result(proto.CodeBadInput, "不支持的数据库迁移工具", nil)
+	}
+	system := &proto.PlanSystem{APT: []string{pkg}, DNF: []string{pkg}}
+	if _, err := a.systemInstall(pkg, system, proxyEnvPrefix(a.req.Install), false); err != nil {
+		return a.result(proto.CodeFailed, err.Error(), nil)
+	}
+	for _, binary := range binaries {
+		if _, err := exec.LookPath(binary); err != nil {
+			return a.result(proto.CodeFailed, "安装后仍找不到 "+binary+"，请检查软件包和执行服务器的 PATH", nil)
+		}
+	}
+	return a.result(proto.CodeOK, "迁移工具已安装", nil)
+}
+
 func systemPackages(s *proto.PlanSystem, mgr string) []string {
 	switch mgr {
 	case "dnf", "yum":
@@ -778,6 +799,9 @@ func (a *Agent) installedPackages(mgr string, pkgs []string) (have, want, alts [
 	return have, want, alts
 }
 
+// systemInstall 用服务器的软件源装包；装包时被自动启动的系统自带服务停掉并禁用（原来就在运行的不动）。
+// env 不为空时下载经这台电脑（proxyEnvPrefix）。deps 为 true 时只是安装包需要的系统库：没有包管理器时跳过（后面的检查会说缺什么）。
+// 包名可以写几个候选（a|b）：用已经装着的，或软件源里有的第一个（不同发行版、版本包名不同，如 libaio1t64|libaio1）。
 func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps bool, offline ...string) ([]string, error) {
 	mgr := a.pkgManager()
 	pkgs := systemPackages(s, mgr)

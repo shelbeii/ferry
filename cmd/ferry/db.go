@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/dbx"
 	"github.com/captain/ferry/internal/engine"
+	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/secret"
 	"github.com/captain/ferry/internal/settings"
 	"github.com/captain/ferry/internal/ui"
@@ -21,7 +26,7 @@ import (
 //	ferry db list | save | remove <连接> | test | close [<连接>] | creds（从服务器上读数据库的账号密码）
 //	ferry db info|databases <连接>
 //	ferry db tables <连接> <库>
-//	ferry db table|rows|count|apply|design|op|exec|query|export|dump <连接> <库>
+//	ferry db table|rows|count|apply|design|op|exec|query|export|dump|migrate-plan|migrate-run <连接> <库>
 //	ferry db redis-keys|redis-get|redis-edit|redis-cmd <连接> <库编号>（Redis）
 //	ferry db mongo-find|mongo-export <连接> <库>（MongoDB）
 //	ferry db routines|routine|routine-save|backup <连接> <库>（函数、存储过程；备份整个库）
@@ -66,6 +71,22 @@ type dbReq struct {
 	Continue     bool           `json:"continue"`     // import-sql：出错后接着执行
 	BatchInserts bool           `json:"batchInserts"` // import-sql：合并连续的单行 INSERT
 	CSV          *dbx.CSVImport `json:"csv"`          // csv-preview、import-csv
+	Migration    *struct {
+		TargetConn string `json:"targetConn"`
+		dbx.MigrationOptions
+	} `json:"migration"`
+	NativeMigration *struct {
+		Worker           dbx.Via                 `json:"worker"`
+		Relay            bool                    `json:"relay"`
+		AllowLocalInfile bool                    `json:"allowLocalInfile"`
+		TargetConn       string                  `json:"targetConn"`
+		TargetDB         string                  `json:"targetDb"`
+		Scope            string                  `json:"scope"`
+		Tables           []proto.DBTransferTable `json:"tables"`
+		Threads          int                     `json:"threads"`
+		Directory        string                  `json:"directory"`
+		SourceSSH        string                  `json:"sourceSsh"`
+	} `json:"nativeMigration"`
 	// creds：从服务器上读数据库的账号密码（「软件」页连数据库时替用户填好）
 	Via  *dbx.Via            `json:"via"`
 	Cred *engine.DBCredQuery `json:"cred"`
@@ -190,6 +211,208 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 	}
 
 	switch sub {
+	case "native-install-tools":
+		if len(args) != 2 || c.flags["config"] == "" {
+			return fail(errors.New("请选择执行服务器和要安装的迁移工具"))
+		}
+		worker, err := newEngine(&dbx.Via{Config: c.flags["config"], Target: args[0]})
+		if err != nil {
+			return fail(err)
+		}
+		if err := worker.InstallDBTransferTools(args[0], args[1]); err != nil {
+			return fail(err)
+		}
+		return out(nil)
+	case "native-plan", "native-run":
+		m := req.NativeMigration
+		if m == nil || m.Worker.Config == "" || m.Worker.Target == "" {
+			return fail(errors.New("请选择执行迁移的 SSH 服务器"))
+		}
+		src, err := connArg()
+		if err != nil {
+			return fail(err)
+		}
+		if src.Kind != dbx.Postgres && src.Kind != dbx.MySQL {
+			return fail(errors.New("服务器端迁移支持 MySQL、MariaDB 和 PostgreSQL"))
+		}
+		canRelay := m.Scope != "instance" || src.Kind == dbx.Postgres
+		if m.Relay && !canRelay {
+			return fail(errors.New("通过本机中转支持整库、指定表和 PostgreSQL 实例克隆"))
+		}
+		worker, err := newEngine(&m.Worker)
+		if err != nil {
+			return fail(err)
+		}
+		var tunnels []dbx.Tunnel
+		defer func() {
+			for _, tunnel := range tunnels {
+				tunnel.Close()
+			}
+		}()
+		endpoint := func(cn *dbx.Conn, database string, dial *engine.DBTransferDial) (proto.DBEndpoint, error) {
+			host, port := cn.Host, cn.Port
+			sameVia := cn.Via != nil && filepath.Clean(cn.Via.Config) == filepath.Clean(m.Worker.Config) && cn.Via.Target == m.Worker.Target
+			useRelay := m.Relay && !sameVia
+			if cn.Via != nil && !sameVia && !useRelay && (cn.Container != "" || strings.EqualFold(host, "localhost") || net.ParseIP(host).IsLoopback()) {
+				if canRelay {
+					return proto.DBEndpoint{}, &proto.DBTransferProblem{Code: "relay-required", Message: "执行服务器无法直接连接另一台 SSH 主机的本地地址或容器。请启用通过本机中转，或选择执行服务器能直接访问的数据库连接"}
+				}
+				return proto.DBEndpoint{}, errors.New("经 SSH 使用本地地址或容器的数据库需要从同一台服务器执行，请选择执行服务器可直接访问的连接")
+			}
+			if useRelay && cn.TLS == "verify" {
+				return proto.DBEndpoint{}, fmt.Errorf("%s 启用了 TLS 主机名校验，原生工具无法通过中转端口校验原主机名，请使用服务器直连", cn.Name)
+			}
+			var tunnel dbx.Tunnel
+			if cn.Via != nil && (useRelay || cn.Container != "") {
+				var err error
+				tunnel, err = openTunnel(cn.Via)
+				if err != nil {
+					return proto.DBEndpoint{}, err
+				}
+				tunnels = append(tunnels, tunnel)
+			}
+			if tunnel != nil && cn.Container != "" {
+				addr, err := tunnel.ContainerAddr(cio.ctx, cn.Container, port)
+				if err != nil {
+					return proto.DBEndpoint{}, err
+				}
+				var rawPort string
+				host, rawPort, err = net.SplitHostPort(addr)
+				if err != nil {
+					return proto.DBEndpoint{}, err
+				}
+				port, _ = strconv.Atoi(rawPort)
+			}
+			if useRelay {
+				addr := net.JoinHostPort(host, strconv.Itoa(port))
+				if tunnel != nil {
+					*dial = func(ctx context.Context) (net.Conn, error) { return tunnel.Dial(ctx, addr) }
+				} else {
+					direct := &net.Dialer{}
+					*dial = func(ctx context.Context) (net.Conn, error) { return direct.DialContext(ctx, "tcp", addr) }
+				}
+			}
+			pw, _, err := password(cn, false)
+			return proto.DBEndpoint{Host: host, Port: port, User: cn.User, Password: pw, Database: database, TLS: cn.TLS}, err
+		}
+		sourceDB := dbArg()
+		if m.Scope == "instance" {
+			sourceDB = ""
+		}
+		var sourceDial, targetDial engine.DBTransferDial
+		source, err := endpoint(src, sourceDB, &sourceDial)
+		if err != nil {
+			return fail(err)
+		}
+		var target proto.DBEndpoint
+		var targetName string
+		if m.TargetConn != "" {
+			dst, err := dbx.Get(m.TargetConn)
+			if err != nil {
+				return fail(err)
+			}
+			if dst.Kind != src.Kind || dst.ReadOnly {
+				return fail(errors.New("请选择同引擎且可写的目标连接"))
+			}
+			if src.ID == dst.ID && sourceDB == m.TargetDB {
+				return fail(errors.New("源和目标相同"))
+			}
+			target, err = endpoint(dst, m.TargetDB, &targetDial)
+			if err != nil {
+				return fail(err)
+			}
+			targetName = dst.Name
+		}
+		request := proto.DBTransfer{Plan: sub == "native-plan", Engine: src.Kind, Scope: m.Scope, Source: source, Target: target,
+			Tables: m.Tables, Threads: m.Threads, Directory: m.Directory, SourceSSH: m.SourceSSH, AllowLocalInfile: m.AllowLocalInfile}
+		result, err := worker.DBTransfer(m.Worker.Target, request, sourceDial, targetDial)
+		if !request.Plan {
+			object := targetName
+			if m.Directory != "" {
+				object += " / " + m.Directory
+			} else {
+				object += " / " + m.TargetDB
+			}
+			worker.Audit(m.Worker.Target, "db-native-migration", strings.TrimPrefix(object, " / "), "源连接 "+src.Name+"，范围 "+m.Scope, err)
+		}
+		if err != nil {
+			return fail(err)
+		}
+		if !request.Plan && result.Directory != "" {
+			rep.Info("克隆数据目录 %s", result.Directory)
+		}
+		return out(result)
+	case "migrate-plan", "migrate-run":
+		if req.Migration == nil || req.Migration.TargetConn == "" || req.Migration.TargetDB == "" || dbArg() == "" {
+			return fail(errors.New("请选择源库和目标库"))
+		}
+		source, err := connArg()
+		if err != nil {
+			return fail(err)
+		}
+		dest, err := dbx.Get(req.Migration.TargetConn)
+		if err != nil {
+			return fail(err)
+		}
+		if source.Kind != dest.Kind || (source.Kind != dbx.Postgres && source.Kind != dbx.MySQL) {
+			return fail(errors.New("请选择同引擎的 MySQL 或 PostgreSQL 连接"))
+		}
+		if source.ID == dest.ID && dbArg() == req.Migration.TargetDB {
+			return fail(errors.New("源库和目标库相同"))
+		}
+		if dest.ReadOnly {
+			return fail(errors.New("目标数据库连接是只读的"))
+		}
+		src, closeSrc, err := open(source, false)
+		if err != nil {
+			return fail(err)
+		}
+		defer closeSrc()
+		dst, closeDst, err := open(dest, false)
+		if err != nil {
+			return fail(err)
+		}
+		defer closeDst()
+		o := req.Migration.MigrationOptions
+		ctx, db := cio.ctx, dbArg()
+		if sub == "migrate-plan" {
+			plan, err := src.PlanMigration(ctx, db, dst, o)
+			if err != nil {
+				return fail(err)
+			}
+			return out(plan)
+		}
+		rep.Step("检查 %s / %s → %s / %s", source.Name, db, dest.Name, o.TargetDB)
+		r, err := src.Migrate(ctx, db, dst, o, func(s string) { rep.Step("%s", s) }, func(n int64) { rep.Progress("已传输", n, 0) })
+		const kind = "db-migrate"
+		object := dest.Name + " / " + o.TargetDB
+		detail := "从 " + source.Name + " / " + db + " 迁移数据库"
+		if r != nil {
+			detail += fmt.Sprintf("，已提交 %d 张表、%d 行", len(r.Completed), r.Rows)
+			if err != nil {
+				rep.Warn("已提交 %d 张表、%d 行，已建表 %d 张。请根据任务结果检查目标库。", len(r.Completed), r.Rows, len(r.Created))
+				if len(r.Created) > 0 {
+					rep.Warn("已建表 %v", r.Created)
+				}
+				if len(r.Completed) > 0 {
+					rep.Warn("已提交的表 %v", r.Completed)
+				}
+			}
+		}
+		var remoteAudit *engine.Engine
+		if dest.Via != nil {
+			remoteAudit, _ = newEngine(dest.Via)
+		}
+		if remoteAudit == nil {
+			engine.AuditLocal((&engine.Engine{Settings: st, Getenv: cio.getenv}).Actor(), kind, object, detail, err)
+		} else {
+			remoteAudit.Audit(dest.Via.Target, kind, object, detail, err)
+		}
+		if err != nil {
+			return fail(err)
+		}
+		rep.Info("迁移完成，已提交 %d 张表、%d 行", len(r.Completed), r.Rows)
+		return out(r)
 	case "list":
 		cs, err := dbx.List()
 		if err != nil {

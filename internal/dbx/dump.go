@@ -37,16 +37,17 @@ const (
 )
 
 type dumper struct {
-	cl       *Client
-	ctx      context.Context
-	tx       *sql.Tx
-	w        io.Writer
-	kind     string
-	db       string
-	whole    bool // 导出整个库（模式）：也导出函数、存储过程、类型
-	rows     int64
-	progress func(string)
-	notes    []string // 导不了的（权限不够之类），写在文件末尾
+	cl         *Client
+	ctx        context.Context
+	tx         *sql.Tx
+	w          io.Writer
+	kind       string
+	db         string
+	whole      bool // 导出整个库（模式）：也导出函数、存储过程、类型
+	createOnly bool // 库间迁移只新建对象，禁止替换目标对象。
+	rows       int64
+	progress   func(string)
+	notes      []string // 导不了的（权限不够之类），写在文件末尾
 }
 
 func (d *dumper) printf(format string, a ...any) { fmt.Fprintf(d.w, format, a...) }
@@ -184,6 +185,9 @@ func (d *dumper) mysqlRoutines() error {
 		rs = append(rs, r)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for _, r := range rs {
 		col := "Create Procedure"
 		if r.typ == "FUNCTION" {
@@ -195,7 +199,10 @@ func (d *dumper) mysqlRoutines() error {
 			continue
 		}
 		d.section(map[string]string{"PROCEDURE": "存储过程", "FUNCTION": "函数"}[r.typ], r.name)
-		d.printf("DROP %s IF EXISTS %s;\nDELIMITER ;;\n%s;;\nDELIMITER ;\n\n", r.typ, Quote(MySQL, r.name), definer.ReplaceAllString(def, ""))
+		if !d.createOnly {
+			d.printf("DROP %s IF EXISTS %s;\n", r.typ, Quote(MySQL, r.name))
+		}
+		d.printf("DELIMITER ;;\n%s;;\nDELIMITER ;\n\n", d.mysqlDefinition(def))
 	}
 	return nil
 }
@@ -222,6 +229,9 @@ func (d *dumper) mysqlTriggers(tables []*TableInfo) error {
 		}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for _, name := range names {
 		def, err := d.showCreate("SHOW CREATE TRIGGER "+Quote(MySQL, name), "SQL Original Statement")
 		if err != nil || def == "" {
@@ -229,9 +239,22 @@ func (d *dumper) mysqlTriggers(tables []*TableInfo) error {
 			continue
 		}
 		d.section("触发器", name)
-		d.printf("DROP TRIGGER IF EXISTS %s;\nDELIMITER ;;\n%s;;\nDELIMITER ;\n\n", Quote(MySQL, name), definer.ReplaceAllString(def, ""))
+		if !d.createOnly {
+			d.printf("DROP TRIGGER IF EXISTS %s;\n", Quote(MySQL, name))
+		}
+		d.printf("DELIMITER ;;\n%s;;\nDELIMITER ;\n\n", d.mysqlDefinition(def))
 	}
 	return nil
+}
+
+func (d *dumper) mysqlDefinition(def string) string {
+	if !d.createOnly {
+		return definer.ReplaceAllString(def, "")
+	}
+	if span := definer.FindStringIndex(def); span != nil {
+		return def[:span[0]] + def[span[1]:]
+	}
+	return def
 }
 
 // showCreate SHOW CREATE … 的结果里叫 col 的那一列。
@@ -401,8 +424,12 @@ func (d *dumper) pgEnums(schema string) error {
 		if err := rows.Scan(&name, &labels); err != nil {
 			return err
 		}
-		d.printf("DO $$ BEGIN CREATE TYPE %s AS ENUM (%s); EXCEPTION WHEN duplicate_object THEN NULL; END $$;\n",
-			TableName(Postgres, "", schema, name), labels)
+		reg := TableName(Postgres, "", schema, name)
+		if d.createOnly {
+			d.printf("CREATE TYPE %s AS ENUM (%s);\n", reg, labels)
+		} else {
+			d.printf("DO $$ BEGIN CREATE TYPE %s AS ENUM (%s); EXCEPTION WHEN duplicate_object THEN NULL; END $$;\n", reg, labels)
+		}
 	}
 	return rows.Err()
 }
@@ -448,6 +475,9 @@ func (d *dumper) pgSequences(schemas []string, tables []*TableInfo) ([]pgSeq, er
 			out = append(out, s)
 		}
 		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -467,6 +497,9 @@ func (d *dumper) pgFunctions(schema string) error {
 		var name, def string
 		if err := rows.Scan(&name, &def); err != nil {
 			return err
+		}
+		if d.createOnly && strings.HasPrefix(def, "CREATE OR REPLACE ") {
+			def = "CREATE " + strings.TrimPrefix(def, "CREATE OR REPLACE ")
 		}
 		d.section("函数", schema+"."+name)
 		d.printf("%s;\n\n", strings.TrimRight(strings.TrimSpace(def), ";"))
@@ -491,6 +524,9 @@ func (d *dumper) pgTriggers(objs []*TableInfo) error {
 			d.printf("%s;\n", def)
 		}
 		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -1,0 +1,20 @@
+FROM postgres:17
+ARG MYDUMPER_VERSION=1.0.19-1
+ARG MYSQL_SHELL_VERSION=8.4.10
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    openssh-server openssh-client mariadb-backup mariadb-server ca-certificates curl \
+    && curl -fsSLo /tmp/mydumper.deb "https://github.com/mydumper/mydumper/releases/download/v${MYDUMPER_VERSION}/mydumper_${MYDUMPER_VERSION}.trixie_$(dpkg --print-architecture).deb" \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/mydumper.deb \
+    && rm /tmp/mydumper.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /root/.ssh /native \
+    && chmod 700 /root/.ssh \
+    && ln -s /usr/lib/postgresql/17/bin/pg_verifybackup /usr/local/bin/pg_verifybackup \
+    && ssh-keygen -A
+RUN mkdir -p /opt/mysqlsh \
+    && curl -fsSLo /tmp/mysqlsh.tar.gz "https://cdn.mysql.com/archives/mysql-shell/mysql-shell-${MYSQL_SHELL_VERSION}-linux-glibc2.28-x86-64bit.tar.gz" \
+    && tar -xzf /tmp/mysqlsh.tar.gz --strip-components=1 -C /opt/mysqlsh \
+    && rm /tmp/mysqlsh.tar.gz \
+    && ln -s /opt/mysqlsh/bin/mysqlsh /usr/local/bin/mysqlsh \
+    && mysqlsh --version
+CMD ["/usr/sbin/sshd", "-D", "-e", "-o", "PermitRootLogin=prohibit-password"]

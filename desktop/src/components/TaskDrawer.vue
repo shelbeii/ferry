@@ -335,6 +335,7 @@ async function clearFinished() {
           </div>
           <template v-if="selected.progress">
             <el-progress
+              v-if="selected.progress.total"
               :percentage="Math.floor((selected.progress.done * 100) / selected.progress.total)"
               :stroke-width="16"
               text-inside
@@ -342,8 +343,9 @@ async function clearFinished() {
               striped-flow
               :duration="12"
             />
+            <div v-else class="pulse"><span /></div>
             <div class="muted mono live-sub">
-              {{ bytes(selected.progress.done) }} / {{ bytes(selected.progress.total) }} · {{ speedText(selected.progress) }}
+              {{ bytes(selected.progress.done) }}<template v-if="selected.progress.total"> / {{ bytes(selected.progress.total) }}</template> · {{ speedText(selected.progress) }}
             </div>
           </template>
           <div v-else class="pulse"><span /></div>

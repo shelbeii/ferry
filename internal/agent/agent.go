@@ -175,6 +175,8 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.softwareTaskStatus()
 	case "swinstall":
 		return a.swinstall()
+	case "db-tools-install":
+		return a.installDBTools()
 	case "repoprobe":
 		return a.repoprobe()
 	case "swcontrol":

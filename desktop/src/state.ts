@@ -287,6 +287,8 @@ let nextId = 1
 /** 启动一个后台 ferry 任务，过程显示在任务面板里。env：本次额外的环境变量（如一次性的密码）。 */
 export function startTask(title: string, args: string[], onDone?: (t: Task) => void, env: Record<string, string> = {}): Task {
   const now = Date.now()
+  const migration = args[0] === 'db' && args[1] === 'migrate-run'
+  const nativeMigration = args[0] === 'db' && args[1] === 'native-run'
   const hid = now.toString(36) + '-' + Math.random().toString(36).slice(2, 8)
   const task = reactive<Task>({ id: nextId++, hid, title, status: 'running', lines: [], startedAt: now, lastAt: now, step: { text: '启动 ferry', at: now } }) as Task
   let sample: { t: number; done: number } | undefined
@@ -300,7 +302,7 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
       const t = Date.now()
       task.lastAt = t
       if (l.kind === 'progress') {
-        if (l.done === undefined || !l.total || (l.label === '' && l.done === l.total)) {
+        if (l.done === undefined || l.total === undefined || (!l.total && !migration) || (l.label === '' && l.done === l.total)) {
           task.progress = undefined
           sample = undefined
           return
@@ -313,7 +315,7 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
           speed = speed ? speed * 0.6 + v * 0.4 : v
           sample = { t, done: l.done }
         }
-        const eta = speed && speed > 0 ? (l.total - l.done) / speed : undefined
+        const eta = l.total && speed && speed > 0 ? (l.total - l.done) / speed : undefined
         task.progress = { label: l.label ?? '', done: l.done, total: l.total, speed, eta }
         const label = l.label ?? ''
         if (label.startsWith('已执行 ')) task.step = { text: label, at: task.step?.at ?? t }
@@ -353,8 +355,10 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
   task.kill = run.kill
   task.config = configOf(args)
   task.target = targetOf(args)
-  task.retry = () => startTask(title, args, onDone, env)
-  task.retryWith = (extra) => startTask(title, [...args, ...extra], onDone, env)
+  if (!migration && !nativeMigration) {
+    task.retry = () => startTask(title, args, onDone, env)
+    task.retryWith = (extra) => startTask(title, [...args, ...extra], onDone, env)
+  }
   saveTask(task)
   run.done.then((r) => {
     task.status = r.ok ? 'ok' : 'failed'

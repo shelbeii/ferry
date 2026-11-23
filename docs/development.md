@@ -7,6 +7,8 @@ go vet ./... && go test ./...
 gofmt -l internal cmd                                                         # 应该没有输出
 FERRY_TEST_JAR=/path/to/app.jar go test ./internal/zipx ./internal/artifact   # 用真实 fat jar 测拼装与检查
 test/e2e/run.sh                                                               # 端到端（需要 docker；Windows 用 Git Bash）
+bash test/e2e/database-migration.sh                                             # 真库迁移端到端（需要 docker）
+bash test/e2e/database-native-migration.sh                                      # 服务器端迁移和物理克隆（Docker，Linux amd64 测试镜像）
 ```
 
 - agent 通过 `agent.System` 接口隔离了 systemd、符号链接、用户、锁等系统操作，单元测试用假实现，在任何平台上都能跑。

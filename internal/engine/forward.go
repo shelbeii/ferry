@@ -277,20 +277,25 @@ func (f *forward) serve() {
 				return
 			}
 			defer r.Close()
-			done := make(chan struct{}, 2)
-			pipe := func(dst, src net.Conn) {
-				io.Copy(dst, src)
-				if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-					cw.CloseWrite()
-				}
-				done <- struct{}{}
-			}
-			go pipe(r, c)
-			go pipe(c, r)
-			<-done
-			<-done
+			copyTCP(c, r)
 		})
 	}
+}
+
+func copyTCP(a, b net.Conn) {
+	done := make(chan struct{})
+	pipe := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}
+	go func() {
+		defer close(done)
+		pipe(a, b)
+	}()
+	pipe(b, a)
+	<-done
 }
 
 // serveHTTP 按域名转发网站：nginx 按请求里的 Host 选网站，原样转 TCP 的话 Host 是本机的地址，只能看到默认站点。

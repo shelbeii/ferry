@@ -16,3 +16,19 @@
 - 一键恢复：恢复前自动先备份一份现在的，恢复错了还能回去；可以把备份下载到这台电脑。保留最近 N 份。定时备份失败时，开着服务器告警就会发告警。
 - **传到异地**（`upload`）：每次定时、手动备份完，再加密（age 格式）传一份到阿里云 OSS、腾讯云 COS、MinIO 等 S3 兼容的对象存储，那边也只留最近 N 份；服务器整台没了时，在新服务器上「取回」再恢复。
 - `ferry backup <目标> [on | off | run | list | restore | download …]`，见 [docs/config.md](../config.md)。
+
+## 服务器端数据库迁移
+
+在桌面版「数据库」中右键库或表，选择「服务器端迁移」。选择能访问源库和目标库的 Linux SSH 服务器。整库迁移使用空目标库，指定表迁移可以写入有其他表的库。迁移期间保留 Ferry 和 SSH 会话。
+
+| 引擎 | 执行服务器所需工具 |
+| --- | --- |
+| MySQL | 目标允许 `local_infile` 时优先用 `mysqlsh`，也可以用 `mydumper` 和 `myloader`。含视图、函数或触发器的整库复制应使用同名目标库。 |
+| MariaDB | `mydumper` 和 `myloader`。 |
+| PostgreSQL | `pg_dump` 和 `pg_restore`，客户端版本兼容源库。 |
+
+右键数据库连接可选「实例物理克隆」。已有数据库服务与新目录分开管理。用兼容版本启动新实例前，按数据库服务账号设置目录所有权。
+
+- MySQL 两端启用 Clone Plugin，在接收端配置 `clone_valid_donor_list`。新数据目录在接收 MySQL 实例所在服务器上。
+- PostgreSQL 执行服务器需要 `pg_basebackup` 和 `pg_verifybackup`，源账号需要复制权限。新数据目录在执行服务器上。
+- MariaDB 执行服务器需要 `mariadb-backup` 和 `mbstream`。源库在另一台服务器时，执行服务器通过预先配置且验证过主机公钥的 SSH 别名调用源端 `mariadb-backup`。新数据目录在执行服务器上。

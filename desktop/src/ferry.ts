@@ -22,6 +22,8 @@ export interface FerryLine {
 /** 结构化的错误信息：需要密码、密码被拒绝、未知主机…… */
 export interface ErrorDetail {
   kind: 'password-required' | 'password-rejected' | 'passphrase-required' | 'passphrase-rejected' | 'sudo-required' | 'sudo-rejected' | 'unknown-host' | 'key-missing' | string
+  /** ID of the saved database connection that needs a password. */
+  id?: string
   target?: string
   key?: string
   env?: string
@@ -46,6 +48,13 @@ export interface ErrorDetail {
   /** pkg-changes：从软件源要装的包，和会顺带改动的已装包（如「openssl-libs（升级）」） */
   packages?: string[]
   changes?: string[]
+  nativeProblem?: DbNativeProblem
+}
+
+export interface DbNativeProblem {
+  code: string
+  install?: ('mydumper' | 'mysql-shell')[]
+  canEnableLocalInfile?: boolean
 }
 
 /** 被本机程序占着的产物（Windows 锁住正在运行的 jar） */

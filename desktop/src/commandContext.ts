@@ -12,6 +12,7 @@ export function commandTarget(args: string[]): string | undefined {
     if (args[1] === 'config' || (['jdk', 'runtime'].includes(args[1]) && ['list', 'install', 'remove'].includes(args[2]))) index = 3
     else index = softwareActions.has(args[1]) ? 2 : 1
   } else if (args[0] === 'port') index = portActions.has(args[1]) ? 2 : 1
+  else if (args[0] === 'db' && args[1] === 'native-install-tools') index = 2
   else if (args[0] === 'who') index = args[1] === 'kick' ? 2 : 1
   else if (args[0] === 'files') index = 2
   else return undefined

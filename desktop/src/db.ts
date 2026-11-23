@@ -41,6 +41,40 @@ export interface DbConn {
 }
 
 export interface DbDatabase { name: string; system?: boolean; /** Redis：键的个数 */ keys?: number }
+export interface DbMigrationTable { schema?: string; name: string }
+export interface DbMigrationOptions {
+  targetConn: string
+  targetDb: string
+  whole: boolean
+  dataOnly: boolean
+  tables?: DbMigrationTable[]
+}
+export interface DbMigrationPlan {
+  method: string
+  tables: (DbMigrationTable & { create: boolean })[]
+  objects?: string[]
+  warnings?: string[]
+}
+export interface DbNativeMigrationOptions {
+  worker: DbVia
+  relay?: boolean
+  allowLocalInfile?: boolean
+  scope: 'tables' | 'database' | 'instance'
+  targetConn?: string
+  targetDb?: string
+  tables?: DbMigrationTable[]
+  threads: number
+  directory?: string
+  sourceSsh?: string
+}
+export interface DbNativeMigrationPlan {
+  method: string
+  sourceVersion: string
+  targetVersion?: string
+  tables: number
+  directory?: string
+  warnings?: string[]
+}
 export interface DbTable {
   schema?: string
   name: string
@@ -218,6 +252,8 @@ export const filterOps: { value: string; label: string; noValue?: boolean; two?:
 ]
 
 export interface DbReq {
+  migration?: DbMigrationOptions
+  nativeMigration?: DbNativeMigrationOptions
   mongo?: { filter?: string; skip?: number; limit?: number }
   schema?: string
   table?: string
@@ -510,7 +546,8 @@ async function withRetry<T>(conn: DbConn | undefined, run: () => Promise<T>, tri
       if (!(e instanceof FerryError) || i >= tries) throw e
       const d = e.detail
       if (conn && (d?.kind === 'db-password-required' || d?.kind === 'db-password-rejected')) {
-        const ok = await new Promise<boolean>((resolve) => { dbPasswordRequest.value = { conn, rejected: d.kind === 'db-password-rejected', resolve } })
+        const passwordConn = dbConns.value.find(c => c.id === d.id) ?? conn
+        const ok = await new Promise<boolean>((resolve) => { dbPasswordRequest.value = { conn: passwordConn, rejected: d.kind === 'db-password-rejected', resolve } })
         if (!ok) throw new FerryError('没有填密码', d)
         continue
       }
@@ -535,6 +572,11 @@ export async function dbCall<T>(conn: DbConn, sub: string, db: string | undefine
   const r = await withRetry(conn, () => call<T>(['db', sub, conn.id, ...(db !== undefined ? [db] : [])], reqEnv(req)))
   dbOpened[conn.id] = true
   return r
+}
+
+export function dbNativePlan(conn: DbConn, db: string, request: DbNativeMigrationOptions): Promise<DbNativeMigrationPlan> {
+  const executor = { ...conn, via: request.worker }
+  return withRetry(executor, () => call<DbNativeMigrationPlan>(['db', 'native-plan', conn.id, db], reqEnv({ nativeMigration: request })))
 }
 
 /** 能取消的调用（查询、导出）。 */
