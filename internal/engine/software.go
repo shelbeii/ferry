@@ -71,6 +71,12 @@ type SoftwarePreview struct {
 	Version         string   `json:"version,omitempty"`
 	Dir             string   `json:"dir"`
 	User            string   `json:"user"`
+	Exec            string   `json:"exec,omitempty"`
+	ServiceType     string   `json:"serviceType,omitempty"`
+	ReadyMode       string   `json:"readyMode,omitempty"`
+	ReadyPort       int      `json:"readyPort,omitempty"`
+	ReadyURL        string   `json:"readyUrl,omitempty"`
+	FreeMB          int64    `json:"freeMB,omitempty"`
 	Java            int      `json:"java,omitempty"`
 	JavaHome        string   `json:"javaHome,omitempty"`
 	Network         string   `json:"network"`
@@ -195,25 +201,35 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	lib := e.Settings.SoftwareDir()
 	version := o.Version
 	var bundle string
+	var singlePkg string
 	if o.PackageFile != "" {
 		pkg = swpkg.FindFile(lib, o.PackageFile)
 		if pkg == nil {
 			return nil, fmt.Errorf("本机库里没有 %s：先导入", o.PackageFile)
 		}
-		if swtpl.FormatOf("", pkg.File) == "zip" {
+		fileFmt := swtpl.FormatOf("", pkg.File)
+		if fileFmt == "zip" {
 			preview, err := swpkg.InspectArchive(e.ctx(), filepath.Join(lib, pkg.File), "zip", 0)
 			if err != nil {
 				return nil, fmt.Errorf("读取 %s：%w", pkg.File, err)
 			}
 			bundle = preview.Bundle
+		} else if fileFmt == "rpm" || fileFmt == "deb" {
+			singlePkg = fileFmt
 		}
 		switch {
 		case v.Package == nil && v.System != nil && bundle != "":
 			v.Package = &swtpl.Package{Format: "zip"}
+		case v.Package == nil && v.System != nil && singlePkg != "":
+			v.Package = &swtpl.Package{Format: singlePkg}
+		case v.Package != nil && singlePkg != "":
+			if v.System == nil {
+				v.System = &swtpl.System{}
+			}
 		case bundle != "":
 			return nil, fmt.Errorf("%s 是 %s 离线包集合，请选用软件的系统包安装方式", pkg.File, strings.ToUpper(bundle))
 		case v.Package == nil:
-			return nil, fmt.Errorf("%s 的系统包安装需要包含 RPM 或 DEB 的 ZIP 文件", tpl.Name)
+			return nil, fmt.Errorf("%s 的系统包安装需要包含 RPM 或 DEB 的 ZIP 文件或单个 RPM / DEB 包", tpl.Name)
 		}
 	}
 	if p := v.Package; p != nil {
@@ -433,8 +449,10 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	}
 
 	networkPlan := &proto.SoftwarePlan{}
-	if len(chk.MissingPackages) > 0 && bundle == "" {
-		e.Rep.Info("缺少系统软件包：%s", strings.Join(chk.MissingPackages, "、"))
+	if (len(chk.MissingPackages) > 0 && bundle == "") || singlePkg != "" {
+		if len(chk.MissingPackages) > 0 {
+			e.Rep.Info("缺少系统软件包：%s", strings.Join(chk.MissingPackages, "、"))
+		}
 		networkPlan.System = &proto.PlanSystem{}
 	}
 	for _, step := range v.Steps {
@@ -452,7 +470,7 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	}
 	var resolution proto.SwResolution
 	// 系统包安装本身先模拟事务。预检和需要先传程序/JDK 的安装也在这里检查，避免传完才发现依赖装不了。
-	if bundle == "" && len(chk.RequiredPackages) > 0 && (o.Preview || v.Package != nil || java > 0) {
+	if bundle == "" && singlePkg == "" && len(chk.RequiredPackages) > 0 && (o.Preview || v.Package != nil || java > 0) {
 		e.Rep.Step("验证软件源与系统包依赖")
 		spec := &proto.SwResolveSpec{Packages: chk.RequiredPackages, Proxy: networkPlan.Proxy, NoProxy: networkPlan.NoProxy}
 		if err := s.callData("swresolve", &proto.Request{SwResolve: spec}, &resolution); err != nil {
@@ -463,6 +481,15 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			return nil, &PkgChangesError{Target: t.Name, Packages: resolution.Packages, Changes: resolution.Changes, Msg: msg}
 		}
 	}
+	// 本机已有安装包时，在预检和上传前就校验程序架构、压缩包层级与启动程序存在性
+	if pkg != nil && v.Package != nil && bundle == "" && singlePkg == "" {
+		if err := e.checkLocalPackage(filepath.Join(lib, pkg.File), pkg, &v, dir, vars, s.arch); err != nil {
+			return nil, err
+		}
+		if err := diskRoom(t.Name, dir, chk, pkg.Size); err != nil {
+			return nil, err
+		}
+	}
 	if o.Preview {
 		route := "none"
 		switch {
@@ -470,10 +497,44 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			route = "offline"
 		case proxy != nil:
 			route = "local"
-		case len(chk.MissingPackages) > 0:
+		case len(chk.MissingPackages) > 0 || singlePkg != "":
 			route = "server"
 		}
-		p := &SoftwarePreview{Template: tpl.ID, Variant: v.Label, Dir: dir, Version: version, User: user, Java: java,
+		previewVars := swtpl.Vars{}
+		for k, val := range vars {
+			previewVars[k] = val
+		}
+		previewVars["version"] = version
+		if java > 0 {
+			if chk.JavaHome != "" {
+				previewVars["java"] = chk.JavaHome + "/bin/java"
+			} else if javaDir != "" {
+				previewVars["java"] = javaDir + "/jdk-" + strconv.Itoa(java) + "/bin/java"
+			} else {
+				previewVars["java"] = s.ferryDir + "/runtimes/java-" + strconv.Itoa(java) + "/bin/java"
+			}
+		} else {
+			previewVars["java"] = ""
+		}
+		if pkg != nil {
+			previewVars["package"] = pkg.File
+		} else {
+			previewVars["package"] = ""
+		}
+		execText, _ := previewVars.Expand(v.Service.Exec)
+		readyMode := v.Service.Ready.Mode
+		if readyMode == "" {
+			readyMode = "tcp"
+		}
+		readyPort := 0
+		if v.Service.Ready.Port != "" {
+			rp, _ := previewVars.Expand(v.Service.Ready.Port)
+			readyPort, _ = strconv.Atoi(rp)
+		}
+		readyURL, _ := previewVars.Expand(v.Service.Ready.URL)
+		p := &SoftwarePreview{Template: tpl.ID, Variant: v.Label, Dir: dir, Version: version, User: user,
+			Exec: strings.TrimSpace(execText), ServiceType: v.Service.Type, ReadyMode: readyMode, ReadyPort: readyPort, ReadyURL: readyURL,
+			FreeMB: chk.FreeMB, Java: java,
 			JavaHome: chk.JavaHome, Network: route, MissingPackages: chk.MissingPackages, PackageChanges: resolution.Changes,
 			Extras: extrasRendered(tpl, &v, vars, extras, version, java, pkg)}
 		if pkg != nil {
@@ -497,13 +558,13 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 			} else {
 				e.Rep.Info("使用本机已有的 %s（%s）", pkg.File, humanBytes(pkg.Size))
 			}
-		}
-		if err := diskRoom(t.Name, dir, chk, pkg.Size); err != nil {
-			return nil, err
-		}
-		if swtpl.FormatOf(p.Format, pkg.File) == "binary" {
-			if err := checkProgramArch(filepath.Join(lib, pkg.File), s.arch); err != nil {
+			if err := diskRoom(t.Name, dir, chk, pkg.Size); err != nil {
 				return nil, err
+			}
+			if bundle == "" && singlePkg == "" {
+				if err := e.checkLocalPackage(filepath.Join(lib, pkg.File), pkg, &v, dir, vars, s.arch); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -589,7 +650,12 @@ func (e *Engine) SoftwareInstall(target string, o SoftwareOptions) (*SoftwareRes
 	if plan.System != nil {
 		plan.System.AllowChanges = o.AllowChanges
 		plan.System.Bundle = bundle
+		if singlePkg != "" {
+			plan.System.Single = singlePkg
+			plan.System.UseRepos = true
+		}
 	}
+	plan.Custom = len(o.TemplateYAML) > 0
 	if javaHome != "" {
 		plan.Reach = []string{javaHome}
 	}
@@ -859,6 +925,75 @@ func orUnknown(s string) string {
 	return s
 }
 
+// checkLocalPackage 上传前对本机安装包做架构与目录结构预检：
+// 1) 单文件 binary 查 ELF 架构；
+// 2) 压缩包查剥离后是否有文件、内部 ELF 架构是否匹配目标服务器、以及 ExecStart 指向的目录内程序是否存在于包内。
+func (e *Engine) checkLocalPackage(fullPath string, pkg *swpkg.Meta, v *swtpl.Variant, dir string, vars swtpl.Vars, serverArch string) error {
+	format := swtpl.FormatOf(v.Package.Format, pkg.File)
+	if format == "binary" {
+		return checkProgramArch(fullPath, serverArch)
+	}
+	if !swtpl.IsArchiveFormat(format) {
+		return nil
+	}
+	preview, err := swpkg.InspectArchive(e.ctx(), fullPath, format, v.Package.Strip)
+	if err != nil {
+		return fmt.Errorf("检查安装包 %s 失败：%w", pkg.File, err)
+	}
+	if preview.Entries == 0 && format != "tar.xz" {
+		return fmt.Errorf("安装包 %s 按当前剥离层数（%d）解压后没有任何文件；建议把剥离层数改为 %d", pkg.File, v.Package.Strip, preview.RecommendedStrip)
+	}
+	if len(preview.Arches) > 0 && serverArch != "" && !slices.Contains(preview.Arches, serverArch) {
+		return fmt.Errorf("安装包 %s 内的可执行程序架构为 %s，与目标服务器（%s）不匹配；请更换 Linux %s 版本的安装包",
+			pkg.File, strings.Join(preview.Arches, "/"), serverArch, serverArch)
+	}
+	// 如果模板没有自定义 steps 且启动命令指向 ${dir}/... 并且不是 files 写出来的，则提前确认该文件在压缩包内存在
+	if len(v.Steps) == 0 && preview.Entries > 0 {
+		testVars := swtpl.Vars{}
+		for k, val := range vars {
+			testVars[k] = val
+		}
+		testVars["java"] = "/usr/bin/java"
+		testVars["package"] = pkg.File
+		if execExpanded, err := testVars.Expand(v.Service.Exec); err == nil {
+			fields := strings.Fields(execExpanded)
+			if len(fields) > 0 {
+				exe := strings.Trim(fields[0], "'\"")
+				if rel, ok := strings.CutPrefix(exe, dir+"/"); ok {
+					writtenByFile := false
+					for _, f := range v.Files {
+						if fp, ferr := testVars.Expand(f.Path); ferr == nil && fp == exe {
+							writtenByFile = true
+							break
+						}
+					}
+					if !writtenByFile {
+						into, _ := testVars.Expand(v.Package.Into)
+						checkRel := rel
+						if into != "" {
+							if stripped, ok := strings.CutPrefix(rel, strings.Trim(into, "/")+"/"); ok {
+								checkRel = stripped
+							} else {
+								checkRel = ""
+							}
+						}
+						if checkRel != "" {
+							if has, herr := swpkg.ArchiveHasPath(e.ctx(), fullPath, format, v.Package.Strip, checkRel); herr == nil && !has {
+								hint := fmt.Sprintf("（当前剥离 %d 层，该包推荐剥离 %d 层）", v.Package.Strip, preview.RecommendedStrip)
+								if len(preview.Candidates) > 0 {
+									hint += "；包内探测到的入口有：" + preview.Candidates[0].Path
+								}
+								return fmt.Errorf("启动命令指定的 %s 在安装包 %s 中不存在%s", exe, pkg.File, hint)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // renderPlan 把装法里的 ${…} 换成值，得到给 agent 的安装计划（if 条件不满足的文件、步骤去掉）。
 func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swpkg.Meta) (*proto.SoftwarePlan, error) {
 	var firstErr error
@@ -869,7 +1004,15 @@ func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swp
 		}
 		return out
 	}
-	pl := &proto.SoftwarePlan{Template: tpl.ID, Title: tpl.Name, Exec: strings.TrimSpace(x(v.Service.Exec)), Workdir: x(v.Service.Workdir)}
+	pl := &proto.SoftwarePlan{
+		Template:    tpl.ID,
+		Title:       tpl.Name,
+		Exec:        strings.TrimSpace(x(v.Service.Exec)),
+		Workdir:     x(v.Service.Workdir),
+		ServiceType: v.Service.Type,
+		AllowRoot:   v.Service.AllowRoot,
+		KeepOnFail:  v.Service.KeepOnFail,
+	}
 	for _, c := range v.Configs {
 		pl.Configs = append(pl.Configs, proto.SoftwareConfigFile{Label: c.Label, Path: x(c.Path), Format: c.Format, Apply: c.Apply})
 	}
@@ -937,11 +1080,25 @@ func renderPlan(tpl *swtpl.Template, v *swtpl.Variant, vars swtpl.Vars, pkg *swp
 			pl.Env[k] = x(val)
 		}
 	}
-	port, err := strconv.Atoi(x(v.Service.Ready.Port))
-	if err != nil {
-		return nil, fmt.Errorf("模板 %s：service.ready.port 不是端口：%q", tpl.ID, v.Service.Ready.Port)
+	pl.ReadyMode = v.Service.Ready.Mode
+	pl.ReadyTimeout = v.Service.Ready.Timeout
+	pl.ReadyStable = v.Service.Ready.Stable
+	if pl.ReadyMode == "http" {
+		pl.ReadyURL = x(v.Service.Ready.URL)
 	}
-	pl.ReadyPort, pl.ReadyTimeout = port, v.Service.Ready.Timeout
+	if pl.ReadyMode == "process" {
+		if v.Service.Ready.Port != "" {
+			if p, err := strconv.Atoi(x(v.Service.Ready.Port)); err == nil && p > 0 {
+				pl.ReadyPort = p
+			}
+		}
+	} else {
+		port, err := strconv.Atoi(x(v.Service.Ready.Port))
+		if err != nil {
+			return nil, fmt.Errorf("模板 %s：service.ready.port 不是端口：%q", tpl.ID, v.Service.Ready.Port)
+		}
+		pl.ReadyPort = port
+	}
 	for _, l := range v.Logs {
 		if l = x(l); l != "" {
 			pl.Logs = append(pl.Logs, l)

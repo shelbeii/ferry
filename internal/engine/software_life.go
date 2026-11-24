@@ -43,6 +43,31 @@ func (e *Engine) SoftwareRestore(target, name string) (*proto.SoftwareInstance, 
 	return &in, nil
 }
 
+// SoftwareServiceGet 查看 Ferry 已安装软件的 systemd 服务设置（启动命令、环境变量、工作目录、就绪检查）。
+func (e *Engine) SoftwareServiceGet(target, name string) (*proto.SwServiceView, error) {
+	var out proto.SwServiceView
+	err := e.withTarget(target, func(s *session) error {
+		return s.callData("swservice", &proto.Request{Instance: name, Action: "get"}, &out)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SoftwareServiceSave 修改 Ferry 已安装软件的 systemd 服务设置并重启验证（失败自动回滚）。
+func (e *Engine) SoftwareServiceSave(target, name string, edit proto.SwServiceEdit) (*proto.SoftwareInstance, error) {
+	var out proto.SoftwareInstance
+	err := e.withTarget(target, func(s *session) error {
+		e.Rep.Step("更新 %s 上 %s 的服务设置并验证启动", s.t.Name, name)
+		return s.callData("swservice", &proto.Request{Instance: name, Action: "save", SwServiceEdit: &edit}, &out)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // UpgradeOptions 升级的选项。
 type UpgradeOptions struct {
 	Version     string // 不填 = 最新
@@ -89,17 +114,25 @@ func (e *Engine) SoftwareUpgrade(target, name string, o UpgradeOptions) (*proto.
 	if kept {
 		return nil, fmt.Errorf("%s 已经卸载了（保留着数据）：先恢复再升级", name)
 	}
-	tpl, err := swtpl.Find(e.Settings.TemplateDir(), in.Kind)
-	if err != nil {
-		return nil, fmt.Errorf("%s 是用模板 %s 装的，这个模板已经不在了：不能自动升级", name, in.Kind)
-	}
-	if in.Variant < 0 || in.Variant >= len(tpl.Variants) {
-		return nil, fmt.Errorf("模板 %s 改过了（没有第 %d 种装法）：不能自动升级", tpl.ID, in.Variant+1)
-	}
-	v := tpl.Variants[in.Variant]
-	p := v.Package
-	if p == nil {
-		return nil, fmt.Errorf("%s 是从服务器的软件源装的：用 dnf / apt 更新系统软件包后，在这里重启它就是新版本", name)
+	tpl, tplErr := swtpl.Find(e.Settings.TemplateDir(), in.Kind)
+	var v swtpl.Variant
+	var p *swtpl.Package
+	customDirect := false
+	if tplErr != nil {
+		if !in.Custom && o.PackageFile == "" {
+			return nil, fmt.Errorf("%s 是用模板 %s 装的，这个模板已经不在了：请通过「指定安装包」上传新版本包进行升级", name, in.Kind)
+		}
+		customDirect = true
+		p = &swtpl.Package{Format: in.PackageFormat, Strip: in.PackageStrip, Into: in.PackageInto}
+	} else {
+		if in.Variant < 0 || in.Variant >= len(tpl.Variants) {
+			return nil, fmt.Errorf("模板 %s 改过了（没有第 %d 种装法）：不能自动升级", tpl.ID, in.Variant+1)
+		}
+		v = tpl.Variants[in.Variant]
+		p = v.Package
+		if p == nil {
+			return nil, fmt.Errorf("%s 是从服务器的软件源装的：用 dnf / apt 更新系统软件包后，在这里重启它就是新版本", name)
+		}
 	}
 
 	// 版本、安装包：和安装时一样，本机库里没有就下载
@@ -114,6 +147,11 @@ func (e *Engine) SoftwareUpgrade(target, name string, o UpgradeOptions) (*proto.
 		if version == "" {
 			version = pkg.Version
 		}
+		if version == "" && (customDirect || in.Custom) {
+			version = "pkg-" + pkg.SHA256[:8]
+		}
+	case customDirect:
+		return nil, fmt.Errorf("%s 是自定义安装的软件：请先在本地包库导入新版本安装包，并在升级时指定该安装包", name)
 	case p.URL == "":
 		if pkg = swpkg.Find(lib, tpl.ID, version); pkg == nil {
 			return nil, fmt.Errorf("%s 没有下载地址：先在「导入安装包」里导入新版本，再选它", tpl.Name)
@@ -127,10 +165,10 @@ func (e *Engine) SoftwareUpgrade(target, name string, o UpgradeOptions) (*proto.
 	if version == "" {
 		return nil, errors.New("不知道要升到哪个版本：写上版本")
 	}
-	if version == in.Version {
+	if version == in.Version && o.PackageFile == "" {
 		return nil, fmt.Errorf("%s 已经是 %s 了", name, version)
 	}
-	if in.Version != "" && majorOf(in.Version) != majorOf(version) && !o.Major {
+	if !customDirect && in.Version != "" && majorOf(in.Version) != majorOf(version) && !o.Major {
 		return nil, &MajorUpgradeError{Target: t.Name, Name: name, From: in.Version, To: version}
 	}
 	var chk proto.SwCheck
@@ -156,12 +194,25 @@ func (e *Engine) SoftwareUpgrade(target, name string, o UpgradeOptions) (*proto.
 		if err := checkProgramArch(filepath.Join(lib, pkg.File), s.arch); err != nil {
 			return nil, err
 		}
+	} else if swtpl.IsArchiveFormat(format) {
+		if prev, err := swpkg.InspectArchive(e.ctx(), filepath.Join(lib, pkg.File), format, p.Strip); err == nil && len(prev.Arches) > 0 && s.arch != "" {
+			matched := false
+			for _, a := range prev.Arches {
+				if a == s.arch {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return nil, fmt.Errorf("安装包 %s 内的程序架构为 %s，与目标服务器 %s 不匹配", pkg.File, strings.Join(prev.Arches, "/"), s.arch)
+			}
+		}
 	}
 	vars := swtpl.Vars{"name": name, "dir": in.Dir, "user": in.User, "host": t.Host, "version": version}
 	into, err1 := vars.Expand(p.Into)
 	check, err2 := vars.Expand(p.Check)
 	if err := errors.Join(err1, err2); err != nil {
-		return nil, fmt.Errorf("模板 %s：%v", tpl.ID, err)
+		return nil, fmt.Errorf("模板 %s：%v", in.Kind, err)
 	}
 	pp := &proto.PlanPackage{File: pkg.File, SHA256: pkg.SHA256, Size: pkg.Size, Format: format, Strip: p.Strip, Into: into, Check: check}
 	if format == "jar" {

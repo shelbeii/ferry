@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/captain/ferry/internal/engine"
+	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/rundist"
 	"github.com/captain/ferry/internal/settings"
 	"github.com/captain/ferry/internal/swpkg"
@@ -254,6 +255,41 @@ func softwareCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Cons
 			con.OK("%s 已升级到 %s", in.Name, in.Version)
 		}
 		return ok(in)
+
+	case "service":
+		if err := need(3); err != nil {
+			return fail(errors.New("用法：ferry software service get|save <目标> <名称>"))
+		}
+		switch args[0] {
+		case "get":
+			view, err := e.SoftwareServiceGet(args[1], args[2])
+			if err != nil {
+				return fail(err)
+			}
+			if con != nil {
+				con.Info("%s（%s）：%s", view.Instance, view.Unit, view.Exec)
+			}
+			return ok(view)
+		case "save":
+			raw := os.Getenv("FERRY_FILE_VALUE")
+			if raw == "" {
+				return fail(errors.New("请通过环境变量 FERRY_FILE_VALUE 提供服务设置 JSON"))
+			}
+			var edit proto.SwServiceEdit
+			if err := json.Unmarshal([]byte(raw), &edit); err != nil {
+				return fail(fmt.Errorf("服务设置 JSON 无效：%w", err))
+			}
+			in, err := e.SoftwareServiceSave(args[1], args[2], edit)
+			if err != nil {
+				return fail(err)
+			}
+			if con != nil {
+				con.OK("%s 服务设置已更新并重启通过", in.Name)
+			}
+			return ok(in)
+		default:
+			return fail(errors.New("用法：ferry software service get|save <目标> <名称>"))
+		}
 
 	case "backup":
 		if err := need(2); err != nil {
@@ -695,18 +731,18 @@ func softwareLocalCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st setti
 			return ok(nil)
 		case "inspect":
 			if len(args) < 2 || len(args) > 3 {
-				return fail(errors.New("用法：ferry software lib inspect <文件名> [剥离层数]"))
+				return fail(errors.New("用法：ferry software lib inspect <文件名> [剥离层数|auto]"))
 			}
 			m := swpkg.FindFile(lib, args[1])
 			if m == nil {
 				return fail(fmt.Errorf("本机库里没有 %s", args[1]))
 			}
-			strip := 0
-			if len(args) == 3 {
+			strip := -1
+			if len(args) == 3 && args[2] != "auto" {
 				var err error
 				strip, err = strconv.Atoi(args[2])
 				if err != nil || strip < 0 || strip > 64 {
-					return fail(errors.New("剥离层数必须是 0 到 64"))
+					return fail(errors.New("剥离层数必须是 0 到 64 或 auto"))
 				}
 			}
 			preview, err := swpkg.InspectArchive(cio.ctx, filepath.Join(lib, m.File), swtpl.FormatOf("", m.File), strip)
@@ -714,7 +750,14 @@ func softwareLocalCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st setti
 				return fail(err)
 			}
 			if con != nil {
-				con.Info("%d 个文件，离线包类型：%s", preview.Entries, preview.Bundle)
+				con.Info("%d 个文件（剥离 %d 层，推荐 %d 层），离线包类型：%s", preview.Entries, preview.Strip, preview.RecommendedStrip, preview.Bundle)
+				for _, c := range preview.Candidates {
+					arch := ""
+					if c.Arch != "" {
+						arch = " [" + c.Arch + "]"
+					}
+					con.Info("候选入口：%s（%s%s）→ %s", c.Path, c.Kind, arch, c.Exec)
+				}
 				for _, file := range preview.Files {
 					con.Info("%s", file)
 				}

@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"debug/elf"
 	"encoding/base64"
 	"encoding/binary"
@@ -362,5 +364,70 @@ func TestMajorOf(t *testing.T) {
 		if majorOf(v) != want {
 			t.Errorf("%s：%s", v, majorOf(v))
 		}
+	}
+}
+
+func TestCheckLocalPackageArchiveArchAndPath(t *testing.T) {
+	dir := t.TempDir()
+	tgz := filepath.Join(dir, "app-arm64.tar.gz")
+	f, err := os.Create(tgz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	elfBytes, err := os.ReadFile(fakeELF(t, elf.EM_AARCH64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw.WriteHeader(&tar.Header{Name: "app-1.0/bin/app", Mode: 0o755, Size: int64(len(elfBytes))})
+	tw.Write(elfBytes)
+	tw.Close()
+	gz.Close()
+	f.Close()
+
+	e := &Engine{}
+	pkg := &swpkg.Meta{File: "app-arm64.tar.gz"}
+	vars := swtpl.Vars{"dir": "/opt/ferry-software/app"}
+
+	// 1. 架构不匹配（arm64 包传到 amd64 服务器）应在上传前被拦截
+	v := &swtpl.Variant{Package: &swtpl.Package{Format: "tar.gz", Strip: 1}, Service: swtpl.Service{Exec: "${dir}/bin/app"}}
+	if err := e.checkLocalPackage(tgz, pkg, v, "/opt/ferry-software/app", vars, "amd64"); err == nil || !strings.Contains(err.Error(), "不匹配") {
+		t.Fatalf("应拦截压缩包内架构不匹配：%v", err)
+	}
+	// 2. 架构匹配但 strip 错导致启动文件不存在，应提前报错并给出推荐 strip
+	vBadStrip := &swtpl.Variant{Package: &swtpl.Package{Format: "tar.gz", Strip: 0}, Service: swtpl.Service{Exec: "${dir}/bin/app"}}
+	if err := e.checkLocalPackage(tgz, pkg, vBadStrip, "/opt/ferry-software/app", vars, "arm64"); err == nil || !strings.Contains(err.Error(), "不存在") || !strings.Contains(err.Error(), "推荐剥离 1 层") {
+		t.Fatalf("应拦截路径不存在并提示推荐 strip：%v", err)
+	}
+	// 3. 架构和 strip 都正确应通过
+	if err := e.checkLocalPackage(tgz, pkg, v, "/opt/ferry-software/app", vars, "arm64"); err != nil {
+		t.Fatalf("正确包应通过：%v", err)
+	}
+}
+
+func TestRenderPlanProcessModeAndAdvanced(t *testing.T) {
+	tpl, err := swtpl.Parse([]byte(`id: worker
+name: Worker
+variants:
+  - label: 导入
+    user: root
+    package: {format: binary, into: worker}
+    service:
+      exec: ${dir}/worker
+      type: forking
+      allowRoot: true
+      keepOnFail: true
+      ready: {mode: process, stable: 6, timeout: 90}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl, err := renderPlan(tpl, &tpl.Variants[0], swtpl.Vars{"dir": "/opt/ferry-software/worker"}, &swpkg.Meta{File: "worker", SHA256: strings.Repeat("a", 64), Size: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pl.ReadyMode != "process" || pl.ReadyPort != 0 || pl.ReadyStable != 6 || pl.ReadyTimeout != 90 || pl.ServiceType != "forking" || !pl.AllowRoot || !pl.KeepOnFail {
+		t.Fatalf("计划字段不对：%+v", pl)
 	}
 }
