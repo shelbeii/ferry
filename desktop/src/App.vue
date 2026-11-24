@@ -20,7 +20,7 @@ import ConnectionView from './components/ConnectionView.vue'
 import McpApprovals from './components/McpApprovals.vue'
 import { completeRequest, requestKey } from './requestQueue'
 import { dbOpen, dbRequest } from './db'
-import { startAutoCheck, updater } from './update'
+import { openUpdateDialog, startAutoCheck, updater } from './update'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const SettingsDialog = defineAsyncComponent(() => import('./components/SettingsDialog.vue'))
@@ -308,8 +308,8 @@ async function moveConfig(path: string) {
           </el-badge>
         </button>
       </el-tooltip>
-      <el-tooltip v-if="updater.info?.newer" :show-after="HOVER_DELAY" :content="`有新版本 ${updater.info.latest}，点这里更新`" placement="right">
-        <button class="rail-btn rail-update" aria-label="有新版本" @click="updater.dialog = true">
+      <el-tooltip v-if="updater.info?.newer || updater.mismatch" :show-after="HOVER_DELAY" :content="updater.info?.newer ? `有新版本 ${updater.info.latest}，点这里更新` : '组件版本不一致，点这里修复更新'" placement="right">
+        <button class="rail-btn rail-update" :aria-label="updater.info?.newer ? '有新版本' : '修复更新'" @click="openUpdateDialog">
           <el-badge is-dot class="rail-badge">
             <el-icon :size="18"><Download /></el-icon>
           </el-badge>

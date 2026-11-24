@@ -16,7 +16,7 @@ import { glass, GLASS_TRANSPARENCY_DEFAULT } from '../glass/runtime'
 import { setParticles } from '../fx/dialogParticles'
 import GlassButton from './glass/GlassButton.vue'
 import GlassToggle from './glass/GlassToggle.vue'
-import { checkUpdate, updater } from '../update'
+import { checkUpdate, detectVersionMismatch, openUpdateDialog, updater } from '../update'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const TemplateEditor = defineAsyncComponent(() => import('./TemplateEditor.vue'))
@@ -491,11 +491,15 @@ interface CliVersion {
 const app = ref<{ name: string; version: string; tauri: string }>()
 const cli = ref<CliVersion>()
 const aboutError = ref('')
+const aboutMismatch = computed(() => (isTauri ? detectVersionMismatch(app.value?.version, cli.value?.version) : undefined) ?? updater.mismatch)
 
 async function loadAbout() {
   try {
     app.value = await appInfo()
     cli.value = await call<CliVersion>(['version'])
+    if (isTauri) {
+      updater.mismatch = detectVersionMismatch(app.value.version, cli.value.version)
+    }
   } catch (e) {
     aboutError.value = (e as Error).message
   }
@@ -514,11 +518,16 @@ function aboutText(): string {
 
 async function manualCheck() {
   try {
-    const r = await checkUpdate(true)
-    if (r?.newer) updater.dialog = true
+    const r = await checkUpdate(true, !!aboutMismatch.value)
+    if (r?.newer || updater.mismatch) openUpdateDialog()
   } catch {
     // 原因显示在「更新」一行
   }
+}
+
+function openRepair() {
+  if (aboutMismatch.value) updater.mismatch = aboutMismatch.value
+  openUpdateDialog()
 }
 
 async function copyAbout() {
@@ -1246,6 +1255,22 @@ async function pickKeyDir() {
           </div>
         </div>
         <el-alert v-if="aboutError" type="error" :title="aboutError" :closable="false" show-icon class="mb" />
+        <el-alert
+          v-if="aboutMismatch"
+          type="warning"
+          :title="`桌面版（${aboutMismatch.desktop}）与内置 ferry 命令行（${aboutMismatch.cli}）版本不一致，可能是上次更新未完整覆盖`"
+          :closable="false"
+          show-icon
+          class="mb"
+        />
+        <el-alert
+          v-if="updater.staleBinaries > 0"
+          type="info"
+          :title="`检测到 ${updater.staleBinaries} 个旧版 ferry 进程仍被外部软件占用（通常是编程软件启动的 ferry mcp 或终端命令），重启对应软件后即可切换为新版本`"
+          :closable="false"
+          show-icon
+          class="mb"
+        />
         <el-descriptions :column="1" border size="small" class="about-table">
           <el-descriptions-item label="桌面版">{{ app?.version ?? '…' }}<span class="muted ml">Tauri {{ app?.tauri ?? '' }}</span></el-descriptions-item>
           <el-descriptions-item label="ferry 命令行">
@@ -1265,10 +1290,12 @@ async function pickKeyDir() {
             <div class="update-row">
               <span v-if="updater.checking" class="muted">正在检查…</span>
               <span v-else-if="updater.info?.newer">有新版本 <b>{{ updater.info.latest }}</b></span>
+              <span v-else-if="aboutMismatch" class="danger">组件版本不一致（建议重新安装修复）</span>
               <span v-else-if="updater.info">已是最新版本<span class="muted">（GitHub 上最新发布的是 {{ updater.info.latest }}）</span></span>
               <span v-else-if="updater.checkError" class="danger">检查失败：{{ updater.checkError }}</span>
               <span v-else class="muted">还没检查过</span>
-              <GlassButton v-if="updater.info?.newer" tone="primary" size="small" @click="updater.dialog = true">查看并更新</GlassButton>
+              <GlassButton v-if="updater.info?.newer" tone="primary" size="small" @click="openUpdateDialog">查看并更新</GlassButton>
+              <GlassButton v-else-if="aboutMismatch" tone="primary" size="small" @click="openRepair">查看并修复</GlassButton>
               <GlassButton v-else size="small" :loading="updater.checking" @click="manualCheck">检查更新</GlassButton>
             </div>
             <div class="muted small">

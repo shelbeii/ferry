@@ -7,8 +7,10 @@ import { exitApp, openUrl } from '../platform'
 import { pageTerminals, tasks, terminals } from '../state'
 import { cancelUpdate, checkUpdate, installUpdate, updater } from '../update'
 
-// 新版本：更新了什么、点「更新」下载安装包并安装
+// 新版本：更新了什么、点「更新」下载安装包并安装；若检测到桌面程序与内置命令版本不一致，提供一键重装修复
 const info = computed(() => updater.info)
+const mismatch = computed(() => updater.mismatch)
+const repairMode = computed(() => !info.value?.newer && !!mismatch.value)
 const current = computed(() => info.value?.current.replace(/\+.*$/, '') ?? '')
 const running = computed(() => tasks.filter((t) => t.status === 'running').length)
 const openTerms = computed(() => [...terminals, ...pageTerminals].filter((t) => t.state === 'open').length)
@@ -16,12 +18,24 @@ const busyText = computed(() => {
   const parts = [running.value ? `${running.value} 个任务在进行中` : '', openTerms.value ? `${openTerms.value} 个终端连着` : ''].filter(Boolean)
   return parts.length ? `还有${parts.join('、')}：更新时 Ferry 会关闭，本机这一侧的任务会停止（服务器上已经开始的切换会继续完成），终端里正在运行的命令会被结束。` : ''
 })
+const externalText = computed(() => {
+  const others = info.value?.otherProcesses ?? 0
+  const stale = Math.max(info.value?.staleBinaries ?? 0, updater.staleBinaries)
+  if (others > 0) {
+    return `检测到还有 ${others} 个外部 ferry 进程在运行（如编程软件启动的 ferry mcp 或终端命令）：桌面版更新不受影响，但这些进程会继续使用旧版本，更新完成后需重启对应编程软件或终端才会切换为新版本。`
+  }
+  if (stale > 0) {
+    return `检测到有 ${stale} 个旧版 ferry 进程仍在运行（通常是编程软件启动的 ferry mcp 或终端命令）：更新完成后请重启对应编程软件或终端，以切换到新版本。`
+  }
+  return ''
+})
 const percent = computed(() => (updater.total > 0 ? Math.min(100, Math.floor((updater.done / updater.total) * 100)) : 0))
 const published = computed(() => {
   const t = info.value?.published ? new Date(info.value.published) : undefined
   return t && !isNaN(t.getTime()) ? t.toLocaleDateString() : ''
 })
-const action = computed(() => (info.value?.install === 'dmg' ? '下载并打开安装包' : '更新'))
+const title = computed(() => (info.value?.newer ? 'Ferry 有新版本' : repairMode.value ? '修复 Ferry 安装' : '检查更新'))
+const action = computed(() => (repairMode.value ? '重新安装修复' : info.value?.install === 'dmg' ? '下载并打开安装包' : '更新'))
 
 // 发布说明按 Markdown 显示：不放行 HTML，链接只认 http(s)，用系统浏览器打开
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
@@ -37,12 +51,15 @@ function onNotesClick(e: MouseEvent) {
 
 function retryNotes() {
   if (updater.checking || updater.phase) return
-  void checkUpdate(false)
+  void checkUpdate(false, repairMode.value)
 }
 
 onMounted(() => {
-  if (updater.info?.newer && !updater.info.notes && !updater.checking && !updater.phase) {
-    void checkUpdate(false)
+  if (updater.checking || updater.phase) return
+  if (!updater.info && updater.mismatch) {
+    void checkUpdate(false, true)
+  } else if ((updater.info?.newer || updater.mismatch) && !updater.info?.notes) {
+    void checkUpdate(false, repairMode.value)
   }
 })
 
@@ -55,13 +72,24 @@ function close() {
 <template>
   <el-dialog
     :model-value="updater.dialog"
-    :title="info?.newer ? 'Ferry 有新版本' : '检查更新'"
+    :title="title"
     width="620px"
     append-to-body
     :close-on-click-modal="false"
     :show-close="updater.phase !== 'download' && updater.phase !== 'install'"
     @update:model-value="(v: boolean) => !v && close()"
   >
+    <el-alert
+      v-if="mismatch"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="mb"
+      title="检测到桌面程序与内置命令版本不一致"
+    >
+      <p class="pre">桌面程序是 {{ mismatch.desktop }}，内置 ferry 命令是 {{ mismatch.cli }}，上次更新可能没有完整覆盖。建议重新安装最新版本以恢复一致。</p>
+    </el-alert>
+
     <template v-if="info">
       <div class="head">
         <div>
@@ -80,6 +108,7 @@ function close() {
 
       <el-alert v-if="!info.install" type="info" :closable="false" show-icon class="mt" title="这种系统没有现成的安装包，请到发布页下载。" />
       <el-alert v-else-if="busyText && !updater.phase" type="warning" :closable="false" show-icon class="mt" :title="busyText" />
+      <el-alert v-if="externalText && !updater.phase" type="info" :closable="false" show-icon class="mt" :title="externalText" />
 
       <div v-if="updater.phase === 'download'" class="mt">
         <el-progress :percentage="percent" :indeterminate="!updater.total" :duration="2" />
@@ -95,6 +124,11 @@ function close() {
         <p class="pre">{{ updater.error }}</p>
       </el-alert>
     </template>
+    <p v-else-if="updater.checking" class="muted">正在获取最新版本信息…</p>
+    <el-alert v-else-if="updater.checkError" type="error" :closable="false" show-icon title="检查更新失败">
+      <p class="pre">{{ updater.checkError }}</p>
+      <el-button link type="primary" size="small" @click="retryNotes">重试</el-button>
+    </el-alert>
 
     <template #footer>
       <template v-if="updater.phase === 'download'">
@@ -106,8 +140,8 @@ function close() {
       </template>
       <template v-else-if="updater.phase !== 'install'">
         <el-button @click="close">以后再说</el-button>
-        <el-button v-if="info?.newer && !info.install" type="primary" @click="openUrl(info.page)">去发布页下载</el-button>
-        <el-button v-else-if="info?.newer" type="primary" @click="installUpdate">{{ updater.error ? '重试' : action }}</el-button>
+        <el-button v-if="(info?.newer || repairMode) && !info?.install" type="primary" @click="openUrl(info!.page)">去发布页下载</el-button>
+        <el-button v-else-if="info?.newer || repairMode" type="primary" @click="installUpdate">{{ updater.error ? '重试' : action }}</el-button>
       </template>
     </template>
   </el-dialog>
@@ -153,6 +187,9 @@ function close() {
 .notes :deep(code) {
   font-family: var(--ferry-mono, monospace);
   font-size: 12px;
+}
+.mb {
+  margin-bottom: 12px;
 }
 .mt {
   margin-top: 12px;

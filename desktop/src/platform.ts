@@ -118,11 +118,15 @@ function inOrder(send: (msg: unknown) => Promise<void>): (msg: unknown) => Promi
 }
 
 let tauri: Server | undefined
+let tauriStop: (() => Promise<void>) | undefined
 
 function tauriServer(): Server {
   if (tauri) return tauri
   const cmd = Command.sidecar('binaries/ferry', ['serve'])
   const child = cmd.spawn()
+  let closed!: () => void
+  const exited = new Promise<void>((r) => (closed = r))
+  let stopping = false
   const srv: Server = {
     send: inOrder(async (msg) => {
       const c = await child
@@ -130,7 +134,19 @@ function tauriServer(): Server {
     }),
   }
   const gone = (why: string) => {
-    if (tauri === srv) tauri = undefined
+    if (tauri === srv) {
+      tauri = undefined
+      tauriStop = undefined
+    }
+    closed()
+    if (stopping) {
+      for (const [id, p] of pending) {
+        if (p.srv !== srv) continue
+        pending.delete(id)
+        p.resolve(-1)
+      }
+      return
+    }
     lost(srv, why)
   }
   cmd.stdout.on('data', dispatch)
@@ -139,7 +155,23 @@ function tauriServer(): Server {
   cmd.on('error', (e) => gone(`ferry 后台进程出错：${e}`))
   child.catch((e) => gone(`无法启动 ferry：${e}`))
   tauri = srv
+  tauriStop = async () => {
+    stopping = true
+    const c = await child.catch(() => undefined)
+    if (!c) return
+    await srv.send({ id: page + 'quit', op: 'quit' }).catch(() => undefined)
+    const done = await Promise.race([
+      exited.then(() => true),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 2000)),
+    ])
+    if (!done) await c.kill().catch(() => undefined)
+  }
   return srv
+}
+
+/** 优雅结束常驻的 ferry serve 后台进程（更新退出前调用，尽快释放 ferry.exe 文件锁）。 */
+export async function shutdownFerry(): Promise<void> {
+  await tauriStop?.()
 }
 
 // 浏览器调试：开发桥接里同样只有一个 ferry serve，这里用一条长连接接收它的全部输出
@@ -363,4 +395,14 @@ export async function openUrl(url: string): Promise<void> {
 /** 退出 Ferry（更新时安装程序已经启动）；浏览器调试时什么也不做。 */
 export async function exitApp(): Promise<void> {
   if (isTauri) await invoke('exit_app')
+}
+
+/** 清理安装目录中残留的 ferry.exe.old-*，返回仍被外部进程（如 ferry mcp）占用删不掉的文件名。 */
+export async function cleanupOldBinaries(): Promise<string[]> {
+  if (!isTauri) return []
+  try {
+    return await invoke<string[]>('cleanup_old_binaries')
+  } catch {
+    return []
+  }
 }
