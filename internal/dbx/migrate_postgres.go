@@ -9,12 +9,17 @@ import (
 	"math/big"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-func migratePostgres(ctx context.Context, sc, dc *sql.Conn, srcDB string, o MigrationOptions, p *MigrationPlan, progress migrationProgress) (*MigrationResult, error) {
+const pgMigrationSessionSettings = `SET LOCAL DateStyle = 'ISO, YMD'; SET LOCAL IntervalStyle = postgres;
+	SET LOCAL TIME ZONE 'UTC'; SET LOCAL extra_float_digits = 3;
+	SET LOCAL standard_conforming_strings = on; SET LOCAL row_security = off; SET LOCAL search_path = public, pg_catalog;`
+
+func migratePostgres(ctx context.Context, sc, dc *sql.Conn, src *Client, srcDB string, dst *Client, o MigrationOptions, p *MigrationPlan, progress *migrationProgress) (*MigrationResult, error) {
 	result := &MigrationResult{Phase: "准备"}
 	fail := func(err error) (*MigrationResult, error) { return result, &migrationError{*result, err} }
 	source, err := sc.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
@@ -27,20 +32,21 @@ func migratePostgres(ctx context.Context, sc, dc *sql.Conn, srcDB string, o Migr
 		return fail(err)
 	}
 	defer target.Rollback()
-	settings := `SET LOCAL DateStyle = 'ISO, YMD'; SET LOCAL IntervalStyle = postgres;
-		SET LOCAL TIME ZONE 'UTC'; SET LOCAL extra_float_digits = 3;
-		SET LOCAL standard_conforming_strings = on; SET LOCAL row_security = off; SET LOCAL search_path = public, pg_catalog;`
 	for _, tx := range []*sql.Tx{source, target} {
-		if err := migrationDDL(ctx, tx, Postgres, settings); err != nil {
+		if err := migrationDDL(ctx, tx, Postgres, pgMigrationSessionSettings); err != nil {
 			return fail(err)
 		}
 	}
-	if o.Whole {
+	ignoreExists := o.IfExists == "skip" || o.IfExists == "replace"
+	if o.Whole && !ignoreExists {
 		if err := checkMigrationEmpty(ctx, target, Postgres, o.TargetDB); err != nil {
 			return fail(err)
 		}
 	}
 	for _, t := range p.checks {
+		if t.Skip {
+			continue
+		}
 		if _, err := source.ExecContext(ctx, "LOCK TABLE "+t.sqlName(Postgres)+" IN ACCESS SHARE MODE"); err != nil {
 			return fail(err)
 		}
@@ -51,27 +57,81 @@ func migratePostgres(ctx context.Context, sc, dc *sql.Conn, srcDB string, o Migr
 	}
 	result.Phase = "建表"
 	progress.step("准备目标表")
-	if err := migrationDDL(ctx, target, Postgres, schema.before); err != nil {
+	if err := pgMigrationExecDDL(ctx, target, schema.before, ignoreExists); err != nil {
 		return fail(err)
 	}
-	var created, completed []MigrationTable
+	var created, completed, skipped []MigrationTable
+	var toCopy []migrationTableCheck
+	for _, t := range p.checks {
+		if t.Create {
+			created = append(created, t.MigrationTable)
+		}
+		if t.Skip {
+			skipped = append(skipped, t.MigrationTable)
+			continue
+		}
+		toCopy = append(toCopy, t)
+	}
 	var rows int64
 	count := progress.counter()
-	for _, t := range p.checks {
+	canParallel := o.Concurrency > 1 && len(toCopy) > 1 && !hasExistingTableDeps(toCopy)
+	if canParallel {
+		var snapshotID string
+		if err := source.QueryRowContext(ctx, "SELECT pg_export_snapshot()").Scan(&snapshotID); err != nil {
+			return fail(err)
+		}
+		// 并行 COPY 需先提交目标建表事务，让各并行写入连接能看到新表。
+		if err := target.Commit(); err != nil {
+			return fail(err)
+		}
+		result.Created, result.Skipped = created, skipped
+		if err := pgMigrationParallel(ctx, src, srcDB, dst, o, snapshotID, toCopy, result, progress, count); err != nil {
+			return fail(err)
+		}
+		count.flush()
+		postTx, err := dc.BeginTx(ctx, &sql.TxOptions{})
+		if err != nil {
+			return fail(err)
+		}
+		defer postTx.Rollback()
+		if err := migrationDDL(ctx, postTx, Postgres, pgMigrationSessionSettings); err != nil {
+			return fail(err)
+		}
+		result.Phase, result.Table = "恢复索引、约束和其他对象", nil
+		progress.step("恢复索引、约束和其他对象")
+		if err := pgMigrationExecDDL(ctx, postTx, schema.after, ignoreExists); err != nil {
+			return fail(err)
+		}
+		if err := restorePGMigrationSequences(ctx, source, postTx, schema.sequences, p, o); err != nil {
+			return fail(err)
+		}
+		result.Phase = "提交"
+		if err := postTx.Commit(); err != nil {
+			return fail(fmt.Errorf("确认目标库状态后再重试：%w", err))
+		}
+		result.Phase = "完成"
+		return result, nil
+	}
+
+	for _, t := range toCopy {
 		result.Phase, result.Table = "复制数据", &t.MigrationTable
 		progress.step("复制 " + t.String())
 		if !t.Create {
 			if _, err := target.ExecContext(ctx, "LOCK TABLE "+t.sqlName(Postgres)+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 				return fail(err)
 			}
-			if err := migrationTableEmpty(ctx, target, t.MigrationTable, Postgres, false); err != nil {
-				return fail(err)
+			if t.Replace {
+				if _, err := target.ExecContext(ctx, "DELETE FROM "+t.sqlName(Postgres)); err != nil {
+					return fail(err)
+				}
+			} else {
+				if err := migrationTableEmpty(ctx, target, t.MigrationTable, Postgres, false); err != nil {
+					return fail(err)
+				}
 			}
 			if err := migrationExistingTriggers(ctx, target, Postgres, o.TargetDB, t.MigrationTable); err != nil {
 				return fail(err)
 			}
-		} else {
-			created = append(created, t.MigrationTable)
 		}
 		n, err := pgMigrationCopy(ctx, sc, dc, t.source, count)
 		if err != nil {
@@ -83,7 +143,7 @@ func migratePostgres(ctx context.Context, sc, dc *sql.Conn, srcDB string, o Migr
 	count.flush()
 	result.Phase, result.Table = "恢复索引、约束和其他对象", nil
 	progress.step("恢复索引、约束和其他对象")
-	if err := migrationDDL(ctx, target, Postgres, schema.after); err != nil {
+	if err := pgMigrationExecDDL(ctx, target, schema.after, ignoreExists); err != nil {
 		return fail(err)
 	}
 	if err := restorePGMigrationSequences(ctx, source, target, schema.sequences, p, o); err != nil {
@@ -93,8 +153,183 @@ func migratePostgres(ctx context.Context, sc, dc *sql.Conn, srcDB string, o Migr
 	if err := target.Commit(); err != nil {
 		return fail(fmt.Errorf("确认目标库状态后再重试：%w", err))
 	}
-	result.Phase, result.Created, result.Completed, result.Rows = "完成", created, completed, rows
+	result.Phase, result.Created, result.Completed, result.Skipped, result.Rows = "完成", created, completed, skipped, rows
 	return result, nil
+}
+
+func pgMigrationExecDDL(ctx context.Context, tx *sql.Tx, script string, ignoreExists bool) error {
+	for _, stmt := range Split(Postgres, script) {
+		if !ignoreExists {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT ferry_mig_ddl"); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, stmt)
+		if err != nil {
+			if isPGAlreadyExists(err) {
+				if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT ferry_mig_ddl"); rerr != nil {
+					return rerr
+				}
+				_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ferry_mig_ddl")
+				continue
+			}
+			return err
+		}
+		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT ferry_mig_ddl")
+	}
+	return nil
+}
+
+func isPGAlreadyExists(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "42710", "42P07", "42723", "42P06": // duplicate_object, duplicate_table, duplicate_function, duplicate_schema
+		return true
+	}
+	return false
+}
+
+func pgMigrationParallel(ctx context.Context, src *Client, srcDB string, dst *Client, o MigrationOptions, snapshotID string, toCopy []migrationTableCheck, result *MigrationResult, progress *migrationProgress, count *migrationCounter) error {
+	workers := min(o.Concurrency, len(toCopy))
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan migrationTableCheck, len(toCopy))
+	for _, t := range toCopy {
+		jobs <- t
+	}
+	close(jobs)
+
+	var mu sync.Mutex
+	var firstErr error
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			wSrc, err := migrationConn(runCtx, src, srcDB)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+			defer wSrc.Close()
+			wDst, err := migrationConn(runCtx, dst, o.TargetDB)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+			defer wDst.Close()
+
+			srcTx, err := wSrc.BeginTx(runCtx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+			defer srcTx.Rollback()
+			if _, err := srcTx.ExecContext(runCtx, "SET TRANSACTION SNAPSHOT "+Literal(Postgres, snapshotID)); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+			if err := migrationDDL(runCtx, srcTx, Postgres, pgMigrationSessionSettings); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+
+			for t := range jobs {
+				if runCtx.Err() != nil {
+					return
+				}
+				progress.step("并行复制 " + t.String())
+				dstTx, err := wDst.BeginTx(runCtx, &sql.TxOptions{})
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						result.Phase, result.Table = "复制数据", &t.MigrationTable
+						firstErr = fmt.Errorf("%s：%w", t.String(), err)
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
+				err = func() error {
+					defer dstTx.Rollback()
+					if err := migrationDDL(runCtx, dstTx, Postgres, pgMigrationSessionSettings); err != nil {
+						return err
+					}
+					if !t.Create {
+						if _, err := dstTx.ExecContext(runCtx, "LOCK TABLE "+t.sqlName(Postgres)+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+							return err
+						}
+						if t.Replace {
+							if _, err := dstTx.ExecContext(runCtx, "DELETE FROM "+t.sqlName(Postgres)); err != nil {
+								return err
+							}
+						} else if err := migrationTableEmpty(runCtx, dstTx, t.MigrationTable, Postgres, false); err != nil {
+							return err
+						}
+						if err := migrationExistingTriggers(runCtx, dstTx, Postgres, o.TargetDB, t.MigrationTable); err != nil {
+							return err
+						}
+					}
+					n, err := pgMigrationCopy(runCtx, wSrc, wDst, t.source, count)
+					if err != nil {
+						return err
+					}
+					if err := dstTx.Commit(); err != nil {
+						return err
+					}
+					mu.Lock()
+					result.Completed = append(result.Completed, t.MigrationTable)
+					result.Rows += n
+					mu.Unlock()
+					return nil
+				}()
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						result.Phase, result.Table = "复制数据", &t.MigrationTable
+						firstErr = fmt.Errorf("%s：%w", t.String(), err)
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 type pgMigrationDefinition struct {
@@ -107,6 +342,14 @@ type migrationEnum struct {
 }
 
 func (p *MigrationPlan) planPostgresEnums(ctx context.Context, src, dst *sql.DB) error {
+	return p.planPostgresEnumsWithTarget(ctx, src, dst)
+}
+
+func (p *MigrationPlan) planPostgresEnumsMissingTarget(ctx context.Context, src *sql.DB) error {
+	return p.planPostgresEnumsWithTarget(ctx, src, nil)
+}
+
+func (p *MigrationPlan) planPostgresEnumsWithTarget(ctx context.Context, src, dst *sql.DB) error {
 	seen := map[MigrationTable]bool{}
 	for _, table := range p.checks {
 		if !table.Create {
@@ -132,6 +375,10 @@ func (p *MigrationPlan) planPostgresEnums(ctx context.Context, src, dst *sql.DB)
 					continue
 				}
 				seen[key] = true
+				if dst == nil {
+					p.pgEnums = append(p.pgEnums, e)
+					continue
+				}
 				var labels sql.NullString
 				err := dst.QueryRowContext(ctx, `SELECT string_agg(quote_literal(e.enumlabel), ', ' ORDER BY e.enumsortorder)
 					FROM pg_type typ JOIN pg_namespace ns ON ns.oid = typ.typnamespace LEFT JOIN pg_enum e ON e.enumtypid = typ.oid

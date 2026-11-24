@@ -5,15 +5,17 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/go-sql-driver/mysql"
 )
 
-func migrateMySQL(ctx context.Context, sc, dc *sql.Conn, src *Client, srcDB string, dst *Client, o MigrationOptions, p *MigrationPlan, progress migrationProgress) (*MigrationResult, error) {
+func migrateMySQL(ctx context.Context, sc, dc *sql.Conn, src *Client, srcDB string, dst *Client, o MigrationOptions, p *MigrationPlan, progress *migrationProgress) (*MigrationResult, error) {
 	result := &MigrationResult{Phase: "准备"}
 	fail := func(err error) (*MigrationResult, error) { return result, &migrationError{*result, err} }
 	for _, c := range []*sql.Conn{sc, dc} {
@@ -21,7 +23,7 @@ func migrateMySQL(ctx context.Context, sc, dc *sql.Conn, src *Client, srcDB stri
 			return fail(err)
 		}
 	}
-	_, err := dc.ExecContext(ctx, `SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@session.sql_mode, ''), 'NO_AUTO_VALUE_ON_ZERO')`)
+	_, err := dc.ExecContext(ctx, `SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@session.sql_mode, ''), 'NO_AUTO_VALUE_ON_ZERO', 'STRICT_ALL_TABLES')`)
 	if err != nil {
 		return fail(err)
 	}
@@ -36,7 +38,7 @@ func migrateMySQL(ctx context.Context, sc, dc *sql.Conn, src *Client, srcDB stri
 		return fail(err)
 	}
 	defer source.Rollback()
-	if o.Whole {
+	if o.Whole && (o.IfExists == "" || o.IfExists == "fail") {
 		if err := checkMigrationEmpty(ctx, dc, MySQL, o.TargetDB); err != nil {
 			return fail(err)
 		}
@@ -60,27 +62,181 @@ func migrateMySQL(ctx context.Context, sc, dc *sql.Conn, src *Client, srcDB stri
 		result.Created = append(result.Created, t.MigrationTable)
 		foreign = append(foreign, constraints...)
 	}
-	count := progress.counter()
+	var toCopy []migrationTableCheck
 	for _, t := range p.checks {
-		result.Phase, result.Table = "复制数据", &t.MigrationTable
-		progress.step("复制 " + t.String())
-		n, err := mySQLMigrationTable(ctx, source, dc, t.source, o.TargetDB, p.Method, count)
-		if err != nil {
-			return fail(fmt.Errorf("%s：%w", t.String(), err))
+		if t.Skip {
+			result.Skipped = append(result.Skipped, t.MigrationTable)
+			continue
 		}
-		result.Completed = append(result.Completed, t.MigrationTable)
-		result.Rows += n
+		toCopy = append(toCopy, t)
+	}
+	count := progress.counter()
+	canParallel := o.Concurrency > 1 && len(toCopy) > 1 && !hasExistingTableDeps(toCopy)
+	if canParallel {
+		if err := mySQLMigrationParallel(ctx, src, srcDB, dst, o, p.Method, toCopy, result, progress, count); err != nil {
+			return fail(err)
+		}
+	} else {
+		for _, t := range toCopy {
+			result.Phase, result.Table = "复制数据", &t.MigrationTable
+			progress.step("复制 " + t.String())
+			n, err := mySQLMigrationTable(ctx, source, dc, t.source, o.TargetDB, p.Method, t.Replace, count)
+			if err != nil {
+				return fail(fmt.Errorf("%s：%w", t.String(), err))
+			}
+			result.Completed = append(result.Completed, t.MigrationTable)
+			result.Rows += n
+		}
 	}
 	count.flush()
 	result.Phase, result.Table = "恢复外键和其他对象", nil
 	progress.step("恢复外键和其他对象")
+	ignoreExists := o.IfExists == "skip" || o.IfExists == "replace"
 	for _, stmt := range append(foreign, objects...) {
 		if _, err := dc.ExecContext(ctx, mysqlMigrationSchemaName(stmt, srcDB, o.TargetDB)); err != nil {
+			if ignoreExists && isMySQLAlreadyExists(err) {
+				continue
+			}
 			return fail(err)
 		}
 	}
 	result.Phase = "完成"
 	return result, nil
+}
+
+func hasExistingTableDeps(checks []migrationTableCheck) bool {
+	in := make(map[MigrationTable]bool, len(checks))
+	for _, t := range checks {
+		in[t.MigrationTable] = true
+	}
+	for _, t := range checks {
+		if t.Create {
+			continue
+		}
+		for _, dep := range t.depends {
+			if in[dep] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isMySQLAlreadyExists(err error) bool {
+	var me *mysql.MySQLError
+	if !errors.As(err, &me) {
+		return false
+	}
+	switch me.Number {
+	case 1050, 1061, 1304, 1359, 1826: // table/view/key/routine/trigger/fk already exists
+		return true
+	}
+	return false
+}
+
+func mySQLMigrationParallel(ctx context.Context, src *Client, srcDB string, dst *Client, o MigrationOptions, method string, toCopy []migrationTableCheck, result *MigrationResult, progress *migrationProgress, count *migrationCounter) error {
+	workers := min(o.Concurrency, len(toCopy))
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan migrationTableCheck, len(toCopy))
+	for _, t := range toCopy {
+		jobs <- t
+	}
+	close(jobs)
+
+	var mu sync.Mutex
+	var firstErr error
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			wSrc, err := migrationConn(runCtx, src, srcDB)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+			defer wSrc.Close()
+			wDst, err := migrationConn(runCtx, dst, o.TargetDB)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+			defer wDst.Close()
+			for _, c := range []*sql.Conn{wSrc, wDst} {
+				if _, err := c.ExecContext(runCtx, "SET SESSION time_zone = '+00:00'"); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
+			}
+			if _, err := wDst.ExecContext(runCtx, `SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@session.sql_mode, ''), 'NO_AUTO_VALUE_ON_ZERO', 'STRICT_ALL_TABLES')`); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				return
+			}
+			sID, dID := src.connID(runCtx, wSrc), dst.connID(runCtx, wDst)
+			stop := context.AfterFunc(runCtx, func() {
+				dst.stopStmt(o.TargetDB, dID)
+				src.stopStmt(srcDB, sID)
+			})
+			defer stop()
+
+			for t := range jobs {
+				if runCtx.Err() != nil {
+					return
+				}
+				progress.step("并行复制 " + t.String())
+				tx, err := wSrc.BeginTx(runCtx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						result.Phase, result.Table = "复制数据", &t.MigrationTable
+						firstErr = fmt.Errorf("%s：%w", t.String(), err)
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
+				n, err := mySQLMigrationTable(runCtx, tx, wDst, t.source, o.TargetDB, method, t.Replace, count)
+				_ = tx.Rollback()
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						result.Phase, result.Table = "复制数据", &t.MigrationTable
+						firstErr = fmt.Errorf("%s：%w", t.String(), err)
+						cancel()
+					}
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				result.Completed = append(result.Completed, t.MigrationTable)
+				result.Rows += n
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 func mySQLMigrationTableDDL(t *TableInfo) (string, []string) {
@@ -242,7 +398,7 @@ func mySQLMigrationColumns(t *TableInfo) []mysqlMigrationColumn {
 	return cols
 }
 
-func mySQLMigrationTable(ctx context.Context, src *sql.Tx, dc *sql.Conn, table *TableInfo, targetDB, method string, count *migrationCounter) (int64, error) {
+func mySQLMigrationTable(ctx context.Context, src *sql.Tx, dc *sql.Conn, table *TableInfo, targetDB, method string, replace bool, count *migrationCounter) (int64, error) {
 	key := migrationTableID(table)
 	cols := mySQLMigrationColumns(table)
 	if len(cols) == 0 {
@@ -261,8 +417,18 @@ func mySQLMigrationTable(ctx context.Context, src *sql.Tx, dc *sql.Conn, table *
 		return 0, err
 	}
 	defer target.Rollback()
-	if err := migrationTableEmpty(ctx, target, key, MySQL, true); err != nil {
-		return 0, err
+	if replace {
+		if _, err := target.ExecContext(ctx, "SET SESSION FOREIGN_KEY_CHECKS = 0"); err != nil {
+			return 0, err
+		}
+		defer func() { _, _ = dc.ExecContext(context.Background(), "SET SESSION FOREIGN_KEY_CHECKS = 1") }()
+		if _, err := target.ExecContext(ctx, "DELETE FROM "+key.sqlName(MySQL)); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := migrationTableEmpty(ctx, target, key, MySQL, true); err != nil {
+			return 0, err
+		}
 	}
 	if err := migrationExistingTriggers(ctx, target, MySQL, targetDB, key); err != nil {
 		return 0, err
@@ -443,8 +609,12 @@ func mySQLMigrationInsert(ctx context.Context, target *sql.Tx, table MigrationTa
 		if err != nil {
 			return err
 		}
-		if err := mySQLMigrationCheckLoad(ctx, target, r, int64(batchRows)); err != nil {
+		written, err := r.RowsAffected()
+		if err != nil {
 			return err
+		}
+		if written != int64(batchRows) {
+			return fmt.Errorf("源端读取 %d 行，目标导入 %d 行", batchRows, written)
 		}
 		n += int64(batchRows)
 		count.add(batchBytes)
@@ -472,11 +642,13 @@ func mySQLMigrationInsert(ctx context.Context, target *sql.Tx, table MigrationTa
 	if err := rows.Err(); err != nil {
 		return n, err
 	}
-	err := flush()
-	return n, err
+	if err := flush(); err != nil {
+		return n, err
+	}
+	return n, mySQLMigrationCheckWarnings(ctx, target)
 }
 
-func mySQLMigrationCheckLoad(ctx context.Context, target *sql.Tx, result sql.Result, read int64) error {
+func mySQLMigrationCheckWarnings(ctx context.Context, target *sql.Tx) error {
 	var warnings int64
 	if err := target.QueryRowContext(ctx, "SHOW COUNT(*) WARNINGS").Scan(&warnings); err != nil {
 		return err
@@ -488,6 +660,13 @@ func mySQLMigrationCheckLoad(ctx context.Context, target *sql.Tx, result sql.Res
 			return fmt.Errorf("目标产生 %d 条警告：%w", warnings, err)
 		}
 		return fmt.Errorf("目标产生 %d 条警告（%s %d）：%s", warnings, level, code, message)
+	}
+	return nil
+}
+
+func mySQLMigrationCheckLoad(ctx context.Context, target *sql.Tx, result sql.Result, read int64) error {
+	if err := mySQLMigrationCheckWarnings(ctx, target); err != nil {
+		return err
 	}
 	written, err := result.RowsAffected()
 	if err != nil {

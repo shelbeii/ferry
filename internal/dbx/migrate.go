@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,15 +18,20 @@ type MigrationTable struct {
 }
 
 type MigrationOptions struct {
-	TargetDB string           `json:"targetDb"`
-	Whole    bool             `json:"whole"`
-	DataOnly bool             `json:"dataOnly"`
-	Tables   []MigrationTable `json:"tables"`
+	TargetDB       string           `json:"targetDb"`
+	Whole          bool             `json:"whole"`
+	DataOnly       bool             `json:"dataOnly"`
+	CreateTargetDB bool             `json:"createTargetDb,omitempty"`
+	Concurrency    int              `json:"concurrency,omitempty"` // 1 = 串行（默认），2..8 = 表级并发
+	IfExists       string           `json:"ifExists,omitempty"`    // "" / "fail"（默认）| "skip"（跳过已有数据表/断点续传）| "replace"（清空覆盖）
+	Tables         []MigrationTable `json:"tables"`
 }
 
 type MigrationTablePlan struct {
 	MigrationTable
-	Create bool `json:"create"`
+	Create  bool `json:"create"`
+	Skip    bool `json:"skip,omitempty"`
+	Replace bool `json:"replace,omitempty"`
 }
 
 type MigrationPlan struct {
@@ -41,6 +47,7 @@ type MigrationPlan struct {
 type MigrationResult struct {
 	Created   []MigrationTable `json:"created,omitempty"`
 	Completed []MigrationTable `json:"completed,omitempty"`
+	Skipped   []MigrationTable `json:"skipped,omitempty"`
 	Rows      int64            `json:"rows"`
 	Phase     string           `json:"phase"`
 	Table     *MigrationTable  `json:"table,omitempty"`
@@ -64,6 +71,7 @@ type migrationTableCheck struct {
 }
 
 type migrationProgress struct {
+	mu    sync.Mutex
 	Step  func(string)
 	Bytes func(int64)
 }
@@ -89,11 +97,29 @@ func (src *Client) PlanMigration(ctx context.Context, srcDB string, dst *Client,
 	if err != nil {
 		return nil, err
 	}
-	ddb, err := dst.DB(ctx, o.TargetDB)
+	targetMissing := false
+	if o.CreateTargetDB {
+		exists, err := dst.migrationDatabaseExists(ctx, o.TargetDB)
+		if err != nil {
+			return nil, fmt.Errorf("检查目标库：%w", err)
+		}
+		targetMissing = !exists
+		if targetMissing && o.DataOnly {
+			return nil, fmt.Errorf("目标库 %s 尚不存在，仅迁数据需要预先建库和建表", o.TargetDB)
+		}
+	}
+	targetCheckDB := o.TargetDB
+	if targetMissing {
+		targetCheckDB = ""
+	}
+	ddb, err := dst.DB(ctx, targetCheckDB)
 	if err != nil {
 		return nil, err
 	}
 	p := &MigrationPlan{Method: "COPY", Tables: []MigrationTablePlan{}}
+	if targetMissing {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("迁移开始时会自动创建目标库 %s。", o.TargetDB))
+	}
 	if src.Conn.Kind == MySQL {
 		var local, readOnly bool
 		if err := ddb.QueryRowContext(ctx, "SELECT @@global.local_infile, @@global.read_only").Scan(&local, &readOnly); err != nil {
@@ -120,13 +146,16 @@ func (src *Client) PlanMigration(ctx context.Context, srcDB string, dst *Client,
 	if err != nil {
 		return nil, fmt.Errorf("读取源库：%w", err)
 	}
-	target, err := dst.Tables(ctx, o.TargetDB)
-	if err != nil {
-		return nil, fmt.Errorf("读取目标库：%w", err)
-	}
-	if o.Whole {
-		if err := checkMigrationEmpty(ctx, ddb, src.Conn.Kind, o.TargetDB); err != nil {
-			return nil, err
+	var target []Table
+	if !targetMissing {
+		target, err = dst.Tables(ctx, o.TargetDB)
+		if err != nil {
+			return nil, fmt.Errorf("读取目标库：%w", err)
+		}
+		if o.Whole && (o.IfExists == "" || o.IfExists == "fail") {
+			if err := checkMigrationEmpty(ctx, ddb, src.Conn.Kind, o.TargetDB); err != nil {
+				return nil, err
+			}
 		}
 	}
 	selected := make(map[MigrationTable]bool, len(o.Tables))
@@ -143,6 +172,7 @@ func (src *Client) PlanMigration(ctx context.Context, srcDB string, dst *Client,
 	for _, table := range target {
 		targetObjects[MigrationTable{table.Schema, table.Name}] = table
 	}
+	skippedCount, replaceCount := 0, 0
 	for _, table := range source {
 		key := MigrationTable{table.Schema, table.Name}
 		if !o.Whole && !selected[key] {
@@ -160,14 +190,18 @@ func (src *Client) PlanMigration(ctx context.Context, srcDB string, dst *Client,
 			p.views = append(p.views, info)
 			continue
 		}
-		if err := checkMigrationTable(ctx, sdb, srcDB, src.Conn.Kind, info); err != nil {
+		warn, err := checkMigrationTable(ctx, sdb, srcDB, src.Conn.Kind, info)
+		if err != nil {
 			return nil, err
+		}
+		if warn != "" {
+			p.Warnings = append(p.Warnings, warn)
 		}
 		old, exists := targetObjects[key]
 		if o.DataOnly && !exists {
 			return nil, fmt.Errorf("目标没有表 %s，仅迁数据需要预先建表", key.String())
 		}
-		check := migrationTableCheck{MigrationTablePlan: MigrationTablePlan{key, !exists}, source: info}
+		check := migrationTableCheck{MigrationTablePlan: MigrationTablePlan{MigrationTable: key, Create: !exists}, source: info}
 		if exists {
 			if old.Type != "table" {
 				return nil, fmt.Errorf("目标已有同名对象 %s", key.String())
@@ -176,17 +210,32 @@ func (src *Client) PlanMigration(ctx context.Context, srcDB string, dst *Client,
 			if err != nil {
 				return nil, err
 			}
-			if err := checkMigrationTable(ctx, ddb, o.TargetDB, src.Conn.Kind, check.target); err != nil {
+			if _, err := checkMigrationTable(ctx, ddb, o.TargetDB, src.Conn.Kind, check.target); err != nil {
 				return nil, err
 			}
 			if err := migrationColumnsMatch(info, check.target); err != nil {
 				return nil, err
 			}
-			if err := migrationTableEmpty(ctx, ddb, key, src.Conn.Kind, false); err != nil {
+			hasRows, err := migrationTableHasRows(ctx, ddb, key, src.Conn.Kind, false)
+			if err != nil {
 				return nil, err
 			}
-			if err := migrationExistingTriggers(ctx, ddb, src.Conn.Kind, o.TargetDB, key); err != nil {
-				return nil, err
+			if hasRows {
+				switch o.IfExists {
+				case "skip":
+					check.Skip = true
+					skippedCount++
+				case "replace":
+					check.Replace = true
+					replaceCount++
+				default:
+					return nil, fmt.Errorf("目标表 %s 已有数据，迁移不会覆盖", key.String())
+				}
+			}
+			if !check.Skip {
+				if err := migrationExistingTriggers(ctx, ddb, src.Conn.Kind, o.TargetDB, key); err != nil {
+					return nil, err
+				}
 			}
 		}
 		q, db := migrationQueryer(sdb), srcDB
@@ -199,6 +248,19 @@ func (src *Client) PlanMigration(ctx context.Context, srcDB string, dst *Client,
 		}
 		p.checks = append(p.checks, check)
 	}
+	if skippedCount > 0 {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("断点续传模式：将跳过 %d 张已有数据的目标表，仅迁移尚未导入或为空的表。", skippedCount))
+	}
+	if replaceCount > 0 {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("覆盖模式：%d 张已有数据的目标表将在复制前清空。", replaceCount))
+	}
+	if o.Concurrency > 1 {
+		if src.Conn.Kind == MySQL {
+			p.Warnings = append(p.Warnings, fmt.Sprintf("并行迁移（%d 并发）按表独立读取快照；如需全库严格同一时刻快照，可将并发数设为 1。", o.Concurrency))
+		} else {
+			p.Warnings = append(p.Warnings, fmt.Sprintf("并行迁移（%d 并发）共享源端一致快照，目标端按表提交。", o.Concurrency))
+		}
+	}
 	for table := range selected {
 		return nil, fmt.Errorf("源库没有表 %s", table.String())
 	}
@@ -208,8 +270,12 @@ func (src *Client) PlanMigration(ctx context.Context, srcDB string, dst *Client,
 	if err := p.orderTables(targetObjects); err != nil {
 		return nil, err
 	}
-	if src.Conn.Kind == Postgres && !o.Whole && !o.DataOnly {
+	if src.Conn.Kind == Postgres && !o.Whole && !o.DataOnly && !targetMissing {
 		if err := p.planPostgresEnums(ctx, sdb, ddb); err != nil {
+			return nil, err
+		}
+	} else if src.Conn.Kind == Postgres && !o.Whole && !o.DataOnly && targetMissing {
+		if err := p.planPostgresEnumsMissingTarget(ctx, sdb); err != nil {
 			return nil, err
 		}
 	}
@@ -231,6 +297,12 @@ func migrationEndpoints(src *Client, srcDB string, dst *Client, o MigrationOptio
 	}
 	if dst.Conn.ReadOnly {
 		return errors.New("目标数据库连接是只读的")
+	}
+	if o.Concurrency < 0 || o.Concurrency > 8 {
+		return errors.New("并发数须在 1 到 8 之间")
+	}
+	if !slices.Contains([]string{"", "fail", "skip", "replace"}, o.IfExists) {
+		return errors.New("不支持的已有目标表处理策略")
 	}
 	if o.Whole && (o.DataOnly || len(o.Tables) != 0) || !o.Whole && len(o.Tables) == 0 {
 		return errors.New("请选择整库或指定表迁移")
@@ -296,6 +368,20 @@ func (src *Client) Migrate(ctx context.Context, srcDB string, dst *Client, o Mig
 	if err := migrationEndpoints(src, srcDB, dst, o); err != nil {
 		return nil, err
 	}
+	if o.CreateTargetDB {
+		exists, err := dst.migrationDatabaseExists(ctx, o.TargetDB)
+		if err != nil {
+			return nil, fmt.Errorf("检查目标库：%w", err)
+		}
+		if !exists {
+			if step != nil {
+				step("创建目标库 " + o.TargetDB)
+			}
+			if err := createMigrationDatabase(ctx, src, srcDB, dst, o.TargetDB); err != nil {
+				return nil, err
+			}
+		}
+	}
 	sc, err := migrationConn(ctx, src, srcDB)
 	if err != nil {
 		return nil, err
@@ -315,11 +401,61 @@ func (src *Client) Migrate(ctx context.Context, srcDB string, dst *Client, o Mig
 	if err != nil {
 		return nil, err
 	}
-	notify := migrationProgress{Step: step, Bytes: progress}
+	notify := &migrationProgress{Step: step, Bytes: progress}
 	if src.Conn.Kind == MySQL {
 		return migrateMySQL(ctx, sc, dc, src, srcDB, dst, o, p, notify)
 	}
-	return migratePostgres(ctx, sc, dc, srcDB, o, p, notify)
+	return migratePostgres(ctx, sc, dc, src, srcDB, dst, o, p, notify)
+}
+
+func (cl *Client) migrationDatabaseExists(ctx context.Context, name string) (bool, error) {
+	dbs, err := cl.Databases(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range dbs {
+		if d.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func createMigrationDatabase(ctx context.Context, src *Client, srcDB string, dst *Client, targetDB string) error {
+	admin, err := dst.DB(ctx, "")
+	if err != nil {
+		return err
+	}
+	if dst.Conn.Kind == Postgres {
+		var exists bool
+		if err := admin.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", targetDB).Scan(&exists); err != nil {
+			return dst.explain(err)
+		}
+		if exists {
+			return nil
+		}
+		_, err := admin.ExecContext(ctx, "CREATE DATABASE "+Quote(Postgres, targetDB))
+		return dst.explain(err)
+	}
+	cs := "utf8mb4"
+	var collation string
+	if sdb, err := src.DB(ctx, srcDB); err == nil {
+		var c, col sql.NullString
+		if sdb.QueryRowContext(ctx, "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?", srcDB).Scan(&c, &col) == nil {
+			if c.Valid && c.String != "" && !strings.ContainsAny(c.String, " ;'\"`") {
+				cs = c.String
+			}
+			if col.Valid && col.String != "" && !strings.ContainsAny(col.String, " ;'\"`") {
+				collation = col.String
+			}
+		}
+	}
+	stmt := "CREATE DATABASE IF NOT EXISTS " + Quote(MySQL, targetDB) + " DEFAULT CHARACTER SET " + cs
+	if collation != "" {
+		stmt += " COLLATE " + collation
+	}
+	_, err = admin.ExecContext(ctx, stmt)
+	return dst.explain(err)
 }
 
 func migrationConn(ctx context.Context, cl *Client, db string) (*sql.Conn, error) {
@@ -353,30 +489,43 @@ func lockMigration(ctx context.Context, c *sql.Conn, kind, db string) (func(), e
 	}, nil
 }
 
-func (p migrationProgress) step(s string) {
+func (p *migrationProgress) step(s string) {
 	if p.Step != nil {
+		p.mu.Lock()
 		p.Step(s)
+		p.mu.Unlock()
 	}
 }
 
-func (p migrationProgress) counter() *migrationCounter { return &migrationCounter{report: p.Bytes} }
+func (p *migrationProgress) counter() *migrationCounter { return &migrationCounter{report: p.Bytes} }
 
 type migrationCounter struct {
+	mu     sync.Mutex
 	total  int64
 	last   time.Time
 	report func(int64)
 }
 
 func (c *migrationCounter) add(n int) {
+	c.mu.Lock()
 	c.total += int64(n)
-	if c.report != nil && time.Since(c.last) >= 500*time.Millisecond {
+	should := c.report != nil && time.Since(c.last) >= 500*time.Millisecond
+	total := c.total
+	if should {
 		c.last = time.Now()
-		c.report(c.total)
+	}
+	c.mu.Unlock()
+	if should {
+		c.report(total)
 	}
 }
 
 func (c *migrationCounter) flush() {
-	if c.report != nil {
-		c.report(c.total)
+	c.mu.Lock()
+	total := c.total
+	report := c.report
+	c.mu.Unlock()
+	if report != nil {
+		report(total)
 	}
 }

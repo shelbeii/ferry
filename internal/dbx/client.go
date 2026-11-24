@@ -542,7 +542,7 @@ func (cl *Client) pool(name string, role poolRole) (*sql.DB, error) {
 		db.SetMaxOpenConns(maxSessionsPerDB)
 		db.SetMaxIdleConns(0) // 会话关了连接就关
 	case roleImport:
-		db.SetMaxOpenConns(4)
+		db.SetMaxOpenConns(16)
 		db.SetMaxIdleConns(0)
 	case roleControl:
 		db.SetMaxOpenConns(2)

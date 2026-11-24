@@ -42,27 +42,27 @@ func checkMigrationEmpty(ctx context.Context, db migrationQueryer, kind, name st
 	return nil
 }
 
-func checkMigrationTable(ctx context.Context, q migrationQueryer, db, kind string, t *TableInfo) error {
+func checkMigrationTable(ctx context.Context, q migrationQueryer, db, kind string, t *TableInfo) (warning string, err error) {
 	if kind == MySQL {
-		if !strings.EqualFold(t.Engine, "InnoDB") {
-			return fmt.Errorf("%s 不是 InnoDB 表", t.Name)
+		if t.Engine != "" && !strings.EqualFold(t.Engine, "InnoDB") {
+			warning = fmt.Sprintf("表 %s 使用 %s 引擎，不支持事务快照，迁移期间请避免写入该表。", t.Name, t.Engine)
 		}
 		for _, c := range t.Columns {
 			switch mysqlMigrationType(c.Type) {
 			case "geometry", "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "geometrycollection", "geomcollection", "vector":
-				return fmt.Errorf("表 %s 的列 %s 使用当前不支持的迁移类型 %s", t.Name, c.Name, c.Type)
+				return "", fmt.Errorf("表 %s 的列 %s 使用当前不支持的迁移类型 %s", t.Name, c.Name, c.Type)
 			}
 		}
-		return nil
+		return warning, nil
 	}
 	var ordinary bool
-	err := q.QueryRowContext(ctx, `SELECT c.relkind = 'r' AND NOT c.relrowsecurity AND NOT c.relispartition
+	err = q.QueryRowContext(ctx, `SELECT c.relkind = 'r' AND NOT c.relrowsecurity AND NOT c.relispartition
 		AND NOT EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = c.oid OR inhparent = c.oid)
 		FROM pg_class c WHERE c.oid = $1::regclass`, migrationTableID(t).sqlName(kind)).Scan(&ordinary)
 	if err == nil && !ordinary {
 		err = fmt.Errorf("%s.%s 是分区表、继承表、外部表或启用了行级安全，当前无法直迁", t.Schema, t.Name)
 	}
-	return err
+	return "", err
 }
 
 func migrationColumnsMatch(a, b *TableInfo) error {
@@ -81,7 +81,7 @@ func migrationColumnsMatch(a, b *TableInfo) error {
 	return nil
 }
 
-func migrationTableEmpty(ctx context.Context, q migrationQueryer, table MigrationTable, kind string, lock bool) error {
+func migrationTableHasRows(ctx context.Context, q migrationQueryer, table MigrationTable, kind string, lock bool) (bool, error) {
 	query := "SELECT 1 FROM " + table.sqlName(kind) + " LIMIT 1"
 	if lock && kind == MySQL {
 		query += " FOR UPDATE"
@@ -89,12 +89,23 @@ func migrationTableEmpty(ctx context.Context, q migrationQueryer, table Migratio
 	var one int
 	err := q.QueryRowContext(ctx, query).Scan(&one)
 	if err == sql.ErrNoRows {
-		return nil
+		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func migrationTableEmpty(ctx context.Context, q migrationQueryer, table MigrationTable, kind string, lock bool) error {
+	has, err := migrationTableHasRows(ctx, q, table, kind, lock)
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("目标表 %s 已有数据，迁移不会覆盖", table.String())
+	if has {
+		return fmt.Errorf("目标表 %s 已有数据，迁移不会覆盖", table.String())
+	}
+	return nil
 }
 
 func migrationExistingTriggers(ctx context.Context, q migrationQueryer, kind, db string, t MigrationTable) error {
