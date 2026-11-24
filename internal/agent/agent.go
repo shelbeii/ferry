@@ -60,6 +60,8 @@ type Agent struct {
 	bgSys System
 	// fw 常驻 agent 里跨请求共用的防火墙结果；一次性运行时为 nil，每次现查。
 	fw *fwCache
+	// si 常驻 agent 里跨请求共用的服务器信息状态（启动时预采 CPU 基线、缓存静态字段）。
+	si *serverInfoState
 }
 
 // unitProps 单元属性：本次命令批量读到的先用，没读到再单独查。
@@ -165,6 +167,10 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.loggrep()
 	case "software":
 		return a.software()
+	case "serverinfo":
+		return a.serverInfo()
+	case "who":
+		return a.who()
 	case "swconfig":
 		return a.softwareConfig()
 	case "swcheck":

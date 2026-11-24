@@ -357,3 +357,69 @@ func TestPortsReport(t *testing.T) {
 		t.Fatalf("%+v", rep)
 	}
 }
+
+func TestFirewalldDefaultZoneFromAllZones(t *testing.T) {
+	proc := t.TempDir()
+	os.MkdirAll(filepath.Join(proc, "net"), 0o755)
+	os.WriteFile(filepath.Join(proc, "net", "route"), []byte("Iface\tDestination\tGateway\nens3\t00000000\t0101A8C0\n"), 0o644)
+	pubDefault := strings.Replace(zonePublic, "public (active)", "public (default, active)", 1)
+	pubDefault = strings.Replace(pubDefault, "interfaces: eth0", "interfaces: ", 1)
+	var calledDefault bool
+	sc := &fwScan{proc: proc, root: t.TempDir(), run: func(cmd string, _ time.Duration) (string, error) {
+		switch {
+		case strings.Contains(cmd, "firewall-cmd --state"):
+			return "running\n", nil
+		case strings.Contains(cmd, "--get-default-zone"):
+			calledDefault = true
+			return "public\n", nil
+		case strings.Contains(cmd, "--list-all-zones"):
+			return "block\n  target: %%REJECT%%\n\n" + pubDefault + "\n", nil
+		}
+		return "", errors.New("exit 1")
+	}}
+	st := sc.firewall()
+	if st.Zone != "public" || !st.Manage {
+		t.Fatalf("%+v", st.Firewall)
+	}
+	if calledDefault {
+		t.Fatalf("已从 --list-all-zones 首行认出默认区域，不应再调用 --get-default-zone")
+	}
+}
+
+func TestPortsReportViaSS(t *testing.T) {
+	proc := t.TempDir()
+	unitDir := t.TempDir()
+	os.WriteFile(filepath.Join(unitDir, "ferry-mysql.service"), []byte(ManagedMarker+"\n[Service]\n"), 0o644)
+	for _, p := range []struct {
+		pid, comm, cg string
+	}{
+		{"100", "sshd", "0::/system.slice/sshd.service\n"},
+		{"200", "mysqld", "0::/system.slice/ferry-mysql.service\n"},
+		{"300", "nginx", "0::/system.slice/nginx.service\n"},
+	} {
+		dir := filepath.Join(proc, p.pid)
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "comm"), []byte(p.comm+"\n"), 0o644)
+		os.WriteFile(filepath.Join(dir, "cgroup"), []byte(p.cg), 0o644)
+	}
+	sc := &fwScan{proc: proc, unitDir: unitDir, run: fakeRun(map[string]string{
+		"firewall-cmd": "none", "command -v ufw": "none", "iptables -S": "", "nft list ruleset": "",
+		"ss -lntp": "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n" +
+			"LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=100,fd=3))\n" +
+			"LISTEN 0 128 [::]:3306 [::]:* users:((\"mysqld\",pid=250,fd=12),(\"mysqld\",pid=200,fd=11))\n" +
+			"LISTEN 0 511 127.0.0.1:8080 0.0.0.0:* users:((\"nginx\",pid=300,fd=6))\n",
+	})}
+	rep, _ := sc.report()
+	if len(rep.Ports) != 3 {
+		t.Fatalf("应读出 3 个端口：%+v", rep.Ports)
+	}
+	if !rep.Ports[0].SSH || rep.Ports[0].PID != 100 || rep.Ports[0].Unit != "sshd.service" {
+		t.Errorf("22 端口：%+v", rep.Ports[0])
+	}
+	if rep.Ports[1].Port != 3306 || rep.Ports[1].PID != 200 || !rep.Ports[1].Ferry || rep.Ports[1].Process != "mysqld" {
+		t.Errorf("3306 端口应取最小 PID 并标出 Ferry 单元：%+v", rep.Ports[1])
+	}
+	if rep.Ports[2].Port != 8080 || strings.Join(rep.Ports[2].Listen, ",") != "127.0.0.1" {
+		t.Errorf("8080 端口：%+v", rep.Ports[2])
+	}
+}

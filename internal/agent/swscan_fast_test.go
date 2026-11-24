@@ -337,6 +337,39 @@ func TestSSListenersFallback(t *testing.T) {
 	}
 }
 
+// snapSys 在同一次 status 查看里只运行一次 ss -lntp，并按进程树合并监听端口。
+func TestSnapSysSharesSSListeners(t *testing.T) {
+	proc := t.TempDir()
+	addStat := func(pid, ppid int) {
+		dir := filepath.Join(proc, fmt.Sprint(pid))
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "stat"), []byte(fmt.Sprintf("%d (java) S %d 0 0\n", pid, ppid)), 0o644)
+	}
+	addStat(100, 1)
+	addStat(101, 100)
+	addStat(200, 1)
+
+	calls := 0
+	ss := snapSys{t: &procTable{
+		proc: proc,
+		run: func(cmd string, _ time.Duration) (string, error) {
+			calls++
+			return "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n" +
+				"LISTEN 0 128 127.0.0.1:9201 0.0.0.0:* users:((\"java\",pid=101,fd=45))\n" +
+				"LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"java\",pid=200,fd=46))\n", nil
+		},
+	}}
+	if got := ss.Listening(100); !reflect.DeepEqual(got, []string{"127.0.0.1:9201"}) {
+		t.Fatalf("应用 1 监听端口：%v", got)
+	}
+	if got := ss.Listening(200); !reflect.DeepEqual(got, []string{"*:8080"}) {
+		t.Fatalf("应用 2 监听端口：%v", got)
+	}
+	if calls != 1 {
+		t.Fatalf("多次调用 Listening 应只运行一次 ss -lntp，实际 %d 次", calls)
+	}
+}
+
 func TestMergeListenAddrs(t *testing.T) {
 	got := mergeListenAddrs([]string{"127.0.0.1:8080", "*:8080", "::1:9000", "127.0.0.1:9000"})
 	want := []string{"*:8080", "127.0.0.1:9000", "::1:9000"}

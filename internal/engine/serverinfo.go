@@ -9,69 +9,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/captain/ferry/internal/proto"
 )
 
 // ServerInfo 是一次只读采样，不要求在服务器上安装监控程序，也用于「新建连接」。
-type ServerInfo struct {
-	Hostname       string        `json:"hostname"`
-	OS             string        `json:"os"`
-	Kernel         string        `json:"kernel"`
-	Arch           string        `json:"arch"`
-	Virtualization string        `json:"virtualization"`
-	Timezone       string        `json:"timezone"`
-	Now            int64         `json:"now"`
-	Uptime         float64       `json:"uptime"`
-	CPU            ServerCPU     `json:"cpu"`
-	Memory         ServerMemory  `json:"memory"`
-	Swap           ServerSwap    `json:"swap"`
-	Mounts         []ServerMount `json:"mounts"`
-	Addresses      []ServerAddr  `json:"addresses"`
-	Notes          []string      `json:"notes,omitempty"`
-}
-
-type ServerCPU struct {
-	Model string `json:"model"`
-	Cores int    `json:"cores"` // 逻辑 CPU 数
-	// Usage 为两次 /proc/stat 的差值：第一次读时在服务器上间隔约一秒读两次；之后和上次读到的比（这段时间的平均）。nil 表示采样不可用。
-	Usage *float64 `json:"usage"`
-	// Window Usage 是多少秒内的平均
-	Window float64   `json:"window,omitempty"`
-	Load   []float64 `json:"load"` // 1 / 5 / 15 分钟平均负载，不是百分比
-}
-
-type ServerMemory struct {
-	Total     uint64 `json:"total"`
-	Used      uint64 `json:"used"` // total - available，缓存不算实际占用
-	Available uint64 `json:"available"`
-	Free      uint64 `json:"free"`
-	Cached    uint64 `json:"cached"` // buffers + cached + SReclaimable - Shmem
-}
-
-type ServerSwap struct {
-	Total uint64 `json:"total"`
-	Used  uint64 `json:"used"`
-	Free  uint64 `json:"free"`
-}
-
-type ServerMount struct {
-	Device      string   `json:"device"`
-	Path        string   `json:"path"`
-	FSType      string   `json:"fsType"`
-	Total       uint64   `json:"total"`
-	Used        uint64   `json:"used"`
-	Available   uint64   `json:"available"`
-	Usage       *float64 `json:"usage"` // df 的使用率，包含文件系统保留空间的影响
-	Inodes      uint64   `json:"inodes"`
-	InodesUsed  uint64   `json:"inodesUsed"`
-	InodesUsage *float64 `json:"inodesUsage"`
-	Temporary   bool     `json:"temporary"`
-}
-
-type ServerAddr struct {
-	Interface string `json:"interface"`
-	Family    string `json:"family"`
-	Address   string `json:"address"`
-}
+type (
+	ServerInfo   = proto.ServerInfo
+	ServerCPU    = proto.ServerCPU
+	ServerMemory = proto.ServerMemory
+	ServerSwap   = proto.ServerSwap
+	ServerMount  = proto.ServerMount
+	ServerAddr   = proto.ServerAddr
+)
 
 // 只读 Linux 自带的 procfs 和 coreutils。df 用 POSIX 的单行格式；含空格的挂载点由解析端保留。
 // 临时文件系统也采集，由界面决定是否显示；不加总多个挂载点，避免 bind mount 重复计算容量。
@@ -118,6 +68,20 @@ const cpuPrevMax = 10 * time.Minute
 func (e *Engine) ServerInfo(target string) (*ServerInfo, error) {
 	var out *ServerInfo
 	err := e.withConn(target, func(s *session) error {
+		// 连接上已经准备好常驻 agent 时（如桌面版已查看过应用状态/软件/端口），直接走常驻 agent 原生采集：
+		// 不新开 SSH 通道、不派生 shell/df/lscpu，且利用启动时预采的 CPU 基线免去首次 sleep 1。
+		// 未准备 agent 的连接（如未提权的 sudo 目标、纯 SSH「新建连接」）走原脚本路径，绝不触发 sudo 提示。
+		if !s.t.Plain && s.agent != "" {
+			var rep proto.ServerInfo
+			err := s.callData("serverinfo", &proto.Request{}, &rep)
+			if err == nil {
+				out = &rep
+				return nil
+			}
+			if errors.Is(err, ErrCanceled) || s.e.ctx().Err() != nil {
+				return err
+			}
+		}
 		ctx, cancel := context.WithTimeout(e.ctx(), 25*time.Second)
 		defer cancel()
 		prev, prevAt := s.cpuSample()

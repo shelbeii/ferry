@@ -72,9 +72,9 @@ async function load(background = false, signal?: AbortSignal) {
 watch(key, (_, previous) => {
   if (previous) reads.cancel(previous)
   temporary.value = false
-  // 刚读过、还没到间隔：先显示缓存，定时器到点再刷（每次进页面都重新采样太费）
+  // 刚读过、还没到间隔（或已关闭自动刷新）：先显示缓存，避免每次切回都重新采样
   const cached = cache[key.value]
-  if (!cached || interval.value < 0 || Date.now() - cached.at >= interval.value * 60_000) load()
+  if (!cached || (interval.value > 0 && Date.now() - cached.at >= interval.value * 60_000)) load()
 }, { immediate: true })
 watch(trustedTick, () => errors[key.value] && props.active && load())
 onMounted(() => {

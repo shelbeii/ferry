@@ -28,8 +28,10 @@ func Serve(sys System, in io.Reader, out io.Writer) int {
 	w := &serveOut{w: out}
 	light := make(chan struct{}, serveLight)
 	heavy := make(chan struct{}, serveHeavy)
-	// 跨请求共用：防火墙结果（应用状态每分钟刷新，不用每次都起 firewall-cmd）
+	// 跨请求共用：防火墙结果（应用状态每分钟刷新，不用每次都起 firewall-cmd）与服务器信息 CPU 基线
 	fw := &fwCache{}
+	si := &serverInfoState{}
+	si.prime("/proc")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	cancels := map[string]context.CancelFunc{}
@@ -80,7 +82,7 @@ func Serve(sys System, in io.Reader, out io.Writer) int {
 					}
 					defer func() { <-sem }()
 					lw := &serveLines{id: sr.ID, out: w}
-					a := &Agent{Sys: ctxSys{System: sys, ctx: ctx}, Out: lw, bgSys: sys, fw: fw}
+					a := &Agent{Sys: ctxSys{System: sys, ctx: ctx}, Out: lw, bgSys: sys, fw: fw, si: si}
 					code := a.Run(sr.Cmd, sr.Req) // Run 自己拦下 panic，返回失败的结果
 					lw.flush()
 					w.end(sr.ID, code)

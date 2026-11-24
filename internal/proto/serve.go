@@ -13,7 +13,7 @@ var ServeCmds = map[string]bool{
 	"status": true, "appinfo": true, "appruntimes": true, "releases": true, "history": true,
 	"logruns": true, "logread": true, "loggrep": true, "software": true, "ports": true,
 	"portcheck": true, "keepscan": true, "swinfo": true, "jdklist": true, "runtimelist": true,
-	"swtask": true,
+	"swtask": true, "serverinfo": true, "who": true,
 }
 
 // ServeHeavy 其中费时的扫描（读很多文件、运行很多命令）：和很快的查看分开排队，占满了也不耽误后者。

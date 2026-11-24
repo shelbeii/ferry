@@ -1227,8 +1227,10 @@ t "releases 复用连接" ok "复用已有连接" -- srun releases e2e-a api -c 
 t "history 复用连接" ok '"ok":true' -- srun history e2e-a -c "$P"
 t "日志复用连接" ok "listening 18080" -- srun logs e2e-a api -n 20 -c "$P"
 sleep 1
+t "server-info 复用连接（走常驻 agent）" ok '"memory":{' -- srun server-info e2e-a -c "$P"
+t "who 复用连接（走常驻 agent）" ok '"self":true' -- srun who e2e-a -c "$P"
 n1=$(accepted a)
-has "四次操作只登录了一次" "=1=" "=$((n1 - n0))="
+has "六次操作只登录了一次" "=1=" "=$((n1 - n0))="
 
 t "部署复用连接，多路上传的额外连接用完即关" ok "4 路并行" -- srun deploy e2e-a sys --skip-build --full -c "$P"
 list=$(srun pool)  # 不能放进管道：管道里的子 shell 拿不到 coproc 的文件描述符

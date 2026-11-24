@@ -120,8 +120,10 @@ type swScan struct {
 	children map[int][]int // 父进程号 → 子进程号（找子孙进程的端口，不用再读一遍 /proc）
 	hostNet  string        // /proc/1/ns/net：判断容器是不是用主机网络
 
-	mu   sync.Mutex
-	memo map[string]*verMemo // 版本、软件包版本：同一个程序这次只取一次（几个地方同时要时等第一个取完）
+	mu        sync.Mutex
+	memo      map[string]*verMemo // 版本、软件包版本：同一个程序这次只取一次（几个地方同时要时等第一个取完）
+	btimeOnce sync.Once
+	btime     int64
 }
 
 // verMemo 一个程序这次查到的版本。
@@ -174,7 +176,14 @@ var reSSPid = regexp.MustCompile(`pid=(\d+)`)
 // 没有 ss、输出认不出、读不到进程号（不是 root）时返回 nil，调用方仍逐个进程扫 /proc。
 func (sc *swScan) ssListeners() map[int][]string {
 	out, err := sc.run("ss -lntp 2>/dev/null", 10*time.Second)
-	if err != nil || !strings.Contains(out, "LISTEN") {
+	if err != nil {
+		return nil
+	}
+	return parseSSListeners(out)
+}
+
+func parseSSListeners(out string) map[int][]string {
+	if !strings.Contains(out, "LISTEN") {
 		return nil
 	}
 	by := map[int][]string{}
@@ -267,40 +276,58 @@ func (a *Agent) software() int {
 		exists:        func(p string) bool { _, err := os.Stat(p); return err == nil },
 	}
 	// listening 不设：扫描时用读进程时记下的父子关系找端口
-	rep := sc.scan()
-	sc.cache.save()
-	// 安装软件时用：服务器架构、已有的 JDK、各目录的剩余空间、已占用的端口
-	rep.Arch = goruntime.GOARCH
-	rep.OS = osInfo("/etc/os-release")
-	rep.PkgMgr = a.pkgManager()
-	addOSFamily(rep.OS, rep.PkgMgr)
-	rep.MemTotalMB, rep.MemAvailMB = memInfo("/proc/meminfo")
-	rep.Runtimes = a.installedRuntimes()
-	rep.JDKs = a.jdkInventory(rep.Runtimes)
-	rep.FerryDir = a.ferryDir()
-	for _, d := range []string{"/opt", "/data", "/home", "/srv", "/www"} {
-		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
-			rep.Disks = append(rep.Disks, proto.Disk{Path: d, FreeMB: diskFreeMB(d)})
+	// 进程/容器/服务扫描与服务器基础元数据（系统、内存、运行环境、磁盘、已占端口）互不相干，并行采集。
+	var rep *proto.SoftwareReport
+	var meta proto.SoftwareReport
+	eachParallel(2, 2, func(i int) {
+		if i == 0 {
+			rep = sc.scan()
+			sc.cache.save()
+			return
 		}
-	}
-	rep.Kept, rep.LastInstall = a.keptList(), a.lastInstall()
-	// 已占用的端口：在监听的，加上 Ferry 装的软件停着时也要用的
-	rep.PortUsers = a.swPortUsers("")
-	tcp, udp := listeningPorts(), listeningUDP()
-	for k := range rep.PortUsers {
-		pr, ps, _ := strings.Cut(k, "/")
-		if p, err := strconv.Atoi(ps); err == nil {
-			map[string]map[int]bool{"tcp": tcp, "udp": udp}[pr][p] = true
+		meta.Arch = goruntime.GOARCH
+		meta.OS = osInfo("/etc/os-release")
+		meta.PkgMgr = a.pkgManager()
+		addOSFamily(meta.OS, meta.PkgMgr)
+		meta.MemTotalMB, meta.MemAvailMB = memInfo("/proc/meminfo")
+		meta.Runtimes = a.installedRuntimes()
+		meta.JDKs = a.jdkInventory(meta.Runtimes)
+		meta.FerryDir = a.ferryDir()
+		for _, d := range []string{"/opt", "/data", "/home", "/srv", "/www"} {
+			if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+				meta.Disks = append(meta.Disks, proto.Disk{Path: d, FreeMB: diskFreeMB(d)})
+			}
 		}
-	}
-	for p := range tcp {
-		rep.Ports = append(rep.Ports, p)
-	}
-	for p := range udp {
-		rep.UDPPorts = append(rep.UDPPorts, p)
-	}
-	sort.Ints(rep.Ports)
-	sort.Ints(rep.UDPPorts)
+		meta.Kept, meta.LastInstall = a.keptList(), a.lastInstall()
+		// 已占用的端口：在监听的，加上 Ferry 装的软件停着时也要用的
+		meta.PortUsers = a.swPortUsers("")
+		tcp, udp := listeningPorts(), listeningUDP()
+		for k := range meta.PortUsers {
+			pr, ps, _ := strings.Cut(k, "/")
+			if p, err := strconv.Atoi(ps); err == nil {
+				map[string]map[int]bool{"tcp": tcp, "udp": udp}[pr][p] = true
+			}
+		}
+		for p := range tcp {
+			meta.Ports = append(meta.Ports, p)
+		}
+		for p := range udp {
+			meta.UDPPorts = append(meta.UDPPorts, p)
+		}
+		sort.Ints(meta.Ports)
+		sort.Ints(meta.UDPPorts)
+	})
+	rep.Arch = meta.Arch
+	rep.OS = meta.OS
+	rep.PkgMgr = meta.PkgMgr
+	rep.MemTotalMB, rep.MemAvailMB = meta.MemTotalMB, meta.MemAvailMB
+	rep.Runtimes = meta.Runtimes
+	rep.JDKs = meta.JDKs
+	rep.FerryDir = meta.FerryDir
+	rep.Disks = meta.Disks
+	rep.Kept, rep.LastInstall = meta.Kept, meta.LastInstall
+	rep.PortUsers = meta.PortUsers
+	rep.Ports, rep.UDPPorts = meta.Ports, meta.UDPPorts
 	rep.Took["合计"] = time.Since(start).Milliseconds()
 	return a.result(proto.CodeOK, "", rep)
 }
@@ -519,20 +546,24 @@ func (sc *swScan) scan() *proto.SoftwareReport {
 	return rep
 }
 
-// readProcs 读出全部进程，认出其中的软件。
+// readProcs 读出全部进程，认出其中的软件。进程多的机器上并发扫 /proc 更快。
 func (sc *swScan) readProcs() {
 	sc.procs = map[int]*swProc{}
 	sc.children = map[int][]int{}
 	ents, _ := os.ReadDir(sc.proc)
+	var pids []int
 	for _, e := range ents {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
+		if pid, err := strconv.Atoi(e.Name()); err == nil {
+			pids = append(pids, pid)
 		}
-		dir := filepath.Join(sc.proc, e.Name())
+	}
+	found := make([]*swProc, len(pids))
+	eachParallel(len(pids), 4, func(i int) {
+		pid := pids[i]
+		dir := filepath.Join(sc.proc, strconv.Itoa(pid))
 		cmd, _ := os.ReadFile(filepath.Join(dir, "cmdline"))
 		if len(cmd) == 0 {
-			continue // 内核线程
+			return // 内核线程
 		}
 		p := &swProc{pid: pid, args: strings.Split(strings.TrimRight(string(cmd), "\x00"), "\x00"), rule: -1}
 		if stat, err := os.ReadFile(filepath.Join(dir, "stat")); err == nil {
@@ -550,8 +581,14 @@ func (sc *swScan) readProcs() {
 			p.unit, p.container = cgroupOwner(string(cg))
 		}
 		p.rule = matchRule(p.exe, p.args)
-		sc.procs[pid] = p
-		sc.children[p.ppid] = append(sc.children[p.ppid], pid)
+		found[i] = p
+	})
+	for _, p := range found {
+		if p == nil {
+			continue
+		}
+		sc.procs[p.pid] = p
+		sc.children[p.ppid] = append(sc.children[p.ppid], p.pid)
 	}
 }
 
@@ -703,8 +740,29 @@ func (sc *swScan) sameNet(pid int) bool {
 	return err == nil && sc.hostNet != "" && ns == sc.hostNet
 }
 
+// bootTime /proc/stat 的开机时间（Unix 秒），一次扫描只读一次。
+func (sc *swScan) bootTime() int64 {
+	sc.btimeOnce.Do(func() {
+		st, err := os.ReadFile(filepath.Join(sc.proc, "stat"))
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(string(st), "\n") {
+			if v, ok := strings.CutPrefix(line, "btime "); ok {
+				sc.btime, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+				return
+			}
+		}
+	})
+	return sc.btime
+}
+
 // startTime 进程的启动时间（RFC3339）：stat 第 22 个字段（开机后的时钟周期数，按每秒 100 个）+ 开机时间。
 func (sc *swScan) startTime(pid int) string {
+	bt := sc.bootTime()
+	if bt <= 0 {
+		return ""
+	}
 	stat, err := os.ReadFile(filepath.Join(sc.proc, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return ""
@@ -717,20 +775,7 @@ func (sc *swScan) startTime(pid int) string {
 	if err != nil {
 		return ""
 	}
-	st, err := os.ReadFile(filepath.Join(sc.proc, "stat"))
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(st), "\n") {
-		if v, ok := strings.CutPrefix(line, "btime "); ok {
-			bt, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-			if err != nil {
-				return ""
-			}
-			return time.Unix(bt+ticks/100, 0).Format(time.RFC3339)
-		}
-	}
-	return ""
+	return time.Unix(bt+ticks/100, 0).Format(time.RFC3339)
 }
 
 // ferryUnit 单元文件是不是 Ferry 生成的。

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/captain/ferry/internal/proto"
 )
 
 // 服务器上连着的 SSH：谁（登录用户）、从哪里（对方 IP）、什么时候连上、在干什么（终端、传文件、执行命令），可以断开。
@@ -113,6 +115,23 @@ func (e *Engine) withConn(target string, fn func(s *session) error) error {
 }
 
 func listSSH(s *session) (*SSHReport, error) {
+	// 连接上已经准备好常驻 agent 时，直接走常驻 agent 原生采集：
+	// 免去新开 SSH 通道、ps/awk/grep 子进程，以及 sudoAuth=password 目标每次重新提权的开销。
+	if !s.t.Plain && s.agent != "" {
+		var lines []string
+		err := s.callData("who", &proto.Request{}, &lines)
+		if err == nil {
+			priv := "sudo"
+			if s.t.User == "root" {
+				priv = "root"
+			}
+			lines = append([]string{"priv " + priv}, lines...)
+			return parseSSH(lines, s.t.User, keepPorts(s)[0])
+		}
+		if errors.Is(err, ErrCanceled) || s.e.ctx().Err() != nil {
+			return nil, err
+		}
+	}
 	var lines []string
 	res, err := s.runPrivilegeProbe(s.e.ctx(), sshScript, func(l string) { lines = append(lines, l) })
 	if err != nil {

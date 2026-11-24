@@ -802,27 +802,46 @@ func listeningFromProc(proc string, pid int) []string {
 }
 
 // listeningOf pids（pid 及其子孙进程）的 socket 里处于监听状态的地址；按 pid 所在的网络查 net/tcp、tcp6。
+// 先读网络表里的 LISTEN socket inode，再扫进程的 fd：没有监听端口时零次 fd 遍历，找齐后立即提前结束。
 func listeningOf(proc string, pid int, pids map[int]bool) []string {
-	inodes := map[string]bool{}
+	var tables [][]byte
+	want := map[string]bool{}
+	for _, name := range []string{"tcp", "tcp6"} {
+		b, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(pid), "net", name))
+		if err != nil {
+			continue
+		}
+		tables = append(tables, b)
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 10 && f[3] == "0A" && f[9] != "0" {
+				want[f[9]] = true
+			}
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	found := map[string]bool{}
 	for p := range pids {
 		fds, _ := os.ReadDir(filepath.Join(proc, strconv.Itoa(p), "fd"))
 		for _, fd := range fds {
 			link, err := os.Readlink(filepath.Join(proc, strconv.Itoa(p), "fd", fd.Name()))
 			if err == nil && strings.HasPrefix(link, "socket:[") {
-				inodes[strings.TrimSuffix(strings.TrimPrefix(link, "socket:["), "]")] = true
+				ino := strings.TrimSuffix(strings.TrimPrefix(link, "socket:["), "]")
+				if want[ino] {
+					found[ino] = true
+					if len(found) == len(want) {
+						return listenAddrs(tables, found)
+					}
+				}
 			}
 		}
 	}
-	if len(inodes) == 0 {
+	if len(found) == 0 {
 		return nil
 	}
-	var tables [][]byte
-	for _, name := range []string{"tcp", "tcp6"} {
-		if b, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(pid), "net", name)); err == nil {
-			tables = append(tables, b)
-		}
-	}
-	return listenAddrs(tables, inodes)
+	return listenAddrs(tables, found)
 }
 
 func (realSystem) ProcArgs(pid int) [][]string {
@@ -889,17 +908,48 @@ func descendants(children map[int][]int, pid int) map[int]bool {
 	return pids
 }
 
-// procTable 同一次查看里共用的进程父子关系：第一次用到时把 /proc 读一遍，之后找子孙进程不再重读。
+// procTable 同一次查看里共用的进程父子关系与宿主机监听表：第一次用到时各读一遍，之后不再重读。
 // 进程很多的服务器（上万个没回收的僵尸进程）上，每找一个进程都读一遍全部进程要好几秒。
 type procTable struct {
 	proc     string
 	once     sync.Once
 	children map[int][]int
+
+	ssOnce  sync.Once
+	ssPids  map[int][]string
+	hostNet string
+	run     func(cmd string, timeout time.Duration) (string, error)
 }
 
 func (t *procTable) tree(pid int) map[int]bool {
 	t.once.Do(func() { t.children = readChildren(t.proc) })
 	return descendants(t.children, pid)
+}
+
+func (t *procTable) ssFor(pid int) ([]string, bool) {
+	t.ssOnce.Do(func() {
+		if t.run == nil {
+			return
+		}
+		t.hostNet, _ = os.Readlink(filepath.Join(t.proc, "1", "ns", "net"))
+		if out, err := t.run("ss -lntp 2>/dev/null", 10*time.Second); err == nil {
+			t.ssPids = parseSSListeners(out)
+		}
+	})
+	if t.ssPids == nil {
+		return nil, false
+	}
+	if t.hostNet != "" {
+		ns, err := os.Readlink(filepath.Join(t.proc, strconv.Itoa(pid), "ns", "net"))
+		if err != nil || ns != t.hostNet {
+			return nil, false
+		}
+	}
+	var addrs []string
+	for p := range t.tree(pid) {
+		addrs = append(addrs, t.ssPids[p]...)
+	}
+	return mergeListenAddrs(addrs), true
 }
 
 // snapSys 共用一份进程表的 System：只读的查看（应用状态）里，Listening、ProcArgs 不再每次读全部进程。
@@ -911,6 +961,9 @@ type snapSys struct {
 func (s snapSys) Listening(pid int) []string {
 	if pid <= 0 {
 		return nil
+	}
+	if out, ok := s.t.ssFor(pid); ok {
+		return out
 	}
 	return listeningOf(s.t.proc, pid, s.t.tree(pid))
 }
@@ -928,12 +981,12 @@ func (a *Agent) shareProcs() func() {
 	saved := a.Sys
 	switch s := a.Sys.(type) {
 	case realSystem:
-		a.Sys = snapSys{System: s, t: &procTable{proc: "/proc"}}
+		a.Sys = snapSys{System: s, t: &procTable{proc: "/proc", run: s.Shell}}
 	case ctxSys: // 常驻 agent 里：取消照样生效
 		if _, ok := s.System.(realSystem); !ok {
 			return func() {}
 		}
-		a.Sys = ctxSys{System: snapSys{System: s.System, t: &procTable{proc: "/proc"}}, ctx: s.ctx}
+		a.Sys = ctxSys{System: snapSys{System: s.System, t: &procTable{proc: "/proc", run: s.Shell}}, ctx: s.ctx}
 	default:
 		return func() {}
 	}

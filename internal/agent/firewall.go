@@ -120,14 +120,19 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 	var st *fwState
 	var names map[string]string
 	var dockerNote string
-	// 读防火墙（要起 firewall-cmd，最慢）和读监听的端口、Docker 同时做：两边互不相干
-	eachParallel(2, 2, func(i int) {
-		if i == 0 {
+	var dockerActive bool
+	// 读防火墙（要起 firewall-cmd，最慢）、读监听端口/Docker、查 docker 服务状态同时做：三边互不相干
+	eachParallel(3, 3, func(i int) {
+		switch i {
+		case 0:
 			st = sc.firewallState()
-			return
+		case 1:
+			sc.scanListen(byKey)
+			names, dockerNote = sc.docker(func(port int, pr string) *proto.PortInfo { return addPort(byKey, port, pr) })
+		case 2:
+			out, _ := sc.run("systemctl is-active docker 2>/dev/null", 10*time.Second)
+			dockerActive = strings.TrimSpace(out) == "active"
 		}
-		sc.scanListen(byKey)
-		names, dockerNote = sc.docker(func(port int, pr string) *proto.PortInfo { return addPort(byKey, port, pr) })
 	})
 	rep.Firewall = st.Firewall
 	if dockerNote != "" {
@@ -153,7 +158,7 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 			add(r.lo, pr)
 		}
 	}
-	return sc.finish(rep, st, byKey)
+	return sc.finish(rep, st, byKey, dockerActive)
 }
 
 // addPort 端口 / 协议对应的那一项，没有时加上。
@@ -168,8 +173,17 @@ func addPort(byKey map[string]*proto.PortInfo, port int, pr string) *proto.PortI
 }
 
 // scanListen 1. 正在监听的 TCP 端口，和它的进程、systemd 单元、容器；记下 sshd 监听的端口。
+// 优先用一次 ss -lntp 读取监听地址与进程号（免去遍历全机 /proc/<pid>/fd）；不可用时退回读 /proc。
 func (sc *fwScan) scanListen(byKey map[string]*proto.PortInfo) {
 	sc.ssh = map[int]bool{}
+	if entries := sc.ssListen(); len(entries) > 0 {
+		for _, e := range entries {
+			p := addPort(byKey, e.port, "tcp")
+			p.Listen = addHost(p.Listen, e.host)
+			sc.fillListenPID(p, e.port, e.pid)
+		}
+		return
+	}
 	socks := readListen(sc.proc)
 	want := map[string]bool{}
 	for _, s := range socks {
@@ -179,27 +193,76 @@ func (sc *fwScan) scanListen(byKey map[string]*proto.PortInfo) {
 	for _, s := range socks {
 		p := addPort(byKey, s.port, "tcp")
 		p.Listen = addHost(p.Listen, s.host)
-		pid := owners[s.inode]
-		if pid <= 0 || (p.PID > 0 && p.PID < pid) {
-			continue
-		}
-		p.PID = pid
-		b, _ := os.ReadFile(filepath.Join(sc.proc, strconv.Itoa(pid), "comm"))
-		p.Process = strings.TrimSpace(string(b))
-		if cg, err := os.ReadFile(filepath.Join(sc.proc, strconv.Itoa(pid), "cgroup")); err == nil {
-			unit, ctr := cgroupOwner(string(cg))
-			p.Unit, p.Container = unit, shortID(ctr)
-		}
-		p.Ferry = p.Unit != "" && sc.ferryUnit(p.Unit)
-		p.Docker = p.Process == "docker-proxy"
-		if p.Process == "sshd" {
-			sc.ssh[s.port] = true
-		}
+		sc.fillListenPID(p, s.port, owners[s.inode])
 	}
 }
 
+func (sc *fwScan) fillListenPID(p *proto.PortInfo, port, pid int) {
+	if pid <= 0 || (p.PID > 0 && p.PID < pid) {
+		return
+	}
+	p.PID = pid
+	b, _ := os.ReadFile(filepath.Join(sc.proc, strconv.Itoa(pid), "comm"))
+	p.Process = strings.TrimSpace(string(b))
+	if cg, err := os.ReadFile(filepath.Join(sc.proc, strconv.Itoa(pid), "cgroup")); err == nil {
+		unit, ctr := cgroupOwner(string(cg))
+		p.Unit, p.Container = unit, shortID(ctr)
+	}
+	p.Ferry = p.Unit != "" && sc.ferryUnit(p.Unit)
+	p.Docker = p.Process == "docker-proxy"
+	if p.Process == "sshd" {
+		sc.ssh[port] = true
+	}
+}
+
+type ssListenEntry struct {
+	port int
+	host string
+	pid  int
+}
+
+// ssListen 一次 ss -lntp 读出宿主机全部监听 TCP 端口及最小进程号；没有 ss 或读不到进程号（非 root）时返回 nil。
+func (sc *fwScan) ssListen() []ssListenEntry {
+	out, err := sc.run("ss -lntp 2>/dev/null", 10*time.Second)
+	if err != nil || !strings.Contains(out, "LISTEN") {
+		return nil
+	}
+	var entries []ssListenEntry
+	sawPID := false
+	for _, line := range splitLines(out) {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[0] != "LISTEN" {
+			continue
+		}
+		host, portStr, ok := splitSSAddr(f[3])
+		if !ok {
+			continue
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port <= 0 {
+			continue
+		}
+		minPID := 0
+		for _, m := range reSSPid.FindAllStringSubmatch(line, -1) {
+			pid, err := strconv.Atoi(m[1])
+			if err != nil || pid <= 0 {
+				continue
+			}
+			sawPID = true
+			if minPID == 0 || pid < minPID {
+				minPID = pid
+			}
+		}
+		entries = append(entries, ssListenEntry{port: port, host: host, pid: minPID})
+	}
+	if !sawPID {
+		return nil
+	}
+	return entries
+}
+
 // finish 给每个端口标上防火墙的状态，排好序。
-func (sc *fwScan) finish(rep *proto.PortReport, st *fwState, byKey map[string]*proto.PortInfo) (*proto.PortReport, *fwState) {
+func (sc *fwScan) finish(rep *proto.PortReport, st *fwState, byKey map[string]*proto.PortInfo, dockerActive bool) (*proto.PortReport, *fwState) {
 	var ifaces map[string]string
 	if sc.ifaces != nil {
 		ifaces = sc.ifaces()
@@ -227,11 +290,12 @@ func (sc *fwScan) finish(rep *proto.PortReport, st *fwState, byKey map[string]*p
 	if os.Geteuid() != 0 && sc.proc == "/proc" {
 		rep.Notes = append(rep.Notes, "agent 没有以 root 运行，其他用户的进程可能看不到")
 	}
-	// 打开、关闭 firewalld 时要知道 Docker 在不在运行
+	// 复制一份再填 Disable / Docker，避免并发读 fwCache 时改写共享缓存里的状态
+	cp := *st
+	st = &cp
 	st.Disable = st.Active && (st.Kind == "firewalld" || st.Kind == "ufw")
 	if st.Enable || st.Disable {
-		out, _ := sc.run("systemctl is-active docker 2>/dev/null", 10*time.Second)
-		st.Docker = strings.TrimSpace(out) == "active"
+		st.Docker = dockerActive
 	}
 	rep.Firewall = st.Firewall
 	return rep, st
@@ -548,6 +612,9 @@ func (sc *fwScan) firewalld() *fwState {
 		}
 	}
 	if zone == "" {
+		zone = defaultZoneFromAll(zones)
+	}
+	if zone == "" {
 		out, _ := sc.run("LC_ALL=C firewall-cmd --get-default-zone 2>&1", fwTimeout)
 		zone = strings.TrimSpace(out)
 	}
@@ -638,6 +705,28 @@ type fwZone struct {
 
 // splitZones firewall-cmd --list-all-zones 的输出按区域分开：区域名 → 这个区域的 --list-all 内容。
 // 区域名那行顶格（public (active)），其余各行缩进。
+// defaultZoneFromAll 新版 firewalld 的 --list-all-zones 首行会标明默认区域，如 "public (default, active)"。
+// 能直接认出来就不用再起一次 firewall-cmd --get-default-zone。
+func defaultZoneFromAll(zones map[string]string) string {
+	for name, text := range zones {
+		head, _, _ := strings.Cut(text, "\n")
+		_, rest, ok := strings.Cut(head, "(")
+		if !ok {
+			continue
+		}
+		inside, _, ok := strings.Cut(rest, ")")
+		if !ok {
+			continue
+		}
+		for _, tag := range strings.Split(inside, ",") {
+			if strings.TrimSpace(tag) == "default" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 func splitZones(s string) map[string]string {
 	out := map[string]string{}
 	name := ""
