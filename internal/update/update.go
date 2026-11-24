@@ -86,6 +86,16 @@ type Info struct {
 	Install string `json:"install"`
 	// Downloaded 已经下载好、校验过的安装包（再点更新时不用重新下载）
 	Downloaded string `json:"downloaded,omitempty"`
+	// OtherProcesses 除当前进程外，还有多少个进程占着 ferry 程序（如编程软件启动的 ferry mcp 或终端命令）
+	OtherProcesses int `json:"otherProcesses,omitempty"`
+	// StaleBinaries 清理后仍被旧进程占用的 ferry.exe.old-* 数量（重启对应软件后切换到新版本）
+	StaleBinaries int `json:"staleBinaries,omitempty"`
+}
+
+// CheckOptions CheckWithOptions 的选项。
+type CheckOptions struct {
+	// IncludeDetails 即使不是更新版本也拉取发布说明、安装包大小并保留已下载的安装包（组件版本不一致需重装修复时用）。
+	IncludeDetails bool
 }
 
 // Asset 某个版本在 goos/goarch 上用的文件和装法。
@@ -191,6 +201,11 @@ func latestFrom(ctx context.Context, u string) (string, error) {
 
 // Check 查最新版本，和 current 比较。dir 是下载安装包的目录：已经下载好的会记在 Downloaded 里，旧的删掉。
 func Check(ctx context.Context, s Source, current, dir string) (*Info, error) {
+	return CheckWithOptions(ctx, s, current, dir, CheckOptions{})
+}
+
+// CheckWithOptions 同 Check，可指定额外选项。
+func CheckWithOptions(ctx context.Context, s Source, current, dir string, opts CheckOptions) (*Info, error) {
 	latest, usedMirror, err := latestWithMirror(ctx, s)
 	if err != nil {
 		return nil, err
@@ -200,7 +215,7 @@ func Check(ctx context.Context, s Source, current, dir string) (*Info, error) {
 		Page: "https://github.com/" + Repo + "/releases/tag/v" + latest,
 	}
 	info.Asset, info.Install = Asset(latest, runtime.GOOS, runtime.GOARCH)
-	if !info.Newer {
+	if !info.Newer && !opts.IncludeDetails {
 		Clean(dir, "")
 		return info, nil
 	}

@@ -1333,6 +1333,17 @@ t "空闲超时后自动断开" ok '"target":"e2e-b","connected":false' -- srun 
 exec {SRV_IN}>&-
 wait "$SRV_PID" 2>/dev/null
 has "stdin 关闭后 serve 退出" "=0=" "=$?="
+coproc SRVQ { FERRY_HOME="$OUT/home" "$FERRY" serve 2>>"$OUT/serve.err"; }
+SRVQ_IN=${SRVQ[1]} SRVQ_OUT=${SRVQ[0]}
+read -r -t 10 qready <&"$SRVQ_OUT"
+has "op=quit 用 serve 启动" '"ready":true' "${qready:-}"
+printf '{"id":"q1","op":"quit"}\n' >&"$SRVQ_IN"
+read -r -t 5 qack <&"$SRVQ_OUT"
+has "op=quit 收到退出回执" '"exit":0' "${qack:-}"
+has "op=quit 回执含请求编号" '"id":"q1"' "${qack:-}"
+wait "$SRVQ_PID" 2>/dev/null
+has "op=quit 无需关闭 stdin 即优雅退出" "=0=" "=$?="
+exec {SRVQ_IN}>&- 2>/dev/null || true
 
 step "审计记录（终端、文件、部署……记在服务器上和这台电脑上）"
 au=$(F audit e2e-a --json)

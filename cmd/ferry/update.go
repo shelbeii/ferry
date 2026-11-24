@@ -11,7 +11,7 @@ import (
 	"github.com/captain/ferry/internal/update"
 )
 
-// updateCmd ferry update [check] | download | install [--restart]：检查、下载、安装新版本。
+// updateCmd ferry update [check] | download | install [--restart] [--force]：检查、下载、安装新版本。
 func updateCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Settings, fail func(error) int) int {
 	sub := "check"
 	if len(c.pos) > 0 {
@@ -23,10 +23,15 @@ func updateCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Set
 	if js == nil {
 		rep = con
 	}
+	force := c.has("force")
 
-	info, err := update.Check(cio.ctx, src, Version, dir)
+	info, err := update.CheckWithOptions(cio.ctx, src, Version, dir, update.CheckOptions{IncludeDetails: force})
 	if err != nil {
 		return fail(err)
+	}
+	if rs := update.InspectRunning(); rs.OtherProcesses > 0 || rs.StaleBinaries > 0 {
+		info.OtherProcesses = rs.OtherProcesses
+		info.StaleBinaries = rs.StaleBinaries
 	}
 	if sub == "check" {
 		if js != nil {
@@ -43,12 +48,15 @@ func updateCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Set
 		default:
 			fmt.Fprintf(cio.stdout, "已是最新版本（%s）\n", info.Latest)
 		}
+		if info.StaleBinaries > 0 {
+			fmt.Fprintf(cio.stdout, "提示：检测到 %d 个旧版 ferry 进程仍在运行（如编程软件的 ferry mcp），重启对应软件后切换到新版本\n", info.StaleBinaries)
+		}
 		return 0
 	}
 	if sub != "download" && sub != "install" {
-		return fail(errors.New("用法：ferry update [check] | download | install [--restart]"))
+		return fail(errors.New("用法：ferry update [check] | download | install [--restart] [--force]"))
 	}
-	if !info.Newer {
+	if !info.Newer && !force {
 		return fail(fmt.Errorf("已是最新版本（GitHub 上最新发布的是 %s，这台电脑上是 %s）", info.Latest, info.Current))
 	}
 	if info.Asset == "" {

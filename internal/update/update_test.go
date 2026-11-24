@@ -375,3 +375,37 @@ func TestNotesAPIRedirect(t *testing.T) {
 		t.Fatalf("API 跳转后没取到说明：%q", info.Notes)
 	}
 }
+
+func TestCheckWithOptionsIncludeDetails(t *testing.T) {
+	f := newFake(t, "0.18.9")
+	if f.asset() == "" {
+		t.Skip("这种系统没有安装包")
+	}
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// 默认 Check 在版本相同时不拉取说明与大小
+	plain, err := Check(ctx, f.source(), "0.18.9", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Newer || plain.Notes != "" || plain.Size != 0 {
+		t.Fatalf("默认 Check 同版本应跳过详情：%+v", plain)
+	}
+
+	// 先下载一份到 dir，再验证 IncludeDetails 不会误删且能返回详情与 Downloaded
+	downloaded, err := DownloadFile(ctx, f.source(), "0.18.9", f.asset(), dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forced, err := CheckWithOptions(ctx, f.source(), "0.18.9", dir, CheckOptions{IncludeDetails: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forced.Newer {
+		t.Fatalf("同版本 Newer 仍应为 false：%+v", forced)
+	}
+	if !strings.Contains(forced.Notes, "检查更新") || forced.Size != int64(len(f.body)) || forced.Downloaded != downloaded {
+		t.Fatalf("IncludeDetails 结果不对：%+v", forced)
+	}
+}

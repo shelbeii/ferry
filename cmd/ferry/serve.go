@@ -92,6 +92,9 @@ func serve(in io.Reader, out io.Writer) int {
 			continue
 		}
 		switch req.Op {
+		case "quit":
+			send(map[string]any{"id": req.ID, "exit": 0})
+			goto shutdown
 		case "cancel":
 			if r := find(req.ID); r != nil {
 				r.cancel()
@@ -131,6 +134,7 @@ func serve(in io.Reader, out io.Writer) int {
 			send(map[string]any{"id": req.ID, "err": "未知操作 " + req.Op, "exit": 2})
 		}
 	}
+shutdown:
 	// 桌面版退出：取消进行中的请求，稍等它们收尾
 	reqMu.Lock()
 	for _, r := range reqs {
