@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -29,6 +28,9 @@ type transfer struct {
 	result         proto.DBTransferResult
 	output         func(proto.DBTransferEvent)
 	mariaSourceID  string
+	createTarget   bool
+	dumpTool       string
+	clientTool     string
 }
 
 func Run(ctx context.Context, spec proto.DBTransfer, emit func(proto.DBTransferEvent)) (proto.DBTransferResult, error) {
@@ -76,6 +78,9 @@ func validate(s proto.DBTransfer) error {
 	case "tables", "database":
 		if s.Source.Database == "" || s.Target.Database == "" || (s.Scope == "tables") != (len(s.Tables) > 0) || s.Directory != "" || s.SourceSSH != "" {
 			return errors.New("请选择源库、目标库及迁移范围")
+		}
+		if s.TempDir != "" && (!filepath.IsAbs(s.TempDir) || filepath.Clean(s.TempDir) != s.TempDir || strings.ContainsAny(s.TempDir, "\x00\r\n")) {
+			return errors.New("临时目录须为有效的 Linux 绝对路径")
 		}
 		for _, db := range []string{s.Source.Database, s.Target.Database} {
 			if slices.Contains([]string{"mysql", "information_schema", "performance_schema", "sys", "template0", "template1"}, strings.ToLower(db)) {
@@ -126,7 +131,34 @@ func (t *transfer) plan(ctx context.Context) (err error) {
 			return err
 		}
 		if err = t.target.QueryRowContext(probe, "SELECT VERSION()").Scan(&t.result.TargetVersion); err != nil {
-			return &proto.DBTransferProblem{Code: "target-unreachable", Message: fmt.Sprintf("执行服务器无法访问目标库：%v", err)}
+			if t.spec.Scope != "instance" && isMissingDatabaseErr(t.spec.Engine, err) {
+				t.target.Close()
+				t.target = nil
+				adminEndpoint := t.spec.Target
+				adminEndpoint.Database = ""
+				adminDB, aerr := openDB(t.spec.Engine, adminEndpoint)
+				if aerr == nil {
+					if verr := adminDB.QueryRowContext(probe, "SELECT VERSION()").Scan(&t.result.TargetVersion); verr == nil {
+						if !t.spec.CreateTargetDB {
+							adminDB.Close()
+							return &proto.DBTransferProblem{
+								Code:              "target-db-missing",
+								CanCreateTargetDB: true,
+								Message:           fmt.Sprintf("目标库 %s 不存在，可勾选自动创建目标库，或先在目标实例中手动创建", t.spec.Target.Database),
+							}
+						}
+						t.target = adminDB
+						t.createTarget = true
+						t.result.Warnings = append(t.result.Warnings, fmt.Sprintf("迁移开始时会自动创建目标库 %s。", t.spec.Target.Database))
+						err = nil
+					} else {
+						adminDB.Close()
+					}
+				}
+			}
+			if err != nil {
+				return &proto.DBTransferProblem{Code: "target-unreachable", Message: fmt.Sprintf("执行服务器无法访问目标库：%v", err)}
+			}
 		}
 		if t.isMaria() != strings.Contains(strings.ToLower(t.result.TargetVersion), "mariadb") {
 			return errors.New("请选择相同数据库引擎")
@@ -178,9 +210,26 @@ func pgURL(e proto.DBEndpoint) *url.URL {
 		RawQuery: url.Values{"sslmode": {mode}, "connect_timeout": {"6"}}.Encode()}
 }
 
+func isMissingDatabaseErr(engine string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if engine == "mysql" {
+		var me *mysql.MySQLError
+		if errors.As(err, &me) && me.Number == 1049 {
+			return true
+		}
+		return strings.Contains(strings.ToLower(err.Error()), "unknown database")
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "3d000") || (strings.Contains(lower, "database ") && strings.Contains(lower, "does not exist"))
+}
+
+func mysqlIdentifier(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
+
 func requireTools(names ...string) error {
 	for _, name := range names {
-		if _, err := exec.LookPath(name); err != nil {
+		if _, err := findTool(name); err != nil {
 			return fmt.Errorf("执行服务器缺少 %s，请先安装相应数据库客户端工具", name)
 		}
 	}
@@ -202,6 +251,10 @@ func newDestination(path string) error {
 
 func (t *transfer) stage(text string) { t.output(proto.DBTransferEvent{Kind: "step", Text: text}) }
 
+func (t *transfer) progress(label string, done, total int64) {
+	t.output(proto.DBTransferEvent{Kind: "progress", Progress: &proto.DBTransferProgress{Label: label, Done: done, Total: total}})
+}
+
 func (t *transfer) filter(text string) string {
 	for _, pwd := range []string{t.spec.Source.Password, t.spec.Target.Password} {
 		if pwd != "" {
@@ -214,9 +267,29 @@ func (t *transfer) filter(text string) string {
 }
 
 func (t *transfer) command(ctx context.Context, env []string, name string, args ...string) error {
+	base := filepath.Base(name)
+	if resolved, err := findTool(name); err == nil {
+		name = resolved
+	}
 	cmd := nativeCommand(ctx, name, args...)
-	cmd.Env = append(os.Environ(), env...)
-	out := &commandOutput{log: func(line string) { t.output(proto.DBTransferEvent{Kind: "info", Text: t.filter(line)}) }}
+	cmd.Env = append(os.Environ(), toolPathEnv()...)
+	cmd.Env = append(cmd.Env, env...)
+	var tableDone int64
+	tableTotal := int64(t.result.Tables)
+	out := &commandOutput{log: func(line string) {
+		clean := t.filter(line)
+		t.output(proto.DBTransferEvent{Kind: "info", Text: clean})
+		if pct, ok := parsePercentProgress(clean); ok {
+			t.progress(base, pct, 100)
+			return
+		}
+		if tableTotal > 0 && isTableDoneLine(base, clean) {
+			if tableDone < tableTotal {
+				tableDone++
+			}
+			t.progress(fmt.Sprintf("%s（%d/%d 表）", base, tableDone, tableTotal), tableDone, tableTotal)
+		}
+	}}
 	cmd.Stdout, cmd.Stderr = out, out
 	err := cmd.Run()
 	out.flush()
@@ -224,9 +297,43 @@ func (t *transfer) command(ctx context.Context, env []string, name string, args 
 		return ctx.Err()
 	}
 	if err != nil {
-		return fmt.Errorf("%s：%v", name, err)
+		return fmt.Errorf("%s：%v", base, err)
 	}
 	return nil
+}
+
+func parsePercentProgress(line string) (int64, bool) {
+	// 匹配 mysqlsh / pg_basebackup 输出的百分比（如 "45%" 或 "(45%)"）
+	for i := 0; i < len(line); i++ {
+		if line[i] != '%' || i == 0 {
+			continue
+		}
+		j := i - 1
+		for j >= 0 && line[j] >= '0' && line[j] <= '9' {
+			j--
+		}
+		if j < i-1 {
+			if v, err := strconv.ParseInt(line[j+1:i], 10, 64); err == nil && v >= 0 && v <= 100 {
+				return v, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func isTableDoneLine(tool, line string) bool {
+	lower := strings.ToLower(line)
+	switch tool {
+	case "pg_dump":
+		return strings.Contains(lower, "dumping contents of table")
+	case "pg_restore":
+		return strings.Contains(lower, "processing data for table")
+	case "mydumper":
+		return strings.Contains(lower, "finished dumping table") || strings.Contains(lower, "completed dumping")
+	case "myloader":
+		return strings.Contains(lower, "finished restoring") || strings.Contains(lower, "completed restoring")
+	}
+	return false
 }
 
 // Stdout and stderr use the same writer so the subprocess cannot interleave

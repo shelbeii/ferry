@@ -70,22 +70,26 @@ type dbReq struct {
 	File         string         `json:"file"`         // import-sql：SQL 文件
 	Continue     bool           `json:"continue"`     // import-sql：出错后接着执行
 	BatchInserts bool           `json:"batchInserts"` // import-sql：合并连续的单行 INSERT
+	StartOffset  int64          `json:"startOffset"`  // import-sql：从上次成功的字节偏移继续执行
 	CSV          *dbx.CSVImport `json:"csv"`          // csv-preview、import-csv
 	Migration    *struct {
 		TargetConn string `json:"targetConn"`
 		dbx.MigrationOptions
 	} `json:"migration"`
 	NativeMigration *struct {
-		Worker           dbx.Via                 `json:"worker"`
-		Relay            bool                    `json:"relay"`
-		AllowLocalInfile bool                    `json:"allowLocalInfile"`
-		TargetConn       string                  `json:"targetConn"`
-		TargetDB         string                  `json:"targetDb"`
-		Scope            string                  `json:"scope"`
-		Tables           []proto.DBTransferTable `json:"tables"`
-		Threads          int                     `json:"threads"`
-		Directory        string                  `json:"directory"`
-		SourceSSH        string                  `json:"sourceSsh"`
+		Worker            dbx.Via                 `json:"worker"`
+		Relay             bool                    `json:"relay"`
+		AllowLocalInfile  bool                    `json:"allowLocalInfile"`
+		AllowDumpFallback bool                    `json:"allowDumpFallback"`
+		CreateTargetDB    bool                    `json:"createTargetDb"`
+		TargetConn        string                  `json:"targetConn"`
+		TargetDB          string                  `json:"targetDb"`
+		Scope             string                  `json:"scope"`
+		Tables            []proto.DBTransferTable `json:"tables"`
+		Threads           int                     `json:"threads"`
+		Directory         string                  `json:"directory"`
+		TempDir           string                  `json:"tempDir"`
+		SourceSSH         string                  `json:"sourceSsh"`
 	} `json:"nativeMigration"`
 	// creds：从服务器上读数据库的账号密码（「软件」页连数据库时替用户填好）
 	Via  *dbx.Via            `json:"via"`
@@ -324,7 +328,8 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			targetName = dst.Name
 		}
 		request := proto.DBTransfer{Plan: sub == "native-plan", Engine: src.Kind, Scope: m.Scope, Source: source, Target: target,
-			Tables: m.Tables, Threads: m.Threads, Directory: m.Directory, SourceSSH: m.SourceSSH, AllowLocalInfile: m.AllowLocalInfile}
+			Tables: m.Tables, Threads: m.Threads, Directory: m.Directory, TempDir: m.TempDir, SourceSSH: m.SourceSSH,
+			AllowLocalInfile: m.AllowLocalInfile, AllowDumpFallback: m.AllowDumpFallback, CreateTargetDB: m.CreateTargetDB}
 		result, err := worker.DBTransfer(m.Worker.Target, request, sourceDial, targetDial)
 		if !request.Plan {
 			object := targetName
@@ -917,7 +922,7 @@ func dbCmd(c *cli, cio *cliIO, js *ui.JSON, con *ui.Console, st settings.Setting
 			return fail(errors.New("没有选 SQL 文件"))
 		}
 		rep.Step("在 %s 执行 %s", cn.Name, req.File)
-		opts := dbx.ImportSQLOptions{File: req.File, Continue: req.Continue, BatchInserts: req.BatchInserts}
+		opts := dbx.ImportSQLOptions{File: req.File, Continue: req.Continue, BatchInserts: req.BatchInserts, StartOffset: req.StartOffset}
 		r, err := cl.ImportSQL(ctx, db, opts, func(done, total, n int64) {
 			rep.Progress(fmt.Sprintf("已执行 %d 条语句", n), done, total)
 		})

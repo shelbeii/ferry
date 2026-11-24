@@ -733,15 +733,20 @@ func clearDir(dir string) {
 func (a *Agent) installDBTools() int {
 	pkg := a.req.DBTools
 	var binaries []string
+	var system *proto.PlanSystem
 	switch pkg {
 	case "mydumper":
 		binaries = []string{"mydumper", "myloader"}
+		system = &proto.PlanSystem{APT: []string{"mydumper"}, DNF: []string{"mydumper"}}
 	case "mysql-shell":
 		binaries = []string{"mysqlsh"}
+		system = &proto.PlanSystem{APT: []string{"mysql-shell"}, DNF: []string{"mysql-shell"}}
+	case "postgresql-client":
+		binaries = []string{"pg_dump", "pg_restore"}
+		system = &proto.PlanSystem{APT: []string{"postgresql-client"}, DNF: []string{"postgresql"}}
 	default:
 		return a.result(proto.CodeBadInput, "不支持的数据库迁移工具", nil)
 	}
-	system := &proto.PlanSystem{APT: []string{pkg}, DNF: []string{pkg}}
 	if _, err := a.systemInstall(pkg, system, proxyEnvPrefix(a.req.Install), false); err != nil {
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}

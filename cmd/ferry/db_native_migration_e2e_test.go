@@ -337,6 +337,31 @@ func verifyNativeRemedies(t *testing.T, ctx context.Context, sidecar *migrationS
 	if strings.Join(missing.Install, ",") != "mydumper,mysql-shell" || missing.CanEnableLocalInfile {
 		t.Fatalf("缺工具时应提供安装选项：%+v", missing)
 	}
+	if !missing.CanUseDumpStream {
+		t.Fatalf("镜像含 mysqldump/mariadb-dump 时应提示支持流式兜底：%+v", missing)
+	}
+	// 验证 P0 新增：缺少 mydumper 和 mysqlsh 时，一键降级 mysqldump 流式迁移 + 自动创建目标库
+	streamReq := map[string]any{
+		"worker": dbx.Via{Config: config, Target: "relay"}, "relay": true, "scope": "tables",
+		"targetConn": target.ID, "targetDb": "native_auto_stream", "tables": []proto.DBTransferTable{{Name: "payload"}},
+		"threads": 4, "allowDumpFallback": true, "createTargetDb": true,
+	}
+	streamEnv := map[string]string{
+		"FERRY_DB_REQ":             migrationJSON(map[string]any{"nativeMigration": streamReq}),
+		dbx.PasswordEnv(source.ID): sidecar.pass,
+		dbx.PasswordEnv(target.ID): sidecar.pass,
+	}
+	streamPlan := sidecar.do([]string{"db", "native-plan", source.ID, "native_full", "-c", config}, streamEnv, "")
+	if !streamPlan.OK {
+		t.Fatalf("流式降级+自动建库预检失败：%s", streamPlan.Error)
+	}
+	streamRun := sidecar.do([]string{"db", "native-run", source.ID, "native_full", "-c", config}, streamEnv, "")
+	if !streamRun.OK {
+		t.Fatalf("流式降级+自动建库执行失败：%s\n%s", streamRun.Error, strings.Join(streamRun.Logs, "\n"))
+	}
+	streamDB := migrationTestDB(t, ctx, dbx.MySQL, dstAddr, target.User, sidecar.pass, "native_auto_stream")
+	defer streamDB.Close()
+	checkMigrationValue(t, streamDB, "SELECT note FROM payload WHERE id=3", "中文")
 	nativeDocker(t, "exec", worker, "mv", "/usr/local/bin/mysqlsh.disabled", "/usr/local/bin/mysqlsh")
 	disabled := issue(call("native-plan", "native_temp_enable", "", target, false), "local-infile")
 	if !disabled.CanEnableLocalInfile || strings.Join(disabled.Install, ",") != "mydumper" {

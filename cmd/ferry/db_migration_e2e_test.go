@@ -339,6 +339,93 @@ func testDatabaseMigration(t *testing.T, name, addr string) {
 		checkMigrationValue(t, fallbackSQL, "SELECT HEX(raw) FROM parent WHERE id=1", "00FF5C0A")
 		checkMigrationValue(t, fallbackSQL, "SELECT CAST(flags AS UNSIGNED) FROM parent WHERE id=1", "255")
 	}
+
+	// P0 + P1 端到端验证：自动创建目标库 + 多表并行迁移 + 断点续传(skip) + 覆盖(replace)
+	autoDB := stamp + "_auto_parallel"
+	t.Cleanup(func() {
+		cleanup := migrationTestDB(t, context.Background(), kind, otherAddr, user, password, defaultDB)
+		defer cleanup.Close()
+		q := "DROP DATABASE IF EXISTS " + autoDB
+		if kind == dbx.Postgres {
+			q += " WITH (FORCE)"
+		}
+		_, _ = cleanup.Exec(q)
+	})
+	autoOpts := dbx.MigrationOptions{TargetDB: autoDB, Whole: true, CreateTargetDB: true, Concurrency: 2}
+	wantOK(run(planSub, autoOpts))
+	wantOK(run(runSub, autoOpts))
+	autoConn := migrationTestDB(t, ctx, kind, otherAddr, user, password, autoDB)
+	defer autoConn.Close()
+	checkMigrationFixture(t, kind, autoConn)
+
+	// 断点续传（skip）：把 simple 清空，重跑 whole + skip，只补迁 simple，保留 parent 等已迁数据
+	migrationExec(t, autoConn, "DELETE FROM simple")
+	skipOpts := dbx.MigrationOptions{TargetDB: autoDB, Whole: true, IfExists: "skip", Concurrency: 2}
+	wantOK(run(planSub, skipOpts))
+	skipRun := run(runSub, skipOpts)
+	wantOK(skipRun)
+	var skipRes dbx.MigrationResult
+	if err := json.Unmarshal(skipRun.Data, &skipRes); err != nil || len(skipRes.Skipped) == 0 {
+		t.Fatalf("skip 续传应跳过已有数据的表：%s %v", skipRun.Data, err)
+	}
+	checkMigrationValue(t, autoConn, "SELECT sum(n) FROM simple", "17")
+
+	// 覆盖模式（replace）：改坏 simple 数据，重跑 replace，应覆盖恢复为源数据
+	migrationExec(t, autoConn, "UPDATE simple SET n = 999")
+	replaceOpts := dbx.MigrationOptions{TargetDB: autoDB, Tables: []dbx.MigrationTable{simple}, IfExists: "replace"}
+	wantOK(run(planSub, replaceOpts))
+	wantOK(run(runSub, replaceOpts))
+	checkMigrationValue(t, autoConn, "SELECT sum(n) FROM simple", "17")
+
+	// P0 + P1 导入导出验证：.sql.gz 转储还原 + CSV 高速导入与冲突跳过/覆盖 + PG COPY FROM stdin
+	dumpDir := t.TempDir()
+	gzFile := dumpDir + "/dump.sql.gz"
+	dumpEnv := map[string]string{
+		dbx.PasswordEnv(source.ID): s.pass,
+		"FERRY_DB_REQ":             migrationJSON(map[string]any{"out": gzFile, "data": true, "tables": []string{"simple"}}),
+	}
+	wantOK(s.do([]string{"db", "dump", source.ID, srcDB}, dumpEnv, ""))
+	restoreDB, restoreConn := mkDB("gz_restore", otherAddr, otherAdmin)
+	importEnv := map[string]string{
+		dbx.PasswordEnv(dest.ID): s.pass,
+		"FERRY_DB_REQ":           migrationJSON(map[string]any{"file": gzFile}),
+	}
+	wantOK(s.do([]string{"db", "import-sql", dest.ID, restoreDB}, importEnv, ""))
+	checkMigrationValue(t, restoreConn, "SELECT sum(n) FROM simple", "17")
+
+	// CSV 高速导入 + 冲突跳过/覆盖
+	csvFile := dumpDir + "/rows.csv"
+	if err := os.WriteFile(csvFile, []byte("id,n\n1,100\n3,30\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	csvReq := func(conflict string) map[string]string {
+		return map[string]string{
+			dbx.PasswordEnv(dest.ID): s.pass,
+			"FERRY_DB_REQ": migrationJSON(map[string]any{"csv": map[string]any{
+				"file": csvFile, "header": true, "table": "simple", "columns": []string{"id", "n"}, "emptyNull": true, "conflict": conflict,
+			}}),
+		}
+	}
+	wantOK(s.do([]string{"db", "import-csv", dest.ID, restoreDB}, csvReq("skip"), ""))
+	checkMigrationValue(t, restoreConn, "SELECT n FROM simple WHERE id=1", "7")
+	checkMigrationValue(t, restoreConn, "SELECT n FROM simple WHERE id=3", "30")
+	wantOK(s.do([]string{"db", "import-csv", dest.ID, restoreDB}, csvReq("replace"), ""))
+	checkMigrationValue(t, restoreConn, "SELECT n FROM simple WHERE id=1", "100")
+
+	if kind == dbx.Postgres {
+		// PG COPY ... FROM stdin 导入
+		copyFile := dumpDir + "/pg_copy.sql"
+		copySQL := "CREATE TABLE copy_e2e (id int PRIMARY KEY, label text);\nCOPY copy_e2e (id, label) FROM stdin;\n1\tO'Brien\n2\t中文\n\\.\n"
+		if err := os.WriteFile(copyFile, []byte(copySQL), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		wantOK(s.do([]string{"db", "import-sql", dest.ID, restoreDB}, map[string]string{
+			dbx.PasswordEnv(dest.ID): s.pass,
+			"FERRY_DB_REQ":           migrationJSON(map[string]any{"file": copyFile}),
+		}, ""))
+		checkMigrationValue(t, restoreConn, "SELECT label FROM copy_e2e WHERE id=1", "O'Brien")
+		checkMigrationValue(t, restoreConn, "SELECT label FROM copy_e2e WHERE id=2", "中文")
+	}
 }
 
 func throttleMigrationTarget(t *testing.T, ctx context.Context, destination string) string {

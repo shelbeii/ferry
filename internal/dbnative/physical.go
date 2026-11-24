@@ -45,7 +45,10 @@ func (t *transfer) planPhysical(ctx context.Context) error {
 			return errors.New("PostgreSQL 物理克隆通过数据库复制连接读取源实例")
 		}
 		t.result.Method = pgPhysical
-		return requireTools(pgPhysical, "pg_verifybackup")
+		if err := requireTools(pgPhysical, "pg_verifybackup"); err != nil {
+			return &proto.DBTransferProblem{Code: "missing-tools", Install: []string{"postgresql-client"}, Message: err.Error()}
+		}
+		return nil
 	case t.isMaria():
 		t.result.Method = maPhysical
 		if err := requireTools(maPhysical, "mbstream"); err != nil {

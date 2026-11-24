@@ -3,16 +3,19 @@ package proto
 // DBTransfer travels over the SSH command's standard input. Passwords never
 // appear in command arguments, task history, progress events or results.
 type DBTransfer struct {
-	Plan             bool              `json:"plan"`
-	Engine           string            `json:"engine"`
-	Scope            string            `json:"scope"` // tables, database, instance
-	Source           DBEndpoint        `json:"source"`
-	Target           DBEndpoint        `json:"target"`
-	Tables           []DBTransferTable `json:"tables,omitempty"`
-	Threads          int               `json:"threads,omitempty"`
-	Directory        string            `json:"directory,omitempty"`
-	SourceSSH        string            `json:"sourceSsh,omitempty"`        // MariaDB physical backup, configured on the worker
-	AllowLocalInfile bool              `json:"allowLocalInfile,omitempty"` // Temporarily enable on the MySQL target during the run.
+	Plan              bool              `json:"plan"`
+	Engine            string            `json:"engine"`
+	Scope             string            `json:"scope"` // tables, database, instance
+	Source            DBEndpoint        `json:"source"`
+	Target            DBEndpoint        `json:"target"`
+	Tables            []DBTransferTable `json:"tables,omitempty"`
+	Threads           int               `json:"threads,omitempty"`
+	Directory         string            `json:"directory,omitempty"`
+	TempDir           string            `json:"tempDir,omitempty"`           // 逻辑迁移落盘临时目录（mydumper / pg_dump）；空 = 系统默认临时目录
+	SourceSSH         string            `json:"sourceSsh,omitempty"`         // MariaDB physical backup, configured on the worker
+	AllowLocalInfile  bool              `json:"allowLocalInfile,omitempty"`  // Temporarily enable on the MySQL target during the run.
+	AllowDumpFallback bool              `json:"allowDumpFallback,omitempty"` // 缺少并行工具时允许降级为 mysqldump | mysql 流式迁移
+	CreateTargetDB    bool              `json:"createTargetDb,omitempty"`    // 目标库不存在时自动创建
 }
 
 type DBEndpoint struct {
@@ -39,11 +42,18 @@ type DBTransferResult struct {
 	ElapsedMs     int64    `json:"elapsedMs,omitempty"`
 }
 
+type DBTransferProgress struct {
+	Label string `json:"label"`
+	Done  int64  `json:"done"`
+	Total int64  `json:"total"`
+}
+
 type DBTransferEvent struct {
-	Kind    string             `json:"kind"`
-	Text    string             `json:"text,omitempty"`
-	Result  *DBTransferResult  `json:"result,omitempty"`
-	Problem *DBTransferProblem `json:"problem,omitempty"`
+	Kind     string              `json:"kind"`
+	Text     string              `json:"text,omitempty"`
+	Progress *DBTransferProgress `json:"progress,omitempty"`
+	Result   *DBTransferResult   `json:"result,omitempty"`
+	Problem  *DBTransferProblem  `json:"problem,omitempty"`
 }
 
 type DBTransferProblem struct {
@@ -51,6 +61,8 @@ type DBTransferProblem struct {
 	Code                 string   `json:"code"`
 	Install              []string `json:"install,omitempty"`
 	CanEnableLocalInfile bool     `json:"canEnableLocalInfile,omitempty"`
+	CanUseDumpStream     bool     `json:"canUseDumpStream,omitempty"`
+	CanCreateTargetDB    bool     `json:"canCreateTargetDb,omitempty"`
 }
 
 func (p *DBTransferProblem) Error() string { return p.Message }

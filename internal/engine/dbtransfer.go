@@ -19,7 +19,11 @@ import (
 type DBTransferDial func(context.Context) (net.Conn, error)
 
 func (e *Engine) InstallDBTransferTools(target, pkg string) error {
-	if pkg != "mydumper" && pkg != "mysql-shell" {
+	switch pkg {
+	case "mysql-shell":
+		return e.installMySQLShellBinary(target)
+	case "mydumper", "postgresql-client":
+	default:
 		return errors.New("不支持的数据库迁移工具")
 	}
 	t, err := e.File.Target(target)
@@ -60,11 +64,20 @@ func (e *Engine) DBTransfer(target string, request proto.DBTransfer, source, des
 		return nil, err
 	}
 	defer s.close()
-	if t.User != "root" && !s.allowsSudo() {
-		return nil, errors.New("执行服务器需要 root 或已配置的 sudo 来运行 Ferry 组件")
-	}
-	if err := s.prepareAgent(); err != nil {
-		return nil, err
+	useUserAgent := request.Scope != "instance" && t.User != "root" && !s.allowsSudo()
+	var userAgentPath string
+	if useUserAgent {
+		userAgentPath, err = e.prepareUserAgent(s)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if t.User != "root" && !s.allowsSudo() {
+			return nil, errors.New("实例物理克隆需要执行服务器上的 root 或已配置的 sudo")
+		}
+		if err := s.prepareAgent(); err != nil {
+			return nil, err
+		}
 	}
 	ctx := e.ctx()
 	mayChangeLocalInfile := request.AllowLocalInfile && !request.Plan
@@ -96,7 +109,9 @@ func (e *Engine) DBTransfer(target string, request proto.DBTransfer, source, des
 		e.Rep.Step("通过本机 SSH 通道中转数据库连接")
 	}
 	var pipe *remote.Pipe
-	if s.passwordSudo() {
+	if useUserAgent {
+		pipe, err = s.c.StartPipeContext(ctx, shQuote(userAgentPath)+" db-transfer")
+	} else if s.passwordSudo() {
 		pipe, err = s.c.StartSudoPipe(ctx, s.agentCommand("db-transfer"), s.sudoPassword)
 	} else {
 		pipe, err = s.c.StartPipeContext(ctx, s.sudo+s.agentCommand("db-transfer"))
@@ -140,6 +155,10 @@ func (e *Engine) DBTransfer(target string, request proto.DBTransfer, source, des
 			e.Rep.Step("%s", ev.Text)
 		case "info":
 			e.Rep.Info("%s", ev.Text)
+		case "progress":
+			if ev.Progress != nil {
+				e.Rep.Progress(ev.Progress.Label, ev.Progress.Done, ev.Progress.Total)
+			}
 		case "error":
 			failure = ev.Text
 			problem = ev.Problem
