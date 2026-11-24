@@ -3,7 +3,9 @@ package agent
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -183,6 +185,89 @@ func TestListUnitsFallback(t *testing.T) {
 	}
 	if len(cmds) != 2 {
 		t.Errorf("应该先过滤、失败后全量：%q", cmds)
+	}
+}
+
+type fakeExitCode int
+
+func (c fakeExitCode) Error() string { return fmt.Sprintf("exit status %d", c) }
+func (c fakeExitCode) ExitCode() int { return int(c) }
+
+var _ interface{ ExitCode() int } = (*exec.ExitError)(nil)
+
+// systemd 246+ 按规则过滤未匹配到任何单元时，返回退出码 1 且无输出：不应退回全量扫描。
+func TestListUnitsNoMatch(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+	}{
+		{"空输出", "", fakeExitCode(1)},
+		{"仅空白且包装错误", "\n", fmt.Errorf("systemctl: %w", fakeExitCode(1))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := newFastScan(t).scanner(nil)
+			var cmds []string
+			sc.run = func(cmd string, _ time.Duration) (string, error) {
+				cmds = append(cmds, cmd)
+				return tc.out, tc.err
+			}
+			out, err := sc.listUnits()
+			if err != nil || out != "" {
+				t.Fatalf("0 匹配应直接返回空结果：%q %v", out, err)
+			}
+			if len(cmds) != 1 {
+				t.Errorf("0 匹配不应退回全量枚举：%q", cmds)
+			}
+		})
+	}
+}
+
+// 退出码 1 但有错误输出（如老版本拒绝过滤参数）或退出码非 1 时，仍退回全量枚举。
+func TestListUnitsFallbackOnRealError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+	}{
+		{"退出码1带报错输出", "Too many arguments.\n", fakeExitCode(1)},
+		{"非1退出码空输出", "", fakeExitCode(2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := newFastScan(t).scanner(nil)
+			var cmds []string
+			sc.run = func(cmd string, _ time.Duration) (string, error) {
+				cmds = append(cmds, cmd)
+				if strings.HasSuffix(cmd, "--no-pager") {
+					return "nginx.service enabled disabled\n", nil
+				}
+				return tc.out, tc.err
+			}
+			out, err := sc.listUnits()
+			if err != nil || !strings.Contains(out, "nginx.service") {
+				t.Fatalf("退回全量后：%q %v", out, err)
+			}
+			if len(cmds) != 2 {
+				t.Errorf("应退回全量枚举：%q", cmds)
+			}
+		})
+	}
+}
+
+// 请求取消时不退回全量枚举。
+func TestListUnitsCanceled(t *testing.T) {
+	sc := newFastScan(t).scanner(nil)
+	var cmds []string
+	sc.run = func(cmd string, _ time.Duration) (string, error) {
+		cmds = append(cmds, cmd)
+		return "", errCanceled
+	}
+	_, err := sc.listUnits()
+	if !errors.Is(err, errCanceled) {
+		t.Fatalf("应返回取消错误：%v", err)
+	}
+	if len(cmds) != 1 {
+		t.Errorf("取消后不应退回全量：%q", cmds)
 	}
 }
 

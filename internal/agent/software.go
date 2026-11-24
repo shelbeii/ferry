@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path"
@@ -150,10 +151,19 @@ func unitPatterns() string {
 }
 
 // listUnits 列出规则里认得的 systemd 单元：按单元名过滤，老 systemd 不认参数时退回全量。
+// systemd 246 起，按过滤条件未匹配到任何单元时会返回退出码 1 且无输出，此时无需退回全量。
 func (sc *swScan) listUnits() (string, error) {
 	const cmd = "systemctl list-unit-files --type=service --no-legend --no-pager"
-	if out, err := sc.run(cmd+" "+unitPatterns(), 15*time.Second); err == nil {
+	out, err := sc.run(cmd+" "+unitPatterns(), 15*time.Second)
+	if err == nil {
 		return out, nil
+	}
+	if errors.Is(err, errCanceled) {
+		return "", err
+	}
+	var ec interface{ ExitCode() int }
+	if errors.As(err, &ec) && ec.ExitCode() == 1 && strings.TrimSpace(out) == "" {
+		return "", nil
 	}
 	return sc.run(cmd, 15*time.Second)
 }

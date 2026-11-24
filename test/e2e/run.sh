@@ -1427,6 +1427,16 @@ dx a 'touch /tmp/docker-down'
 t "Docker 没运行时说明" ok '"docker":"Docker 没有运行"' -- F software e2e-a --json
 t "只读：查看前后服务状态不变" ok "active" -- dx a 'systemctl is-active redis-fake'
 dx a 'systemctl stop redis-fake; rm -f /usr/local/bin/docker /usr/local/bin/redis-server /tmp/docker-down /etc/systemd/system/mysqld.service; systemctl daemon-reload'
+# 没有匹配的系统服务时（systemd 246+ 过滤模式返回退出码 1 且无输出），不应回退全量 list-unit-files
+dx a 'rm -f /tmp/e2e-list-units.log; cat > /usr/local/bin/systemctl <<"EOS"
+#!/bin/sh
+[ "$1" = list-unit-files ] && printf "%s\n" "$*" >> /tmp/e2e-list-units.log
+exec /usr/bin/systemctl "$@"
+EOS
+chmod 755 /usr/local/bin/systemctl'
+t "无匹配系统服务时仍正常返回软件列表" ok '"items":[]' -- F software e2e-a --json
+t "无匹配系统服务时不回退全量 list-unit-files" ok "1" -- dx a 'wc -l < /tmp/e2e-list-units.log | tr -d " "'
+dx a 'rm -f /usr/local/bin/systemctl /tmp/e2e-list-units.log'
 
 step "安装软件：Sentinel、Nacos、MySQL（假的安装包，结构同官方）"
 mkdir -p "$OUT/pkg"
