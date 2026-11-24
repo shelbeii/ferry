@@ -1,9 +1,11 @@
 package dbx
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // OpSQL 右键菜单里的操作 → 要执行的语句（先给用户看，确认后用 Exec 执行）。
@@ -112,7 +114,7 @@ func exportText(v any, typ string, sqlLit bool, kind string) string {
 		}
 		return ""
 	}
-	if b, ok := v.([]byte); ok && IsBinaryType(typ) {
+	if b, ok := v.([]byte); ok && (IsBinaryType(typ) || !utf8.Valid(b) || bytes.IndexByte(b, 0) >= 0) {
 		if !sqlLit {
 			return fmt.Sprintf("%x", b)
 		}
@@ -137,7 +139,16 @@ func exportText(v any, typ string, sqlLit bool, kind string) string {
 		}
 	case Binary:
 		if b, ok := v.([]byte); ok {
-			s = string(b)
+			if !sqlLit {
+				return fmt.Sprintf("%x", b)
+			}
+			if kind == MySQL {
+				if len(b) == 0 {
+					return "''"
+				}
+				return fmt.Sprintf("0x%x", b)
+			}
+			return fmt.Sprintf("'\\x%x'::bytea", b)
 		}
 	default:
 		s = fmt.Sprint(x)

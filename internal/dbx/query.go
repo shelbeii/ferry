@@ -114,6 +114,9 @@ func splitScan(kind, src, delim string, final, importFile bool, onStatement func
 			i += len(delim)
 			flush(end, i)
 			used = i
+			if importFile && postgresProtocol(kind) && len(out) > 0 && isPGCopyFromStdin(out[len(out)-1]) {
+				return out, used, delim
+			}
 		case c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v':
 			i++
 		case !hasSQL && c >= utf8.RuneSelf:
@@ -176,6 +179,40 @@ func dollarTag(s string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// isPGCopyFromStdin 判断语句是否为 PostgreSQL 的 COPY ... FROM STDIN（如 pg_dump 默认格式）。
+func isPGCopyFromStdin(stmt string) bool {
+	s := stripComments(Postgres, stmt)
+	var prev string
+	first := ""
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '\'' || c == '"' {
+			i = skipQuoted(Postgres, s, i)
+			prev = ""
+			continue
+		}
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')' || c == ',' {
+			i++
+			continue
+		}
+		start := i
+		for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n' && s[i] != '(' && s[i] != ')' && s[i] != ',' && s[i] != '\'' && s[i] != '"' {
+			i++
+		}
+		tok := strings.ToUpper(s[start:i])
+		if first == "" {
+			if tok != "COPY" {
+				return false
+			}
+			first = tok
+		} else if prev == "FROM" && tok == "STDIN" {
+			return true
+		}
+		prev = tok
+	}
+	return false
 }
 
 func stripComments(kind, s string) string {

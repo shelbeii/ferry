@@ -2,6 +2,7 @@ package dbx
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -134,5 +135,158 @@ func TestPreviewCSV(t *testing.T) {
 	p, err = PreviewCSV(CSVOptions{File: write("b.tsv", []byte(gbk))})
 	if err != nil || p.Delimiter != "\t" || p.Encoding != "gbk" || p.Rows[1][1] != "中文名字" {
 		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+func TestImportSQLCopyFromStdin(t *testing.T) {
+	src := "CREATE TABLE public.users (id int, name text);\n" +
+		"COPY public.users (id, name) FROM stdin;\n" +
+		"1\tO'Brien\n" +
+		"2\t中文;分号\n" +
+		"\\.\n" +
+		"SELECT pg_catalog.setval('public.users_id_seq', 2, true);\n" +
+		"COPY public.empty FROM STDIN WITH (FORMAT csv);\n" +
+		"\\.\n" +
+		"SELECT 1;\n"
+
+	for _, chunk := range []int{7, 31, 128, 4096} {
+		var read int64
+		var stmts []string
+		var copies []string
+		var payloads []string
+		err := eachStatementWithCopy(t.Context(), Postgres, strings.NewReader(src), chunk, &read,
+			func(s []string, _ []int64) bool {
+				stmts = append(stmts, s...)
+				return true
+			},
+			func(stmt string, data io.Reader, endOffset func() int64) bool {
+				b, rerr := io.ReadAll(data)
+				if rerr != nil {
+					t.Fatalf("chunk=%d 读取 COPY 数据失败：%v", chunk, rerr)
+				}
+				copies = append(copies, stmt)
+				payloads = append(payloads, string(b))
+				if endOffset() <= 0 {
+					t.Fatalf("chunk=%d endOffset=%d", chunk, endOffset())
+				}
+				return true
+			},
+		)
+		if err != nil {
+			t.Fatalf("chunk=%d 失败：%v", chunk, err)
+		}
+		wantStmts := []string{
+			"CREATE TABLE public.users (id int, name text)",
+			"SELECT pg_catalog.setval('public.users_id_seq', 2, true)",
+			"SELECT 1",
+		}
+		if !reflect.DeepEqual(stmts, wantStmts) {
+			t.Fatalf("chunk=%d 普通语句不对：%q", chunk, stmts)
+		}
+		if len(copies) != 2 || payloads[0] != "1\tO'Brien\n2\t中文;分号\n" || payloads[1] != "" {
+			t.Fatalf("chunk=%d COPY 结果不对：copies=%q payloads=%q", chunk, copies, payloads)
+		}
+	}
+}
+
+func TestOpenSQLReaderGBK(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gbk.sql")
+	gbk, err := simplifiedchinese.GB18030.NewEncoder().String("INSERT INTO t VALUES (1, '中文测试');\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(gbk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	rd, closeReader, read, err := openSQLReader(f, 0)
+	if err != nil || read != 0 {
+		t.Fatalf("openSQLReader: %v read=%d", err, read)
+	}
+	if closeReader != nil {
+		defer closeReader()
+	}
+	b, err := io.ReadAll(rd)
+	if err != nil || !strings.Contains(string(b), "中文测试") {
+		t.Fatalf("GBK 解码失败：%q %v", string(b), err)
+	}
+}
+
+func TestOpenSQLReaderGzipAndResumeOffset(t *testing.T) {
+	dir := t.TempDir()
+	// 测试 createOut 自动 gzip 压缩 + openSQLReader 透明解压
+	gzPath := filepath.Join(dir, "dump.sql.gz")
+	of, err := createOut(gzPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sqlText = "CREATE TABLE t (id int);\nINSERT INTO t VALUES (1);\n"
+	if _, err := io.WriteString(of.w, sqlText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := of.finish(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(gzPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	rd, closeReader, _, err := openSQLReader(f, 0)
+	if err != nil {
+		t.Fatalf("打开 .sql.gz 失败：%v", err)
+	}
+	if closeReader != nil {
+		defer closeReader()
+	}
+	got, err := io.ReadAll(rd)
+	if err != nil || string(got) != sqlText {
+		t.Fatalf("解压内容不对：%q %v", string(got), err)
+	}
+	if _, _, _, err := openSQLReader(f, 10); err == nil {
+		t.Fatal(".sql.gz 不应允许按字节偏移续传")
+	}
+
+	// 测试未压缩 SQL 的 StartOffset 续传
+	rawPath := filepath.Join(dir, "resume.sql")
+	part1 := "INSERT INTO t VALUES (1);\n"
+	part2 := "INSERT INTO t VALUES (2);\n"
+	if err := os.WriteFile(rawPath, []byte(part1+part2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rf, err := os.Open(rawPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rf.Close()
+	rd2, close2, off, err := openSQLReader(rf, int64(len(part1)))
+	if err != nil || off != int64(len(part1)) {
+		t.Fatalf("StartOffset 续传失败：%v off=%d", err, off)
+	}
+	if close2 != nil {
+		defer close2()
+	}
+	rem, err := io.ReadAll(rd2)
+	if err != nil || string(rem) != part2 {
+		t.Fatalf("续传剩余内容不对：%q %v", string(rem), err)
+	}
+}
+
+func TestExportTextNonUTF8AndNul(t *testing.T) {
+	raw := []byte{0xff, 0x00, 0x41}
+	if got := exportText(raw, "VARCHAR", true, MySQL); got != "0xff0041" {
+		t.Fatalf("MySQL 非 UTF-8 字节导出应为 0xff0041，实际 %q", got)
+	}
+	if got := exportText(raw, "TEXT", true, Postgres); got != `'\xff0041'::bytea` {
+		t.Fatalf("PG 非 UTF-8 字节导出应为 bytea hex，实际 %q", got)
+	}
+	nul := []byte("a\x00b")
+	if got := exportText(nul, "VARCHAR", true, MySQL); got != "0x610062" {
+		t.Fatalf("MySQL 含 NUL 字节导出应为 0x610062，实际 %q", got)
 	}
 }

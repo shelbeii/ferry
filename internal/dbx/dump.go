@@ -89,7 +89,7 @@ func (cl *Client) Dump(ctx context.Context, dbName string, o DumpOptions, progre
 	if len(tables)+len(views) == 0 {
 		return nil, errors.New("没有要导出的表")
 	}
-	db, err := cl.DB(ctx, dbName)
+	db, err := cl.pool(dbName, roleImport)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +98,11 @@ func (cl *Client) Dump(ctx context.Context, dbName string, o DumpOptions, progre
 		return nil, cl.explain(err)
 	}
 	defer conn.Close()
+	if kind == MySQL {
+		if _, err := conn.ExecContext(ctx, "SET SESSION time_zone = '+00:00'"); err != nil {
+			return nil, cl.explain(err)
+		}
+	}
 	// 同一个快照：可重复读的只读事务，第一次读之后看到的都是那一刻的数据
 	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -140,7 +145,7 @@ func (cl *Client) Dump(ctx context.Context, dbName string, o DumpOptions, progre
 // ---------------------------------------------------------------- MySQL
 
 func (d *dumper) mysql(tables, views []*TableInfo, data bool) error {
-	d.printf("SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS = 0;\n\n")
+	d.printf("SET NAMES utf8mb4;\nSET SESSION time_zone = '+00:00';\nSET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@session.sql_mode, ''), 'NO_AUTO_VALUE_ON_ZERO');\nSET FOREIGN_KEY_CHECKS = 0;\n\n")
 	for _, ti := range tables {
 		name := Quote(MySQL, ti.Name)
 		d.section("表", ti.Name)

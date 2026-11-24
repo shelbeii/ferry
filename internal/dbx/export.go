@@ -2,6 +2,7 @@ package dbx
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/csv"
@@ -33,10 +34,12 @@ type ExportResult struct {
 	Out    string `json:"out"`
 }
 
-// outFile 先写同目录下的临时文件，成功后替换目标。
+// outFile 先写同目录下的临时文件，成功后替换目标；文件名以 .gz 结尾时自动透明 gzip 压缩。
 type outFile struct {
 	f   *os.File
-	w   *bufio.Writer
+	bw  *bufio.Writer
+	gz  *gzip.Writer
+	w   io.Writer
 	out string
 }
 
@@ -45,16 +48,33 @@ func createOut(out string) (*outFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &outFile{f: f, w: bufio.NewWriterSize(f, 256<<10), out: out}, nil
+	bw := bufio.NewWriterSize(f, 256<<10)
+	of := &outFile{f: f, bw: bw, w: bw, out: out}
+	if strings.HasSuffix(strings.ToLower(out), ".gz") {
+		of.gz = gzip.NewWriter(bw)
+		of.w = of.gz
+	}
+	return of, nil
 }
 
 func (o *outFile) abort() {
+	if o.gz != nil {
+		_ = o.gz.Close()
+	}
 	o.f.Close()
 	os.Remove(o.f.Name())
 }
 
 func (o *outFile) finish() (int64, error) {
-	if err := o.w.Flush(); err != nil {
+	if o.gz != nil {
+		if err := o.gz.Close(); err != nil {
+			o.f.Close()
+			os.Remove(o.f.Name())
+			return 0, err
+		}
+		o.gz = nil
+	}
+	if err := o.bw.Flush(); err != nil {
 		o.abort()
 		return 0, err
 	}
