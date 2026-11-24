@@ -31,7 +31,7 @@ const remedyOpen = ref(false)
 const installing = ref(false)
 const installError = ref('')
 const runningSource = shallowRef<NativeSource | null>(null)
-const tools = { mydumper: 'MyDumper / MyLoader', 'mysql-shell': 'MySQL Shell' }
+const tools = { mydumper: 'MyDumper / MyLoader', 'mysql-shell': 'MySQL Shell（官方通用包）', 'postgresql-client': 'PostgreSQL 客户端' }
 const advice: Record<string, string> = {
   'target-not-empty': '返回后选择空目标库，或改为迁移目标库中尚不存在的指定表。',
   'target-table-exists': '返回后选择其他目标库，或取消选择已存在的表。',

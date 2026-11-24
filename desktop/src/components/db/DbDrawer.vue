@@ -679,8 +679,7 @@ const menuItems = computed<{ k: string; t: string; sep?: boolean; off?: boolean;
       return [
         { k: 'query', t: '新建查询' }, { k: 'new-table', t: '新建表…', off: ro }, ...(d.conn.kind === 'postgres' ? [{ k: 'create-schema', t: '新建模式…', off: ro }] : []), { k: 'refresh', t: '刷新' },
         { k: 'close-db', t: '关闭库', off: !isDbOpened(d.conn.id, d.db!) },
-        ...(!d.system ? [{ k: 'migrate', t: '迁移到另一个数据库…', sep: true }] : []),
-        ...(!d.system ? [{ k: 'native-migrate', t: '服务器端迁移…' }] : []),
+        ...(!d.system ? [{ k: 'migrate', t: '数据库迁移…', sep: true }] : []),
         { k: 'export-struct', t: '导出全部表的结构', sep: true }, { k: 'export-dump', t: '导出全部表的结构和数据' }, { k: 'import-sql', t: '执行 SQL 文件…', off: ro },
         { k: 'backup', t: '新建备份（存在这台电脑上）', sep: true },
         { k: 'copy-name', t: '复制库名', sep: true }, { k: 'drop-db', t: '删除库…', danger: true, off: ro, sep: true },
@@ -718,8 +717,7 @@ const menuItems = computed<{ k: string; t: string; sep?: boolean; off?: boolean;
       return [
         { k: 'open', t: '打开' }, ...(d.type === 'table' ? [{ k: 'design', t: '设计表', off: ro }] : []), { k: 'select', t: '新建查询（SELECT）' },
         { k: 'rename', t: '重命名…', off: ro, sep: true }, { k: 'copy-name', t: '复制名称' },
-        ...(d.type === 'table' ? [{ k: 'migrate', t: '迁移到另一个数据库…', sep: true }] : []),
-        ...(d.type === 'table' ? [{ k: 'native-migrate', t: '服务器端迁移…' }] : []),
+        ...(d.type === 'table' ? [{ k: 'migrate', t: '数据库迁移…', sep: true }] : []),
         ...(d.type === 'table' ? [{ k: 'export-struct', t: '导出结构', sep: true }, { k: 'export-dump', t: '导出结构和数据' }] : [{ k: 'export-struct', t: '导出视图定义', sep: true }]),
         { k: 'export-csv', t: '导出数据为 CSV' }, { k: 'export-insert', t: '导出数据为 SQL（INSERT）' },
         ...(d.type === 'table' ? [{ k: 'import-csv', t: '导入 CSV…', off: ro }] : []),
@@ -768,28 +766,42 @@ async function askName(title: string, label: string, value = ''): Promise<string
   }
 }
 
-// 执行 SQL 文件：边读边执行（文件可以很大），任务面板里看进度、可以停止
+// 执行 SQL 文件：边读边执行（支持 .sql / .sql.gz，文件可以很大），任务面板里看进度、可以停止
 async function importSql(d: TreeData) {
-  const file = await pickFile('选择要执行的 SQL 文件', 'SQL 文件', ['sql', 'txt'])
+  const file = await pickFile('选择要执行的 SQL 文件', 'SQL 文件', ['sql', 'gz', 'txt'])
   if (!file) return
   const cont = ref(false)
   const batch = ref(false)
+  const offsetText = ref('')
+  const isGz = /\.gz$/i.test(file)
   try {
     await ElMessageBox.confirm(() => h('div', { class: 'import-sql' }, [
       h('p', `在 ${d.conn.name} 的库 ${d.db} 里执行：`),
       h('p', { class: 'mono', style: 'word-break: break-all' }, file),
-      h('p', { style: 'margin-top: 8px' }, '已提交的改动会保留。Ferry 导出的结构 SQL 会先删掉同名的表再重建。'),
+      h('p', { style: 'margin-top: 8px' }, '已提交的改动会保留。Ferry 导出的结构 SQL 会先删掉同名的表再重建。支持 UTF-8 / GBK 自动识别及 PostgreSQL COPY 格式。'),
       h('div', [h(ElCheckbox, { disabled: batch.value, modelValue: cont.value, 'onUpdate:modelValue': (v: unknown) => (cont.value = !!v) }, () => '有语句出错时接着执行后面的（默认停下）')]),
       h('div', [h(ElCheckbox, { disabled: cont.value, modelValue: batch.value, 'onUpdate:modelValue': (v: unknown) => (batch.value = !!v) }, () => '快速导入（合并连续的单行 INSERT）')]),
+      !isGz
+        ? h('div', { style: 'margin-top: 8px; display: flex; align-items: center; gap: 8px;' }, [
+            h('span', '断点续传字节偏移（可选）：'),
+            h('input', {
+              value: offsetText.value,
+              placeholder: '留空从头执行，或填上次报错时的文件字节位置',
+              style: 'flex: 1; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--el-border-color); background: transparent; color: inherit;',
+              onInput: (e: Event) => (offsetText.value = (e.target as HTMLInputElement).value.trim()),
+            }),
+          ])
+        : null,
       batch.value ? h('p', '合并后的语句按批执行和报错。依赖单条 INSERT 语句边界的脚本请使用默认模式。') : null,
     ]), '执行 SQL 文件', { confirmButtonText: '执行', cancelButtonText: '取消', type: 'warning' })
   } catch {
     return
   }
+  const startOffset = !isGz && /^\d+$/.test(offsetText.value) ? Number(offsetText.value) : 0
   startTask(`执行 SQL 文件：${d.conn.name} / ${d.db}`, ['db', 'import-sql', d.conn.id, d.db ?? ''], (t) => {
     if (t.status === 'ok') ElMessage.success({ message: '执行完了', duration: 3000 })
     refreshNode(d.id)
-  }, { FERRY_DB_REQ: JSON.stringify({ file, continue: cont.value, batchInserts: batch.value }) })
+  }, { FERRY_DB_REQ: JSON.stringify({ file, continue: cont.value, batchInserts: batch.value, startOffset }) })
 }
 
 const csvTarget = ref<{ conn: DbConn; db: string; schema?: string; table: string } | null>(null)
@@ -1218,8 +1230,8 @@ function nodeIcon(d: TreeData) {
     <DbConnDialog :conn="connDialog" @close="connDialog = null" @saved="onSaved" />
     <DbSqlConfirm />
     <DbCsvImport :target="csvTarget" @close="csvTarget = null" @done="refreshNode(csvNode)" />
-    <DbMigrate :source="migrationSource" @close="migrationSource = null" @done="(conn, db) => refreshNode(`d:${conn}:${db}`)" />
-    <DbNativeMigration :source="nativeSource" @close="nativeSource = null" @done="(conn, db) => refreshNode(`d:${conn}:${db}`)" />
+    <DbMigrate :source="migrationSource" @close="migrationSource = null" @done="(conn, db) => { refreshNode(`c:${conn}`); refreshNode(`d:${conn}:${db}`) }" />
+    <DbNativeMigration :source="nativeSource" @close="nativeSource = null" @done="(conn, db) => { refreshNode(`c:${conn}`); refreshNode(`d:${conn}:${db}`) }" />
     <el-dialog :model-value="!!dbPasswordRequest" title="数据库密码" width="420px" append-to-body :close-on-click-modal="false" @close="submitPassword(false)">
       <template v-if="dbPasswordRequest">
         <p class="pw-tip">

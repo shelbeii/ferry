@@ -53,8 +53,10 @@ export interface ErrorDetail {
 
 export interface DbNativeProblem {
   code: string
-  install?: ('mydumper' | 'mysql-shell')[]
+  install?: ('mydumper' | 'mysql-shell' | 'postgresql-client')[]
   canEnableLocalInfile?: boolean
+  canUseDumpStream?: boolean
+  canCreateTargetDb?: boolean
 }
 
 /** 被本机程序占着的产物（Windows 锁住正在运行的 jar） */

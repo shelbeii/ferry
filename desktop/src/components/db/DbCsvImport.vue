@@ -18,6 +18,9 @@ const val = (v: string) => (v === 'auto' ? '' : v) // 自动 = 不传
 const delimName: Record<string, string> = { ',': '逗号', '\t': '制表符', ';': '分号', '|': '竖线' }
 const header = ref(true)
 const emptyNull = ref(true)
+const conflict = ref<'fail' | 'skip' | 'replace'>('fail')
+const truncate = ref(false)
+const batchCommit = ref(false)
 const preview = ref<{ delimiter: string; encoding: string; rows: string[][]; size: number } | null>(null)
 const columns = ref<string[]>([]) // 表里能导入的列（去掉计算列）
 const mapping = ref<string[]>([]) // 文件第 i 列 → 表的列；'' = 不导
@@ -30,6 +33,9 @@ watch(() => props.target, async (t) => {
   error.value = ''
   mapping.value = []
   columns.value = []
+  conflict.value = 'fail'
+  truncate.value = false
+  batchCommit.value = false
   if (!t) return
   try {
     const info = await dbCall<DbTableInfo>(t.conn, 'table', t.db, { schema: t.schema, table: t.table })
@@ -89,8 +95,17 @@ function run() {
   if (!picked.value.length) return void (error.value = '至少选一列要导入的')
   if (dup.value) return void (error.value = `列 ${dup.value} 选了两次`)
   const csv = {
-    file: file.value, delimiter: val(delimiter.value) || preview.value?.delimiter || '', encoding: val(encoding.value) || preview.value?.encoding || '',
-    header: header.value, schema: t.schema, table: t.table, columns: mapping.value, emptyNull: emptyNull.value,
+    file: file.value,
+    delimiter: val(delimiter.value) || preview.value?.delimiter || '',
+    encoding: val(encoding.value) || preview.value?.encoding || '',
+    header: header.value,
+    schema: t.schema,
+    table: t.table,
+    columns: mapping.value,
+    emptyNull: emptyNull.value,
+    conflict: conflict.value,
+    truncate: truncate.value,
+    batchCommit: batchCommit.value,
   }
   startTask(`导入 CSV 到 ${t.conn.name} / ${t.db} / ${t.table}`, ['db', 'import-csv', t.conn.id, t.db], (task) => {
     if (task.status === 'ok') {
@@ -127,6 +142,16 @@ function run() {
         <el-checkbox v-model="header">第一行是列名</el-checkbox>
         <el-checkbox v-model="emptyNull">空的格子写 NULL</el-checkbox>
       </div>
+      <div v-if="preview" class="row opts">
+        <span>主键/唯一键冲突</span>
+        <el-select v-model="conflict" size="small" class="sel">
+          <el-option value="fail" label="报错并回滚（默认）" />
+          <el-option value="skip" label="跳过冲突行" />
+          <el-option value="replace" label="覆盖冲突行" />
+        </el-select>
+        <el-checkbox v-model="truncate">导入前清空表</el-checkbox>
+        <el-checkbox v-model="batchCommit">分批提交（每 5000 行）</el-checkbox>
+      </div>
       <div v-if="preview" class="grid">
         <table>
           <thead>
@@ -147,7 +172,7 @@ function run() {
         </table>
       </div>
       <p v-if="preview" class="muted small">
-        上面是文件的前几行；每一列上面选导进表的哪一列（不选 = 不导入）。在一个事务里导入，有一行失败全部撤回；表里原来的数据不动。
+        上面是文件的前几行；每一列上面选导进表的哪一列（不选 = 不导入）。默认走高速通道（MySQL LOAD DATA / PG COPY）并在单事务内回滚；开启「分批提交」适合超大 CSV。
       </p>
       <el-alert v-if="error" type="error" :closable="false" :title="error" class="msg" />
     </template>

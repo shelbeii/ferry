@@ -47,11 +47,14 @@ export interface DbMigrationOptions {
   targetDb: string
   whole: boolean
   dataOnly: boolean
+  createTargetDb?: boolean
+  concurrency?: number
+  ifExists?: 'fail' | 'skip' | 'replace'
   tables?: DbMigrationTable[]
 }
 export interface DbMigrationPlan {
   method: string
-  tables: (DbMigrationTable & { create: boolean })[]
+  tables: (DbMigrationTable & { create: boolean; skip?: boolean; replace?: boolean })[]
   objects?: string[]
   warnings?: string[]
 }
@@ -59,12 +62,15 @@ export interface DbNativeMigrationOptions {
   worker: DbVia
   relay?: boolean
   allowLocalInfile?: boolean
+  allowDumpFallback?: boolean
+  createTargetDb?: boolean
   scope: 'tables' | 'database' | 'instance'
   targetConn?: string
   targetDb?: string
   tables?: DbMigrationTable[]
   threads: number
   directory?: string
+  tempDir?: string
   sourceSsh?: string
 }
 export interface DbNativeMigrationPlan {
