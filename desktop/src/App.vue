@@ -322,7 +322,17 @@ async function moveConfig(path: string) {
       </el-tooltip>
     </nav>
     <aside v-show="listOpen" class="aside">
-      <ProjectScene v-if="listOpen" :identity="current?.path ?? currentConn?.name ?? ''" :name="current?.name ?? currentConn?.title ?? ''" :mode="current ? 'project' : currentConn ? 'connection' : 'welcome'" :traits="current ? projectTraits[current.path] : undefined" :summary="current ? projectSummary[current.path] : undefined" :connected="!!(currentConn && connState[currentConn.name]?.open)" />
+      <ProjectScene
+        v-if="listOpen"
+        :identity="current?.path ?? currentConn?.name ?? ''"
+        :name="current?.name ?? currentConn?.title ?? ''"
+        :mode="current ? 'project' : currentConn ? 'connection' : 'welcome'"
+        :traits="current ? projectTraits[current.path] : undefined"
+        :summary="current ? projectSummary[current.path] : undefined"
+        :connected="!!(currentConn && connState[currentConn.name]?.open)"
+        :running="running"
+        @open-tasks="drawerOpen = true"
+      />
       <div class="navigation-search"><el-input ref="navigationSearch" v-model="navigationQuery" :prefix-icon="Search" placeholder="搜索项目或连接" clearable size="small" aria-label="搜索项目或连接" title="Ctrl / ⌘ + K 快速定位" /></div>
       <div class="aside-title"><span>项目</span></div>
       <el-empty v-if="loaded && !startupError && projects.length === 0 && connections.length === 0" description="点最左边的 + 新建项目、添加已有的 ferry.yaml，或新建连接" :image-size="60" />
