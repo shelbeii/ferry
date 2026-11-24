@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/bzip2"
 	"compress/gzip"
 	"context"
 	"crypto/md5"
@@ -27,6 +28,7 @@ import (
 	"github.com/captain/ferry/internal/artifact"
 	"github.com/captain/ferry/internal/jdk"
 	"github.com/captain/ferry/internal/swtpl"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Sources 下载源。
@@ -79,6 +81,20 @@ func (m *Meta) describe() {
 		}
 	case "jar":
 		m.Desc = "jar 包"
+	case "rpm":
+		if FileHead(m.FullPath, 4) == "\xed\xab\xee\xdb" {
+			m.Bundle = "rpm"
+			m.Desc = "RPM 系统软件包"
+		} else {
+			m.Desc = "无效的 RPM 包"
+		}
+	case "deb":
+		if FileHead(m.FullPath, 8) == "!<arch>\n" {
+			m.Bundle = "deb"
+			m.Desc = "DEB 系统软件包"
+		} else {
+			m.Desc = "无效的 DEB 包"
+		}
 	case "binary":
 		arch, err := artifact.ELFArch(m.FullPath)
 		switch {
@@ -251,12 +267,32 @@ func Check(file, format string, strip int, check string) error {
 			}
 		}
 		return fmt.Errorf("%s 里没有 %s：不是这个软件的安装包", base, check)
-	case "tar.gz":
-		gz, err := gzip.NewReader(f)
-		if err != nil {
-			return fmt.Errorf("%s 不是 tar.gz：%w", base, err)
+	case "tar.gz", "tar.bz2", "tar.zst", "tar":
+		var r io.Reader = f
+		switch format {
+		case "tar.gz":
+			gz, err := gzip.NewReader(f)
+			if err != nil {
+				return fmt.Errorf("%s 不是 tar.gz：%w", base, err)
+			}
+			defer gz.Close()
+			r = gz
+		case "tar.bz2":
+			head := make([]byte, 3)
+			if _, err := io.ReadFull(f, head); err != nil || !bytes.Equal(head, []byte("BZh")) {
+				return fmt.Errorf("%s 不是 tar.bz2", base)
+			}
+			f.Seek(0, io.SeekStart)
+			r = bzip2.NewReader(f)
+		case "tar.zst":
+			zr, err := zstd.NewReader(f)
+			if err != nil {
+				return fmt.Errorf("%s 不是 tar.zst：%w", base, err)
+			}
+			defer zr.Close()
+			r = zr
 		}
-		tr := tar.NewReader(gz)
+		tr := tar.NewReader(r)
 		for {
 			h, err := tr.Next()
 			if err == io.EOF {
@@ -276,6 +312,16 @@ func Check(file, format string, strip int, check string) error {
 		head := make([]byte, 6)
 		if _, err := io.ReadFull(f, head); err != nil || !bytes.Equal(head, []byte{0xFD, '7', 'z', 'X', 'Z', 0}) {
 			return fmt.Errorf("%s 不是 tar.xz", base)
+		}
+	case "rpm":
+		head := make([]byte, 4)
+		if _, err := io.ReadFull(f, head); err != nil || !bytes.Equal(head, []byte{0xed, 0xab, 0xee, 0xdb}) {
+			return fmt.Errorf("%s 不是有效的 RPM 软件包", base)
+		}
+	case "deb":
+		head := make([]byte, 8)
+		if _, err := io.ReadFull(f, head); err != nil || string(head) != "!<arch>\n" {
+			return fmt.Errorf("%s 不是有效的 DEB 软件包", base)
 		}
 	}
 	return nil

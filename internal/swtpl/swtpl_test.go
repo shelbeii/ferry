@@ -106,7 +106,9 @@ func TestMatchFile(t *testing.T) {
 	if _, ok := p.MatchFile("mysql-8.4.10-linux-glibc2.28-aarch64.tar.xz"); ok {
 		t.Error("arm 包不应匹配")
 	}
-	if FormatOf("", "a.TGZ") != "tar.gz" || FormatOf("", "minio") != "binary" || FormatOf("zip", "x") != "zip" {
+	if FormatOf("", "a.TGZ") != "tar.gz" || FormatOf("", "minio") != "binary" || FormatOf("zip", "x") != "zip" ||
+		FormatOf("", "a.tar.bz2") != "tar.bz2" || FormatOf("", "a.tar.zst") != "tar.zst" || FormatOf("", "a.tar") != "tar" ||
+		FormatOf("", "foo.rpm") != "rpm" || FormatOf("", "foo.deb") != "deb" {
 		t.Error("FormatOf 不对")
 	}
 	zlm := &Package{File: "zlmediakit-centos7-x86_64-${version}.tar.gz"}
@@ -189,5 +191,40 @@ func TestExpandBomb(t *testing.T) {
 	vs := Vars{"a": strings.Repeat("${a}", 100)}
 	if _, err := vs.Expand("${a}"); err == nil || !strings.Contains(err.Error(), "太长") {
 		t.Errorf("%v", err)
+	}
+}
+
+func TestValidateCustomModesAndRoot(t *testing.T) {
+	// 无端口 process 模式应通过
+	processTpl := `id: worker
+name: Worker
+variants:
+  - label: 导入
+    user: worker
+    package: {format: binary, into: worker}
+    service:
+      exec: ${dir}/worker
+      ready: {mode: process, stable: 5}
+`
+	if _, err := Parse([]byte(processTpl)); err != nil {
+		t.Fatalf("process 模式应通过：%v", err)
+	}
+	// 默认禁止 root，显式 allowRoot 才允许
+	rootDenied := `id: sysagent
+name: SysAgent
+variants:
+  - label: 导入
+    user: root
+    package: {format: binary}
+    service:
+      exec: ${dir}/sysagent
+      ready: {mode: process}
+`
+	if _, err := Parse([]byte(rootDenied)); err == nil {
+		t.Fatalf("未声明 allowRoot 时应拒绝 root 用户")
+	}
+	rootAllowed := strings.Replace(rootDenied, "exec: ${dir}/sysagent", "exec: ${dir}/sysagent\n      allowRoot: true\n      type: forking\n      keepOnFail: true", 1)
+	if _, err := Parse([]byte(rootAllowed)); err != nil {
+		t.Fatalf("声明 allowRoot 后应允许 root：%v", err)
 	}
 }

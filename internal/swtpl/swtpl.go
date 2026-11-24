@@ -174,16 +174,22 @@ type HTTP struct {
 
 // Service 怎么运行（systemd 单元 ferry-<名称>.service）。
 type Service struct {
-	Exec    string            `yaml:"exec" json:"exec"`
-	Workdir string            `yaml:"workdir,omitempty" json:"workdir,omitempty"`
-	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"` // 写进只有 root 能读的文件（密码放这里）
-	Ready   Ready             `yaml:"ready" json:"ready"`
+	Exec       string            `yaml:"exec" json:"exec"`
+	Workdir    string            `yaml:"workdir,omitempty" json:"workdir,omitempty"`
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"` // 写进只有 root 能读的文件（密码放这里）
+	Type       string            `yaml:"type,omitempty" json:"type,omitempty"`
+	AllowRoot  bool              `yaml:"allowRoot,omitempty" json:"allowRoot,omitempty"`
+	KeepOnFail bool              `yaml:"keepOnFail,omitempty" json:"keepOnFail,omitempty"`
+	Ready      Ready             `yaml:"ready" json:"ready"`
 }
 
-// Ready 就绪判断：端口能连上。
+// Ready 就绪判断：默认等 TCP 端口能连上；mode=process 时仅检测进程稳定存活（无端口/UDP/后台任务服务）；mode=http 时检测本机 HTTP 响应。
 type Ready struct {
-	Port    string `yaml:"port" json:"port"`
+	Mode    string `yaml:"mode,omitempty" json:"mode,omitempty"`       // tcp（默认）| http | process
+	Port    string `yaml:"port,omitempty" json:"port,omitempty"`       // tcp / http 模式需要端口；process 模式可留空
+	URL     string `yaml:"url,omitempty" json:"url,omitempty"`         // http 模式的本机检查地址，如 http://127.0.0.1:${port}/health
 	Timeout int    `yaml:"timeout,omitempty" json:"timeout,omitempty"` // 秒，默认 180
+	Stable  int    `yaml:"stable,omitempty" json:"stable,omitempty"`   // 稳定持续秒数（默认 tcp/http 为 3，process 为 5）
 }
 
 //go:embed builtin/*.yaml
@@ -242,13 +248,28 @@ func (t *Template) Validate() error {
 			return fmt.Errorf("%s：要写 package（上传安装包）或 system（系统软件源）", where)
 		}
 		exec := strings.Fields(v.Service.Exec)
-		if len(exec) == 0 || v.Service.Ready.Port == "" {
+		switch v.Service.Type {
+		case "", "simple", "forking":
+		default:
+			return fmt.Errorf("%s：service.type 只能是 simple 或 forking", where)
+		}
+		readyMode := v.Service.Ready.Mode
+		switch readyMode {
+		case "", "tcp", "http", "process":
+		default:
+			return fmt.Errorf("%s：service.ready.mode 只能是 tcp、http 或 process", where)
+		}
+		needPort := readyMode != "process"
+		if len(exec) == 0 || (needPort && v.Service.Ready.Port == "") {
 			return fmt.Errorf("%s：缺少 service.exec 或 service.ready.port", where)
+		}
+		if readyMode == "http" && strings.TrimSpace(v.Service.Ready.URL) == "" {
+			return fmt.Errorf("%s：service.ready.mode 为 http 时需要填写 service.ready.url", where)
 		}
 		if strings.HasSuffix(strings.Trim(exec[0], "'\""), "/") {
 			return fmt.Errorf("%s：service.exec 必须指向程序文件", where)
 		}
-		if v.User == "" || v.User == "root" {
+		if v.User == "" || (v.User == "root" && !v.Service.AllowRoot) {
 			return fmt.Errorf("%s：user 要写一个非 root 的运行用户", where)
 		}
 		for _, c := range v.Configs {
@@ -268,9 +289,9 @@ func (t *Template) Validate() error {
 		}
 		if p := v.Package; p != nil {
 			switch p.Format {
-			case "", "tar.gz", "tar.xz", "zip", "jar", "binary":
+			case "", "tar.gz", "tar.xz", "tar.bz2", "tar.zst", "tar", "zip", "jar", "binary", "rpm", "deb":
 			default:
-				return fmt.Errorf("%s：package.format 只能是 tar.gz、tar.xz、zip、jar、binary", where)
+				return fmt.Errorf("%s：package.format 只能是 tar.gz、tar.xz、tar.bz2、tar.zst、tar、zip、jar、binary、rpm、deb", where)
 			}
 		}
 		for _, s := range v.Steps {
@@ -645,6 +666,7 @@ func walk(v *Variant, fn func(string)) {
 	fn(v.Service.Exec)
 	fn(v.Service.Workdir)
 	fn(v.Service.Ready.Port)
+	fn(v.Service.Ready.URL)
 	for _, val := range v.Service.Env {
 		fn(val)
 	}
@@ -710,12 +732,31 @@ func FormatOf(format, file string) string {
 		return "tar.gz"
 	case strings.HasSuffix(f, ".tar.xz"), strings.HasSuffix(f, ".txz"):
 		return "tar.xz"
+	case strings.HasSuffix(f, ".tar.bz2"), strings.HasSuffix(f, ".tbz2"), strings.HasSuffix(f, ".tbz"):
+		return "tar.bz2"
+	case strings.HasSuffix(f, ".tar.zst"), strings.HasSuffix(f, ".tzst"):
+		return "tar.zst"
+	case strings.HasSuffix(f, ".tar"):
+		return "tar"
 	case strings.HasSuffix(f, ".zip"):
 		return "zip"
 	case strings.HasSuffix(f, ".jar"), strings.HasSuffix(f, ".war"):
 		return "jar"
+	case strings.HasSuffix(f, ".rpm"):
+		return "rpm"
+	case strings.HasSuffix(f, ".deb"):
+		return "deb"
 	}
 	return "binary"
+}
+
+// IsArchiveFormat 判断是否为压缩包归档格式。
+func IsArchiveFormat(format string) bool {
+	switch format {
+	case "tar.gz", "tar.xz", "tar.bz2", "tar.zst", "tar", "zip":
+		return true
+	}
+	return false
 }
 
 // ErrNoPackage 变体要上传安装包，但没有下载地址，本机库里也没有。
