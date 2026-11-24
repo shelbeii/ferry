@@ -374,9 +374,11 @@ async function clearFinished() {
           show-icon
           class="tip"
         />
-        <div v-if="selected.status === 'failed' && (selected.retry || (selected.config && selected.target))" class="tip">
+        <div v-if="selected.status === 'failed' && (selected.editRetry || selected.retry || (selected.config && selected.target))" class="tip">
+          <!-- 自定义安装失败后：带回全部表单参数和诊断信息，修改后再装 -->
+          <el-button v-if="selected.editRetry" size="small" type="primary" @click="selected.editRetry()">修改配置并重新安装</el-button>
           <!-- 在服务器上手动改好后（删掉目录、改权限……），点一下用同样的设置再执行一次 -->
-          <el-button v-if="selected.retry" size="small" type="primary" :icon="RefreshRight" @click="selected.retry()">重试</el-button>
+          <el-button v-if="selected.retry" size="small" :type="selected.editRetry ? 'default' : 'primary'" :icon="RefreshRight" @click="selected.retry()">重试</el-button>
           <el-button v-if="selected.config && selected.target" size="small" type="warning" plain @click="askAI(selected)">让 AI 看看为什么失败</el-button>
         </div>
         <el-alert v-if="selected.detail?.kind === 'blocked-dirs' && selected.retryWith" type="info" :closable="false" show-icon class="tip">

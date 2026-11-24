@@ -11,14 +11,16 @@ const errors = reactive<Record<string, { msg: string; unknownHost: boolean }>>({
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Key, Plus, Refresh, Grid, List } from '@element-plus/icons-vue'
-import { call, FerryError, time, type KeptSoftware, type Software, type SoftwareResult } from '../ferry'
-import { secretRequest, startTask, trustRequest, trustedTick, type Task } from '../state'
+import { call, FerryError, time, type KeptSoftware, type Software, type SoftwareResult, type SwPackage } from '../ferry'
+import { customInstallRequest, secretRequest, startTask, trustRequest, trustedTick, type Task } from '../state'
+import type { CustomInstallDraft } from '../customInstall'
 import LoadingBlock from './LoadingBlock.vue'
 import GlassPane from './glass/GlassPane.vue'
 import { glass } from '../glass/runtime'
 import InstallSoftwareDialog from './InstallSoftwareDialog.vue'
 import SoftwareLogsDialog from './SoftwareLogsDialog.vue'
 import SoftwareConfigDialog from './SoftwareConfigDialog.vue'
+import SoftwareServiceDialog from './SoftwareServiceDialog.vue'
 import RowActions from './RowActions.vue'
 import type { RowAction } from '../rowActions'
 import { dbRequestFromSoftware, dbRequest, isDbSoftware } from '../db'
@@ -78,6 +80,19 @@ watch(trustedTick, () => errors[key.value] && load())
 // ---------------------------------------------------------------- 安装、启停、卸载（Ferry 装的软件）
 
 const installOpen = ref(false)
+const retryCustomInit = ref<{ draft: CustomInstallDraft; error?: string; diagLines?: string[] }>()
+const serviceEditInstance = ref('')
+watch(key, () => { serviceEditInstance.value = '' })
+watch(
+  customInstallRequest,
+  (req) => {
+    if (!req || req.config !== props.config || req.target !== props.target) return
+    retryCustomInit.value = { draft: req.draft, error: req.error, diagLines: req.diagLines }
+    installOpen.value = true
+    customInstallRequest.value = null
+  },
+  { immediate: true },
+)
 const webOf = ref<Software | null>(null)
 watch(key, () => { webOf.value = null })
 const configOf = ref<Software>()
@@ -127,6 +142,7 @@ function rowActions(row: Software): RowAction[] {
     for (const action of controls) actions.push({ id: action, label: controlLabels[action], run: () => { if (row.instance) control(row, action); else controlOther(row, action) } })
   }
   if (row.instance) {
+    actions.push({ id: 'service', label: '服务设置', run: () => { serviceEditInstance.value = row.instance! } })
     actions.push({ id: 'password', label: '密码', run: () => { showPassword(row) } })
     if (row.upgradable) actions.push({ id: 'upgrade', label: '升级', run: () => { openUpgrade(row) } })
     if (canBackup(row)) actions.push({ id: 'backup', label: '备份', run: () => { backingUp.value = { row, database: '', busy: false } } })
@@ -136,6 +152,7 @@ function rowActions(row: Software): RowAction[] {
 }
 
 function openInstall() {
+  retryCustomInit.value = undefined
   installOpen.value = true
 }
 
@@ -224,26 +241,40 @@ async function showPassword(row: Software) {
 const dbKinds = ['mysql', 'mariadb', 'postgresql']
 const canBackup = (row: Software) => !!row.instance && dbKinds.includes(row.kind ?? '')
 
-const upgrading = ref<{ row: Software; version: string; latest: string; latestError: string; loading: boolean; major: boolean } | null>(null)
+const upgrading = ref<{ row: Software; version: string; pkg: string; library: SwPackage[]; latest: string; latestError: string; loading: boolean; major: boolean } | null>(null)
 async function openUpgrade(row: Software) {
-  upgrading.value = { row, version: '', latest: '', latestError: '', loading: true, major: false }
+  upgrading.value = { row, version: '', pkg: '', library: [], latest: '', latestError: '', loading: true, major: false }
   const u = upgrading.value // 改响应式的那份，界面才会跟着变
   try {
-    u.latest = (await call<{ version: string }>(['software', 'latest', row.kind!])).version
-  } catch (e) {
-    u.latestError = (e as Error).message
+    const [latestRes, libRes] = await Promise.allSettled([
+      row.kind ? call<{ version: string }>(['software', 'latest', row.kind]) : Promise.reject(new Error('自定义安装软件请直接选择本机新安装包')),
+      call<SwPackage[]>(['software', 'lib', 'list']),
+    ])
+    if (latestRes.status === 'fulfilled') u.latest = latestRes.value.version
+    else u.latestError = (latestRes.reason as Error)?.message ?? ''
+    if (libRes.status === 'fulfilled') u.library = libRes.value ?? []
   } finally {
     u.loading = false
   }
 }
 const upTo = computed(() => upgrading.value?.version.trim() || upgrading.value?.latest || '')
+const canRunUpgrade = computed(() => {
+  const u = upgrading.value
+  if (!u) return false
+  if (u.pkg) return true
+  return !!upTo.value && upTo.value !== u.row.version && (!upMajor.value || u.major)
+})
 const majorOf = (v?: string) => (v ?? '').replace(/^v/i, '').split('.')[0]
-const upMajor = computed(() => !!upgrading.value?.row.version && !!upTo.value && majorOf(upgrading.value.row.version) !== majorOf(upTo.value))
+const upMajor = computed(() => !upgrading.value?.pkg && !!upgrading.value?.row.version && !!upTo.value && majorOf(upgrading.value.row.version) !== majorOf(upTo.value))
 function upgrade() {
   const u = upgrading.value
-  if (!u || !upTo.value) return
-  const args = ['software', 'upgrade', props.target, u.row.instance!, '--version', upTo.value, ...(u.major ? ['--major'] : []), '-c', props.config]
-  startTask(`把 ${props.target} 上的 ${u.row.instance} 升级到 ${upTo.value}`, args, () => load())
+  if (!u || !canRunUpgrade.value) return
+  const args = ['software', 'upgrade', props.target, u.row.instance!]
+  if (upTo.value) args.push('--version', upTo.value)
+  if (u.pkg) args.push('--package', u.pkg)
+  if (u.major) args.push('--major')
+  args.push('-c', props.config)
+  startTask(`把 ${props.target} 上的 ${u.row.instance} 升级到 ${upTo.value || u.pkg}`, args, () => load())
   upgrading.value = null
 }
 
@@ -586,7 +617,8 @@ function listenTip(l: string): string {
       </div>
     </template>
     <FilesDrawer v-if="fileLocations.length" v-model="filesOpen" :config="config" :target="target" :title="filesTitle" :path="fileLocations[0].path" :locations="fileLocations" />
-    <InstallSoftwareDialog v-if="installOpen" :config="config" :target="target" :report="report" :done="onInstalled" @close="installOpen = false" />
+    <InstallSoftwareDialog v-if="installOpen" :config="config" :target="target" :report="report" :done="onInstalled" :initial-custom="retryCustomInit" @close="installOpen = false; retryCustomInit = undefined" />
+    <SoftwareServiceDialog v-if="serviceEditInstance" :config="config" :target="target" :instance="serviceEditInstance" @close="serviceEditInstance = ''" @saved="load()" />
     <SoftwareWebDialog v-if="webOf" :sw="webOf" :config="config" :target="target" :host="host" :title="target" @close="webOf = null" @opened="(w) => w === 'builtin' && emit('leave')" />
     <SoftwareConfigDialog v-if="configOf" :key="key" :config="config" :target="target" :software="configOf" @close="configOf = undefined" @changed="load()" />
     <SoftwareLogsDialog v-if="logsName" :config="config" :target="target" :name="logsName" @close="logsName = ''" />
@@ -654,15 +686,20 @@ function listenTip(l: string): string {
       </template>
     </el-dialog>
 
-    <el-dialog v-if="upgrading" :model-value="true" append-to-body :title="`升级 ${upgrading.row.instance}`" width="520px" @close="upgrading = null">
-      <p>现在是 <b>{{ upgrading.row.version || '（不知道版本）' }}</b>。换掉程序，配置和数据带到新版本；新版本起不来时自动换回现在的版本。</p>
-      <el-form label-width="90px">
-        <el-form-item label="升到">
-          <el-input v-model="upgrading.version" class="mono" :placeholder="upgrading.loading ? '正在查最新版本…' : upgrading.latest || '写要升到的版本'" />
+    <el-dialog v-if="upgrading" :model-value="true" append-to-body :title="`升级 ${upgrading.row.instance}`" width="560px" @close="upgrading = null">
+      <p>现在是 <b>{{ upgrading.row.version || '（未记录版本）' }}</b>。换掉程序，配置和数据带到新版本；新版本起不来时自动换回现在的版本。</p>
+      <el-form label-width="100px">
+        <el-form-item label="升到版本">
+          <el-input v-model="upgrading.version" class="mono" :placeholder="upgrading.loading ? '正在查最新版本…' : upgrading.latest || '选下方本机包时可留空'" />
           <div class="muted small">
             <template v-if="upgrading.latest">最新 {{ upgrading.latest }}，不填就升到它</template>
-            <template v-else-if="!upgrading.loading">查不到最新版本：写上版本（没有下载地址的软件，先在「安装软件」里导入新版本的安装包）</template>
+            <template v-else-if="!upgrading.loading">自定义软件或无下载地址的模板，可直接选择下方本机库中的新安装包</template>
           </div>
+        </el-form-item>
+        <el-form-item label="指定本机包">
+          <el-select v-model="upgrading.pkg" clearable filterable placeholder="可选：直接使用本机包库里的安装包" style="width: 100%">
+            <el-option v-for="m in upgrading.library" :key="m.file" :value="m.file" :label="m.desc ? `${m.file}（${m.desc}）` : m.file" />
+          </el-select>
         </el-form-item>
       </el-form>
       <el-alert v-if="upMajor" type="warning" :closable="false" show-icon>
@@ -672,7 +709,7 @@ function listenTip(l: string): string {
       <p v-if="canBackup(upgrading.row)" class="muted small">数据库升级前建议先在「数据备份」里备份一次：新版本启动时会升级数据，换回旧版本不一定能用新数据。</p>
       <template #footer>
         <el-button @click="upgrading = null">取消</el-button>
-        <el-button type="primary" :disabled="!upTo || upTo === upgrading.row.version || (upMajor && !upgrading.major)" @click="upgrade">升级</el-button>
+        <el-button type="primary" :disabled="!canRunUpgrade" @click="upgrade">升级</el-button>
       </template>
     </el-dialog>
 

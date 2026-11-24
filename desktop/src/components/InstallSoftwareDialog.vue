@@ -2,16 +2,22 @@
 import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft, Delete, FolderOpened, Search, Plus, Upload } from '@element-plus/icons-vue'
-import { stringify } from 'yaml'
-import { call, variantMisfit, type Software, type SoftwareReport, type SwExtra, type SwExtraPreview, type SwPackage, type SwParam, type SwTemplate, type SwTemplates, type SwVariant } from '../ferry'
+import { call, variantMisfit, type ArchiveCandidate, type ArchivePreview, type Software, type SoftwareReport, type SwExtra, type SwExtraPreview, type SwPackage, type SwParam, type SwTemplate, type SwTemplates, type SwVariant } from '../ferry'
 import { extraLine, extrasCount, extrasPayload, extraWhere, rowErrors, type ExtraRow } from '../softwareExtras'
-import { startTask, type Task } from '../state'
+import { buildCustomYAML, cloneCustomDraft, createCustomDraft, deriveTitleFromFile, detectPackageFormat, isArchiveFormat, isSystemSingleFormat, nextFreeTcpPort, validateCustomDraft, type CustomInstallDraft } from '../customInstall'
+import { customInstallRequest, drawerOpen, startTask, type Task } from '../state'
 import { pickFile } from '../platform'
 import LoadingBlock from './LoadingBlock.vue'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 const RemoteDirectoryPicker = defineAsyncComponent(() => import('./RemoteDirectoryPicker.vue'))
 
-const props = defineProps<{ config: string; target: string; report?: SoftwareReport; done: (t: Task) => void }>()
+const props = defineProps<{
+  config: string
+  target: string
+  report?: SoftwareReport
+  done: (t: Task) => void
+  initialCustom?: { draft: CustomInstallDraft; error?: string; diagLines?: string[] }
+}>()
 const emit = defineEmits<{ close: [] }>()
 const reads = useReadRequests()
 let latestSequence = 0
@@ -165,7 +171,7 @@ const latest = ref('')
 const latestError = ref('')
 const latestLoading = ref(false)
 
-const taken = computed(() => new Set((props.report?.items ?? []).map((i) => i.instance).filter(Boolean)))
+const taken = computed(() => new Set((props.report?.items ?? []).map((i) => i.instance).filter((x): x is string => !!x)))
 
 function freeName(base: string) {
   let n = base
@@ -576,96 +582,232 @@ function install() {
 
 // ---------------------------------------------------------------- 自定义安装
 
-const custom = ref({ pkg: '', title: '', name: '', exec: '', port: 8080, user: '', java: 0, format: '', strip: 1, into: '', save: false, id: '' })
+const customFormats = ['binary', 'jar', 'tar.gz', 'tar.xz', 'tar.bz2', 'tar.zst', 'tar', 'zip', 'rpm', 'deb']
+const custom = ref<CustomInstallDraft>(createCustomDraft('app'))
+const customAdvancedOpen = ref<string[]>([])
+const failedBanner = ref<{ error?: string; diagLines: string[] } | null>(null)
 const customFile = computed(() => library.value.find((m) => m.file === custom.value.pkg))
-const archivePreview = ref<{ files: string[]; entries: number; bundle?: string }>()
-const extFormat = (file: string) => {
-  const f = file.toLowerCase()
-  if (f.endsWith('.tar.gz') || f.endsWith('.tgz')) return 'tar.gz'
-  if (f.endsWith('.tar.xz') || f.endsWith('.txz')) return 'tar.xz'
-  if (f.endsWith('.zip')) return 'zip'
-  if (f.endsWith('.jar') || f.endsWith('.war')) return 'jar'
-  return 'binary'
-}
-const isArchive = computed(() => ['tar.gz', 'tar.xz', 'zip'].includes(custom.value.format))
+const archivePreview = ref<ArchivePreview>()
+const archiveInspecting = ref(false)
+const isArchive = computed(() => isArchiveFormat(custom.value.format))
+const isSingleSysPkg = computed(() => isSystemSingleFormat(custom.value.format))
+let suppressPkgReset = false
+let suppressStripInspect = false
 
-watch(() => [custom.value.pkg, custom.value.format, custom.value.strip] as const, async ([file, format, strip]) => {
+const customReviewing = ref(false)
+const customReviewText = ref('')
+const customReviewError = ref('')
+let customReviewSeq = 0
+
+watch(
+  [custom, () => form.value.in, () => form.value.javaDir],
+  () => {
+    customReviewSeq++
+    reads.cancel('custom-review')
+    customReviewing.value = false
+    customReviewText.value = ''
+    customReviewError.value = ''
+  },
+  { deep: true },
+)
+
+async function inspectCustomArchive(file: string, format: string, stripArg: number | 'auto', autoFillExec: boolean) {
   archivePreview.value = undefined
   reads.cancel('archive')
-  if (!file || !['zip', 'tar.gz'].includes(format)) return
+  if (!file || !isArchiveFormat(format)) return
+  archiveInspecting.value = true
   try {
-    const result = await reads.run('archive', s => readCall<NonNullable<typeof archivePreview.value>>(
-      ['software', 'lib', 'inspect', file, String(strip ?? 0)], s,
-    ))
-    if (custom.value.pkg === file && custom.value.format === format && custom.value.strip === strip) archivePreview.value = result
+    const result = await reads.run('archive', (s) =>
+      readCall<ArchivePreview>(['software', 'lib', 'inspect', file, String(stripArg)], s),
+    )
+    if (custom.value.pkg !== file || custom.value.format !== format) return
+    archivePreview.value = result
+    if (stripArg === 'auto' && result.recommendedStrip !== custom.value.strip) {
+      suppressStripInspect = true
+      custom.value.strip = result.recommendedStrip
+    }
+    if (autoFillExec && result.candidates?.length && !custom.value.exec.trim()) {
+      applyCandidate(result.candidates[0])
+    }
   } catch {
-    // 实际安装仍会独立校验安装包。
+    // 实际安装与预检仍会独立校验安装包。
+  } finally {
+    archiveInspecting.value = false
   }
-})
-
-function openCustom() {
-  custom.value = { pkg: '', title: '', name: freeName('app'), exec: '', port: 8080, user: '', java: 0, format: '', strip: 1, into: '', save: false, id: '' }
-  tried.value = false
-  form.value.javaDir = ''
-  view.value = 'custom'
 }
+
+function applyCandidate(c: ArchiveCandidate) {
+  custom.value.exec = c.exec
+  if (c.kind === 'jar' && !custom.value.java) {
+    custom.value.java = 17
+  }
+}
+
 watch(
   () => custom.value.pkg,
-  (file) => {
-    if (!file) return
-    const fmt = extFormat(file)
+  (file, prev) => {
+    if (!file) {
+      archivePreview.value = undefined
+      return
+    }
+    if (suppressPkgReset) {
+      suppressPkgReset = false
+      void inspectCustomArchive(file, custom.value.format, custom.value.strip, false)
+      return
+    }
+    const fmt = detectPackageFormat(file)
     custom.value.format = fmt
     custom.value.into = fmt === 'jar' || fmt === 'binary' ? file : ''
-    const base = file.replace(/(\.tar\.gz|\.tgz|\.tar\.xz|\.zip|\.jar|\.war)$/i, '').replace(/[-_.]?v?\d.*$/, '')
-    if (!custom.value.title) custom.value.title = base || file
-    if (!custom.value.exec) {
-      custom.value.exec = fmt === 'jar' ? `\${java} -jar \${dir}/${file} --server.port=\${port}` : fmt === 'binary' ? `\${dir}/${file}` : ''
-      if (fmt === 'jar' && !custom.value.java) custom.value.java = 17
+    // 切换安装包时清理旧包残留的显示名与启动命令
+    if (!prev || prev !== file) {
+      custom.value.title = deriveTitleFromFile(file)
+      if (fmt === 'jar') {
+        custom.value.exec = `\${java} -jar \${dir}/${file} --server.port=\${port}`
+        if (!custom.value.java) custom.value.java = 17
+      } else if (fmt === 'binary') {
+        custom.value.exec = `\${dir}/${file}`
+      } else {
+        custom.value.exec = ''
+      }
+    }
+    if (isArchiveFormat(fmt)) {
+      void inspectCustomArchive(file, fmt, 'auto', true)
+    } else {
+      archivePreview.value = undefined
     }
   },
 )
 
-// 点了「安装」之后才把没填好的标红
+watch(
+  () => [custom.value.format, custom.value.strip] as const,
+  ([format, strip], [prevFmt, prevStrip]) => {
+    if (suppressStripInspect) {
+      suppressStripInspect = false
+      return
+    }
+    if (format === prevFmt && strip === prevStrip) return
+    if (!custom.value.pkg || !isArchiveFormat(format)) {
+      archivePreview.value = undefined
+      return
+    }
+    void inspectCustomArchive(custom.value.pkg, format, strip ?? 0, false)
+  },
+)
+
+function openCustom() {
+  const freePort = nextFreeTcpPort(8080, used.value)
+  custom.value = createCustomDraft(freeName('app'), form.value.in || '/opt/ferry-software', freePort)
+  customAdvancedOpen.value = []
+  failedBanner.value = null
+  tried.value = false
+  form.value.javaDir = ''
+  view.value = 'custom'
+}
+
+function restoreCustomFromFailed(req: NonNullable<typeof props.initialCustom>) {
+  suppressPkgReset = true
+  suppressStripInspect = true
+  const draft = cloneCustomDraft(req.draft)
+  // 如果上次失败的实例名已被其他软件占用，自动换个可用名；通常失败已回滚，名称可沿用
+  if (taken.value.has(draft.name)) draft.name = freeName(draft.name)
+  custom.value = draft
+  form.value.in = draft.inDir || '/opt/ferry-software'
+  form.value.javaDir = draft.javaDir || ''
+  failedBanner.value = { error: req.error, diagLines: req.diagLines ?? [] }
+  const hasAdv =
+    draft.envRows.length > 0 ||
+    !!draft.configPath.trim() ||
+    !!draft.logPath.trim() ||
+    !!draft.workdir.trim() ||
+    draft.serviceType === 'forking' ||
+    draft.allowRoot ||
+    draft.keepOnFail ||
+    (draft.readyTimeout > 0 && draft.readyTimeout !== 180)
+  customAdvancedOpen.value = hasAdv ? ['adv'] : []
+  tried.value = false
+  view.value = 'custom'
+  if (draft.pkg && isArchiveFormat(draft.format)) {
+    void inspectCustomArchive(draft.pkg, draft.format, draft.strip, false)
+  }
+}
+
+onMounted(() => {
+  if (props.initialCustom) restoreCustomFromFailed(props.initialCustom)
+})
+
+function addCustomEnv() {
+  custom.value.envRows.push({ key: '', value: '' })
+}
+function removeCustomEnv(i: number) {
+  custom.value.envRows.splice(i, 1)
+}
+
+// 点了「安装」或「预检」之后才把没填好的标红
 const tried = ref(false)
 const shownErrors = computed<Record<string, string>>(() => (tried.value ? customErrors.value : {}))
 
-const customErrors = computed(() => {
-  const c = custom.value
-  const e: Record<string, string> = {}
-  if (!c.pkg) e.pkg = '选一个安装包（没有就先导入）'
-  else if (archivePreview.value?.bundle) e.pkg = '系统软件包集合，请在对应软件的安装方式里选择离线包'
-  else if (archivePreview.value?.entries === 0) e.pkg = '当前剥离层数没有保留任何文件'
-  if (!/^[a-z][a-z0-9-]{0,30}$/.test(c.name)) e.name = '小写字母、数字、横线，以字母开头'
-  else if (taken.value.has(c.name)) e.name = '已经有同名的了'
-  if (!c.exec.trim()) e.exec = '写启动命令'
-  else if (/^(?:"[^"]*\/"|'[^']*\/'|[^\s"'\\]+\/)(?:\s|$)/.test(c.exec.trim())) e.exec = '启动命令要指向程序文件'
-  else if (c.exec.includes('${java}') && !c.java) e.exec = '用了 ${java}：要选 JDK'
-  if (c.java && javaDirError.value) e.javaDir = javaDirError.value
-  if (inError.value) e.in = inError.value
-  if (!c.port || c.port < 1 || c.port > 65535) e.port = '端口要在 1～65535 之间'
-  else if (portTaken('tcp', c.port)) e.port = `${c.port} ${portTaken('tcp', c.port)}`
-  if (c.save && !/^[a-z][a-z0-9-]{0,30}$/.test(c.id)) e.id = '模板 ID：小写字母、数字、横线，以字母开头'
-  return e
-})
+const customErrors = computed(() =>
+  validateCustomDraft(custom.value, {
+    takenNames: taken.value,
+    serverArch: arch.value,
+    archivePreview: archivePreview.value,
+    inError: inError.value,
+    javaDirError: javaDirError.value,
+    portTakenText: (p) => portTaken('tcp', p),
+  }),
+)
 
 /** 自定义安装生成的模板 */
 function customYAML(): string {
+  return buildCustomYAML(custom.value)
+}
+
+function customArgs(action: 'plan' | 'install', tplArg = '-') {
   const c = custom.value
-  const id = c.save ? c.id : c.name
-  const pkg: Record<string, unknown> = { format: c.format }
-  if (isArchive.value && c.strip) pkg.strip = c.strip
-  if (c.into) pkg.into = c.into
-  const v: Record<string, unknown> = { label: '导入的安装包', user: c.user || id.replace(/-/g, '_'), package: pkg }
-  if (c.java) v.java = c.java
-  v.service = { exec: c.exec.trim().replace(/\s*\n\s*/g, ' '), workdir: '${dir}', ready: { port: '${port}' } }
-  return stringify({
-    id,
-    name: c.title || id,
-    category: '自定义',
-    desc: `自定义安装：${c.pkg}`,
-    params: [{ key: 'port', label: '端口', type: 'port', default: String(c.port) }],
-    variants: [v],
-  })
+  const args = ['software', action, props.target, tplArg, '--name', c.name, '--in', form.value.in.trim().replace(/\/+$/, ''), '--package', c.pkg, '-c', props.config]
+  if (c.java && form.value.javaDir.trim()) args.push('--java-dir', form.value.javaDir.trim().replace(/\/+$/, ''))
+  return args
+}
+
+async function reviewCustom() {
+  tried.value = true
+  if (Object.keys(customErrors.value).length > 0) return
+  const seq = ++customReviewSeq
+  customReviewing.value = true
+  customReviewText.value = ''
+  customReviewError.value = ''
+  try {
+    const yaml = customYAML()
+    const plan = await reads.run(
+      'custom-review',
+      (signal) =>
+        readCall<{
+          dir: string
+          exec?: string
+          readyMode?: string
+          readyPort?: number
+          readyUrl?: string
+          freeMB?: number
+          network: 'none' | 'local' | 'server' | 'offline'
+        }>(customArgs('plan', '-'), signal, { FERRY_SOFTWARE_TEMPLATE: yaml }),
+      { timeout: 60_000, timeoutMessage: '预检超时，请检查服务器连接后重试' },
+    )
+    if (seq !== customReviewSeq) return
+    const readyDesc =
+      plan.readyMode === 'process'
+        ? '仅检测进程稳定存活'
+        : plan.readyMode === 'http'
+          ? `HTTP 检查 ${plan.readyUrl || ''}`
+          : `TCP 端口 ${plan.readyPort || custom.value.port}`
+    const freeDesc = plan.freeMB && plan.freeMB > 0 ? `分区剩余 ${gb(plan.freeMB)}` : ''
+    customReviewText.value = [`预检通过`, plan.dir, readyDesc, freeDesc, plan.exec ? `启动：${plan.exec}` : ''].filter(Boolean).join(' · ')
+  } catch (e) {
+    if (seq === customReviewSeq && !(e instanceof ReadCanceled)) {
+      customReviewError.value = (e as Error).message
+    }
+  } finally {
+    if (seq === customReviewSeq) customReviewing.value = false
+  }
 }
 
 async function installCustom() {
@@ -673,20 +815,40 @@ async function installCustom() {
   if (Object.keys(customErrors.value).length > 0) return
   const c = custom.value
   const yaml = customYAML()
-  let tplArg = '-'
-  if (c.save) {
-    try {
-      await call(['software', 'template', 'save'], { FERRY_SOFTWARE_TEMPLATE: yaml })
-      ElMessage.success(`已保存为模板 ${c.id}，以后在软件池里能找到`)
-      tplArg = c.id
-    } catch (e) {
-      ElMessage.error((e as Error).message)
-      return
-    }
+  const snap = cloneCustomDraft({
+    ...c,
+    inDir: form.value.in.trim().replace(/\/+$/, '') || '/opt/ferry-software',
+    javaDir: form.value.javaDir.trim().replace(/\/+$/, ''),
+  })
+  const args = customArgs('install', '-')
+  const target = props.target
+  const config = props.config
+  const task = startTask(
+    `在 ${target} 上安装 ${c.title || c.name}（${c.name}）`,
+    args,
+    async (t) => {
+      // 仅在安装成功后保存为模板，避免失败的半成品污染软件池
+      if (t.status === 'ok' && snap.save && snap.id) {
+        try {
+          await call(['software', 'template', 'save'], { FERRY_SOFTWARE_TEMPLATE: yaml })
+          ElMessage.success(`已保存为模板 ${snap.id}，以后在软件池里能找到`)
+        } catch (e) {
+          ElMessage.warning(`软件已安装成功，但保存模板失败：${(e as Error).message}`)
+        }
+      }
+      props.done(t)
+    },
+    { FERRY_SOFTWARE_TEMPLATE: yaml },
+  )
+  task.editRetry = () => {
+    const diagLines = task.lines
+      .filter((l) => l.kind === 'error' || l.kind === 'warn' || l.code === 'diag' || l.code === 'crash')
+      .map((l) => l.msg)
+      .filter((m): m is string => !!m)
+      .slice(-6)
+    customInstallRequest.value = { config, target, draft: cloneCustomDraft(snap), error: task.error, diagLines }
+    drawerOpen.value = false
   }
-  const args = ['software', 'install', props.target, tplArg, '--name', c.name, '--in', form.value.in.trim().replace(/\/+$/, ''), '--package', c.pkg, '-c', props.config]
-  if (c.java && form.value.javaDir.trim()) args.push('--java-dir', form.value.javaDir.trim().replace(/\/+$/, ''))
-  startTask(`在 ${props.target} 上安装 ${c.title || c.name}（${c.name}）`, args, props.done, tplArg === '-' ? { FERRY_SOFTWARE_TEMPLATE: yaml } : {})
   emit('close')
 }
 </script>
@@ -926,8 +1088,12 @@ async function installCustom() {
 
     <!-- 自定义安装 -->
     <template v-else-if="view === 'custom'">
+      <el-alert v-if="failedBanner" type="error" :closable="true" show-icon class="fail-banner" @close="failedBanner = null">
+        <template #title>上次安装失败：{{ failedBanner.error || '请根据下方诊断调整参数后重装（已保留原安装包缓存，无需重传）' }}</template>
+        <pre v-if="failedBanner.diagLines.length" class="mono fail-diag">{{ failedBanner.diagLines.join('\n') }}</pre>
+      </el-alert>
       <p class="muted small desc-line">
-        把自己的程序或压缩包装到服务器上，作为系统服务 <span class="mono">ferry-{{ custom.name }}</span> 运行。如果是你们自己经常改版本的程序，放在「应用」里部署更合适（有版本和回滚）。
+        把自己的程序、压缩包或单系统包（RPM/DEB）装到服务器上，作为系统服务 <span class="mono">ferry-{{ custom.name }}</span> 运行。如果是你们自己经常改版本的程序，放在「应用」里部署更合适（有版本和回滚）。
       </p>
       <el-form label-width="120px" class="form">
         <el-form-item label="安装包" :error="shownErrors.pkg">
@@ -938,18 +1104,48 @@ async function installCustom() {
           <div v-if="customFile" class="muted small">
             格式
             <el-select v-model="custom.format" size="small" class="fmt">
-              <el-option v-for="f in ['binary', 'jar', 'tar.gz', 'tar.xz', 'zip']" :key="f" :value="f" :label="f" />
+              <el-option v-for="f in customFormats" :key="f" :value="f" :label="f" />
             </el-select>
             <template v-if="isArchive">
-              ，解压时去掉 <el-input-number v-model="custom.strip" :min="0" :max="5" size="small" class="strip" /> 层目录（压缩包里通常有一层「软件名-版本/」）
+              ，解压时去掉 <el-input-number v-model="custom.strip" :min="0" :max="5" size="small" class="strip" /> 层目录
+              <template v-if="archivePreview">
+                （自动推荐 {{ archivePreview.recommendedStrip }} 层<template v-if="archivePreview.singleTopDir">，顶层目录 <span class="mono">{{ archivePreview.singleTopDir }}/</span></template><template v-else>，扁平包</template>）
+              </template>
             </template>
+            <template v-else-if="isSingleSysPkg">，通过服务器包管理器安装并自动解析依赖（断网可经本机代理）</template>
             <template v-else>，放在安装目录下的 <span class="mono">{{ custom.into }}</span></template>
           </div>
-          <div v-if="archivePreview" class="muted small">
+          <div v-if="archiveInspecting" class="muted small">正在探测压缩包结构与程序入口…</div>
+          <div v-else-if="archivePreview" class="muted small">
             <template v-if="archivePreview.bundle">内容为 {{ archivePreview.bundle.toUpperCase() }} 软件包集合</template>
             <template v-else>
-              解压后 {{ archivePreview.entries }} 个文件<span v-if="archivePreview.files.length"> · {{ archivePreview.files.slice(0, 6).join('、') }}</span>
+              解压后 {{ archivePreview.entries }} 个文件
+              <template v-if="archivePreview.arches?.length"> · 程序架构 <span class="mono">{{ archivePreview.arches.join('/') }}</span></template>
+              <span v-if="archivePreview.files.length"> · {{ archivePreview.files.slice(0, 6).join('、') }}</span>
             </template>
+          </div>
+          <div v-if="archivePreview?.candidates?.length" class="cand-box">
+            <span class="muted small">探测到的入口（点击一键填入启动命令）：</span>
+            <div class="cand-list">
+              <el-tag
+                v-for="c in archivePreview.candidates.slice(0, 6)"
+                :key="c.path"
+                size="small"
+                :type="c.arch && arch && c.arch !== arch ? 'danger' : custom.exec.includes(c.path) ? 'success' : 'info'"
+                effect="plain"
+                class="cand-tag mono"
+                @click="applyCandidate(c)"
+              >
+                {{ c.path }}
+                <template v-if="c.arch"> [{{ c.arch }}]</template>
+                <template v-else-if="c.kind === 'jar'"> [jar]</template>
+                <template v-if="c.daemon"> · 疑似后台脚本</template>
+                <template v-if="c.crlf"> · CRLF(自动转LF)</template>
+              </el-tag>
+            </div>
+          </div>
+          <div v-if="archivePreview?.configs?.length" class="muted small">
+            包内配置文件：<span class="mono">{{ archivePreview.configs.slice(0, 5).join('、') }}</span>
           </div>
         </el-form-item>
         <el-form-item label="显示名">
@@ -968,14 +1164,24 @@ async function installCustom() {
           </div>
         </el-form-item>
         <el-form-item label="启动命令" :error="shownErrors.exec">
-          <el-input v-model="custom.exec" type="textarea" :rows="3" class="mono" />
+          <el-input v-model="custom.exec" type="textarea" :rows="3" class="mono" :placeholder="isSingleSysPkg ? '系统包安装后的可执行路径，如 /usr/bin/mytool --port ${port}' : '${dir}/bin/app --port ${port}'" />
           <div class="muted small">
-            可以用 <span class="mono">${dir}</span>（安装目录）、<span class="mono">${port}</span>（下面的端口）、<span class="mono">${java}</span>（选了 JDK 时）。要在前台运行，不要用 nohup、&amp; 放到后台
+            可以用 <span class="mono">${dir}</span>（安装目录）、<span class="mono">${port}</span>（端口）、<span class="mono">${java}</span>（选了 JDK 时）。缺执行权限或 CRLF 换行会自动修复；后台守护脚本可在下方「高级选项」切换为 <span class="mono">forking</span>。
           </div>
         </el-form-item>
-        <el-form-item label="端口" :error="shownErrors.port">
+        <el-form-item label="就绪检查">
+          <el-radio-group v-model="custom.readyMode" size="small">
+            <el-radio-button value="tcp">TCP 端口</el-radio-button>
+            <el-radio-button value="http">HTTP 接口</el-radio-button>
+            <el-radio-button value="process">仅检查进程存活（无端口/Worker/UDP）</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="custom.readyMode !== 'process'" label="端口" :error="shownErrors.port">
           <el-input-number v-model="custom.port" :min="1" :max="65535" :controls="false" class="port" />
-          <span class="muted small ml">启动后等这个端口能连上，算启动成功</span>
+          <span class="muted small ml">启动后等这个端口就绪（若进程实际监听了别的端口会自动快速提示）</span>
+        </el-form-item>
+        <el-form-item v-if="custom.readyMode === 'http'" label="HTTP 检查" :error="shownErrors.readyUrl">
+          <el-input v-model="custom.readyUrl" class="mono wide" placeholder="http://127.0.0.1:${port}/health" />
         </el-form-item>
         <el-form-item label="JDK">
           <el-select v-model="custom.java" class="short">
@@ -989,13 +1195,66 @@ async function installCustom() {
           </el-input>
           <div class="muted small">{{ javaDirHint(custom.java) }}</div>
         </el-form-item>
-        <el-form-item label="运行用户">
-          <el-input v-model="custom.user" class="mono short" :placeholder="custom.name.replace(/-/g, '_')" />
+        <el-form-item label="运行用户" :error="shownErrors.user">
+          <el-input v-model="custom.user" class="mono short" :disabled="custom.allowRoot" :placeholder="custom.allowRoot ? 'root' : custom.name.replace(/-/g, '_')" />
         </el-form-item>
         <el-form-item label="存成模板" :error="shownErrors.id">
-          <el-checkbox v-model="custom.save">以后在软件池里一键装</el-checkbox>
+          <el-checkbox v-model="custom.save">安装成功后存为模板（以后在软件池里一键装）</el-checkbox>
           <el-input v-if="custom.save" v-model="custom.id" class="mono short ml" placeholder="模板 ID，如 my-app" />
         </el-form-item>
+
+        <el-collapse v-model="customAdvancedOpen" class="adv-collapse">
+          <el-collapse-item title="高级选项（环境变量、配置文件、工作目录、日志、后台模式、排障保留现场）" name="adv">
+            <el-form-item label="环境变量" :error="shownErrors.env">
+              <div class="env-list">
+                <div v-for="(row, i) in custom.envRows" :key="i" class="env-row">
+                  <el-input v-model="row.key" class="mono env-k" placeholder="变量名（如 APP_ENV）" />
+                  <span class="muted">=</span>
+                  <el-input v-model="row.value" class="mono env-v" placeholder="值" />
+                  <el-button link :icon="Delete" @click="removeCustomEnv(i)" />
+                </div>
+                <el-button link type="primary" size="small" :icon="Plus" @click="addCustomEnv">添加环境变量</el-button>
+              </div>
+            </el-form-item>
+            <el-form-item label="写入配置文件" :error="shownErrors.configPath">
+              <el-input v-model="custom.configPath" class="mono wide" placeholder="相对路径，如 conf/config.yaml（留空不写）" />
+              <el-input
+                v-if="custom.configPath.trim()"
+                v-model="custom.configContent"
+                type="textarea"
+                :rows="4"
+                class="mono mt-6"
+                placeholder="配置文件内容（支持 ${dir}、${port} 变量）"
+              />
+            </el-form-item>
+            <el-form-item label="工作目录">
+              <el-input v-model="custom.workdir" class="mono wide" placeholder="留空默认 ${dir}，可填相对路径如 bin" />
+            </el-form-item>
+            <el-form-item v-if="isArchive" label="解压子目录">
+              <el-input v-model="custom.into" class="mono short" placeholder="如 app（填写后支持在线升级）" />
+              <span class="muted small ml">把程序单独解到子目录后，未来可直接上传新包升级并自动回滚</span>
+            </el-form-item>
+            <el-form-item label="日志文件路径">
+              <el-input v-model="custom.logPath" class="mono wide" placeholder="安装目录内相对路径，如 logs/app.log（便于失败诊断与查看日志）" />
+            </el-form-item>
+            <el-form-item label="就绪超时">
+              <el-input-number v-model="custom.readyTimeout" :min="15" :max="600" size="small" />
+              <span class="muted small ml">秒（默认 180 秒）</span>
+            </el-form-item>
+            <el-form-item label="启动方式">
+              <el-radio-group v-model="custom.serviceType" size="small">
+                <el-radio value="simple">前台运行（simple，推荐）</el-radio>
+                <el-radio value="forking">后台守护脚本（forking）</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="排障与权限">
+              <div class="adv-checks">
+                <el-checkbox v-model="custom.keepOnFail">失败时保留解压后的安装目录到 <span class="mono">.failed/{{ custom.name }}</span> 以便排查</el-checkbox>
+                <el-checkbox v-model="custom.allowRoot">允许以 <span class="mono">root</span> 运行（仅用于确实需要特权的系统采集器/网络工具）</el-checkbox>
+              </div>
+            </el-form-item>
+          </el-collapse-item>
+        </el-collapse>
       </el-form>
     </template>
 
@@ -1008,10 +1267,13 @@ async function installCustom() {
           {{ x.content ? `看生成的 ${x.file?.split('/').pop()}` : '看启动命令' }}
         </el-button>
       </div>
+      <el-alert v-if="view === 'custom' && customReviewError" :title="customReviewError" type="error" :closable="false" show-icon />
+      <div v-if="view === 'custom' && customReviewText" class="muted small review-ok">{{ customReviewText }}</div>
       <el-button @click="emit('close')">取消</el-button>
       <el-button v-if="view === 'template'" :disabled="!canInstall" :loading="reviewing" @click="review">预检</el-button>
       <el-button v-if="view === 'template'" type="primary" :disabled="!canInstall || reviewing" @click="install">安装</el-button>
-      <el-button v-if="view === 'custom'" type="primary" @click="installCustom">安装</el-button>
+      <el-button v-if="view === 'custom'" :loading="customReviewing" @click="reviewCustom">预检</el-button>
+      <el-button v-if="view === 'custom'" type="primary" :disabled="customReviewing" @click="installCustom">安装</el-button>
     </template>
   </el-dialog>
   <el-dialog v-if="extraFile" :model-value="true" append-to-body width="760px" :title="extraFile.content ? extraFile.file : '启动命令'" @close="extraFile = undefined">
@@ -1177,6 +1439,63 @@ async function installCustom() {
   margin: 0;
   padding-left: 18px;
   color: var(--el-text-color-regular);
+}
+.fail-banner {
+  margin-bottom: 10px;
+}
+.fail-diag {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 140px;
+  overflow: auto;
+}
+.cand-box {
+  margin-top: 6px;
+}
+.cand-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.cand-tag {
+  cursor: pointer;
+}
+.adv-collapse {
+  margin-top: 8px;
+}
+.env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 660px;
+}
+.env-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.env-k {
+  flex: 0 0 220px;
+}
+.env-v {
+  flex: 1;
+}
+.mt-6 {
+  margin-top: 6px;
+}
+.adv-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.review-ok {
+  text-align: left;
+  margin-bottom: 6px;
+  word-break: break-all;
 }
 </style>
 

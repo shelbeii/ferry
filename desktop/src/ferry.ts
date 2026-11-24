@@ -903,14 +903,63 @@ export interface SwPackage {
   /** 「导入：本机路径」或下载地址 */
   source?: string
   added?: string
-  /** tar.gz / tar.xz / zip / jar / binary */
+  /** tar.gz / tar.xz / tar.bz2 / tar.zst / tar / zip / jar / rpm / deb / binary */
   format?: string
-  /** ZIP 内的系统包类型 */
+  /** ZIP 内的系统包类型，或单包 rpm / deb */
   bundle?: 'rpm' | 'deb'
   /** binary 是 Linux 程序时：amd64 / arm64 */
   arch?: string
   /** 给人看的类型：Linux 程序（arm64）、tar.gz 压缩包…… */
   desc?: string
+}
+
+export interface ArchiveCandidate {
+  path: string
+  kind: 'elf' | 'script' | 'jar' | 'binary'
+  arch?: string
+  exec: string
+  daemon?: boolean
+  crlf?: boolean
+}
+
+export interface ArchivePreview {
+  files: string[]
+  entries: number
+  bundle?: 'rpm' | 'deb'
+  strip: number
+  recommendedStrip: number
+  singleTopDir?: string
+  candidates?: ArchiveCandidate[]
+  configs?: string[]
+  arches?: string[]
+  hasSymlinks?: boolean
+}
+
+export interface SwServiceView {
+  instance: string
+  unit: string
+  dir: string
+  user: string
+  exec: string
+  workdir?: string
+  env?: Record<string, string>
+  serviceType?: 'simple' | 'forking'
+  readyMode?: 'tcp' | 'http' | 'process'
+  readyPort?: number
+  readyUrl?: string
+  logs?: string[]
+}
+
+export interface SwServiceEdit {
+  exec: string
+  workdir?: string
+  env?: Record<string, string>
+  serviceType?: 'simple' | 'forking'
+  readyMode?: 'tcp' | 'http' | 'process'
+  readyPort?: number
+  readyUrl?: string
+  readyTimeout?: number
+  logs?: string[]
 }
 
 /** 安装包什么时候、怎么加进来的；path = 导入时的本机路径 */

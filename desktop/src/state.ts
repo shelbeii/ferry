@@ -10,6 +10,7 @@ import { commandTarget } from './commandContext'
 import { mergeRetries, queuedRequest } from './requestQueue'
 import type { SettingsSecretChange } from './settingsSecrets'
 import { syncAppIcon, waitForAppIcon } from './appIcon'
+import type { CustomInstallDraft } from './customInstall'
 
 // ---------------------------------------------------------------- 设置
 
@@ -261,6 +262,8 @@ export interface Task {
   kill?: () => Promise<void>
   /** 重新执行同一个任务 */
   retry?: () => void
+  /** 失败后带回上次配置并在弹窗中修改重装（自定义安装） */
+  editRetry?: () => void
   /** 加上几个参数重新执行（如同意加权限的 --fix-parents） */
   retryWith?: (extra: string[]) => void
   /** 任务的 ferry.yaml */
@@ -281,6 +284,14 @@ export const browserOpen = ref(false)
 /** 要在内置浏览器里打开的网址（「软件」页「打开网页」）：浏览器打开后接过去，开着这个网址的标签就切过去。
  *  login：网页加载完后替用户填好账号密码、点登录（只在这个网站上，Rust 那边只留两分钟） */
 export const browserRequest = ref<{ url: string; login?: { user: string; password: string } } | null>(null)
+/** 自定义安装失败后点击「修改配置并重新安装」，带回原表单与诊断信息 */
+export const customInstallRequest = ref<{
+  config: string
+  target: string
+  draft: CustomInstallDraft
+  error?: string
+  diagLines?: string[]
+} | null>(null)
 export const selectedTaskId = ref<number | null>(null)
 let nextId = 1
 
