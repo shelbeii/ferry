@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { generateReleaseNotes } from './release-notes.mjs';
+import { buildReleaseMeta, generateReleaseNotes } from './release-notes.mjs';
 
 function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'ferry-release-notes-'));
@@ -91,4 +91,23 @@ test('missing history and empty explicit descriptions fail instead of hiding upd
   assert.throws(() => generateReleaseNotes({ ...options, releases: [{ tag_name: 'v1.0.0' }, { tag_name: 'v1.0.1' }, { tag_name: 'v1.0.0' }] }), /更新说明为空/);
   assert.throws(() => generateReleaseNotes({ ...options, previousTag: 'v0.9.0' }));
   assert.throws(() => generateReleaseNotes(options), /Releases 列表/);
+});
+
+test('release metadata captures version, notes, published time, and asset sizes', t => {
+  const { cwd } = fixture(t);
+  const assetsDir = join(cwd, 'files');
+  mkdirSync(assetsDir, { recursive: true });
+  writeFileSync(join(assetsDir, 'Ferry_1.0.2_x64-setup.exe'), 'hello-installer');
+  writeFileSync(join(assetsDir, 'SHA256SUMS.txt'), 'abc');
+  const meta = buildReleaseMeta({
+    tag: 'v1.0.2',
+    notes: '## 本次更新\n\n- 修复问题\n',
+    assetsDir,
+    published: '2026-11-24T02:43:06Z',
+  });
+  assert.equal(meta.version, '1.0.2');
+  assert.equal(meta.published, '2026-11-24T02:43:06Z');
+  assert.match(meta.notes, /修复问题/);
+  assert.equal(meta.assets['Ferry_1.0.2_x64-setup.exe'], Buffer.byteLength('hello-installer'));
+  assert.equal(meta.assets['SHA256SUMS.txt'], 3);
 });

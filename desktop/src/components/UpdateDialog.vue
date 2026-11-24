@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import MarkdownIt from 'markdown-it'
 import { bytes } from '../ferry'
 import { exitApp, openUrl } from '../platform'
 import { pageTerminals, tasks, terminals } from '../state'
-import { cancelUpdate, installUpdate, updater } from '../update'
+import { cancelUpdate, checkUpdate, installUpdate, updater } from '../update'
 
 // 新版本：更新了什么、点「更新」下载安装包并安装
 const info = computed(() => updater.info)
@@ -35,6 +35,17 @@ function onNotesClick(e: MouseEvent) {
   if (/^https?:\/\//i.test(href)) openUrl(href).catch((err) => ElMessage.error(String(err)))
 }
 
+function retryNotes() {
+  if (updater.checking || updater.phase) return
+  void checkUpdate(false)
+}
+
+onMounted(() => {
+  if (updater.info?.newer && !updater.info.notes && !updater.checking && !updater.phase) {
+    void checkUpdate(false)
+  }
+})
+
 function close() {
   if (updater.phase === 'download' || updater.phase === 'install') return
   updater.dialog = false
@@ -61,7 +72,11 @@ function close() {
       </div>
 
       <div v-if="notes" class="notes md" @click="onNotesClick" v-html="notes" />
-      <p v-else class="muted">没取到更新说明，可以到 GitHub 的发布页查看。</p>
+      <p v-else-if="updater.checking" class="muted">正在获取更新说明…</p>
+      <p v-else class="muted">
+        没取到更新说明，可以到 GitHub 的发布页查看。
+        <el-button link type="primary" size="small" @click="retryNotes">重试</el-button>
+      </p>
 
       <el-alert v-if="!info.install" type="info" :closable="false" show-icon class="mt" title="这种系统没有现成的安装包，请到发布页下载。" />
       <el-alert v-else-if="busyText && !updater.phase" type="warning" :closable="false" show-icon class="mt" :title="busyText" />

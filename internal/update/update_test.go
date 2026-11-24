@@ -231,3 +231,147 @@ func TestLatestErrors(t *testing.T) {
 		t.Errorf("连不上时：%v", err)
 	}
 }
+
+func TestNotesFallbackToReleaseMeta(t *testing.T) {
+	f := newFake(t, "0.18.6")
+	if f.asset() == "" {
+		t.Skip("这种系统没有安装包")
+	}
+	var apiHits, metaHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + Repo + "/releases/latest":
+			http.Redirect(w, r, "/"+Repo+"/releases/tag/v0.18.6", http.StatusFound)
+		case "/repos/" + Repo + "/releases/tags/v0.18.6":
+			apiHits.Add(1)
+			http.Error(w, "API rate limit exceeded", http.StatusForbidden)
+		case "/" + Repo + "/releases/download/v0.18.6/" + ReleaseMetaFile:
+			metaHits.Add(1)
+			fmt.Fprintf(w, `{"notes":"## 本次更新\n\n- 发布 Ferry 0.18.6\n","published":"2026-11-24T02:43:06Z","assets":{%q:42000}}`, f.asset())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	info, err := Check(context.Background(), Source{Base: srv.URL, API: srv.URL}, "0.18.5", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiHits.Load() != 1 || metaHits.Load() != 1 {
+		t.Fatalf("应先试 API 再回退 release.json：api=%d meta=%d", apiHits.Load(), metaHits.Load())
+	}
+	if !strings.Contains(info.Notes, "发布 Ferry 0.18.6") || info.Published != "2026-11-24T02:43:06Z" || info.Size != 42000 {
+		t.Fatalf("回退 release.json 结果不对：%+v", info)
+	}
+}
+
+func TestNotesFallbackToAtom(t *testing.T) {
+	atomXML := `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>tag:github.com,2008:Repository/12345/v0.18.6</id>
+    <updated>2026-11-24T02:43:06Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/` + Repo + `/releases/tag/v0.18.6"/>
+    <content type="html">&lt;h2&gt;&lt;a class="anchor" href="#update"&gt;&lt;svg&gt;&lt;path/&gt;&lt;/svg&gt;&lt;/a&gt;本次更新&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;发布 Ferry 0.18.6&lt;/li&gt;
+&lt;li&gt;避免软件列表无匹配系统服务时回退全量枚举&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;下载&lt;/h2&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;文件&lt;/th&gt;&lt;th&gt;用途&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;&lt;code&gt;Ferry_0.18.6_x64-setup.exe&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Windows 安装包&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;Full Changelog&lt;/strong&gt;: &lt;a href="https://github.com/` + Repo + `/compare/v0.18.5...v0.18.6"&gt;v0.18.5...v0.18.6&lt;/a&gt;&lt;/p&gt;</content>
+  </entry>
+</feed>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + Repo + "/releases/latest":
+			http.Redirect(w, r, "/"+Repo+"/releases/tag/v0.18.6", http.StatusFound)
+		case "/repos/" + Repo + "/releases/tags/v0.18.6":
+			http.Error(w, "API rate limit exceeded", http.StatusForbidden)
+		case "/" + Repo + "/releases.atom":
+			w.Header().Set("Content-Type", "application/atom+xml")
+			w.Write([]byte(atomXML))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	info, err := Check(context.Background(), Source{Base: srv.URL, API: srv.URL}, "0.18.5", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Published != "2026-11-24T02:43:06Z" {
+		t.Fatalf("发布时间不对：%q", info.Published)
+	}
+	for _, want := range []string{
+		"## 本次更新",
+		"- 发布 Ferry 0.18.6",
+		"- 避免软件列表无匹配系统服务时回退全量枚举",
+		"| `Ferry_0.18.6_x64-setup.exe` | Windows 安装包 |",
+		"**Full Changelog**: [v0.18.5...v0.18.6](https://github.com/" + Repo + "/compare/v0.18.5...v0.18.6)",
+	} {
+		if !strings.Contains(info.Notes, want) {
+			t.Errorf("Atom 转 Markdown 缺少 %q，实际：\n%s", want, info.Notes)
+		}
+	}
+}
+
+func TestNotesViaMirrorWhenDirectFails(t *testing.T) {
+	f := newFake(t, "0.18.6")
+	if f.asset() == "" {
+		t.Skip("这种系统没有安装包")
+	}
+	// 直连地址直接关掉，模拟国内直连不上只能走 GitHub 加速
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+
+	var mirrorMetaHits atomic.Int32
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/"+Repo+"/releases/latest"):
+			http.Redirect(w, r, deadURL+"/"+Repo+"/releases/tag/v0.18.6", http.StatusFound)
+		case strings.HasSuffix(r.URL.Path, "/"+Repo+"/releases/download/v0.18.6/"+ReleaseMetaFile):
+			mirrorMetaHits.Add(1)
+			fmt.Fprintf(w, `{"notes":"## 本次更新\n\n- 加速节点说明","published":"2026-11-24T02:43:06Z","assets":{%q:12345}}`, f.asset())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mirror.Close()
+
+	src := Source{Base: deadURL, API: deadURL, Mirror: mirror.URL + "/"}
+	info, err := Check(context.Background(), src, "0.18.5", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mirrorMetaHits.Load() != 1 || !strings.Contains(info.Notes, "加速节点说明") || info.Size != 12345 {
+		t.Fatalf("走加速取说明结果不对：hits=%d info=%+v", mirrorMetaHits.Load(), info)
+	}
+}
+
+func TestNotesAPIRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + Repo + "/releases/latest":
+			http.Redirect(w, r, "/"+Repo+"/releases/tag/v0.18.6", http.StatusFound)
+		case "/repos/" + Repo + "/releases/tags/v0.18.6":
+			http.Redirect(w, r, "/canonical/releases/tags/v0.18.6", http.StatusMovedPermanently)
+		case "/canonical/releases/tags/v0.18.6":
+			w.Write([]byte(`{"body":"## 跳转后说明","published_at":"2026-11-24T02:43:06Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	info, err := Check(context.Background(), Source{Base: srv.URL, API: srv.URL}, "0.18.5", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Notes != "## 跳转后说明" {
+		t.Fatalf("API 跳转后没取到说明：%q", info.Notes)
+	}
+}

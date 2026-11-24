@@ -1,7 +1,8 @@
 // Package update 检查 GitHub 上有没有 Ferry 的新版本，下载这台电脑用的安装包并校验，再装上。
 //
 // 最新版本看 github.com/<仓库>/releases/latest 跳转到哪个标签（不用 API：同一出口 IP 每小时只能调 60 次）；
-// 发布说明尽量从 API 取，取不到就只给发布页地址。安装包可以经「GitHub 加速」（设置 → 运行环境）下载，
+// 发布说明优先从 API 取，遇到限流、直连不通等情况时依次回退到 Release 里的 release.json 和 releases.atom，
+// 都取不到才只给发布页地址。安装包可以经「GitHub 加速」（设置 → 运行环境）下载，
 // 校验和（Release 里的 SHA256SUMS.txt）先直接从 GitHub 取，取不到才经加速取；校验和要用编进程序的公钥验过签名（sig.go）。
 package update
 
@@ -10,7 +11,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -145,17 +145,22 @@ var short = &http.Client{
 
 // Latest GitHub 上最新发布的版本号（不带 v）。
 func Latest(ctx context.Context, s Source) (string, error) {
+	v, _, err := latestWithMirror(ctx, s)
+	return v, err
+}
+
+func latestWithMirror(ctx context.Context, s Source) (string, bool, error) {
 	u := s.base() + "/" + Repo + "/releases/latest"
 	v, err := latestFrom(ctx, u)
 	if err != nil {
 		if m := s.mirrored(u); m != "" {
 			if v2, err2 := latestFrom(ctx, m); err2 == nil {
-				return v2, nil
+				return v2, true, nil
 			}
 		}
-		return "", err
+		return "", false, err
 	}
-	return v, nil
+	return v, false, nil
 }
 
 func latestFrom(ctx context.Context, u string) (string, error) {
@@ -186,7 +191,7 @@ func latestFrom(ctx context.Context, u string) (string, error) {
 
 // Check 查最新版本，和 current 比较。dir 是下载安装包的目录：已经下载好的会记在 Downloaded 里，旧的删掉。
 func Check(ctx context.Context, s Source, current, dir string) (*Info, error) {
-	latest, err := Latest(ctx, s)
+	latest, usedMirror, err := latestWithMirror(ctx, s)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +204,7 @@ func Check(ctx context.Context, s Source, current, dir string) (*Info, error) {
 		Clean(dir, "")
 		return info, nil
 	}
-	notes(ctx, s, info)
+	notes(ctx, s, info, usedMirror)
 	if info.Asset != "" {
 		Clean(dir, info.Asset)
 		if p := filepath.Join(dir, info.Asset); fileOK(p, info.Size) {
@@ -207,43 +212,6 @@ func Check(ctx context.Context, s Source, current, dir string) (*Info, error) {
 		}
 	}
 	return info, nil
-}
-
-// notes 尽量从 API 取发布说明、发布时间、安装包大小（取不到不算错）。
-func notes(ctx context.Context, s Source, info *Info) {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.api()+"/repos/"+Repo+"/releases/tags/v"+info.Latest, nil)
-	if err != nil {
-		return
-	}
-	req.Header.Set("User-Agent", "ferry")
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := short.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-	var r struct {
-		Body        string `json:"body"`
-		PublishedAt string `json:"published_at"`
-		Assets      []struct {
-			Name string `json:"name"`
-			Size int64  `json:"size"`
-		} `json:"assets"`
-	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&r) != nil {
-		return
-	}
-	info.Notes, info.Published = r.Body, r.PublishedAt
-	for _, a := range r.Assets {
-		if a.Name == info.Asset {
-			info.Size = a.Size
-		}
-	}
 }
 
 // fileOK 下载好的安装包在、大小对（不知道大小时只看在不在），并且旁边记着的校验和与内容一致。

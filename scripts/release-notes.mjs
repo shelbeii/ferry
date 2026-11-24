@@ -1,8 +1,8 @@
 // Build release notes from the tagged source, including direct commits without PRs.
 // CI supplies the published Releases list; local previews can use --previous-tag.
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
@@ -84,20 +84,38 @@ ${history}
 `;
 }
 
+export function buildReleaseMeta({ tag, notes, assetsDir, published = new Date().toISOString() }) {
+  if (!releaseTag.test(tag ?? '')) throw new Error('标签必须是 vX.Y.Z 正式版');
+  const assets = {};
+  if (assetsDir) {
+    for (const name of readdirSync(assetsDir).sort()) {
+      const st = statSync(join(assetsDir, name));
+      if (st.isFile()) assets[name] = st.size;
+    }
+  }
+  return { version: tag.slice(1), published, notes, assets };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const { values } = parseArgs({ options: {
       tag: { type: 'string' }, repo: { type: 'string' }, releases: { type: 'string' },
       'previous-tag': { type: 'string' }, output: { type: 'string' },
+      'assets-dir': { type: 'string' }, 'meta-output': { type: 'string' },
     } });
+    const tag = values.tag ?? process.env.GITHUB_REF_NAME;
     const notes = generateReleaseNotes({
-      tag: values.tag ?? process.env.GITHUB_REF_NAME,
+      tag,
       repository: values.repo ?? process.env.GITHUB_REPOSITORY,
       releases: values.releases ? JSON.parse(readFileSync(values.releases, 'utf8')) : undefined,
       previousTag: values['previous-tag'],
     });
     if (values.output) writeFileSync(values.output, notes, 'utf8');
     else process.stdout.write(notes);
+    if (values['meta-output']) {
+      const meta = buildReleaseMeta({ tag, notes, assetsDir: values['assets-dir'] });
+      writeFileSync(values['meta-output'], JSON.stringify(meta, null, 2) + '\n', 'utf8');
+    }
   } catch (error) {
     console.error(`生成发布说明失败：${error.message}`);
     process.exitCode = 1;

@@ -149,10 +149,10 @@ jobs:
           VERSION: ${{ needs.check.outputs.version }}
         run: |
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
-          node scripts/release-notes.mjs --tag "$TAG" --repo "$GITHUB_REPOSITORY" --releases releases.json --output notes.md
+          node scripts/release-notes.mjs --tag "$TAG" --repo "$GITHUB_REPOSITORY" --releases releases.json --output notes.md --assets-dir files --meta-output release.json
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file notes.md
-            gh release upload "$TAG" files/* --clobber
+            gh release upload "$TAG" files/* release.json --clobber
           else
-            gh release create "$TAG" files/* --title "Ferry $VERSION" --notes-file notes.md
+            gh release create "$TAG" files/* release.json --title "Ferry $VERSION" --notes-file notes.md
           fi
