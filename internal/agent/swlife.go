@@ -214,7 +214,7 @@ func (a *Agent) swrestore() int {
 	if err := a.Sys.Systemctl("enable", "--now", unit); err != nil {
 		return fail("%v", err)
 	}
-	spec := readySpec(name, k.Logs, k.ReadyPort, 300)
+	spec := readySpecForInstance(&in, 300)
 	if err := a.waitReady(spec, unit); err != nil {
 		a.diag(spec, unit)
 		a.selinuxHint(name)
@@ -335,7 +335,7 @@ func (a *Agent) swupgrade() int {
 		}
 		os.RemoveAll(oldRoot)
 		a.Sys.Systemctl("start", in.Unit)
-		spec := readySpec(name, in.Logs, in.ReadyPort, 300)
+		spec := readySpecForInstance(in, 300)
 		if err := a.waitReady(spec, in.Unit); err != nil {
 			return fail("%s；已换回 %s，但它也没能启动：%v", why, in.Version, err)
 		}
@@ -366,14 +366,14 @@ func (a *Agent) swupgrade() int {
 	}
 	a.info(proto.EvStart, name, "启动 %s", in.Unit)
 	a.Sys.Systemctl("start", in.Unit)
-	spec := readySpec(name, in.Logs, in.ReadyPort, 300)
+	spec := readySpecForInstance(in, 300)
 	if err := a.waitReady(spec, in.Unit); err != nil {
 		a.diag(spec, in.Unit)
 		a.Sys.Systemctl("stop", in.Unit)
 		return restore(fmt.Sprintf("%s 起不来：%v", pl.Version, err))
 	}
 	os.RemoveAll(oldRoot)
-	os.RemoveAll(a.swCacheDir())
+	os.Remove(filepath.Join(a.swCacheDir(), pk.SHA256))
 	in.Version = pl.Version
 	b, _ := json.MarshalIndent(in, "", "  ")
 	if err := writeFileAtomic(a.instFile(name), b, 0o644); err != nil {
@@ -381,6 +381,259 @@ func (a *Agent) swupgrade() int {
 	}
 	a.info(proto.EvReady, name, "%s 已升级到 %s", in.Title, pl.Version)
 	return a.result(proto.CodeOK, "", in)
+}
+
+// ---------------------------------------------------------------- 服务设置编辑（swservice）
+
+// swservice 查看或修改 Ferry 已安装软件的启动命令、环境变量、工作目录、就绪检查与日志路径；
+// 修改后自动校验 systemd 单元并重启验证，启动失败时自动回滚回修改前的配置。
+func (a *Agent) swservice() int {
+	in, err := a.loadInstance(a.req.Instance)
+	if err != nil {
+		return a.result(proto.CodeBadInput, err.Error(), nil)
+	}
+	action := a.req.Action
+	if action == "" {
+		action = "get"
+	}
+	switch action {
+	case "get":
+		unitText, _ := os.ReadFile(a.unitPath(in.Unit))
+		execStart := strings.ReplaceAll(lastUnitValue(string(unitText), "ExecStart"), "%%", "%")
+		workdir := lastUnitValue(string(unitText), "WorkingDirectory")
+		svcType := lastUnitValue(string(unitText), "Type")
+		if svcType == "" {
+			svcType = in.ServiceType
+		}
+		if svcType == "" {
+			svcType = "simple"
+		}
+		envMap := readSwEnvFile(swEnvFile(in.Dir))
+		readyMode := in.ReadyMode
+		if readyMode == "" {
+			if in.ReadyPort > 0 {
+				readyMode = "tcp"
+			} else {
+				readyMode = "process"
+			}
+		}
+		return a.result(proto.CodeOK, "", proto.SwServiceView{
+			Instance:    in.Name,
+			Unit:        in.Unit,
+			Dir:         in.Dir,
+			User:        in.User,
+			Exec:        execStart,
+			Workdir:     workdir,
+			Env:         envMap,
+			ServiceType: svcType,
+			ReadyMode:   readyMode,
+			ReadyPort:   in.ReadyPort,
+			ReadyURL:    in.ReadyURL,
+			Logs:        in.Logs,
+		})
+	case "save":
+		ed := a.req.SwServiceEdit
+		if ed == nil {
+			return a.result(proto.CodeBadInput, "缺少服务修改内容", nil)
+		}
+		ed.Exec = strings.TrimSpace(ed.Exec)
+		if ed.Exec == "" || strings.ContainsAny(ed.Exec, "\n\r") {
+			return a.result(proto.CodeBadInput, "启动命令无效", nil)
+		}
+		if execPath := commandExecutable(sdSplit(ed.Exec)); execPath == "" || strings.HasSuffix(execPath, "/") {
+			return a.result(proto.CodeBadInput, "启动命令必须指向程序文件", nil)
+		}
+		if ed.ServiceType == "" {
+			ed.ServiceType = "simple"
+		}
+		if ed.ServiceType != "simple" && ed.ServiceType != "forking" {
+			return a.result(proto.CodeBadInput, "服务类型只能是 simple 或 forking", nil)
+		}
+		if ed.ReadyMode == "" {
+			if ed.ReadyPort > 0 {
+				ed.ReadyMode = "tcp"
+			} else {
+				ed.ReadyMode = "process"
+			}
+		}
+		switch ed.ReadyMode {
+		case "tcp":
+			if ed.ReadyPort < 1 || ed.ReadyPort > 65535 {
+				return a.result(proto.CodeBadInput, fmt.Sprintf("就绪端口无效：%d", ed.ReadyPort), nil)
+			}
+		case "http":
+			if _, err := stepURL(ed.ReadyURL); err != nil {
+				return a.result(proto.CodeBadInput, "HTTP 就绪检查地址无效："+err.Error(), nil)
+			}
+		case "process":
+			ed.ReadyPort = 0
+		default:
+			return a.result(proto.CodeBadInput, "就绪检查模式只能是 tcp、http 或 process", nil)
+		}
+		if ed.Workdir != "" && !inDir(in.Dir, ed.Workdir) && ed.Workdir != in.Dir {
+			return a.result(proto.CodeBadInput, "工作目录必须在安装目录内："+ed.Workdir, nil)
+		}
+		for k, v := range ed.Env {
+			if !reEnvKey.MatchString(k) || strings.ContainsAny(v, "\n\r") {
+				return a.result(proto.CodeBadInput, fmt.Sprintf("环境变量无效：%q", k), nil)
+			}
+		}
+		for _, l := range ed.Logs {
+			if l != "" && !inDir(in.Dir, l) {
+				return a.result(proto.CodeBadInput, "日志文件必须在安装目录内："+l, nil)
+			}
+		}
+		unlock, err := a.Sys.Lock(a.swLock(), 10*time.Minute)
+		if err != nil {
+			return a.result(proto.CodeLocked, "另一个安装 / 卸载正在进行："+err.Error(), nil)
+		}
+		defer unlock()
+
+		pl := &proto.SoftwarePlan{
+			Name:         in.Name,
+			Title:        in.Title,
+			Version:      in.Version,
+			Dir:          in.Dir,
+			User:         in.User,
+			AllowRoot:    in.User == "root",
+			Exec:         ed.Exec,
+			Workdir:      ed.Workdir,
+			Env:          ed.Env,
+			ServiceType:  ed.ServiceType,
+			ReadyMode:    ed.ReadyMode,
+			ReadyPort:    ed.ReadyPort,
+			ReadyURL:     ed.ReadyURL,
+			ReadyTimeout: ed.ReadyTimeout,
+			Ports:        in.AllPorts,
+			UDPPorts:     in.UDPPorts,
+			Hosting:      in.Hosting,
+			Logs:         ed.Logs,
+			Custom:       in.Custom,
+		}
+		if ed.ReadyPort > 0 {
+			found := false
+			for _, p := range pl.Ports {
+				if p == ed.ReadyPort {
+					found = true
+					break
+				}
+			}
+			if !found {
+				pl.Ports = append(append([]int{}, pl.Ports...), ed.ReadyPort)
+			}
+		}
+		if err := a.checkSoftwareExec(pl); err != nil {
+			return a.result(proto.CodeFailed, err.Error(), nil)
+		}
+		newUnit := swUnitText(pl)
+		if err := a.verifySoftwareUnit(in.Unit, newUnit); err != nil {
+			return a.result(proto.CodeFailed, "系统服务配置校验失败："+err.Error(), nil)
+		}
+
+		// 备份旧的单元文件和 env 文件以便启动失败时自动回滚
+		oldUnit, _ := os.ReadFile(a.unitPath(in.Unit))
+		envPath := swEnvFile(in.Dir)
+		oldEnv, oldEnvErr := os.ReadFile(envPath)
+		hadOldEnv := oldEnvErr == nil
+
+		writeEnv := func(m map[string]string) error {
+			if len(m) == 0 {
+				os.Remove(envPath)
+				return nil
+			}
+			keys := make([]string, 0, len(m))
+			for k := range m {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			var b strings.Builder
+			for _, k := range keys {
+				fmt.Fprintf(&b, "%s=%s\n", k, m[k])
+			}
+			if err := writeFileAtomic(envPath, []byte(b.String()), 0o600); err != nil {
+				return err
+			}
+			a.Sys.Lchown(envPath, 0, 0)
+			return nil
+		}
+		rollback := func(why string) int {
+			if len(oldUnit) > 0 {
+				_ = writeFileAtomic(a.unitPath(in.Unit), oldUnit, 0o644)
+			}
+			if hadOldEnv {
+				_ = writeFileAtomic(envPath, oldEnv, 0o600)
+				a.Sys.Lchown(envPath, 0, 0)
+			} else {
+				_ = os.Remove(envPath)
+			}
+			_ = a.Sys.Systemctl("daemon-reload")
+			_ = a.Sys.Systemctl("restart", in.Unit)
+			return a.result(proto.CodeFailed, why+"；已自动回滚到修改前的服务配置", nil)
+		}
+		if err := writeEnv(ed.Env); err != nil {
+			return a.result(proto.CodeFailed, "写环境变量文件失败："+err.Error(), nil)
+		}
+		if err := writeFileAtomic(a.unitPath(in.Unit), []byte(newUnit), 0o644); err != nil {
+			return rollback("写系统服务失败：" + err.Error())
+		}
+		if err := a.Sys.Systemctl("daemon-reload"); err != nil {
+			return rollback(err.Error())
+		}
+		a.info(proto.EvStart, in.Name, "应用服务设置并重启 %s", in.Unit)
+		if err := a.Sys.Systemctl("restart", in.Unit); err != nil {
+			spec := readySpecForPlan(pl)
+			spec.UnitText = newUnit
+			a.diag(spec, in.Unit)
+			return rollback(err.Error())
+		}
+		spec := readySpecForPlan(pl)
+		spec.UnitText = newUnit
+		if err := a.waitReady(spec, in.Unit); err != nil {
+			a.diag(spec, in.Unit)
+			return rollback("重启验证失败：" + err.Error())
+		}
+		in.ServiceType = ed.ServiceType
+		in.ReadyMode = ed.ReadyMode
+		in.ReadyPort = ed.ReadyPort
+		in.ReadyURL = ed.ReadyURL
+		in.Logs = ed.Logs
+		if ed.ReadyPort > 0 {
+			if in.Ports == nil {
+				in.Ports = map[string]int{}
+			}
+			in.Ports["port"] = ed.ReadyPort
+			in.AllPorts = pl.Ports
+		}
+		b, _ := json.MarshalIndent(in, "", "  ")
+		if err := writeFileAtomic(a.instFile(in.Name), b, 0o644); err != nil {
+			return a.result(proto.CodeFailed, "写安装记录失败："+err.Error(), nil)
+		}
+		a.info(proto.EvReady, in.Name, "服务设置已更新并验证通过")
+		return a.result(proto.CodeOK, "", in)
+	default:
+		return a.result(proto.CodeBadInput, "未知操作："+action, nil)
+	}
+}
+
+func readSwEnvFile(file string) map[string]string {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, line := range splitLines(string(b)) {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(t, "="); ok {
+			out[strings.TrimSpace(k)] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- 告警

@@ -3,6 +3,8 @@ package agent
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
+	"compress/bzip2"
 	"compress/gzip"
 	"debug/elf"
 	"encoding/json"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/zipx"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Ferry 安装的软件（swinstall / swcontrol / swremove / swlogs）。
@@ -43,6 +46,7 @@ var (
 	reUserName  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	reSwVersion = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,40}$`)
 	rePkgName   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	reEnvKey    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	reUnitName  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._-]*\.service$`)
 	reAccount   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{2,31}$`)
 )
@@ -144,16 +148,27 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 		return fmt.Errorf("名称只能用小写字母、数字、横线，以字母开头：%q", pl.Name)
 	case pl.Version != "" && !reSwVersion.MatchString(pl.Version):
 		return fmt.Errorf("版本无效：%q", pl.Version)
-	case !reUserName.MatchString(pl.User) || pl.User == "root":
+	case !reUserName.MatchString(pl.User) || (pl.User == "root" && !pl.AllowRoot):
 		return fmt.Errorf("运行用户无效（不能是 root）：%q", pl.User)
 	case pl.Account != "" && !reAccount.MatchString(pl.Account):
 		return fmt.Errorf("账号无效：%q", pl.Account)
 	case pl.Exec == "" || strings.ContainsAny(pl.Exec, "\n\r"):
 		return errors.New("启动命令无效")
-	case pl.ReadyPort < 1 || pl.ReadyPort > 65535:
+	case pl.ServiceType != "" && pl.ServiceType != "simple" && pl.ServiceType != "forking":
+		return fmt.Errorf("服务类型无效：%q", pl.ServiceType)
+	case pl.ReadyMode != "" && pl.ReadyMode != "tcp" && pl.ReadyMode != "http" && pl.ReadyMode != "process":
+		return fmt.Errorf("就绪检查模式无效：%q", pl.ReadyMode)
+	case pl.ReadyMode != "process" && (pl.ReadyPort < 1 || pl.ReadyPort > 65535):
 		return fmt.Errorf("端口无效：%d", pl.ReadyPort)
+	case pl.ReadyMode == "http" && strings.TrimSpace(pl.ReadyURL) == "":
+		return errors.New("HTTP 就绪检查缺少检查地址")
 	case pl.Package == nil && pl.System == nil:
 		return errors.New("没有安装包，也没有要从软件源装的包")
+	}
+	if pl.ReadyMode == "http" {
+		if _, err := stepURL(pl.ReadyURL); err != nil {
+			return fmt.Errorf("HTTP 就绪检查地址无效：%w", err)
+		}
 	}
 	if err := validInstallDir(pl.Dir); err != nil {
 		return err
@@ -183,7 +198,7 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 			return errors.New("安装包信息无效")
 		}
 		switch pk.Format {
-		case "tar.gz", "tar.xz", "zip", "jar", "binary":
+		case "tar.gz", "tar.xz", "tar.bz2", "tar.zst", "tar", "zip", "jar", "binary", "rpm", "deb":
 		default:
 			return fmt.Errorf("安装包格式 %q 不认识", pk.Format)
 		}
@@ -194,6 +209,9 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 	if s := pl.System; s != nil {
 		if s.Bundle != "" && ((s.Bundle != "rpm" && s.Bundle != "deb") || pl.Package == nil || pl.Package.Format != "zip") {
 			return errors.New("离线系统软件包必须是 RPM 或 DEB 的 ZIP 文件")
+		}
+		if s.Single != "" && ((s.Single != "rpm" && s.Single != "deb") || pl.Package == nil || pl.Package.Format != s.Single) {
+			return errors.New("单个离线系统软件包必须是有效的 RPM 或 DEB 文件")
 		}
 		if err := validatePackageNames(s.DNF, s.APT); err != nil {
 			return err
@@ -241,7 +259,7 @@ func validatePlan(pl *proto.SoftwarePlan) error {
 		}
 	}
 	for k := range pl.Env {
-		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(k) {
+		if !reEnvKey.MatchString(k) {
 			return fmt.Errorf("环境变量名无效：%q", k)
 		}
 	}
@@ -440,9 +458,23 @@ func (a *Agent) swinstallRun() int {
 			if err != nil {
 				return fail("%v", err)
 			}
+		} else if s.Single != "" {
+			if err := checkSystemBundle(a.pkgManager(), s.Single); err != nil {
+				return fail("%v", err)
+			}
+			a.installPhase(name, "校验单个离线系统软件包")
+			dir, err := os.MkdirTemp(a.swDir(), ".single-")
+			if err != nil {
+				return fail("%v", err)
+			}
+			defer os.RemoveAll(dir)
+			offline, err = prepareSingleSystemPackage(src, dir, s.Single, pl.Package.File)
+			if err != nil {
+				return fail("%v", err)
+			}
 		}
 		var err error
-		if packages, err = a.systemInstall(name, s, proxyEnvPrefix(pl), pl.Package != nil && s.Bundle == "", offline...); err != nil {
+		if packages, err = a.systemInstall(name, s, proxyEnvPrefix(pl), pl.Package != nil && s.Bundle == "" && s.Single == "", offline...); err != nil {
 			var pc *pkgChangesError
 			if errors.As(err, &pc) {
 				a.warn(proto.EvWarn, name, "%v", err)
@@ -477,13 +509,31 @@ func (a *Agent) swinstallRun() int {
 		if ok {
 			return
 		}
-		// 失败：拆掉装了一半的，方便改了再装（从软件源装的包不删）
+		// 失败：拆掉系统服务与标签；若启用了 KeepOnFail 则把解压后的现场移到 .failed/<name> 方便排查
 		a.Sys.Systemctl("disable", "--now", unit)
 		a.undoSELinux(name, se)
 		removeLogrotate(rotate)
 		if a.ferryUnitFile(unit) {
 			os.Remove(a.unitPath(unit))
 			a.Sys.Systemctl("daemon-reload")
+		}
+		keptFailed := ""
+		if pl.KeepOnFail {
+			failedDir := filepath.Join(a.swDir(), ".failed")
+			dst := filepath.Join(failedDir, name)
+			_ = os.RemoveAll(dst)
+			if os.MkdirAll(failedDir, 0o750) == nil {
+				if os.Rename(pl.Dir, dst) == nil {
+					keptFailed = dst
+					if !created {
+						_ = os.Mkdir(pl.Dir, 0o750)
+					}
+				}
+			}
+		}
+		if keptFailed != "" {
+			a.info(proto.EvSoftware, name, "已撤销系统服务，并保留失败现场目录到 %s（用于排查目录结构或手动试跑；重装成功后自动清理）", keptFailed)
+			return
 		}
 		if created {
 			os.RemoveAll(pl.Dir)
@@ -493,7 +543,7 @@ func (a *Agent) swinstallRun() int {
 		a.info(proto.EvSoftware, name, "已撤销这次安装")
 	}()
 
-	if pk := pl.Package; pk != nil && (pl.System == nil || pl.System.Bundle == "") {
+	if pk := pl.Package; pk != nil && (pl.System == nil || (pl.System.Bundle == "" && pl.System.Single == "")) {
 		a.installPhase(name, "解压安装包")
 		if err := a.unpack(name, src, pl.Dir, pk); err != nil {
 			return fail("%v", err)
@@ -564,12 +614,12 @@ func (a *Agent) swinstallRun() int {
 		return fail("%v", err)
 	}
 	a.info(proto.EvStart, name, "启动 %s", unit)
+	spec := readySpecForPlan(pl)
+	spec.UnitText = unitText
 	if err := a.Sys.Systemctl("enable", "--now", unit); err != nil {
-		a.diag(readySpec(name, pl.Logs, pl.ReadyPort, pl.ReadyTimeout), unit)
+		a.diag(spec, unit)
 		return fail("%v", err)
 	}
-	spec := readySpec(name, pl.Logs, pl.ReadyPort, pl.ReadyTimeout)
-	spec.UnitText = unitText
 	if err := a.waitReady(spec, unit); err != nil {
 		a.diag(spec, unit)
 		a.softwareSELinuxDiag(pl, unit)
@@ -585,21 +635,33 @@ func (a *Agent) swinstallRun() int {
 		return fail("%v", err)
 	}
 	if len(packages) > 0 {
-		if pl.System.Bundle != "" {
+		if pl.System.Bundle != "" || pl.System.Single != "" {
 			notes = append(notes, fmt.Sprintf("从离线包安装了 %d 个系统软件包（卸载此次软件实例时保留）", len(packages)))
 		} else {
 			notes = append(notes, "从软件源装了 "+strings.Join(packages, " ")+"（卸载时不会删除这些包）")
 		}
 	}
-	inst := proto.SoftwareInstance{Name: name, Kind: pl.Template, Title: pl.Title, Version: pl.Version, Dir: pl.Dir, Unit: unit, User: pl.User, InstallTaskID: pl.TaskID,
-		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyPort: pl.ReadyPort, Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting, SELinux: se,
-		Variant: pl.Variant, Logrotate: rotate, Upgradable: pl.Package != nil && (pl.Package.Into != "" || pl.Package.Format == "jar" || pl.Package.Format == "binary")}
+	instVersion := pl.Version
+	if instVersion == "" && pl.System != nil {
+		instVersion = a.installedPrimaryVersion(pl.System, packages)
+	}
+	pkgInto, pkgStrip, pkgFormat := "", 0, ""
+	if pl.Package != nil {
+		pkgInto, pkgStrip, pkgFormat = pl.Package.Into, pl.Package.Strip, pl.Package.Format
+	}
+	upgradable := pl.Package != nil && (pl.Package.Into != "" || pl.Package.Format == "jar" || pl.Package.Format == "binary")
+	inst := proto.SoftwareInstance{Name: name, Kind: pl.Template, Title: pl.Title, Version: instVersion, Dir: pl.Dir, Unit: unit, User: pl.User, InstallTaskID: pl.TaskID,
+		Ports: pl.PortMap, AllPorts: pl.Ports, UDPPorts: pl.UDPPorts, ReadyMode: pl.ReadyMode, ReadyPort: pl.ReadyPort, ReadyURL: pl.ReadyURL, ServiceType: pl.ServiceType, Custom: pl.Custom,
+		PackageInto: pkgInto, PackageStrip: pkgStrip, PackageFormat: pkgFormat,
+		Logs: pl.Logs, Packages: packages, InstalledAt: a.Sys.Now(), InstalledBy: a.req.Actor, Notes: notes, Unset: unset, Account: pl.Account, Configs: pl.Configs, Hosting: pl.Hosting, SELinux: se,
+		Variant: pl.Variant, Logrotate: rotate, Upgradable: upgradable}
 	b, _ := json.MarshalIndent(inst, "", "  ")
 	if err := writeFileAtomic(a.instFile(name), b, 0o644); err != nil {
 		return fail("写安装记录失败：%v", err)
 	}
 	ok, installed = true, true
-	a.info(proto.EvReady, name, "%s 已安装并启动", strings.TrimSpace(pl.Title+" "+pl.Version))
+	_ = os.RemoveAll(filepath.Join(a.swDir(), ".failed", name))
+	a.info(proto.EvReady, name, "%s 已安装并启动", strings.TrimSpace(pl.Title+" "+instVersion))
 	return a.result(proto.CodeOK, "", inst)
 }
 
@@ -626,7 +688,15 @@ func mkdirInstallParents(dir string) error {
 }
 
 func (a *Agent) checkSoftwareExec(pl *proto.SoftwarePlan) error {
-	executable := commandExecutable(sdSplit(pl.Exec))
+	tokens := sdSplit(pl.Exec)
+	executable := commandExecutable(tokens)
+	// 检查并自动修复脚本参数（如 `sh /opt/.../start.sh`）的 CRLF 与存在性
+	if scriptArg := findDirScriptArg(tokens, pl.Dir); scriptArg != "" {
+		if _, err := os.Stat(scriptArg); err != nil {
+			return fmt.Errorf("启动脚本 %s 不存在：%w", scriptArg, err)
+		}
+		a.fixScriptCRLF(pl.Name, scriptArg)
+	}
 	if !filepath.IsAbs(executable) {
 		return nil // systemd 按其默认搜索路径解析简单命令名
 	}
@@ -634,8 +704,22 @@ func (a *Agent) checkSoftwareExec(pl *proto.SoftwarePlan) error {
 	if err != nil {
 		return fmt.Errorf("启动程序 %s 不可用：%w", executable, err)
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
+	if !st.Mode().IsRegular() {
 		return fmt.Errorf("启动程序 %s 必须是可执行文件", executable)
+	}
+	// Windows 下打包的 ZIP/tar 常丢失可执行权限位：若位于安装目录内则自动补齐 +x
+	if st.Mode().Perm()&0o111 == 0 {
+		if inDir(pl.Dir, executable) {
+			if err := os.Chmod(executable, st.Mode().Perm()|0o755); err != nil {
+				return fmt.Errorf("启动程序 %s 缺少可执行权限且自动添加失败：%w", executable, err)
+			}
+			a.info(proto.EvSoftware, pl.Name, "已自动为 %s 添加可执行权限 (+x)", executable)
+		} else {
+			return fmt.Errorf("启动程序 %s 必须是可执行文件", executable)
+		}
+	}
+	if inDir(pl.Dir, executable) {
+		a.fixScriptCRLF(pl.Name, executable)
 	}
 	if noExecMount(executable) {
 		return fmt.Errorf("启动程序 %s 所在挂载点设置了 noexec", executable)
@@ -650,6 +734,106 @@ func (a *Agent) checkSoftwareExec(pl *proto.SoftwarePlan) error {
 		if err := checkELFExecutable(executable, runtime.GOARCH); err != nil {
 			return err
 		}
+		if err := a.checkELFSharedLibs(executable); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// findDirScriptArg 当 ExecStart 为 `sh /opt/.../start.sh` 或 `/bin/bash /opt/.../run.sh` 时，返回其中的脚本路径。
+func findDirScriptArg(tokens []string, dir string) string {
+	if len(tokens) < 2 {
+		return ""
+	}
+	base := path.Base(strings.TrimLeft(tokens[0], "-@:+!"))
+	switch base {
+	case "sh", "bash", "dash", "zsh":
+	default:
+		return ""
+	}
+	for _, tok := range tokens[1:] {
+		if strings.HasPrefix(tok, "-") {
+			if tok == "-c" {
+				return ""
+			}
+			continue
+		}
+		if inDir(dir, tok) {
+			return tok
+		}
+		break
+	}
+	return ""
+}
+
+// fixScriptCRLF 若启动脚本以 `#!` 开头且首行含 Windows 换行符 `\r\n`，原地转为 `\n` 避免 systemd 报 203/EXEC。
+func (a *Agent) fixScriptCRLF(name, file string) {
+	b, err := os.ReadFile(file)
+	if err != nil || len(b) == 0 || len(b) > 2<<20 || !bytes.HasPrefix(b, []byte("#!")) {
+		return
+	}
+	firstLine, _, _ := bytes.Cut(b, []byte("\n"))
+	if !bytes.Contains(firstLine, []byte("\r")) {
+		return
+	}
+	fixed := bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+	fi, err := os.Stat(file)
+	if err != nil {
+		return
+	}
+	if writeFileAtomic(file, fixed, fi.Mode().Perm()) == nil {
+		a.info(proto.EvSoftware, name, "检测到启动脚本 %s 含 Windows 换行符 (CRLF)，已自动转换为 Linux 换行符 (LF)", file)
+	}
+}
+
+// checkELFSharedLibs 检查动态链接 ELF 是否缺少系统 .so 库或 glibc 版本过低。
+func (a *Agent) checkELFSharedLibs(executable string) error {
+	f, err := elf.Open(executable)
+	if err != nil {
+		return nil // 非 ELF（如脚本）直接跳过
+	}
+	interp := f.Section(".interp")
+	f.Close()
+	if interp == nil {
+		return nil // 静态编译程序不需要动态库
+	}
+	out, _ := a.Sys.Shell("command -v ldd >/dev/null 2>&1 && LC_ALL=C ldd "+shellQuote(executable)+" 2>&1 || true", 8*time.Second)
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	return parseLddProblems(executable, out)
+}
+
+func parseLddProblems(executable, out string) error {
+	var missingLibs []string
+	var missingGlibc []string
+	seenLib := map[string]bool{}
+	seenGlibc := map[string]bool{}
+	for _, line := range splitLines(out) {
+		t := strings.TrimSpace(line)
+		if strings.Contains(t, "=> not found") {
+			name := strings.TrimSpace(strings.SplitN(t, "=>", 2)[0])
+			if name != "" && !seenLib[name] {
+				seenLib[name] = true
+				missingLibs = append(missingLibs, name)
+			}
+		} else if strings.Contains(t, "GLIBC_") && strings.Contains(t, "not found") {
+			if i := strings.Index(t, "GLIBC_"); i >= 0 {
+				rest := t[i:]
+				ver := strings.FieldsFunc(rest, func(r rune) bool { return r == '\'' || r == '`' || r == ' ' || r == ')' || r == ':' })[0]
+				if ver != "" && !seenGlibc[ver] {
+					seenGlibc[ver] = true
+					missingGlibc = append(missingGlibc, ver)
+				}
+			}
+		}
+	}
+	if len(missingGlibc) > 0 {
+		return fmt.Errorf("启动程序 %s 需要更高版本的系统基础库（%s），当前服务器系统版本不兼容；请更换低版本 glibc 编译包或静态编译包", executable, strings.Join(missingGlibc, "、"))
+	}
+	if len(missingLibs) > 0 {
+		return fmt.Errorf("启动程序 %s 缺少系统动态库：%s（请先在服务器上安装对应依赖库，或检查 LD_LIBRARY_PATH 环境变量）", executable, strings.Join(missingLibs, "、"))
 	}
 	return nil
 }
@@ -715,11 +899,119 @@ func readySpec(name string, logs []string, port, timeout int) *proto.AppSpec {
 	if timeout <= 0 {
 		timeout = 180
 	}
-	s := &proto.AppSpec{Name: name, Health: proto.Health{TCP: "127.0.0.1:" + strconv.Itoa(port), TimeoutSec: timeout, StableSec: 3}}
+	h := proto.Health{TimeoutSec: timeout, StableSec: 3}
+	if port > 0 {
+		h.TCP = "127.0.0.1:" + strconv.Itoa(port)
+	} else {
+		h.StableSec = 5
+	}
+	s := &proto.AppSpec{Name: name, Health: h}
 	if len(logs) > 0 {
 		s.DiagLogs = logs[:1]
 	}
 	return s
+}
+
+func readySpecForPlan(pl *proto.SoftwarePlan) *proto.AppSpec {
+	timeout := pl.ReadyTimeout
+	if timeout <= 0 {
+		timeout = 180
+	}
+	stable := pl.ReadyStable
+	h := proto.Health{TimeoutSec: timeout, StableSec: stable}
+	switch pl.ReadyMode {
+	case "process":
+		if h.StableSec <= 0 {
+			h.StableSec = 5
+		}
+	case "http":
+		h.HTTP = pl.ReadyURL
+		if h.StableSec <= 0 {
+			h.StableSec = 3
+		}
+	default:
+		if pl.ReadyPort > 0 {
+			h.TCP = "127.0.0.1:" + strconv.Itoa(pl.ReadyPort)
+			if h.StableSec <= 0 {
+				h.StableSec = 3
+			}
+			if pl.Custom {
+				// 自定义安装允许在持续监听错误端口 25s 后快速失败并给出明确端口提示，避免干等 180s
+				h.FastMismatchSec = 25
+			}
+		} else if h.StableSec <= 0 {
+			h.StableSec = 5
+		}
+	}
+	s := &proto.AppSpec{Name: pl.Name, Health: h}
+	if len(pl.Logs) > 0 {
+		s.DiagLogs = pl.Logs[:1]
+	}
+	return s
+}
+
+func readySpecForInstance(in *proto.SoftwareInstance, timeout int) *proto.AppSpec {
+	if timeout <= 0 {
+		timeout = 240
+	}
+	h := proto.Health{TimeoutSec: timeout, StableSec: 3}
+	switch in.ReadyMode {
+	case "process":
+		h.StableSec = 5
+	case "http":
+		if in.ReadyURL != "" {
+			h.HTTP = in.ReadyURL
+		} else if in.ReadyPort > 0 {
+			h.TCP = "127.0.0.1:" + strconv.Itoa(in.ReadyPort)
+		}
+	default:
+		if in.ReadyPort > 0 {
+			h.TCP = "127.0.0.1:" + strconv.Itoa(in.ReadyPort)
+		} else {
+			h.StableSec = 5
+		}
+	}
+	s := &proto.AppSpec{Name: in.Name, Health: h}
+	if len(in.Logs) > 0 {
+		s.DiagLogs = in.Logs[:1]
+	}
+	return s
+}
+
+func (a *Agent) installedPrimaryVersion(s *proto.PlanSystem, installed []string) string {
+	mgr := a.pkgManager()
+	var cands []string
+	cands = append(cands, installed...)
+	for _, p := range systemPackages(s, mgr) {
+		for _, c := range strings.Split(p, "|") {
+			cands = append(cands, c)
+		}
+	}
+	for _, pkg := range cands {
+		if pkg == "" || strings.HasSuffix(pkg, ".rpm") || strings.HasSuffix(pkg, ".deb") {
+			continue
+		}
+		var cmd string
+		if mgr == "apt-get" {
+			cmd = "dpkg-query -W -f='${Version}' " + shellQuote(pkg) + " 2>/dev/null"
+		} else {
+			cmd = "rpm -q --qf '%{VERSION}' " + shellQuote(pkg) + " 2>/dev/null"
+		}
+		out, err := a.Sys.Shell(cmd, 10*time.Second)
+		if err == nil {
+			v := strings.TrimSpace(out)
+			if i := strings.IndexByte(v, ':'); i >= 0 {
+				v = v[i+1:]
+			}
+			if i := strings.IndexByte(v, '-'); i >= 0 {
+				v = v[:i]
+			}
+			if reSwVersion.MatchString(v) {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // clearDir 清空目录（目录是原来就有的空目录时，失败后恢复原样）。
@@ -810,7 +1102,7 @@ func (a *Agent) installedPackages(mgr string, pkgs []string) (have, want, alts [
 func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps bool, offline ...string) ([]string, error) {
 	mgr := a.pkgManager()
 	pkgs := systemPackages(s, mgr)
-	if len(pkgs) == 0 {
+	if len(pkgs) == 0 && len(offline) == 0 {
 		if deps {
 			a.warn(proto.EvWarn, name, "服务器上没有 dnf / yum / apt：需要的系统库没有自动安装")
 			return nil, nil
@@ -827,7 +1119,7 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	if len(have) > 0 {
 		a.info(proto.EvSoftware, name, "服务器上已经装着 %s：直接用，不升级", strings.Join(have, " "))
 	}
-	if len(want)+len(alts) == 0 {
+	if len(want)+len(alts)+len(offline) == 0 {
 		return nil, a.checkRequire(s)
 	}
 	pkgs = want
@@ -843,6 +1135,9 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	}
 	if len(offline) > 0 {
 		via = "离线包"
+		if s.UseRepos {
+			via = "本地包 + 软件源补齐依赖"
+		}
 		pkgs = make([]string, 0, len(offline))
 		for _, file := range offline {
 			pkgs = append(pkgs, filepath.Base(file))
@@ -850,7 +1145,7 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	}
 	// 先演练一遍：软件源里没有这个包时说清楚；会顺带升级、删除已装的包时停下来问用户（升级会让用到它们的程序换版本）
 	a.installPhase(name, fmt.Sprintf("解析软件源和依赖（%s，%s）", mgr, via))
-	changes, err := pkgChanges(run, mgr, env, pkgs, offline)
+	changes, err := pkgChanges(run, mgr, env, pkgs, offline, s.UseRepos)
 	if err != nil {
 		return nil, err
 	}
@@ -865,9 +1160,9 @@ func (a *Agent) systemInstall(name string, s *proto.PlanSystem, env string, deps
 	} else {
 		a.installPhase(name, fmt.Sprintf("下载并安装系统软件包（%s，%s）", mgr, via))
 	}
-	cmd := env + packageManagerArgs(mgr, offline) + " install -y " + packageArguments(pkgs, offline)
+	cmd := env + packageManagerArgs(mgr, offline, s.UseRepos) + " install -y " + packageArguments(pkgs, offline)
 	if mgr == "apt-get" {
-		cmd = env + "DEBIAN_FRONTEND=noninteractive " + packageManagerArgs(mgr, offline) + " install -y --no-upgrade " + packageArguments(pkgs, offline)
+		cmd = env + "DEBIAN_FRONTEND=noninteractive " + packageManagerArgs(mgr, offline, s.UseRepos) + " install -y --no-upgrade " + packageArguments(pkgs, offline)
 	}
 	out, err := a.installShell(name, "安装系统软件包", cmd+" 2>&1", 20*time.Minute)
 	if err != nil {
@@ -918,9 +1213,9 @@ type packageShell func(phase, cmd string, timeout time.Duration) (string, error)
 
 // pkgChanges 演练装包（dnf --assumeno、apt-get -s）：会升级、降级、删除的已装包（新装的不算）。
 // 演练必须得出事务结果；仓库错误或超时不能当作没有包变更。
-func pkgChanges(run packageShell, mgr, env string, pkgs, offline []string) ([]string, error) {
+func pkgChanges(run packageShell, mgr, env string, pkgs, offline []string, useRepos bool) ([]string, error) {
 	list := packageArguments(pkgs, offline)
-	base := packageManagerArgs(mgr, offline)
+	base := packageManagerArgs(mgr, offline, useRepos)
 	cmd := env + "LC_ALL=C " + base + " install --assumeno " + list + " 2>&1"
 	if mgr == "apt-get" {
 		cmd = env + "LC_ALL=C DEBIAN_FRONTEND=noninteractive " + base + " -s install --no-upgrade " + list + " 2>&1"
@@ -1140,6 +1435,12 @@ func (a *Agent) unpack(name, src, dir string, pk *proto.PlanPackage) error {
 	switch pk.Format {
 	case "tar.gz":
 		err = extractTarGzStrip(src, dst, pk.Strip)
+	case "tar.bz2":
+		err = extractTarBz2Strip(src, dst, pk.Strip)
+	case "tar.zst":
+		err = extractTarZstStrip(src, dst, pk.Strip)
+	case "tar":
+		err = extractTarStrip(src, dst, pk.Strip)
 	case "zip":
 		err = extractZip(src, dst, pk.Strip)
 	case "tar.xz":
@@ -1188,7 +1489,43 @@ func extractTarGzStrip(src, dst string, strip int) error {
 	if err != nil {
 		return err
 	}
-	tr := tar.NewReader(gz)
+	defer gz.Close()
+	return extractTarReader(tar.NewReader(gz), dst, strip)
+}
+
+func extractTarBz2Strip(src, dst string, strip int) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return extractTarReader(tar.NewReader(bzip2.NewReader(f)), dst, strip)
+}
+
+func extractTarZstStrip(src, dst string, strip int) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	zr, err := zstd.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	return extractTarReader(tar.NewReader(zr), dst, strip)
+}
+
+func extractTarStrip(src, dst string, strip int) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return extractTarReader(tar.NewReader(f), dst, strip)
+}
+
+func extractTarReader(tr *tar.Reader, dst string, strip int) error {
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -1239,7 +1576,7 @@ func extractTarGzStrip(src, dst string, strip int) error {
 	}
 }
 
-// extractZip 解开 zip（去掉前 strip 层目录）。
+// extractZip 解开 zip（去掉前 strip 层目录），并安全展开目录内的相对符号链接。
 func extractZip(src, dst string, strip int) error {
 	z, err := zip.OpenReader(src)
 	if err != nil {
@@ -1265,7 +1602,24 @@ func extractZip(src, dst string, strip int) error {
 			continue
 		}
 		if f.Mode()&os.ModeSymlink != 0 {
-			continue // zip 里的符号链接不展开
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			linkBytes, err := io.ReadAll(io.LimitReader(rc, 4096))
+			rc.Close()
+			if err != nil {
+				return err
+			}
+			target := strings.TrimSpace(string(linkBytes))
+			if target == "" || path.IsAbs(target) || !within(dst, filepath.Join(filepath.Dir(p), filepath.FromSlash(target))) {
+				return fmt.Errorf("压缩包里有指向外部的链接：%s → %s", f.Name, target)
+			}
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			if err := os.Symlink(target, p); err != nil {
+				return err
+			}
+			continue
 		}
 		rc, err := f.Open()
 		if err != nil {
@@ -1471,8 +1825,12 @@ func readResponseField(body io.Reader, field string) (string, error) {
 // swUnitText 软件的 systemd 单元。
 func swUnitText(pl *proto.SoftwarePlan) string {
 	var b strings.Builder
+	svcType := pl.ServiceType
+	if svcType == "" {
+		svcType = "simple"
+	}
 	fmt.Fprintf(&b, "%s（软件 %s）\n", ManagedMarker, pl.Name)
-	fmt.Fprintf(&b, "[Unit]\nDescription=%s %s (%s)\nAfter=network.target\n\n[Service]\nType=simple\n", pl.Title, pl.Version, pl.Name)
+	fmt.Fprintf(&b, "[Unit]\nDescription=%s %s (%s)\nAfter=network.target\n\n[Service]\nType=%s\n", pl.Title, pl.Version, pl.Name, svcType)
 	fmt.Fprintf(&b, "User=%s\n", pl.User)
 	if pl.Workdir != "" {
 		fmt.Fprintf(&b, "WorkingDirectory=%s\n", pl.Workdir)
@@ -1571,8 +1929,8 @@ func (a *Agent) swcontrol() int {
 		a.fail(proto.EvFail, in.Name, "%v", err)
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
-	if action != "stop" && in.ReadyPort > 0 {
-		spec := readySpec(in.Name, in.Logs, in.ReadyPort, 240)
+	if action != "stop" {
+		spec := readySpecForInstance(in, 240)
 		if err := a.waitReady(spec, in.Unit); err != nil {
 			a.diag(spec, in.Unit)
 			return a.result(proto.CodeFailed, err.Error(), nil)

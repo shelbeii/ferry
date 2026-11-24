@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -1012,6 +1013,9 @@ func (a *Agent) waitReady(s *proto.AppSpec, unit string) error {
 	pid0 := 0
 	var okSince time.Time
 	var lastErr error
+	var mismatchSince time.Time
+	var mismatchWarned string
+	var lastListenCheck time.Time
 	round := 0
 	for {
 		now := a.Sys.Now()
@@ -1033,9 +1037,31 @@ func (a *Agent) waitReady(s *proto.AppSpec, unit string) error {
 		if healthy && probe {
 			if err := a.Sys.Probe(h); err != nil {
 				healthy, lastErr = false, err
+				if h.TCP != "" && p.PID > 0 && now.Sub(start) >= 8*time.Second && (lastListenCheck.IsZero() || now.Sub(lastListenCheck) >= 8*time.Second) {
+					lastListenCheck = now
+					if addrs := a.processListeningTCP(p.PID); len(addrs) > 0 {
+						if mismatchMsg := describePortMismatch(h.TCP, addrs); mismatchMsg != "" {
+							if mismatchWarned != mismatchMsg {
+								mismatchWarned = mismatchMsg
+								a.warn(proto.EvWarn, s.Name, "进程已运行（PID %d），但%s", p.PID, mismatchMsg)
+							}
+							if mismatchSince.IsZero() {
+								mismatchSince = now
+							}
+							if h.FastMismatchSec > 0 && now.Sub(mismatchSince) >= time.Duration(h.FastMismatchSec)*time.Second {
+								msg := fmt.Sprintf("进程已启动（PID %d），但%s；无需继续干等，可修改端口或启动命令后重新安装", p.PID, mismatchMsg)
+								a.fail(proto.EvFail, s.Name, "%s", msg)
+								return errors.New(msg)
+							}
+						} else {
+							mismatchSince = time.Time{}
+						}
+					}
+				}
 			}
 		}
 		if healthy {
+			mismatchSince = time.Time{}
 			if okSince.IsZero() {
 				okSince = now
 			}
@@ -1053,12 +1079,87 @@ func (a *Agent) waitReady(s *proto.AppSpec, unit string) error {
 			if lastErr != nil {
 				msg += "：" + lastErr.Error()
 			}
+			if h.TCP != "" && p.PID > 0 {
+				if addrs := a.processListeningTCP(p.PID); len(addrs) > 0 {
+					if mismatchMsg := describePortMismatch(h.TCP, addrs); mismatchMsg != "" {
+						msg += "（进程正在运行，" + mismatchMsg + "）"
+					}
+				}
+			}
 			a.fail(proto.EvFail, s.Name, "%s", msg)
 			return errors.New(msg)
 		}
 		a.Sys.Sleep(waitBackoff(round))
 		round++
 	}
+}
+
+// processListeningTCP 查询指定 PID 及其直接子进程当前正在监听的 TCP 地址（如 0.0.0.0:9000）。
+func (a *Agent) processListeningTCP(pid int) []string {
+	if pid <= 0 {
+		return nil
+	}
+	out, err := a.Sys.Shell(fmt.Sprintf("pids=$(ps -o pid= --ppid %d 2>/dev/null; echo %d); ss -tlnp 2>/dev/null | awk 'NR>1 {print $4, $6}'", pid, pid), 5*time.Second)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return nil
+	}
+	pidsOut, _ := a.Sys.Shell(fmt.Sprintf("ps -o pid= --ppid %d 2>/dev/null; echo %d", pid, pid), 3*time.Second)
+	wanted := map[string]bool{strconv.Itoa(pid): true}
+	for _, f := range strings.Fields(pidsOut) {
+		wanted[f] = true
+	}
+	return parseSSListeningForPIDs(out, wanted)
+}
+
+// parseSSListeningForPIDs 解析 `ss -tlnp` 输出中的 local_addr 与 users 信息，筛出属于目标 PID 集合的监听地址。
+func parseSSListeningForPIDs(out string, pids map[string]bool) []string {
+	seen := map[string]bool{}
+	var addrs []string
+	for _, line := range splitLines(out) {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		addr := fields[0]
+		rest := strings.Join(fields[1:], " ")
+		matched := false
+		for pid := range pids {
+			if strings.Contains(rest, "pid="+pid+",") || strings.Contains(rest, "pid="+pid+")") {
+				matched = true
+				break
+			}
+		}
+		if matched && !seen[addr] {
+			seen[addr] = true
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs
+}
+
+// describePortMismatch 对比期望的 TCP 探活目标（如 127.0.0.1:8080）与进程实际监听地址。
+func describePortMismatch(expectedTCP string, listening []string) string {
+	_, wantPort, err := net.SplitHostPort(expectedTCP)
+	if err != nil || wantPort == "" || len(listening) == 0 {
+		return ""
+	}
+	samePortOtherHost := false
+	for _, addr := range listening {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			continue
+		}
+		if port == wantPort {
+			if host == "*" || host == "0.0.0.0" || host == "::" || host == "127.0.0.1" || host == "::1" {
+				return ""
+			}
+			samePortOtherHost = true
+		}
+	}
+	if samePortOtherHost {
+		return fmt.Sprintf("仅监听在 %s（未绑定 127.0.0.1:%s）", strings.Join(listening, "、"), wantPort)
+	}
+	return fmt.Sprintf("实际监听在 %s，而非等待的端口 %s", strings.Join(listening, "、"), wantPort)
 }
 
 // waitBackoff 等就绪时两次检查之间的间隔：开头密一点（多数应用一两秒内就绪，固定等 2 秒是白等），

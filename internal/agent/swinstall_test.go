@@ -2,7 +2,10 @@ package agent
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"github.com/captain/ferry/internal/proto"
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestValidInstallDir(t *testing.T) {
@@ -331,7 +335,7 @@ func TestDependencyResolutionReportsRepositoryFailures(t *testing.T) {
 			}
 			return tc.output, errors.New("exit status 1")
 		}
-		_, err := pkgChanges(cmd, tc.manager, "", []string{"nginx"}, nil)
+		_, err := pkgChanges(cmd, tc.manager, "", []string{"nginx"}, nil, false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s：想要 %q，收到 %v", tc.manager, tc.want, err)
 		}
@@ -441,5 +445,211 @@ func TestExtractStrip(t *testing.T) {
 	}
 	if _, err := archivePath("../x", 0); err == nil {
 		t.Error("越界路径应当拒绝")
+	}
+}
+
+func TestParseLddProblems(t *testing.T) {
+	out := `	linux-vdso.so.1 (0x00007fff)
+	libssl.so.1.1 => not found
+	libcrypto.so.1.1 => not found
+	libc.so.6 => /lib64/libc.so.6 (0x00007f)`
+	err := parseLddProblems("/opt/app/bin/app", out)
+	if err == nil || !strings.Contains(err.Error(), "libssl.so.1.1") || !strings.Contains(err.Error(), "libcrypto.so.1.1") {
+		t.Fatalf("应报缺库：%v", err)
+	}
+	glibcOut := `/opt/app/bin/app: /lib64/libc.so.6: version 'GLIBC_2.34' not found (required by /opt/app/bin/app)`
+	err = parseLddProblems("/opt/app/bin/app", glibcOut)
+	if err == nil || !strings.Contains(err.Error(), "GLIBC_2.34") {
+		t.Fatalf("应报 glibc 版本不兼容：%v", err)
+	}
+	if err := parseLddProblems("/opt/app/bin/app", "\tlibc.so.6 => /lib64/libc.so.6\n"); err != nil {
+		t.Fatalf("全部依赖存在时不应报错：%v", err)
+	}
+}
+
+func TestPortMismatchDiagnosis(t *testing.T) {
+	ssOut := `0.0.0.0:9000 users:(("myapp",pid=4321,fd=3))
+127.0.0.1:22 users:(("sshd",pid=100,fd=3))`
+	addrs := parseSSListeningForPIDs(ssOut, map[string]bool{"4321": true})
+	if len(addrs) != 1 || addrs[0] != "0.0.0.0:9000" {
+		t.Fatalf("应只匹配目标 PID 的监听地址：%+v", addrs)
+	}
+	if msg := describePortMismatch("127.0.0.1:8080", addrs); !strings.Contains(msg, "0.0.0.0:9000") || !strings.Contains(msg, "8080") {
+		t.Fatalf("应指出端口错配：%q", msg)
+	}
+	if msg := describePortMismatch("127.0.0.1:9000", addrs); msg != "" {
+		t.Fatalf("端口匹配时不应报错：%q", msg)
+	}
+	if msg := describePortMismatch("127.0.0.1:8080", []string{"192.168.1.10:8080"}); !strings.Contains(msg, "未绑定 127.0.0.1:8080") {
+		t.Fatalf("仅绑定非回环 IP 时应明确提示：%q", msg)
+	}
+}
+
+func TestAutoChmodAndCRLFScriptFix(t *testing.T) {
+	f := newFake(t)
+	a := &Agent{Sys: f, Out: io.Discard}
+	// CRLF 自动修复在所有平台均可直接验证
+	crlfFile := filepath.Join(t.TempDir(), "run.sh")
+	if err := os.WriteFile(crlfFile, []byte("#!/bin/sh\r\necho hi\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.fixScriptCRLF("app", crlfFile)
+	data, err := os.ReadFile(crlfFile)
+	if err != nil || strings.Contains(string(data), "\r") {
+		t.Fatalf("CRLF 应已自动转换为 LF：%q %v", string(data), err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir := filepath.Join(f.root, "opt", "app")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "start.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\r\necho hi\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pl := &proto.SoftwarePlan{Name: "app", Dir: dir, User: "app", Exec: script}
+	if err := a.checkSoftwareExec(pl); err != nil {
+		t.Fatalf("目录内缺少 +x 和 CRLF 的脚本应自动修复并放行：%v", err)
+	}
+	data, err = os.ReadFile(script)
+	if err != nil || strings.Contains(string(data), "\r") {
+		t.Fatalf("CRLF 应已自动转换为 LF：%q %v", string(data), err)
+	}
+}
+
+func TestExtractTarZstAndZipSafeSymlink(t *testing.T) {
+	dir := t.TempDir()
+	// 1. tar.zst
+	zstPath := filepath.Join(dir, "app.tar.zst")
+	zf, err := os.Create(zstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw, err := zstd.NewWriter(zf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(zw)
+	tw.WriteHeader(&tar.Header{Name: "top/bin/run", Typeflag: tar.TypeReg, Mode: 0o755, Size: 2})
+	tw.Write([]byte("ok"))
+	tw.Close()
+	zw.Close()
+	zf.Close()
+
+	out1 := filepath.Join(dir, "out1")
+	os.MkdirAll(out1, 0o755)
+	if err := extractTarZstStrip(zstPath, out1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(out1, "bin", "run")); err != nil || string(b) != "ok" {
+		t.Fatalf("tar.zst 解压不对：%q %v", string(b), err)
+	}
+
+	// 2. zip 越界符号链接应拒绝
+	badZip := filepath.Join(dir, "bad.zip")
+	bf, _ := os.Create(badZip)
+	bw := zip.NewWriter(bf)
+	h := &zip.FileHeader{Name: "link"}
+	h.SetMode(os.ModeSymlink | 0o777)
+	w, _ := bw.CreateHeader(h)
+	w.Write([]byte("../../etc/passwd"))
+	bw.Close()
+	bf.Close()
+	out2 := filepath.Join(dir, "out2")
+	os.MkdirAll(out2, 0o755)
+	if err := extractZip(badZip, out2, 0); err == nil || !strings.Contains(err.Error(), "指向外部") {
+		t.Fatalf("zip 越界符号链接应被拒绝：%v", err)
+	}
+}
+
+func TestSwServiceEditAndRollback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("需要 POSIX 绝对路径（Linux agent 环境）")
+	}
+	oldSysDirs := systemDirs
+	systemDirs = nil
+	defer func() { systemDirs = oldSysDirs }()
+	f := newFake(t)
+	ferry := filepath.Join(f.root, "ferry")
+	dir := filepath.ToSlash(filepath.Join(f.root, "opt", "worker"))
+	os.MkdirAll(dir, 0o755)
+	bin := dir + "/worker"
+	os.WriteFile(bin, []byte("#!/bin/sh\necho ok\n"), 0o755)
+
+	// 先写入一个已安装的软件实例和单元
+	in := proto.SoftwareInstance{Name: "worker", Kind: "worker", Title: "Worker", Dir: dir, Unit: "ferry-worker.service", User: "worker", ReadyMode: "process", Custom: true}
+	b, _ := json.Marshal(in)
+	swDir := filepath.Join(ferry, "software")
+	os.MkdirAll(swDir, 0o755)
+	os.WriteFile(filepath.Join(swDir, "worker.json"), b, 0o644)
+	oldUnit := swUnitText(&proto.SoftwarePlan{Name: "worker", Title: "Worker", Dir: dir, User: "worker", Exec: bin + " --old", Workdir: dir})
+	os.WriteFile(filepath.Join(f.unitDir, "ferry-worker.service"), []byte(oldUnit), 0o644)
+
+	// get
+	r := exec1(t, f, "swservice", &proto.Request{FerryDir: ferry, Instance: "worker", Action: "get"})
+	if r.result.RC != proto.CodeOK {
+		t.Fatalf("swservice get 失败：%s", r.result.Msg)
+	}
+	var view proto.SwServiceView
+	if err := json.Unmarshal(r.result.Data, &view); err != nil || view.Exec != bin+" --old" || view.ReadyMode != "process" {
+		t.Fatalf("swservice get 结果不对：%+v %v", view, err)
+	}
+
+	// save 成功
+	r = exec1(t, f, "swservice", &proto.Request{FerryDir: ferry, Instance: "worker", Action: "save", SwServiceEdit: &proto.SwServiceEdit{
+		Exec: bin + " --new", Workdir: dir, Env: map[string]string{"FOO": "bar"}, ServiceType: "simple", ReadyMode: "process",
+	}})
+	if r.result.RC != proto.CodeOK {
+		t.Fatalf("swservice save 失败：%s", r.result.Msg)
+	}
+	gotUnit, _ := os.ReadFile(filepath.Join(f.unitDir, "ferry-worker.service"))
+	if !strings.Contains(string(gotUnit), "--new") || !strings.Contains(string(gotUnit), "EnvironmentFile=") {
+		t.Fatalf("单元未更新：%s", string(gotUnit))
+	}
+
+	// save 启动失败时自动回滚到修改前的单元
+	f.unitBad["ferry-worker.service"] = true
+	r = exec1(t, f, "swservice", &proto.Request{FerryDir: ferry, Instance: "worker", Action: "save", SwServiceEdit: &proto.SwServiceEdit{
+		Exec: bin + " --broken", Workdir: dir, ServiceType: "simple", ReadyMode: "process",
+	}})
+	if r.result.RC == proto.CodeOK || !strings.Contains(r.result.Msg, "回滚") {
+		t.Fatalf("启动失败时应自动回滚：%d %s", r.result.RC, r.result.Msg)
+	}
+	revertedUnit, _ := os.ReadFile(filepath.Join(f.unitDir, "ferry-worker.service"))
+	if !strings.Contains(string(revertedUnit), "--new") || strings.Contains(string(revertedUnit), "--broken") {
+		t.Fatalf("单元应已回滚到 --new：%s", string(revertedUnit))
+	}
+}
+
+func TestSwInstallKeepOnFail(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("需要 POSIX 绝对路径（Linux agent 环境）")
+	}
+	oldSysDirs := systemDirs
+	systemDirs = nil
+	defer func() { systemDirs = oldSysDirs }()
+	f := newFake(t)
+	ferry := filepath.Join(f.root, "ferry")
+	stage := filepath.Join(f.root, ".ferry", "incoming", "s1")
+	os.MkdirAll(stage, 0o755)
+	body := []byte("#!/bin/sh\nexit 1\n")
+	os.WriteFile(filepath.Join(stage, "demo"), body, 0o755)
+	sum := sha256.Sum256(body)
+	dir := filepath.ToSlash(filepath.Join(f.root, "opt", "demo"))
+	f.unitBad["ferry-demo.service"] = true
+
+	pl := &proto.SoftwarePlan{
+		Name: "demo", Title: "Demo", Dir: dir, User: "demo", Exec: dir + "/demo",
+		ReadyMode: "process", KeepOnFail: true,
+		Package: &proto.PlanPackage{File: "demo", SHA256: hex.EncodeToString(sum[:]), Size: int64(len(body)), Format: "binary", Into: "demo"},
+	}
+	r := exec1(t, f, "swinstall", &proto.Request{Root: f.root, FerryDir: ferry, Stage: stage, Install: pl})
+	if r.result.RC == proto.CodeOK {
+		t.Fatal("预期安装失败")
+	}
+	if _, err := os.Stat(filepath.Join(ferry, "software", ".failed", "demo", "demo")); err != nil {
+		t.Fatalf("开启 KeepOnFail 时应把失败现场保留到 .failed/demo（rc=%d msg=%s）：%v", r.result.RC, r.result.Msg, err)
 	}
 }

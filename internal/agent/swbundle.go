@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -81,6 +82,32 @@ func extractSystemPackage(entry *zip.File, dst, bundle string) error {
 	return writeEntry(dst, io.MultiReader(bytes.NewReader(head), r), 0o600)
 }
 
+// checkSingleSystemPackage 校验单个 .rpm / .deb 离线包文件头并复制到临时目录供包管理器使用。
+func prepareSingleSystemPackage(src, dst, kind, fileName string) ([]string, error) {
+	f, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	magic := []byte("!<arch>\n")
+	if kind == "rpm" {
+		magic = []byte{0xed, 0xab, 0xee, 0xdb}
+	}
+	head := make([]byte, len(magic))
+	if _, err := io.ReadFull(f, head); err != nil || !bytes.Equal(head, magic) {
+		return nil, fmt.Errorf("文件不是有效的 %s 软件包", strings.ToUpper(kind))
+	}
+	name := path.Base(fileName)
+	if !systemBundleFilename.MatchString(name) {
+		name = "package." + kind
+	}
+	local := filepath.Join(dst, name)
+	if err := writeEntry(local, io.MultiReader(bytes.NewReader(head), f), 0o600); err != nil {
+		return nil, err
+	}
+	return []string{local}, nil
+}
+
 func packageArguments(pkgs, offline []string) string {
 	if len(offline) == 0 {
 		return strings.Join(pkgs, " ")
@@ -92,11 +119,11 @@ func packageArguments(pkgs, offline []string) string {
 	return strings.Join(args, " ")
 }
 
-// packageManagerArgs 离线包安装时关掉软件源：只用包里的本地文件，依赖不齐时直接说装不上。
+// packageManagerArgs 离线包安装时默认关掉软件源（只用包里的本地文件）；当 useRepos 为 true 时允许结合软件源补齐基础依赖。
 // apt 的 --no-download 在 apt 2.4（Ubuntu 22.04）里和本地 .deb 一起用会报
 // "Pathname to install is not absolute"，所以 apt 改用不加载任何软件源。
-func packageManagerArgs(manager string, offline []string) string {
-	if len(offline) == 0 {
+func packageManagerArgs(manager string, offline []string, useRepos bool) string {
+	if len(offline) == 0 || useRepos {
 		return manager
 	}
 	if manager == "apt-get" {

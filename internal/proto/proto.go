@@ -129,6 +129,7 @@ type Request struct {
 	DBTools        string                 `json:"dbTools,omitempty"`
 	Instance       string                 `json:"instance,omitempty"`
 	SoftwareConfig *SoftwareConfigRequest `json:"softwareConfig,omitempty"`
+	SwServiceEdit  *SwServiceEdit         `json:"swServiceEdit,omitempty"`
 	Purge          bool                   `json:"purge,omitempty"`   // swremove：连安装目录（数据）一起删除
 	LogMain        bool                   `json:"logMain,omitempty"` // swlogs：看软件自己的日志文件（否则看 journald）
 	// swcheck：安装前检查（上传之前发现问题，不用白传）
@@ -472,13 +473,14 @@ type Hook struct {
 
 // Health 就绪判断。TCP、HTTP 都为空时：进程持续运行 StableSec 秒即就绪。
 type Health struct {
-	Host       string `json:"host,omitempty"` // HTTP 虚拟主机的 Host。
-	TCP        string `json:"tcp,omitempty"`  // host:port
-	HTTP       string `json:"http,omitempty"` // 完整 URL
-	Status     []int  `json:"status,omitempty"`
-	Contains   string `json:"contains,omitempty"`
-	TimeoutSec int    `json:"timeoutSec"`
-	StableSec  int    `json:"stableSec,omitempty"` // 健康检查通过后还要再稳定运行的秒数
+	Host            string `json:"host,omitempty"` // HTTP 虚拟主机的 Host。
+	TCP             string `json:"tcp,omitempty"`  // host:port
+	HTTP            string `json:"http,omitempty"` // 完整 URL
+	Status          []int  `json:"status,omitempty"`
+	Contains        string `json:"contains,omitempty"`
+	TimeoutSec      int    `json:"timeoutSec"`
+	StableSec       int    `json:"stableSec,omitempty"`       // 健康检查通过后还要再稳定运行的秒数
+	FastMismatchSec int    `json:"fastMismatchSec,omitempty"` // 进程持续存活且只监听其他端口超过该秒数时提前报错（0 = 仅提示不提前中止）
 }
 
 // ReleaseSpec 一个应用本次要发布的版本。
@@ -1059,12 +1061,20 @@ type SoftwarePlan struct {
 	Props []PlanProps `json:"props,omitempty"`
 	Steps []PlanStep  `json:"steps,omitempty"`
 
-	Exec    string            `json:"exec"`
-	Workdir string            `json:"workdir,omitempty"`
-	Env     map[string]string `json:"env,omitempty"` // 写进只有 root 能读的文件
-	// ReadyPort 启动后等这个端口能连上
-	ReadyPort    int `json:"readyPort"`
-	ReadyTimeout int `json:"readyTimeout,omitempty"`
+	Exec        string            `json:"exec"`
+	Workdir     string            `json:"workdir,omitempty"`
+	Env         map[string]string `json:"env,omitempty"` // 写进只有 root 能读的文件
+	ServiceType string            `json:"serviceType,omitempty"`
+	AllowRoot   bool              `json:"allowRoot,omitempty"`
+	KeepOnFail  bool              `json:"keepOnFail,omitempty"`
+	Custom      bool              `json:"custom,omitempty"`
+	// ReadyMode 就绪模式：tcp（默认）| http | process（仅检测进程稳定存活，不检测端口）
+	ReadyMode string `json:"readyMode,omitempty"`
+	// ReadyPort 启动后等这个端口能连上（process 模式下为 0）
+	ReadyPort    int    `json:"readyPort"`
+	ReadyURL     string `json:"readyUrl,omitempty"`
+	ReadyTimeout int    `json:"readyTimeout,omitempty"`
+	ReadyStable  int    `json:"readyStable,omitempty"`
 	// Account 登录用的账号（模板的 account 参数）：记进安装记录给用户看
 	Account  string               `json:"account,omitempty"`
 	Ports    []int                `json:"ports"`              // 要占用的 TCP 端口（安装前检查有没有被占用）
@@ -1156,11 +1166,13 @@ type BlockedDir struct {
 
 // PlanSystem 用服务器的软件源安装。
 type PlanSystem struct {
-	Bundle  string   `json:"bundle,omitempty"` // 安装包是要交给包管理器的 ZIP（rpm 或 deb）
-	DNF     []string `json:"dnf,omitempty"`
-	APT     []string `json:"apt,omitempty"`
-	Disable []string `json:"disable,omitempty"` // 装包时系统自带、被自动启动的服务：停掉并禁用（原来就在运行的不动）
-	Require string   `json:"require,omitempty"`
+	Bundle   string   `json:"bundle,omitempty"`   // 安装包是要交给包管理器的 ZIP（rpm 或 deb）
+	Single   string   `json:"single,omitempty"`   // 单个离线系统包文件（rpm 或 deb）
+	UseRepos bool     `json:"useRepos,omitempty"` // 安装本地系统包时允许结合软件源补齐缺失基础依赖
+	DNF      []string `json:"dnf,omitempty"`
+	APT      []string `json:"apt,omitempty"`
+	Disable  []string `json:"disable,omitempty"` // 装包时系统自带、被自动启动的服务：停掉并禁用（原来就在运行的不动）
+	Require  string   `json:"require,omitempty"`
 	// AllowChanges 用户同意了装包时顺带升级、删除已装的包（没同意时演练出有这些变化就停下来问）
 	AllowChanges bool `json:"allowChanges,omitempty"`
 }
@@ -1253,7 +1265,14 @@ type SoftwareInstance struct {
 	// AllPorts、UDPPorts 占用的全部 TCP、UDP 端口（含附加端口）：停着时别的软件也不能用
 	AllPorts    []int     `json:"allPorts,omitempty"`
 	UDPPorts    []int     `json:"udpPorts,omitempty"`
+	ReadyMode   string    `json:"readyMode,omitempty"`
 	ReadyPort   int       `json:"readyPort"`
+	ReadyURL    string    `json:"readyUrl,omitempty"`
+	ServiceType string    `json:"serviceType,omitempty"`
+	Custom      bool      `json:"custom,omitempty"`
+	PackageInto string    `json:"packageInto,omitempty"`
+	PackageStrip int      `json:"packageStrip,omitempty"`
+	PackageFormat string  `json:"packageFormat,omitempty"`
 	Logs        []string  `json:"logs,omitempty"`
 	Packages    []string  `json:"packages,omitempty"` // 从软件源装的包（卸载时不删，告诉用户）
 	InstalledAt time.Time `json:"installedAt"`
@@ -1271,6 +1290,35 @@ type SoftwareInstance struct {
 	Configs []SoftwareConfigFile `json:"configs,omitempty"`
 	Hosting *NginxHosting        `json:"hosting,omitempty"`
 	SELinux *SwSELinux           `json:"selinux,omitempty"`
+}
+
+// SwServiceView 读取已安装软件的 systemd 服务定义（用于安装后在线微调启动命令、环境变量与就绪检查）。
+type SwServiceView struct {
+	Instance    string            `json:"instance"`
+	Unit        string            `json:"unit"`
+	Dir         string            `json:"dir"`
+	User        string            `json:"user"`
+	Exec        string            `json:"exec"`
+	Workdir     string            `json:"workdir,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	ServiceType string            `json:"serviceType,omitempty"`
+	ReadyMode   string            `json:"readyMode,omitempty"`
+	ReadyPort   int               `json:"readyPort,omitempty"`
+	ReadyURL    string            `json:"readyUrl,omitempty"`
+	Logs        []string          `json:"logs,omitempty"`
+}
+
+// SwServiceEdit 更新已安装软件的服务定义。
+type SwServiceEdit struct {
+	Exec         string            `json:"exec"`
+	Workdir      string            `json:"workdir,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	ServiceType  string            `json:"serviceType,omitempty"`
+	ReadyMode    string            `json:"readyMode,omitempty"`
+	ReadyPort    int               `json:"readyPort,omitempty"`
+	ReadyURL     string            `json:"readyUrl,omitempty"`
+	ReadyTimeout int               `json:"readyTimeout,omitempty"`
+	Logs         []string          `json:"logs,omitempty"`
 }
 
 // Software 服务器上找到的一个软件（一个运行中的实例，或装了没运行的服务 / 容器）。

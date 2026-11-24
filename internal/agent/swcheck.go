@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -127,7 +128,7 @@ func (a *Agent) swresolve() int {
 	var changes []string
 	if len(want) > 0 {
 		var err error
-		changes, err = pkgChanges(run, mgr, env, want, nil)
+		changes, err = pkgChanges(run, mgr, env, want, nil, false)
 		if err != nil {
 			return a.result(proto.CodeFailed, err.Error(), nil)
 		}
@@ -275,22 +276,68 @@ func blockedWords(list []proto.BlockedDir) string {
 	return "上级目录 " + strings.Join(parts, "、") + " 不允许其他用户进入"
 }
 
-// keepPackage 安装失败时把校验过的安装包留在服务器上（只留这一个），下次装同一个包时不用再上传。
+const (
+	swCacheMaxFiles = 5
+	swCacheMaxBytes = 2 << 30 // 2 GiB
+)
+
+// keepPackage 安装失败时把校验过的安装包留在服务器上（多槽位 LRU，最多保留 5 个且总大小不超过 2 GiB），
+// 下次装同一个包时不用再上传，且交替重试多个安装包时不会互相清空。
 func (a *Agent) keepPackage(name, src, sha string) {
 	dir := a.swCacheDir()
 	dst := filepath.Join(dir, sha)
 	if src == dst {
+		now := time.Now()
+		_ = os.Chtimes(dst, now, now)
 		return
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
-	ents, _ := os.ReadDir(dir)
-	for _, e := range ents {
-		os.RemoveAll(filepath.Join(dir, e.Name()))
-	}
 	if os.Rename(src, dst) == nil {
-		a.info(proto.EvSoftware, name, "安装包留在服务器上：改好后重新安装同一个版本不用再上传")
+		now := time.Now()
+		_ = os.Chtimes(dst, now, now)
+		a.pruneSwCache(sha)
+		a.info(proto.EvSoftware, name, "安装包已保留在服务器缓存：修改参数后重新安装同一个包不用再上传")
+	}
+}
+
+func (a *Agent) pruneSwCache(keepSHA string) {
+	dir := a.swCacheDir()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type item struct {
+		name  string
+		path  string
+		size  int64
+		mtime time.Time
+	}
+	var items []item
+	var total int64
+	for _, e := range ents {
+		p := filepath.Join(dir, e.Name())
+		fi, err := e.Info()
+		if err != nil || fi.IsDir() {
+			os.RemoveAll(p)
+			continue
+		}
+		items = append(items, item{name: e.Name(), path: p, size: fi.Size(), mtime: fi.ModTime()})
+		total += fi.Size()
+	}
+	// 最新的在前，优先淘汰最旧的条目，始终保护刚刚放入的 keepSHA
+	sort.Slice(items, func(i, j int) bool { return items[i].mtime.After(items[j].mtime) })
+	for i := len(items) - 1; i >= 0; i-- {
+		if len(items) <= swCacheMaxFiles && total <= swCacheMaxBytes {
+			break
+		}
+		if items[i].name == keepSHA {
+			continue
+		}
+		os.Remove(items[i].path)
+		total -= items[i].size
+		items = append(items[:i], items[i+1:]...)
 	}
 }
 

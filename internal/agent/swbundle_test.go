@@ -40,7 +40,7 @@ func TestOfflinePackageExtractionAndManager(t *testing.T) {
 			if err != nil || len(files) != 1 || filepath.Dir(files[0]) != dir {
 				t.Fatalf("离线包未放进指定目录：%v %v", files, err)
 			}
-			args := packageManagerArgs(test.manager, files)
+			args := packageManagerArgs(test.manager, files, false)
 			switch test.manager {
 			case "apt-get":
 				// apt 2.4 的 --no-download 和本地 .deb 一起用会报 Pathname to install is not absolute
@@ -61,7 +61,7 @@ func TestOfflinePackageExtractionAndManager(t *testing.T) {
 
 func TestPackageManagerArgsOnline(t *testing.T) {
 	for _, manager := range []string{"apt-get", "dnf", "yum"} {
-		if got := packageManagerArgs(manager, nil); got != manager {
+		if got := packageManagerArgs(manager, nil, false); got != manager {
 			t.Fatalf("在线安装时不该改命令：%s", got)
 		}
 	}

@@ -195,6 +195,8 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.swrestore()
 	case "swupgrade":
 		return a.swupgrade()
+	case "swservice":
+		return a.swservice()
 	case "swlogs":
 		return a.swlogs()
 	case "swunit":

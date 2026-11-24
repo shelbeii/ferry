@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/captain/ferry/internal/proto"
 )
@@ -113,7 +114,7 @@ func TestSystemDir(t *testing.T) {
 	}
 }
 
-// 安装失败时留下安装包（只留最新一个），swcheck 报告有；再失败时换成新的
+// 安装失败时留下安装包（多槽位 LRU，最多留 5 个），swcheck 报告有；超过上限时淘汰最旧的
 func TestKeepPackage(t *testing.T) {
 	f := newFake(t)
 	ferry := filepath.Join(f.root, "ferry")
@@ -136,13 +137,26 @@ func TestKeepPackage(t *testing.T) {
 	}
 	src2, sha2 := put("two")
 	a.keepPackage("nacos", src2, sha2)
-	if check(sha1) || !check(sha2) {
-		t.Fatal("只留最新的一个")
+	if !check(sha1) || !check(sha2) {
+		t.Fatal("多槽位缓存应同时保留 sha1 和 sha2")
 	}
 	// 已经在缓存里（用留着的包装又失败了）：不动
 	a.keepPackage("nacos", filepath.Join(a.swCacheDir(), sha2), sha2)
 	if !check(sha2) {
 		t.Fatal("留着的包不应被删掉")
+	}
+	// 故意把 sha1 的时间调旧，再塞入 4 个新包触发 LRU 淘汰最旧的 sha1
+	old := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(filepath.Join(a.swCacheDir(), sha1), old, old)
+	for _, label := range []string{"three", "four", "five", "six"} {
+		src, _ := put(label)
+		a.keepPackage("nacos", src, label+strings.Repeat("0", 64-len(label)))
+	}
+	if check(sha1) {
+		t.Fatal("超过槽位上限时应淘汰最旧的 sha1")
+	}
+	if !check(sha2) {
+		t.Fatal("较新的 sha2 应仍在缓存中")
 	}
 }
 
