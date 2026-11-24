@@ -1263,21 +1263,21 @@ type SoftwareInstance struct {
 	User          string         `json:"user"`
 	Ports         map[string]int `json:"ports,omitempty"`
 	// AllPorts、UDPPorts 占用的全部 TCP、UDP 端口（含附加端口）：停着时别的软件也不能用
-	AllPorts    []int     `json:"allPorts,omitempty"`
-	UDPPorts    []int     `json:"udpPorts,omitempty"`
-	ReadyMode   string    `json:"readyMode,omitempty"`
-	ReadyPort   int       `json:"readyPort"`
-	ReadyURL    string    `json:"readyUrl,omitempty"`
-	ServiceType string    `json:"serviceType,omitempty"`
-	Custom      bool      `json:"custom,omitempty"`
-	PackageInto string    `json:"packageInto,omitempty"`
-	PackageStrip int      `json:"packageStrip,omitempty"`
-	PackageFormat string  `json:"packageFormat,omitempty"`
-	Logs        []string  `json:"logs,omitempty"`
-	Packages    []string  `json:"packages,omitempty"` // 从软件源装的包（卸载时不删，告诉用户）
-	InstalledAt time.Time `json:"installedAt"`
-	InstalledBy string    `json:"installedBy,omitempty"`
-	Notes       []string  `json:"notes,omitempty"`
+	AllPorts      []int     `json:"allPorts,omitempty"`
+	UDPPorts      []int     `json:"udpPorts,omitempty"`
+	ReadyMode     string    `json:"readyMode,omitempty"`
+	ReadyPort     int       `json:"readyPort"`
+	ReadyURL      string    `json:"readyUrl,omitempty"`
+	ServiceType   string    `json:"serviceType,omitempty"`
+	Custom        bool      `json:"custom,omitempty"`
+	PackageInto   string    `json:"packageInto,omitempty"`
+	PackageStrip  int       `json:"packageStrip,omitempty"`
+	PackageFormat string    `json:"packageFormat,omitempty"`
+	Logs          []string  `json:"logs,omitempty"`
+	Packages      []string  `json:"packages,omitempty"` // 从软件源装的包（卸载时不删，告诉用户）
+	InstalledAt   time.Time `json:"installedAt"`
+	InstalledBy   string    `json:"installedBy,omitempty"`
+	Notes         []string  `json:"notes,omitempty"`
 	// Account 登录用的账号（密码在本机凭据库里）
 	Account string `json:"account,omitempty"`
 	// Upgradable 用安装包装的（程序单独放在安装目录下的一个位置）：可以换新版本的安装包升级

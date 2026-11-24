@@ -88,8 +88,8 @@ func TestSystemBundleRejectsSourceArchive(t *testing.T) {
 func fakeELF(machine uint16) []byte {
 	b := make([]byte, 64)
 	copy(b[:4], []byte{0x7f, 'E', 'L', 'F'})
-	b[4] = 2 // 64-bit
-	b[5] = 1 // little-endian
+	b[4] = 2                                   // 64-bit
+	b[5] = 1                                   // little-endian
 	binary.LittleEndian.PutUint16(b[16:18], 2) // ET_EXEC
 	binary.LittleEndian.PutUint16(b[18:20], machine)
 	return b
