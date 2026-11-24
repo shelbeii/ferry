@@ -16,6 +16,37 @@ const CACHE_DIRS: &[&str] = &[
     "EBWebView/Default/GPUCache",
 ];
 
+const VERSION_MARKER: &str = ".ferry-version";
+
+/// 应用版本变化时（升级 / 降级），在 WebView2 启动前自动清理磁盘缓存、脚本编译缓存与显卡缓存，
+/// 不触碰设置、Cookie 和本地存储；文件此时未被占用，可直接删除。返回 true 表示实际执行了清理。
+#[cfg(any(windows, test))]
+pub fn clear_if_upgraded(dir: &Path, current_version: &str) -> bool {
+    let version = current_version.trim();
+    if version.is_empty() {
+        return false;
+    }
+    let marker = dir.join(VERSION_MARKER);
+    if let Ok(saved) = std::fs::read_to_string(&marker) {
+        if saved.trim() == version {
+            return false;
+        }
+    }
+    let mut cleared = false;
+    if dir.join("EBWebView").exists() {
+        for sub in CACHE_DIRS {
+            let p = dir.join(sub);
+            if p.exists() && std::fs::remove_dir_all(&p).is_ok() {
+                cleared = true;
+            }
+        }
+    }
+    if std::fs::create_dir_all(dir).is_ok() {
+        let _ = std::fs::write(&marker, version);
+    }
+    cleared
+}
+
 fn usage(dir: &Path) -> u64 {
     CACHE_DIRS
         .iter()
@@ -100,4 +131,88 @@ fn clear(v: &Webview) -> Result<(), String> {
 #[cfg(not(windows))]
 fn clear(_: &Webview) -> Result<(), String> {
     Err("这个系统上不能单独清理界面缓存".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_ui_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ferry-uicache-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn seed_webview(dir: &Path) {
+        for sub in CACHE_DIRS {
+            let p = dir.join(sub);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("entry.bin"), b"cached").unwrap();
+        }
+        let keep = dir.join("EBWebView/Default/Local Storage");
+        std::fs::create_dir_all(&keep).unwrap();
+        std::fs::write(keep.join("prefs.ldb"), b"keep-me").unwrap();
+    }
+
+    #[test]
+    fn clears_cache_on_first_upgrade_and_version_change_only() {
+        let dir = temp_ui_dir();
+        seed_webview(&dir);
+
+        // 从未记录版本号（从旧版升级上来）：清掉 3 个缓存目录，保留本地存储，写下当前版本
+        assert!(clear_if_upgraded(&dir, "0.18.9"));
+        for sub in CACHE_DIRS {
+            assert!(!dir.join(sub).exists(), "{sub} 应被清理");
+        }
+        assert_eq!(
+            std::fs::read(dir.join("EBWebView/Default/Local Storage/prefs.ldb")).unwrap(),
+            b"keep-me"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERSION_MARKER)).unwrap(),
+            "0.18.9"
+        );
+
+        // 相同版本再次启动：不再清理缓存
+        seed_webview(&dir);
+        assert!(!clear_if_upgraded(&dir, "0.18.9"));
+        for sub in CACHE_DIRS {
+            assert!(dir.join(sub).join("entry.bin").exists(), "同版本不应清理 {sub}");
+        }
+
+        // 升级到新版本：再次清理缓存并更新版本标记
+        assert!(clear_if_upgraded(&dir, "0.19.0"));
+        for sub in CACHE_DIRS {
+            assert!(!dir.join(sub).exists(), "升级后 {sub} 应被清理");
+        }
+        assert_eq!(
+            std::fs::read(dir.join("EBWebView/Default/Local Storage/prefs.ldb")).unwrap(),
+            b"keep-me"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERSION_MARKER)).unwrap(),
+            "0.19.0"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fresh_install_writes_marker_without_error() {
+        let dir = temp_ui_dir().join("fresh");
+        assert!(!clear_if_upgraded(&dir, "0.18.9"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(VERSION_MARKER)).unwrap(),
+            "0.18.9"
+        );
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
 }

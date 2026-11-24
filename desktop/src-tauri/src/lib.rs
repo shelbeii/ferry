@@ -114,6 +114,55 @@ fn exit_app(webview: tauri::Webview, app: tauri::AppHandle) -> Result<(), String
     Ok(())
 }
 
+/// 清理安装目录下因旧进程占用而改名留下的 ferry.exe.old-*，返回仍被占用删不掉的文件名列表。
+#[cfg(any(windows, test))]
+fn cleanup_old_binaries_in(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut locked = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.to_ascii_lowercase().starts_with("ferry.exe.old-") {
+            continue;
+        }
+        let path = entry.path();
+        if std::fs::remove_file(&path).is_err() && path.exists() {
+            locked.push(name);
+        }
+    }
+    locked.sort();
+    locked
+}
+
+/// 清理残留的旧版 sidecar 并返回仍被外部进程（如 ferry mcp）占用的文件列表。
+#[tauri::command]
+async fn cleanup_old_binaries(webview: tauri::Webview) -> Result<Vec<String>, String> {
+    main_only(&webview)?;
+    #[cfg(windows)]
+    {
+        let dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let Some(dir) = dir else {
+            return Ok(Vec::new());
+        };
+        tauri::async_runtime::spawn_blocking(move || cleanup_old_binaries_in(&dir))
+            .await
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Vec::new())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -136,6 +185,7 @@ pub fn run() {
             read_config,
             write_config,
             exit_app,
+            cleanup_old_binaries,
             shellicon::sync_shell_icon,
             shellicon::refresh_shell_icon,
             open_external,
@@ -168,11 +218,27 @@ pub fn run() {
                 .visible(false);
             #[cfg(not(target_os = "macos"))]
             let redirected = data_dir();
+            #[cfg(windows)]
+            if let Some(d) = &redirected {
+                uicache::clear_if_upgraded(
+                    &d.join("webview"),
+                    &app.package_info().version.to_string(),
+                );
+            }
             #[cfg(not(target_os = "macos"))]
             if let Some(d) = &redirected {
                 w = w.data_directory(d.join("webview"));
             }
             let win = w.build()?;
+            #[cfg(windows)]
+            if let Some(dir) = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            {
+                std::thread::spawn(move || {
+                    let _ = cleanup_old_binaries_in(&dir);
+                });
+            }
             #[cfg(windows)]
             windowchrome::hide_branding(&win)?;
             {
@@ -212,4 +278,74 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("启动 Ferry 失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ferry-lib-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cleanup_old_binaries_removes_unlocked_and_preserves_others() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("ferry.exe"), b"new").unwrap();
+        std::fs::write(dir.join("ferry-desktop.exe"), b"ui").unwrap();
+        std::fs::write(dir.join("ferry.exe.old-100"), b"old1").unwrap();
+        std::fs::write(dir.join("FERRY.EXE.OLD-200"), b"old2").unwrap();
+        std::fs::create_dir_all(dir.join("ferry.exe.old-dir")).unwrap();
+
+        let locked = cleanup_old_binaries_in(&dir);
+        assert!(locked.is_empty(), "未占用的旧文件应全部清理：{locked:?}");
+        assert!(!dir.join("ferry.exe.old-100").exists());
+        assert!(!dir.join("FERRY.EXE.OLD-200").exists());
+        assert!(dir.join("ferry.exe").exists());
+        assert!(dir.join("ferry-desktop.exe").exists());
+        assert!(dir.join("ferry.exe.old-dir").is_dir());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_old_binaries_reports_locked_files() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = temp_dir();
+        let locked_path = dir.join("ferry.exe.old-999");
+        let unlocked_path = dir.join("ferry.exe.old-111");
+        std::fs::write(&locked_path, b"locked").unwrap();
+        std::fs::write(&unlocked_path, b"unlocked").unwrap();
+
+        // share_mode(1) = FILE_SHARE_READ（不共享 DELETE，模拟运行中的旧 exe）
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&locked_path)
+            .unwrap();
+
+        let locked = cleanup_old_binaries_in(&dir);
+        assert_eq!(locked, vec!["ferry.exe.old-999".to_string()]);
+        assert!(!unlocked_path.exists());
+        assert!(locked_path.exists());
+
+        drop(hold);
+        let locked_after = cleanup_old_binaries_in(&dir);
+        assert!(locked_after.is_empty());
+        assert!(!locked_path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
