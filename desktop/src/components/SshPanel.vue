@@ -11,16 +11,26 @@ const errors = reactive<Record<string, { msg: string; unknownHost: boolean }>>({
 </script>
 
 <script setup lang="ts">
-// 服务器上连着的 SSH：谁、从哪里、什么时候连上、在干什么；可以断开（本机 Ferry 自己的连接除外）。
+// 服务器上连着的 SSH：谁、归属来源（本机 Ferry / 本机其他软件 / 同 IP 其他设备 / 外部）、认证方式、连了多久、在干什么；可以断开（当前连接除外）。
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Key, Refresh, SwitchButton } from '@element-plus/icons-vue'
+import { InfoFilled, Key, Refresh, SwitchButton } from '@element-plus/icons-vue'
 import { call, FerryError, type SSHSession } from '../ferry'
 import { secretRequest, trustRequest, trustedTick } from '../state'
 import LoadingBlock from './LoadingBlock.vue'
 import { readCall, ReadCanceled, useReadRequests } from '../readRequests'
 import { useManualRefresh } from '../manualRefresh'
 import { useInteractionScope } from '../interactionScope'
+import {
+  buildKickWarningLines,
+  filterSessions,
+  formatSessionActivity,
+  formatSessionAuth,
+  originBadge,
+  sessionShortDesc,
+  summarizeSessions,
+  type SessionFilter,
+} from '../sshSessions'
 
 const props = defineProps<{
   config: string
@@ -37,7 +47,9 @@ const report = computed(() => cache[key.value])
 const error = computed(() => errors[key.value])
 const sessions = computed<SSHSession[]>(() => report.value?.sessions ?? [])
 const sessionQuery = defineModel<string>('query', { default: '' })
-const matchingSessions = computed(() => sessions.value.filter((s) => `${s.user} ${s.from ?? ''} ${s.kind} ${(s.cmds ?? []).join(' ')}`.toLowerCase().includes(sessionQuery.value.trim().toLowerCase())))
+const sessionFilter = defineModel<SessionFilter>('filter', { default: 'all' })
+const matchingSessions = computed(() => filterSessions(sessions.value, sessionFilter.value, sessionQuery.value))
+const shownCount = computed(() => matchingSessions.value.length)
 const reads = useReadRequests()
 const loading = computed(() => !!reads.loading.value[key.value])
 onBeforeUnmount(reads.cancelAll)
@@ -78,17 +90,7 @@ watch(
 )
 watch(trustedTick, () => errors[key.value] && load())
 
-const counts = computed(() => {
-  if (!report.value) return undefined
-  const s = sessions.value
-  return {
-    total: s.length,
-    users: new Set(s.map((x) => x.user)).size,
-    ips: new Set(s.filter((x) => x.from).map((x) => x.from)).size,
-    terminals: s.filter((x) => x.kind === 'terminal').length,
-    pending: report.value.pending ?? 0,
-  }
-})
+const counts = computed(() => summarizeSessions(report.value))
 
 const kindText: Record<SSHSession['kind'], string> = {
   terminal: '终端',
@@ -126,14 +128,22 @@ function idleText(s: SSHSession): string {
   return s.idle < 60 ? '正在使用' : `${span(s.idle)}没输入`
 }
 
+function fromSub(s: SSHSession): string {
+  if (s.origin === 'local-proc' && s.localPid) return `本机 PID ${s.localPid}`
+  if (s.origin === 'same-ip') return '同 IP · 非本机端口'
+  if (s.origin === 'nat-same-ip' && report.value?.natPortTranslated) return '同出口 IP · 经 NAT 转换'
+  return ''
+}
+
 function why(s: SSHSession): string {
-  if (s.self) return '这是本机 Ferry 正在用的连接（终端、文件、这个列表都经它），不能在这里断开'
+  if (s.self) return '这是本机 Ferry 当前页面正在用的连接（终端、文件、这个列表都经它），不能在这里断开'
   if (!s.kick) return `登录用户 ${report.value?.me} 不是 root，也不能免密 sudo：只能断开 ${report.value?.me} 自己的连接`
   return ''
 }
 
-function desc(s: SSHSession): string {
-  return `${s.user}${s.from ? `（来自 ${s.from}）` : ''}的${kindText[s.kind] === '空闲' ? '连接' : kindText[s.kind]}`
+function canBulkSelect(r: SSHSession): boolean {
+  // 本机 Ferry 连接池里的其他连接不参与全选批量断开，避免误踢自己；仍可在行末手动断开
+  return r.kick && !r.self && r.origin !== 'ferry-pool'
 }
 
 async function kick(rows: SSHSession[]) {
@@ -142,9 +152,8 @@ async function kick(rows: SSHSession[]) {
   const config = props.config, target = props.target, k = key.value
   rows = rows.filter((r) => r.kick && !r.self)
   if (!rows.length) return
-  const what = rows.length === 1 ? desc(rows[0]) : `这 ${rows.length} 个连接`
-  const lines = rows.length > 1 ? rows.map((r) => `· ${desc(r)}`) : []
-  lines.push('', '里面正在运行的命令会被结束。对方可以重新连上：不想让它再连，要改密码、去掉它的公钥，或用防火墙限制来源。')
+  const what = rows.length === 1 ? sessionShortDesc(rows[0]) : `这 ${rows.length} 个连接`
+  const lines = buildKickWarningLines(rows)
   try {
     await ElMessageBox.confirm(lines.join('\n').trim(), `断开 ${what}`, {
       type: 'warning',
@@ -178,19 +187,27 @@ const kickSelected = () => kick(selected.value)
 const manual = useManualRefresh(() => key.value)
 const refreshing = manual.refreshing
 const refresh = () => manual.run('登录用户', () => load(), () => !error.value)
-defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kicking, kickSelected })
+defineExpose({ load, refresh, refreshing, loading, error, counts, shownCount, selected, kicking, kickSelected })
 </script>
 
 <template>
   <div class="sp" :class="{ refreshing }">
     <div v-if="bar" class="sp-bar">
-      <el-input v-model="sessionQuery" class="session-search" placeholder="搜索用户、来源 IP 或命令" clearable aria-label="搜索登录会话" />
+      <el-input v-model="sessionQuery" class="session-search" placeholder="搜索用户、归属、IP、密钥备注或命令" clearable aria-label="搜索登录会话" />
+      <el-radio-group v-model="sessionFilter" size="small" aria-label="按来源筛选">
+        <el-radio-button value="all">全部</el-radio-button>
+        <el-radio-button value="others">其他设备</el-radio-button>
+        <el-radio-button value="local">仅本机</el-radio-button>
+        <el-radio-button value="non-ferry">隐藏 Ferry</el-radio-button>
+      </el-radio-group>
       <el-button type="danger" plain :icon="SwitchButton" :disabled="!selected.length" :loading="kicking" @click="kickSelected">
         断开{{ selected.length ? `（${selected.length}）` : '所选' }}
       </el-button>
       <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的登录用户" placement="bottom"><el-button :icon="Refresh" :loading="loading || refreshing" circle aria-label="刷新登录用户" @click="refresh()" /></el-tooltip>
       <span class="spacer" />
-      <span v-if="counts" class="muted">{{ counts.total }} 个连接 · {{ counts.users }} 个用户 · {{ counts.ips }} 个来源 IP</span>
+      <span v-if="counts" class="muted">
+        {{ counts.total }} 个连接（本机 {{ counts.localCount }} · 其他 {{ counts.otherDeviceCount }}）· {{ counts.ips }} 个来源 IP
+      </span>
     </div>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon class="sp-err">
@@ -209,7 +226,7 @@ defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kick
       class="sp-loading"
     />
     <template v-else-if="report">
-      <div v-if="report.pending || report.notes?.length" class="sp-notes">
+      <div v-if="report.pending || report.notes?.length || (report.natPortTranslated && (counts?.natSameIPCount ?? 0) > 0)" class="sp-notes">
         <el-tooltip
           v-if="report.pending"
           :show-after="HOVER_DELAY"
@@ -218,6 +235,9 @@ defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kick
         >
           <span class="pending">另外有 {{ report.pending }} 个连接正在登录（还没通过验证）</span>
         </el-tooltip>
+        <span v-if="report.natPortTranslated && (counts?.natSameIPCount ?? 0) > 0" class="muted small">
+          当前连接经过了 NAT / 代理端口转换：同出口 IP 的非 Ferry 连接无法仅按本机端口区分设备，可结合认证密钥备注与终端内容判断
+        </span>
         <span v-for="n in report.notes ?? []" :key="n" class="muted small">{{ n }}</span>
       </div>
 
@@ -225,53 +245,109 @@ defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kick
         <el-table
           :data="matchingSessions"
           row-key="pid"
-          :empty-text="sessionQuery.trim() ? '没有匹配的 SSH 连接' : '没有已登录的 SSH 连接'"
+          :empty-text="sessionQuery.trim() || sessionFilter !== 'all' ? '没有匹配的 SSH 连接' : '没有已登录的 SSH 连接'"
           @selection-change="(rows: SSHSession[]) => (selected = rows)"
         >
-          <el-table-column type="selection" width="44" :selectable="(r: SSHSession) => r.kick && !r.self" />
-          <el-table-column label="用户" min-width="120">
+          <el-table-column type="selection" width="44" :selectable="canBulkSelect" />
+          <el-table-column label="用户与归属" min-width="210">
             <template #default="{ row }">
-              <span class="name">{{ row.user }}</span>
-              <el-tooltip v-if="row.self" :show-after="HOVER_DELAY" content="本机 Ferry 正在用的连接（终端、文件、这个列表都经它）" placement="top">
-                <el-tag size="small" type="success" effect="plain" class="ml">本机 Ferry</el-tag>
-              </el-tooltip>
+              <div class="user-line">
+                <span class="name">{{ row.user }}</span>
+                <el-tooltip v-if="originBadge(row)" :show-after="HOVER_DELAY" :content="originBadge(row)!.tip" placement="top">
+                  <el-tag size="small" :type="originBadge(row)!.type" effect="plain" class="origin-tag">
+                    {{ originBadge(row)!.text }}
+                  </el-tag>
+                </el-tooltip>
+              </div>
+              <div class="sub meta-line">
+                <span class="mono">PID {{ row.pid }}</span>
+                <template v-if="formatSessionAuth(row)">
+                  <span class="dot">·</span>
+                  <el-tooltip :show-after="HOVER_DELAY" :content="formatSessionAuth(row)!.tip" placement="top">
+                    <span class="auth-chip">{{ formatSessionAuth(row)!.text }}</span>
+                  </el-tooltip>
+                </template>
+              </div>
             </template>
           </el-table-column>
-          <el-table-column label="来源" min-width="150">
+          <el-table-column label="来源" min-width="155">
             <template #default="{ row }">
               <template v-if="row.from">
-                <span class="mono">{{ row.from }}</span><span v-if="row.fromPort" class="muted mono port">:{{ row.fromPort }}</span>
+                <div>
+                  <span class="mono">{{ row.from }}</span><span v-if="row.fromPort" class="muted mono port">:{{ row.fromPort }}</span>
+                </div>
+                <div v-if="fromSub(row)" class="sub">{{ fromSub(row) }}</div>
               </template>
               <el-tooltip v-else :show-after="HOVER_DELAY" content="登录用户不是 root、也不能免密 sudo，看不到别的用户的连接从哪里来" placement="top">
                 <span class="muted">看不到</span>
               </el-tooltip>
             </template>
           </el-table-column>
-          <el-table-column label="连了多久" width="110">
+          <el-table-column label="连了多久" width="102">
             <template #default="{ row }">
               <el-tooltip :show-after="HOVER_DELAY" :content="`${fullTime(row.since)} 连上`" placement="top">
                 <span>{{ age(row) }}</span>
               </el-tooltip>
             </template>
           </el-table-column>
-          <el-table-column label="类型" width="130">
+          <el-table-column label="类型" width="136">
             <template #default="{ row }">
-              <el-tooltip :show-after="HOVER_DELAY" :content="kindTip[row.kind as SSHSession['kind']]" placement="top">
-                <span class="kind" :class="row.kind">{{ kindText[row.kind as SSHSession['kind']] }}</span>
-              </el-tooltip>
-              <span v-if="row.ttys?.length" class="muted mono small ml">{{ row.ttys.join(',') }}</span>
+              <div class="kind-line">
+                <el-tooltip :show-after="HOVER_DELAY" :content="kindTip[row.kind as SSHSession['kind']]" placement="top">
+                  <span class="kind" :class="row.kind">{{ kindText[row.kind as SSHSession['kind']] }}</span>
+                </el-tooltip>
+                <span v-if="row.ttys?.length" class="muted mono small ml">{{ row.ttys.join(',') }}</span>
+              </div>
+              <div v-if="row.forwards?.length" class="sub">
+                <el-tooltip :show-after="HOVER_DELAY" :content="`活跃端口转发：${row.forwards.join('、')}`" placement="top">
+                  <span class="fw-chip">含端口转发</span>
+                </el-tooltip>
+              </div>
             </template>
           </el-table-column>
-          <el-table-column label="在干什么" min-width="200">
+          <el-table-column label="在干什么" min-width="230">
             <template #default="{ row }">
-              <div v-if="row.cmds?.length" class="mono cmds" :title="row.cmds.join('\n')">{{ row.cmds.join('；') }}</div>
-              <span v-else class="muted">—</span>
+              <div class="act-line">
+                <span v-if="formatSessionActivity(row).summary" class="act-text" :class="{ mono: !formatSessionActivity(row).hasFriendly }" :title="formatSessionActivity(row).raw || formatSessionActivity(row).summary">
+                  {{ formatSessionActivity(row).summary }}
+                </span>
+                <span v-else class="muted">—</span>
+                <el-popover placement="left" :width="380" trigger="click">
+                  <template #reference>
+                    <button type="button" class="detail-btn" aria-label="查看连接详情" title="查看原始命令与认证详情">
+                      <el-icon><InfoFilled /></el-icon>
+                    </button>
+                  </template>
+                  <div class="detail-pop">
+                    <div class="detail-title">{{ row.user }} · sshd PID {{ row.pid }}</div>
+                    <div class="detail-row"><span>连入时间</span><span class="mono">{{ fullTime(row.since) }}</span></div>
+                    <div v-if="row.from" class="detail-row"><span>来源地址</span><span class="mono">{{ row.from }}{{ row.fromPort ? `:${row.fromPort}` : '' }}</span></div>
+                    <div v-if="row.originDetail || row.originLabel" class="detail-row"><span>归属判定</span><span>{{ row.originDetail || row.originLabel }}</span></div>
+                    <div v-if="row.localProcess || row.localPid" class="detail-row"><span>本机进程</span><span class="mono">{{ row.localProcess || '未知' }}{{ row.localPid ? ` (PID ${row.localPid})` : '' }}</span></div>
+                    <div v-if="formatSessionAuth(row)" class="detail-row"><span>登录认证</span><span>{{ formatSessionAuth(row)!.text }}</span></div>
+                    <div v-if="row.authKey" class="detail-row"><span>公钥指纹</span><span class="mono break-all">{{ row.authKey }}</span></div>
+                    <div v-if="row.forwards?.length" class="detail-row"><span>端口转发</span><span class="mono break-all">{{ row.forwards.join('、') }}</span></div>
+                    <div v-if="row.cmds?.length" class="detail-block">
+                      <div class="detail-sub">原始进程命令</div>
+                      <pre class="detail-pre">{{ row.cmds.join('\n') }}</pre>
+                    </div>
+                  </div>
+                </el-popover>
+              </div>
               <div v-if="idleText(row)" class="sub" :class="{ active: row.idle < 60 }">{{ idleText(row) }}</div>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
             <template #default="{ row }">
-              <el-button v-if="row.kick && !row.self" link type="danger" :disabled="kicking" @click="kick([row])">断开</el-button>
+              <el-button
+                v-if="row.kick && !row.self"
+                link
+                :type="row.origin === 'ferry-pool' ? 'warning' : 'danger'"
+                :disabled="kicking"
+                @click="kick([row])"
+              >
+                断开
+              </el-button>
               <el-tooltip v-else :show-after="HOVER_DELAY" :content="why(row)" placement="left">
                 <span class="muted small">不能断开</span>
               </el-tooltip>
@@ -305,7 +381,7 @@ defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kick
   font-size: 13px;
 }
 .sp-bar > * { flex-shrink: 0; }
-.sp-bar > .session-search { flex: 0 1 320px; min-width: 120px; }
+.sp-bar > .session-search { flex: 0 1 280px; min-width: 140px; }
 .sp-bar > .spacer { flex-shrink: 1; min-width: 0; }
 .sp-bar .el-button + .el-button {
   margin-left: 0;
@@ -346,11 +422,40 @@ defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kick
   border-bottom: 1px dashed var(--el-color-warning-light-5);
   cursor: default;
 }
+.user-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .name {
   font-weight: 500;
 }
+.origin-tag {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.meta-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.dot {
+  opacity: 0.55;
+}
+.auth-chip {
+  border-bottom: 1px dashed var(--el-border-color);
+  cursor: default;
+}
 .port {
   font-size: 12px;
+}
+.kind-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
 }
 .kind {
   display: inline-block;
@@ -368,11 +473,79 @@ defineExpose({ load, refresh, refreshing, loading, error, counts, selected, kick
   background: var(--el-color-success-light-9);
   color: var(--el-color-success-dark-2);
 }
-.cmds {
+.fw-chip {
+  color: var(--el-color-primary);
+  font-size: 11.5px;
+}
+.act-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.act-text {
   font-size: 12.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.detail-btn {
+  border: none;
+  background: transparent;
+  color: var(--el-text-color-placeholder);
+  cursor: pointer;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+.detail-btn:hover {
+  color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+}
+.detail-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.detail-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.detail-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+.detail-row > span:first-child {
+  color: var(--el-text-color-secondary);
+}
+.detail-block {
+  margin-top: 2px;
+}
+.detail-sub {
+  color: var(--el-text-color-secondary);
+  margin-bottom: 4px;
+}
+.detail-pre {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+  font-family: var(--ferry-mono, monospace);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
+}
+.break-all {
+  word-break: break-all;
 }
 .sub {
   margin-top: 2px;

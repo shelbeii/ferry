@@ -70,6 +70,20 @@ func (c *conn) setCPUSample(lines []string) {
 	}
 }
 
+// remoteAgentPID 返回该连接上常驻 agent 在服务器上的 PID（未启动或未收到握手时为 0）。
+func (c *conn) remoteAgentPID() int {
+	if c == nil {
+		return 0
+	}
+	c.srvMu.Lock()
+	srv := c.srv
+	c.srvMu.Unlock()
+	if srv == nil || !srv.alive() {
+		return 0
+	}
+	return int(srv.remotePID.Load())
+}
+
 // session 一次操作对一个目标的使用：连接（可能是复用的）+ 本次请求的引擎（输出、配置）。
 type session struct {
 	*conn
@@ -511,7 +525,7 @@ var changingCmds = map[string]string{
 	"db-tools-install": "",
 	"secretset":        "",
 	"deploy":           "（失败时自动回滚）", "rollback": "（失败时切回原版本）", "control": "", "runtime": "", "runjob": "（定时任务在服务器上照常跑完）",
-	"swinstall": "", "swcontrol": "", "swremove": "", "portset": "", "fwenable": "（3 分钟内没确认会自动关掉防火墙）", "fwdisable": "",
+	"swinstall": "", "swcontrol": "", "swremove": "", "portset": "", "fwenable": "（3 分钟内没确认会自动关掉防火墙）", "fwdisable": "", "fwinstall": "", "fwuninstall": "",
 	"jdkremove": "", "runtimeremove": "",
 }
 

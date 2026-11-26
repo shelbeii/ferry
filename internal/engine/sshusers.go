@@ -1,14 +1,19 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/proto"
 )
 
@@ -46,6 +51,32 @@ type SSHSession struct {
 	// Kick 登录用户能不能断开它（root、能 sudo 时都能；否则只能断开自己用户的连接）
 	Kick bool `json:"kick"`
 
+	// Origin 连接归属分类：
+	//   "self"        当前查询所用的本机 Ferry 连接
+	//   "ferry-pool"  本机 Ferry 连接池里的其他连接（其他项目、独立连接、或并发溢出扩展连接）
+	//   "local-proc"  本机上的其他进程（如 ssh、Xshell、GoLand、另一实例 Ferry MCP/CLI）
+	//   "same-ip"     同出口 IP 的其他设备（确认无 NAT 端口转换且本机未占用该源端口）
+	//   "nat-same-ip" 同出口 IP，但经过 NAT/代理端口转换或本机 TCP 表不可用，无法仅靠端口确认是否本机
+	//   "remote"      其他 IP 来源
+	Origin string `json:"origin,omitempty"`
+	// OriginLabel 面向用户的简短归属标签（如「当前连接」「本机 Ferry（独立连接：xxx）」「本机 · ssh.exe」「同 IP 其他设备」）
+	OriginLabel string `json:"originLabel,omitempty"`
+	// OriginDetail 归属详情说明（用于悬停提示或展开查看）
+	OriginDetail string `json:"originDetail,omitempty"`
+	// LocalPID 匹配到本机进程时的本地进程 PID
+	LocalPID int `json:"localPid,omitempty"`
+	// LocalProcess 匹配到本机进程时的进程名
+	LocalProcess string `json:"localProcess,omitempty"`
+
+	// AuthMethod 服务端日志识别出的认证方式（publickey | password | keyboard-interactive）
+	AuthMethod string `json:"authMethod,omitempty"`
+	// AuthKey 公钥登录时的密钥指纹（如 SHA256:...）
+	AuthKey string `json:"authKey,omitempty"`
+	// AuthKeyComment 从目标用户 authorized_keys 反查到的公钥备注（如 zhangsan@MacBook）
+	AuthKeyComment string `json:"authKeyComment,omitempty"`
+	// Forwards 该连接当前活跃的端口转发目标（如 127.0.0.1:3306）
+	Forwards []string `json:"forwards,omitempty"`
+
 	pids []int // 这个连接的 sshd 进程（断开时一起结束）
 }
 
@@ -61,9 +92,16 @@ type SSHReport struct {
 	Notes   []string `json:"notes,omitempty"`
 	// Now 服务器上的当前时间（Unix 秒）：算连了多久用它，不受本机时钟影响
 	Now int64 `json:"now"`
+	// SelfFrom 当前 Ferry 连接在服务器侧看到的客户端 IP（用于区分同 IP 连接）
+	SelfFrom string `json:"selfFrom,omitempty"`
+	// NATPortTranslated 客户端本机源端口与服务器看到的源端口不一致（说明经过了端口转换 NAT / 代理）
+	NATPortTranslated bool `json:"natPortTranslated,omitempty"`
 }
 
-// sshScript 列出 sshd 的进程、它们的子进程、连接的对方地址。分段输出，由 parseSSH 解析。
+// localTCPLookup 可在单元测试里替换本机 TCP 进程表查询函数。
+var localTCPLookup = lookupLocalTCP
+
+// sshScript 列出 sshd 的进程、它们的子进程、连接的对方地址、认证日志与公钥备注。分段输出，由 parseSSH 解析。
 // 对方地址：root 时从 ss 看 sshd 的 TCP 连接；再从子进程的环境变量 SSH_CONNECTION 看（自己用户的能读）；终端的还有 who。
 const sshScript = `echo "@@self $$"
 echo "@@now $(date +%s)"
@@ -77,11 +115,31 @@ K=$(echo "$P" | awk '{ n[NR] = $1; p[NR] = $2; a[NR] = $5; if ($5 ~ /^sshd/) s[$
 echo "@@env"
 [ -n "$K" ] && grep -a -s -o -m1 -H 'SSH_CONNECTION=[0-9A-Fa-f.:% ]*' $K
 echo "@@ss"
-[ "$(id -u)" = 0 ] && ss -tnp 2>/dev/null | grep sshd
+[ "$(id -u)" = 0 ] && ss -atnp 2>/dev/null | grep sshd
 echo "@@who"
 who 2>/dev/null
 echo "@@tty"
 stat -c '%n %X' /dev/pts/[0-9]* 2>/dev/null
+echo "@@auth"
+if [ "$(id -u)" = 0 ]; then
+  A=""
+  if command -v journalctl >/dev/null 2>&1; then
+    A=$(journalctl -t sshd -t sshd-session --no-pager -o short -n 2000 2>/dev/null | grep 'Accepted ' | tail -n 200)
+  fi
+  if [ -z "$A" ]; then
+    A=$(tail -n 1000 /var/log/auth.log /var/log/secure 2>/dev/null | grep 'Accepted ' | tail -n 200)
+  fi
+  [ -n "$A" ] && printf '%s\n' "$A"
+fi
+echo "@@keylines"
+USERS=$(echo "$P" | awk '$5 ~ /^sshd/ { if ($6 ~ /@/) { u=$6; sub(/@.*/, "", u); seen[u]=1 } else if ($7 == "[priv]" || (NF == 6 && $6 !~ /^[/[]/)) { seen[$6]=1 } } END { for (x in seen) print x }')
+for u in $USERS; do
+  h=$(awk -F: -v u="$u" '$1==u {print $6; exit}' /etc/passwd 2>/dev/null)
+  [ -n "$h" ] || continue
+  for kf in "$h/.ssh/authorized_keys" "$h/.ssh/authorized_keys2"; do
+    [ -r "$kf" ] && head -n 200 "$kf" 2>/dev/null | awk -v u="$u" 'NF && $1 !~ /^#/ { printf "%s\t%s\n", u, $0 }'
+  done
+done
 true
 `
 
@@ -126,7 +184,12 @@ func listSSH(s *session) (*SSHReport, error) {
 				priv = "root"
 			}
 			lines = append([]string{"priv " + priv}, lines...)
-			return parseSSH(lines, s.t.User, keepPorts(s)[0])
+			rep, descToTop, perr := parseSSHInternal(lines, s.t.User, keepPorts(s)[0])
+			if perr != nil {
+				return nil, perr
+			}
+			enrichSSHReport(s, rep, descToTop)
+			return rep, nil
 		}
 		if errors.Is(err, ErrCanceled) || s.e.ctx().Err() != nil {
 			return nil, err
@@ -140,7 +203,275 @@ func listSSH(s *session) (*SSHReport, error) {
 	if res.Code != 0 && len(lines) == 0 {
 		return nil, fmt.Errorf("查看 SSH 连接失败：%s", strings.TrimSpace(res.Stderr))
 	}
-	return parseSSH(lines, s.t.User, keepPorts(s)[0])
+	rep, descToTop, perr := parseSSHInternal(lines, s.t.User, keepPorts(s)[0])
+	if perr != nil {
+		return nil, perr
+	}
+	enrichSSHReport(s, rep, descToTop)
+	return rep, nil
+}
+
+// enrichSSHReport 在客户端侧补全每条 SSH 连接的归属信息：
+// 1) 当前 Ferry 连接；
+// 2) 同进程连接池中的其他 Ferry 连接（含独立连接、其他项目、并发溢出扩展连接；优先按常驻 agent 远端 PID 匹配，跨 NAT 也准确）；
+// 3) 同 IP 且无 NAT 端口转换时，反查本机 TCP 表定位到本机具体进程名（如 Xshell、GoLand、ssh、另一 Ferry MCP 实例），或确认是「同 IP 其他设备」。
+func enrichSSHReport(s *session, rep *SSHReport, descToTop map[int]int) {
+	if s == nil || rep == nil {
+		return
+	}
+	remoteIP, remotePort := "", 0
+	selfLocalPort := 0
+	hostFP := ""
+	var selfExtraPorts []int
+	if s.c != nil {
+		remoteIP, remotePort = s.c.RemoteAddr()
+		selfLocalPort = s.c.LocalPort()
+		hostFP = s.c.HostFingerprint
+		selfExtraPorts = s.c.ExtraLocalPorts()
+	}
+	var poolSnaps []poolConnSnap
+	if s.e != nil && s.e.Pool != nil {
+		poolSnaps = s.e.Pool.snapshotForServer(hostFP, remoteIP, remotePort)
+	}
+	enrichSSHReportWith(enrichInput{
+		CurrentConn:    s.conn,
+		CurrentRef:     currentSessionRefLabel(s),
+		SelfLocalPort:  selfLocalPort,
+		SelfExtraPorts: selfExtraPorts,
+		RemoteIP:       remoteIP,
+		RemotePort:     remotePort,
+		PoolSnaps:      poolSnaps,
+		DescToTop:      descToTop,
+		LocalPID:       os.Getpid(),
+		LocalProcName:  selfProcessName(),
+		LookupTCP:      localTCPLookup,
+	}, rep)
+}
+
+type enrichInput struct {
+	CurrentConn    *conn
+	CurrentRef     string
+	SelfLocalPort  int
+	SelfExtraPorts []int
+	RemoteIP       string
+	RemotePort     int
+	PoolSnaps      []poolConnSnap
+	DescToTop      map[int]int
+	LocalPID       int
+	LocalProcName  string
+	LookupTCP      func(remoteIP string, remotePort int) (map[int]localTCPProc, bool)
+}
+
+func enrichSSHReportWith(in enrichInput, rep *SSHReport) {
+	if rep == nil {
+		return
+	}
+	var selfSess *SSHSession
+	for i := range rep.Sessions {
+		if rep.Sessions[i].Self {
+			selfSess = &rep.Sessions[i]
+			break
+		}
+	}
+	if selfSess != nil && selfSess.From != "" {
+		rep.SelfFrom = selfSess.From
+	}
+	natTranslated := in.SelfLocalPort > 0 && selfSess != nil && selfSess.FromPort > 0 && in.SelfLocalPort != selfSess.FromPort
+	rep.NATPortTranslated = natTranslated
+
+	// 1. 先标记当前连接与同进程 Ferry 连接池中的所有连接
+	for i := range rep.Sessions {
+		ss := &rep.Sessions[i]
+		if ss.Self {
+			ss.Origin = "self"
+			ss.OriginLabel = "当前连接"
+			ref := in.CurrentRef
+			if ref != "" {
+				ss.OriginDetail = fmt.Sprintf("本机 Ferry 当前页面正在使用的连接（%s，本机 PID %d）", ref, in.LocalPID)
+			} else {
+				ss.OriginDetail = fmt.Sprintf("本机 Ferry 当前页面正在使用的连接（本机 PID %d）", in.LocalPID)
+			}
+			ss.LocalPID = in.LocalPID
+			ss.LocalProcess = in.LocalProcName
+			continue
+		}
+
+		sameIP := rep.SelfFrom != "" && ss.From != "" && ss.From == rep.SelfFrom
+
+		// 当前连接的并发溢出扩展连接（c.extra）
+		if !natTranslated && sameIP && ss.FromPort > 0 && slices.Contains(in.SelfExtraPorts, ss.FromPort) {
+			ss.Origin = "ferry-pool"
+			ss.OriginLabel = "本机 Ferry（并发扩展）"
+			if in.CurrentRef != "" {
+				ss.OriginDetail = fmt.Sprintf("当前连接（%s）因会话数达到服务器上限自动扩展的并发连接（本机 PID %d）", in.CurrentRef, in.LocalPID)
+			} else {
+				ss.OriginDetail = fmt.Sprintf("本机 Ferry 因会话数达到上限自动扩展的并发连接（本机 PID %d）", in.LocalPID)
+			}
+			ss.LocalPID = in.LocalPID
+			ss.LocalProcess = in.LocalProcName
+			continue
+		}
+
+		// 连接池里的其他条目（如左侧独立连接、其他项目目标）
+		if snap, extra, matched := matchPoolSnap(ss, in.CurrentConn, in.PoolSnaps, in.DescToTop, sameIP, natTranslated); matched {
+			ss.Origin = "ferry-pool"
+			refShort, refFull := formatPoolSnapRefs(snap)
+			if extra {
+				if refShort != "" {
+					ss.OriginLabel = fmt.Sprintf("本机 Ferry（%s · 扩展）", refShort)
+				} else {
+					ss.OriginLabel = "本机 Ferry（并发扩展）"
+				}
+			} else if refShort != "" {
+				ss.OriginLabel = fmt.Sprintf("本机 Ferry（%s）", refShort)
+			} else {
+				ss.OriginLabel = "本机 Ferry（其他连接）"
+			}
+			detail := fmt.Sprintf("同一个 Ferry 进程维持的另一条 SSH 连接（%s，本机 PID %d）", refFull, in.LocalPID)
+			if extra {
+				detail += " · 并发溢出扩展连接"
+			}
+			ss.OriginDetail = detail
+			ss.LocalPID = in.LocalPID
+			ss.LocalProcess = in.LocalProcName
+		}
+	}
+
+	// 2. 对剩余「与当前连接同 IP」的会话，若未经过端口转换 NAT，则查本机 TCP 进程表
+	needLocalLookup := false
+	if !natTranslated && rep.SelfFrom != "" && in.RemoteIP != "" && in.RemotePort > 0 && in.LookupTCP != nil {
+		for i := range rep.Sessions {
+			ss := &rep.Sessions[i]
+			if ss.Origin == "" && ss.From == rep.SelfFrom && ss.FromPort > 0 {
+				needLocalLookup = true
+				break
+			}
+		}
+	}
+	var localMap map[int]localTCPProc
+	localLookupOK := false
+	if needLocalLookup {
+		localMap, localLookupOK = in.LookupTCP(in.RemoteIP, in.RemotePort)
+	}
+
+	// 3. 给所有剩余会话分配最终归属
+	for i := range rep.Sessions {
+		ss := &rep.Sessions[i]
+		if ss.Origin != "" || ss.From == "" {
+			continue
+		}
+		if rep.SelfFrom != "" && ss.From == rep.SelfFrom {
+			if !natTranslated && localLookupOK && ss.FromPort > 0 {
+				if proc, ok := localMap[ss.FromPort]; ok {
+					ss.Origin = "local-proc"
+					ss.LocalPID = proc.PID
+					ss.LocalProcess = proc.Name
+					ss.OriginLabel, ss.OriginDetail = formatLocalProcOrigin(proc, ss.FromPort)
+					continue
+				}
+				ss.Origin = "same-ip"
+				ss.OriginLabel = "同 IP 其他设备"
+				ss.OriginDetail = fmt.Sprintf("来源 IP 与本机相同（%s），但本机未占用源端口 %d，通常来自同一局域网 NAT、VPN 或出口网关下的其他设备", ss.From, ss.FromPort)
+				continue
+			}
+			ss.Origin = "nat-same-ip"
+			ss.OriginLabel = "同出口 IP"
+			if natTranslated {
+				ss.OriginDetail = fmt.Sprintf("与当前连接来源 IP 相同（%s），但链路经过了 NAT / 代理端口转换，无法仅凭源端口确认是否为本机其他软件，可结合认证密钥或终端内容判断", ss.From)
+			} else {
+				ss.OriginDetail = fmt.Sprintf("与当前连接来源 IP 相同（%s），本机进程表暂不可用，无法进一步区分是本机其他软件还是同网关其他设备", ss.From)
+			}
+			continue
+		}
+		ss.Origin = "remote"
+		ss.OriginLabel = "其他 IP"
+		if rep.SelfFrom != "" {
+			ss.OriginDetail = fmt.Sprintf("来自外部地址 %s（与本机来源 %s 不同）", ss.From, rep.SelfFrom)
+		} else {
+			ss.OriginDetail = fmt.Sprintf("来自地址 %s", ss.From)
+		}
+	}
+}
+
+func matchPoolSnap(ss *SSHSession, cur *conn, snaps []poolConnSnap, descToTop map[int]int, sameIP, natTranslated bool) (poolConnSnap, bool, bool) {
+	for _, snap := range snaps {
+		if snap.Conn != nil && snap.Conn == cur {
+			continue
+		}
+		// 优先用常驻 agent 在服务器上的 PID 匹配：即使经过 NAT/PAT 端口改写也能 100% 精准命中
+		if snap.RemoteAgentPID > 0 && descToTop[snap.RemoteAgentPID] == ss.PID {
+			return snap, false, true
+		}
+	}
+	if natTranslated || !sameIP || ss.FromPort <= 0 {
+		return poolConnSnap{}, false, false
+	}
+	for _, snap := range snaps {
+		if snap.Conn != nil && snap.Conn == cur {
+			continue
+		}
+		if snap.PrimaryPort > 0 && snap.PrimaryPort == ss.FromPort {
+			return snap, false, true
+		}
+		if slices.Contains(snap.ExtraPorts, ss.FromPort) {
+			return snap, true, true
+		}
+	}
+	return poolConnSnap{}, false, false
+}
+
+func currentSessionRefLabel(s *session) string {
+	if s == nil || s.t == nil {
+		return ""
+	}
+	if s.e != nil && s.e.File != nil {
+		if s.e.File.Kind == config.KindConnections {
+			name := s.t.Title
+			if name == "" {
+				name = s.t.Name
+			}
+			return "独立连接：" + name
+		}
+		if s.e.File.Project != "" {
+			return s.e.File.Project + " / " + s.t.Name
+		}
+	}
+	return s.t.Name
+}
+
+func formatPoolSnapRefs(snap poolConnSnap) (short, full string) {
+	if len(snap.Refs) == 0 {
+		if snap.Label != "" {
+			return snap.Label, snap.Label
+		}
+		return "", "连接池连接"
+	}
+	var shorts []string
+	var fulls []string
+	for _, r := range snap.Refs {
+		if r.Kind == config.KindConnections {
+			name := r.Title
+			if name == "" {
+				name = r.Target
+			}
+			shorts = append(shorts, "独立连接："+name)
+			fulls = append(fulls, "独立连接 "+name)
+		} else if r.Project != "" {
+			shorts = append(shorts, "项目："+r.Project)
+			fulls = append(fulls, fmt.Sprintf("项目 %s / %s", r.Project, r.Target))
+		} else if r.Target != "" {
+			shorts = append(shorts, r.Target)
+			fulls = append(fulls, r.Target)
+		}
+	}
+	if len(shorts) == 0 {
+		return snap.Label, snap.Label
+	}
+	short = shorts[0]
+	if len(shorts) > 1 {
+		short += fmt.Sprintf(" 等 %d 处", len(shorts))
+	}
+	return short, strings.Join(fulls, "、")
 }
 
 // SSHKick 断开这些连接（pids 为 SSHSession.PID），返回断开后的情况；断不开的报错（同时返回现在的情况）。
@@ -241,29 +572,66 @@ type psProc struct {
 	args      string
 }
 
+type sshAuthInfo struct {
+	user     string
+	from     string
+	fromPort int
+	method   string
+	key      string
+}
+
+type sshAuthTuple struct {
+	user     string
+	from     string
+	fromPort int
+}
+
+type sshUserKey struct {
+	user string
+	fp   string
+}
+
 var (
-	// sshd: alice@pts/0,pts/1、sshd-session: alice@notty、sshd: alice@internal-sftp
-	reSSHUser = regexp.MustCompile(`^sshd(?:-session)?: (\S+)@(\S+)$`)
+	// sshd: alice@pts/0,pts/1、sshd-session: alice@notty、sshd: alice@internal-sftp，以及 ssh -N 纯端口转发时的 sshd-session: alice
+	reSSHUser = regexp.MustCompile(`^sshd(?:-session)?: ([^\s/\[\]@]+)(?:@(\S+))?$`)
 	reSSHPriv = regexp.MustCompile(`^sshd(?:-session)?: (\S+) \[priv\]$`)
 	reSSHPre  = regexp.MustCompile(`^sshd(?:-session|-auth)?: .*\[(?:net|preauth)\]$`)
-	reSSHPeer = regexp.MustCompile(`\s\S+:(\d+)\s+(\S+):(\d+)\s+users:\(\((.*)\)\)`)
+	reSSHPeer = regexp.MustCompile(`\s\S+:(\d+)\s+(\S+):(\d+|\*)\s+users:\(\((.*)\)\)`)
 	reSSHPid  = regexp.MustCompile(`pid=(\d+)`)
 	reWhoHost = regexp.MustCompile(`\(([^)]*)\)\s*$`)
+	reSSHAuth = regexp.MustCompile(`sshd(?:-session|-auth)?\[(\d+)\]:\s+Accepted\s+(\S+)\s+for\s+(\S+)\s+from\s+(\S+)\s+port\s+(\d+)\s+ssh2(?::\s+(.*))?$`)
 )
+
+type ssSocket struct {
+	state    string // "LISTEN" | "ESTAB"
+	local    int
+	peerIP   string
+	peerPort string
+	pids     []int
+}
 
 // sshPort Ferry 连这台服务器用的端口（ss 里认哪个是客户端连进来的）。
 func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
+	rep, _, err := parseSSHInternal(lines, me, sshPort)
+	return rep, err
+}
+
+func parseSSHInternal(lines []string, me string, sshPort int) (*SSHReport, map[int]int, error) {
 	rep := &SSHReport{Priv: "none", Me: me, Sessions: []SSHSession{}}
 	var self int
 	var now int64
 	sec := ""
 	procs := map[int]*psProc{}
 	kids := map[int][]int{}
-	env := map[int][2]string{}  // pid → 对方 IP、端口
-	peer := map[int][2]string{} // sshd 的 pid → 对方 IP、端口（ss）
-	peerOnSSH := map[int]bool{}
+	env := map[int][2]string{} // pid → 对方 IP、端口
+	envServerPorts := map[int]bool{}
+	var ssSockets []ssSocket
 	whoHost := map[string]string{}
 	ttyAt := map[string]int64{}
+	authByPID := map[int]sshAuthInfo{}
+	authByTuple := map[sshAuthTuple]sshAuthInfo{}
+	keyComments := map[sshUserKey]string{}
+
 	for _, l := range lines {
 		switch {
 		case strings.HasPrefix(l, "priv "):
@@ -302,24 +670,43 @@ func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
 			pid, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(file, "/proc/"), "/environ"))
 			if f := strings.Fields(v); err == nil && len(f) >= 2 {
 				env[pid] = [2]string{f[0], f[1]}
+				if len(f) >= 4 {
+					if sp := atoi(f[3]); sp > 0 {
+						envServerPorts[sp] = true
+					}
+				}
 			}
 		case "ss":
-			m := reSSHPeer.FindStringSubmatch(l)
-			if m == nil || !strings.HasPrefix(strings.TrimSpace(l), "ESTAB") {
+			trimmed := strings.TrimSpace(l)
+			state := ""
+			switch {
+			case strings.HasPrefix(trimmed, "ESTAB"):
+				state = "ESTAB"
+			case strings.HasPrefix(trimmed, "LISTEN"):
+				state = "LISTEN"
+			default:
 				continue
 			}
-			// sshd 的其他 TCP 连接是端口转发：只认本地端口是 SSH 端口的（认不出 SSH 端口时取第一个）
-			local := atoi(m[1])
+			m := reSSHPeer.FindStringSubmatch(l)
+			if m == nil {
+				continue
+			}
+			var spids []int
 			for _, pm := range reSSHPid.FindAllStringSubmatch(m[4], -1) {
-				pid, err := strconv.Atoi(pm[1])
-				if err != nil {
-					continue
-				}
-				if _, ok := peer[pid]; !ok || (local == sshPort && !peerOnSSH[pid]) {
-					peer[pid] = [2]string{cleanIP(m[2]), m[3]}
-					peerOnSSH[pid] = local == sshPort
+				if pid, err := strconv.Atoi(pm[1]); err == nil {
+					spids = append(spids, pid)
 				}
 			}
+			if len(spids) == 0 {
+				continue
+			}
+			ssSockets = append(ssSockets, ssSocket{
+				state:    state,
+				local:    atoi(m[1]),
+				peerIP:   cleanIP(m[2]),
+				peerPort: m[3],
+				pids:     spids,
+			})
 		case "who":
 			f := strings.Fields(l)
 			if m := reWhoHost.FindStringSubmatch(l); m != nil && len(f) >= 2 && m[1] != "" && !strings.HasPrefix(m[1], ":") {
@@ -332,15 +719,100 @@ func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
 					ttyAt[strings.TrimPrefix(f[0], "/dev/")] = t
 				}
 			}
+		case "auth":
+			m := reSSHAuth.FindStringSubmatch(strings.TrimSpace(l))
+			if m == nil {
+				continue
+			}
+			pid, err := strconv.Atoi(m[1])
+			if err != nil {
+				continue
+			}
+			method := normalizeAuthMethod(m[2])
+			user := m[3]
+			from := cleanIP(m[4])
+			fromPort := atoi(m[5])
+			key := extractAuthFingerprint(m[6])
+			info := sshAuthInfo{user: user, from: from, fromPort: fromPort, method: method, key: key}
+			authByPID[pid] = info
+			if from != "" && fromPort > 0 {
+				authByTuple[sshAuthTuple{user: user, from: from, fromPort: fromPort}] = info
+			}
+		case "keys":
+			parts := strings.SplitN(l, "\t", 3)
+			if len(parts) == 3 && parts[0] != "" && parts[1] != "" && strings.TrimSpace(parts[2]) != "" {
+				keyComments[sshUserKey{user: parts[0], fp: parts[1]}] = strings.TrimSpace(parts[2])
+			}
+		case "keylines":
+			user, rawLine, ok := strings.Cut(l, "\t")
+			if !ok || user == "" {
+				continue
+			}
+			if fp, cmt, ok := parseAuthorizedKeyLine(rawLine); ok && cmt != "" {
+				keyComments[sshUserKey{user: user, fp: fp}] = cmt
+			}
 		}
 	}
 	if len(procs) == 0 {
-		return nil, errors.New("查看 SSH 连接失败：服务器上的 ps 不支持（需要 procps）")
+		return nil, nil, errors.New("查看 SSH 连接失败：服务器上的 ps 不支持（需要 procps）")
 	}
 	if now == 0 {
 		now = time.Now().Unix()
 	}
 	rep.Now = now
+
+	// 解析服务器真实的 sshd 监听端口（经 Docker/NAT/路由器端口映射时，服务器内部端口可能与客户端配置的 sshPort 不同）
+	sessionPIDs := map[int]bool{}
+	for _, p := range procs {
+		if reSSHUser.MatchString(p.args) || reSSHPriv.MatchString(p.args) || reSSHPre.MatchString(p.args) {
+			sessionPIDs[p.pid] = true
+		}
+	}
+	realSSHPorts := map[int]bool{}
+	for sp := range envServerPorts {
+		realSSHPorts[sp] = true
+	}
+	for _, sk := range ssSockets {
+		if sk.state != "LISTEN" || sk.local <= 0 {
+			continue
+		}
+		// 只采纳主 sshd 监听进程（排除会话进程通过 -R 反向转发打开的监听端口）
+		isMaster := false
+		for _, pid := range sk.pids {
+			if !sessionPIDs[pid] {
+				isMaster = true
+				break
+			}
+		}
+		if isMaster {
+			realSSHPorts[sk.local] = true
+		}
+	}
+	if len(realSSHPorts) == 0 && sshPort > 0 {
+		realSSHPorts[sshPort] = true
+	}
+
+	peer := map[int][2]string{}
+	peerOnSSH := map[int]bool{}
+	forwards := map[int][]string{}
+	for _, sk := range ssSockets {
+		if sk.state != "ESTAB" {
+			continue
+		}
+		onSSH := realSSHPorts[sk.local]
+		for _, pid := range sk.pids {
+			if _, ok := peer[pid]; !ok || (onSSH && !peerOnSSH[pid]) {
+				peer[pid] = [2]string{sk.peerIP, sk.peerPort}
+				peerOnSSH[pid] = onSSH
+			}
+			if !onSSH && sk.peerIP != "" && sk.peerPort != "" && sk.peerPort != "*" {
+				dst := sk.peerIP + ":" + sk.peerPort
+				if !slices.Contains(forwards[pid], dst) {
+					forwards[pid] = append(forwards[pid], dst)
+				}
+			}
+		}
+	}
 
 	// 本机 Ferry 的连接：这个脚本的上级进程
 	ancestors := map[int]bool{}
@@ -354,6 +826,7 @@ func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
 	}
 
 	seen := map[int]bool{}
+	descToTop := map[int]int{}
 	for _, p := range procs {
 		if reSSHPre.MatchString(p.args) {
 			rep.Pending++
@@ -370,6 +843,10 @@ func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
 			continue
 		}
 		seen[top.pid] = true
+		walk(top.pid, procs, kids, func(d *psProc) {
+			descToTop[d.pid] = top.pid
+		})
+
 		ss := SSHSession{PID: top.pid, User: m[1], Since: now - top.age, Idle: -1, Kind: "idle", pids: []int{top.pid}}
 		if top != p {
 			ss.pids = append(ss.pids, p.pid)
@@ -391,16 +868,39 @@ func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
 		} else if a, ok := peer[p.pid]; ok {
 			ss.From, ss.FromPort = a[0], atoi(a[1])
 		}
+		// 端口转发目标（ss 中非 SSH 监听端口的 ESTAB 连接，且排除会话自身客户端地址）
+		selfPeer := ""
+		if ss.From != "" && ss.FromPort > 0 {
+			selfPeer = fmt.Sprintf("%s:%d", ss.From, ss.FromPort)
+		}
+		fwSet := map[string]bool{}
+		for _, pid := range ss.pids {
+			for _, dst := range forwards[pid] {
+				if dst != selfPeer {
+					fwSet[dst] = true
+				}
+			}
+		}
+		if len(fwSet) > 0 {
+			for dst := range fwSet {
+				ss.Forwards = append(ss.Forwards, dst)
+			}
+			sort.Strings(ss.Forwards)
+			if len(ss.Forwards) > 4 {
+				ss.Forwards = ss.Forwards[:4]
+			}
+		}
+
 		ferry, exec := false, false
 		for _, c := range kids[p.pid] {
 			cp := procs[c]
+			if a, ok := env[c]; ok && ss.From == "" {
+				ss.From, ss.FromPort = cleanIP(a[0]), atoi(a[1])
+			}
 			if strings.HasPrefix(cp.args, "sshd") || ancestors[c] {
 				continue // 查看这个列表的脚本本身不算
 			}
 			exec = true
-			if a, ok := env[c]; ok && ss.From == "" {
-				ss.From, ss.FromPort = cleanIP(a[0]), atoi(a[1])
-			}
 			ss.Cmds = append(ss.Cmds, running(cp, procs, kids)...)
 			walk(c, procs, kids, func(d *psProc) {
 				switch {
@@ -437,6 +937,16 @@ func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
 			ss.Cmds = append(ss.Cmds[:4], fmt.Sprintf("等 %d 个", len(ss.Cmds)))
 		}
 		ss.Kick = !ss.Self && (rep.Priv != "none" || ss.User == me)
+
+		// 匹配认证日志与公钥备注：优先按 sshd PID 匹配（校验 user/from 防 PID 复用误配），再按 (user, from, fromPort) 兜底
+		if ai, ok := matchAuthInfo(&ss, authByPID, authByTuple); ok {
+			ss.AuthMethod = ai.method
+			ss.AuthKey = ai.key
+			if ai.key != "" {
+				ss.AuthKeyComment = keyComments[sshUserKey{user: ss.User, fp: ai.key}]
+			}
+		}
+
 		rep.Sessions = append(rep.Sessions, ss)
 	}
 	// 本机 Ferry 的在最前，其余新连上的在前
@@ -453,7 +963,95 @@ func parseSSH(lines []string, me string, sshPort int) (*SSHReport, error) {
 	if rep.Priv == "none" {
 		rep.Notes = append(rep.Notes, fmt.Sprintf("登录用户 %s 不是 root，也不能免密 sudo：别的用户的连接可能看不到来源 IP，也只能断开 %s 自己的连接", me, me))
 	}
-	return rep, nil
+	return rep, descToTop, nil
+}
+
+func matchAuthInfo(ss *SSHSession, byPID map[int]sshAuthInfo, byTuple map[sshAuthTuple]sshAuthInfo) (sshAuthInfo, bool) {
+	for _, pid := range ss.pids {
+		if ai, ok := byPID[pid]; ok && ai.user == ss.User && (ss.From == "" || ai.from == ss.From) && (ss.FromPort == 0 || ai.fromPort == 0 || ai.fromPort == ss.FromPort) {
+			return ai, true
+		}
+	}
+	if ss.From != "" && ss.FromPort > 0 {
+		if ai, ok := byTuple[sshAuthTuple{user: ss.User, from: ss.From, fromPort: ss.FromPort}]; ok {
+			return ai, true
+		}
+	}
+	return sshAuthInfo{}, false
+}
+
+func normalizeAuthMethod(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if strings.HasPrefix(raw, "keyboard-interactive") {
+		return "keyboard-interactive"
+	}
+	return raw
+}
+
+func extractAuthFingerprint(rest string) string {
+	for _, tok := range strings.Fields(rest) {
+		if strings.HasPrefix(tok, "SHA256:") || strings.HasPrefix(tok, "MD5:") {
+			return tok
+		}
+	}
+	return ""
+}
+
+// parseAuthorizedKeyLine 解析 authorized_keys 单行，返回 OpenSSH SHA256 指纹与末尾备注。
+func parseAuthorizedKeyLine(line string) (fingerprint, comment string, ok bool) {
+	s := strings.TrimSpace(line)
+	if s == "" || strings.HasPrefix(s, "#") {
+		return "", "", false
+	}
+	i := 0
+	for i < len(s) {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		start := i
+		inQuote := false
+		for i < len(s) {
+			c := s[i]
+			if c == '\\' && inQuote && i+1 < len(s) {
+				i += 2
+				continue
+			}
+			if c == '"' {
+				inQuote = !inQuote
+				i++
+				continue
+			}
+			if !inQuote && (c == ' ' || c == '\t') {
+				break
+			}
+			i++
+		}
+		tok := s[start:i]
+		if !strings.HasPrefix(tok, "ssh-") && !strings.HasPrefix(tok, "ecdsa-sha2-") &&
+			!strings.HasPrefix(tok, "sk-ssh-") && !strings.HasPrefix(tok, "sk-ecdsa-") {
+			continue
+		}
+		rest := strings.TrimSpace(s[i:])
+		if rest == "" {
+			return "", "", false
+		}
+		keyB64, cmt, _ := strings.Cut(rest, " ")
+		if tabIdx := strings.IndexByte(keyB64, '\t'); tabIdx >= 0 {
+			cmt = strings.TrimSpace(keyB64[tabIdx+1:] + " " + cmt)
+			keyB64 = keyB64[:tabIdx]
+		}
+		blob, err := base64.StdEncoding.DecodeString(keyB64)
+		if err != nil || len(blob) < 8 {
+			return "", "", false
+		}
+		sum := sha256.Sum256(blob)
+		fp := "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+		return fp, strings.TrimSpace(strings.ReplaceAll(cmt, "\t", " ")), true
+	}
+	return "", "", false
 }
 
 // running 一个子进程在干什么：是登录 shell 而且里面在跑命令时，列出那些命令。

@@ -239,6 +239,72 @@ func dialSSH(addr string, cfg *ssh.ClientConfig, hd *handshakeDeadline) (*ssh.Cl
 // Alive 连接是否还可用（已知断开时为 false）。
 func (c *Client) Alive() bool { return !c.dead.Load() }
 
+// LocalPort 本机侧主 SSH TCP 连接的源端口；不可用时返回 0。
+func (c *Client) LocalPort() int {
+	if c == nil || c.ssh == nil {
+		return 0
+	}
+	return tcpAddrPort(c.ssh.LocalAddr())
+}
+
+// RemoteAddr 本机侧主 SSH TCP 连接实际连到的服务器 IP 与端口（域名已解析为 IP）。
+func (c *Client) RemoteAddr() (string, int) {
+	if c == nil || c.ssh == nil {
+		return "", 0
+	}
+	return tcpAddrHostPort(c.ssh.RemoteAddr())
+}
+
+// ExtraLocalPorts 会话数达到上限后另建的扩展 SSH 连接的本机源端口列表。
+func (c *Client) ExtraLocalPorts() []int {
+	if c == nil {
+		return nil
+	}
+	c.extraMu.Lock()
+	defer c.extraMu.Unlock()
+	if len(c.extra) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(c.extra))
+	for _, e := range c.extra {
+		if e == nil {
+			continue
+		}
+		if p := tcpAddrPort(e.LocalAddr()); p > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func tcpAddrPort(a net.Addr) int {
+	_, port := tcpAddrHostPort(a)
+	return port
+}
+
+func tcpAddrHostPort(a net.Addr) (string, int) {
+	if a == nil {
+		return "", 0
+	}
+	if ta, ok := a.(*net.TCPAddr); ok && ta != nil {
+		ip := ""
+		if ta.IP != nil {
+			if ip4 := ta.IP.To4(); ip4 != nil {
+				ip = ip4.String()
+			} else {
+				ip = ta.IP.String()
+			}
+		}
+		return ip, ta.Port
+	}
+	host, portStr, err := net.SplitHostPort(a.String())
+	if err != nil {
+		return "", 0
+	}
+	p, _ := strconv.Atoi(portStr)
+	return strings.TrimPrefix(host, "::ffff:"), p
+}
+
 // ListenRemote 在服务器上监听 addr（如 127.0.0.1:0，端口由服务器分配），连进来的连接经这条 SSH 转给本机。
 // 服务器的 sshd 不允许端口转发（AllowTcpForwarding no）时报错。
 func (c *Client) ListenRemote(addr string) (net.Listener, error) {
@@ -446,6 +512,17 @@ func LoadKey(p string, passphrase func(keyPath string) (string, error)) (ssh.Sig
 		return nil, fmt.Errorf("读取私钥 %s：%w", p, err)
 	}
 	return parseKey(data, p, passphrase)
+}
+
+// KeyEncrypted 私钥文件是否存在且需要密码才能解密。
+func KeyEncrypted(p string) bool {
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return false
+	}
+	_, err = ssh.ParsePrivateKey(data)
+	var missing *ssh.PassphraseMissingError
+	return errors.As(err, &missing)
 }
 
 // parseKey 解析私钥；有密码时调用 passphrase(name) 取密码。

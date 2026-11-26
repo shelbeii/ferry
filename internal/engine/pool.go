@@ -37,6 +37,7 @@ type poolEntry struct {
 	created     time.Time
 	lastUsed    time.Time
 	refs        map[poolRef]bool // 用过它的「配置文件 + 目标」
+	refMeta     map[poolRef]poolRefMeta
 	credentials []string
 	dialing     chan struct{} // 正在建立时不为空，建好或失败后关闭
 	dialErr     error         // 建立失败的原因（dialing 关闭后读）：等它的请求直接报这个错，不再一个接一个重新连
@@ -44,6 +45,27 @@ type poolEntry struct {
 }
 
 type poolRef struct{ config, target string }
+
+type poolRefMeta struct {
+	Project string
+	Kind    string
+	Target  string
+	Title   string
+}
+
+type poolConnSnap struct {
+	Conn            *conn
+	Label           string
+	HostFingerprint string
+	RemoteIP        string
+	RemotePort      int
+	PrimaryPort     int
+	ExtraPorts      []int
+	RemoteAgentPID  int
+	Refs            []poolRefMeta
+	InUse           int
+	Created         time.Time
+}
 
 // reuseCheckAfter 空闲超过这么久、最近 recentOK 以内也没确认过的连接，复用前先确认还通（keepalive 30 秒一次，期间断了未必知道）。
 // 桌面版开着项目页时每 10 秒量一次延迟，那次就确认过了，点操作时通常不用再多等一个来回。
@@ -98,10 +120,20 @@ func refOf(f *config.File, t *config.Target) poolRef {
 	return poolRef{path, t.Name}
 }
 
+func refMetaOf(f *config.File, t *config.Target) poolRefMeta {
+	return poolRefMeta{
+		Project: f.Project,
+		Kind:    f.Kind,
+		Target:  t.Name,
+		Title:   t.Title,
+	}
+}
+
 // Acquire 取得到目标的连接（复用或新建）；用完调用返回的 release。
 func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 	key := poolKey(e.File, t)
 	ref := refOf(e.File, t)
+	meta := refMetaOf(e.File, t)
 	for {
 		p.mu.Lock()
 		ent := p.entries[key]
@@ -144,13 +176,13 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 			}
 			ent.cn.broken.Store(false)
 			p.mu.Lock()
-			p.retarget(ent, ref)
+			p.retarget(ent, ref, meta)
 			p.mu.Unlock()
 			e.Rep.Step("连接 %s（%s，复用已有连接）", t.Name, ent.cn.label)
 			return ent.cn, p.releaser(ent, !e.Background), nil
 		}
 		// 新建
-		ent = &poolEntry{key: key, dialing: make(chan struct{}), refs: map[poolRef]bool{}, credentials: poolCredentials(e.File, t)}
+		ent = &poolEntry{key: key, dialing: make(chan struct{}), refs: map[poolRef]bool{}, refMeta: map[poolRef]poolRefMeta{}, credentials: poolCredentials(e.File, t)}
 		p.entries[key] = ent
 		p.mu.Unlock()
 
@@ -170,7 +202,7 @@ func (p *Pool) Acquire(e *Engine, t *config.Target) (*conn, func(), error) {
 		}
 		ent.cn, ent.users, ent.created, ent.lastUsed = cn, 1, time.Now(), time.Now()
 		if !ent.stale {
-			p.retarget(ent, ref)
+			p.retarget(ent, ref, meta)
 		}
 		p.mu.Unlock()
 		return cn, p.releaser(ent, true), nil
@@ -192,16 +224,21 @@ func sharedDialErr(err error) bool {
 }
 
 // retarget 记下这个目标现在用的连接；它以前用的另一条连接（配置改了）失效。调用时持有锁。
-func (p *Pool) retarget(ent *poolEntry, ref poolRef) {
+func (p *Pool) retarget(ent *poolEntry, ref poolRef, meta poolRefMeta) {
 	for _, other := range p.entries {
 		if other != ent && other.refs[ref] {
 			delete(other.refs, ref)
+			delete(other.refMeta, ref)
 			if len(other.refs) == 0 {
 				p.invalidate(other)
 			}
 		}
 	}
 	ent.refs[ref] = true
+	if ent.refMeta == nil {
+		ent.refMeta = map[poolRef]poolRefMeta{}
+	}
+	ent.refMeta[ref] = meta
 }
 
 // releaser 用完连接时调用；used 为 false（后台自动刷新）时不算一次使用，不推迟空闲断开。
@@ -433,5 +470,58 @@ func (p *Pool) List() []PoolEntry {
 		out = append(out, pe)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
+	return out
+}
+
+// snapshotForServer 返回连接池中连向同一台服务器（按主机公钥指纹或远端 IP:端口匹配）的所有活跃连接快照。
+func (p *Pool) snapshotForServer(hostFingerprint, remoteIP string, remotePort int) []poolConnSnap {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []poolConnSnap
+	for _, ent := range p.entries {
+		if ent.dialing != nil || ent.stale || ent.cn == nil || ent.cn.c == nil || !ent.cn.c.Alive() {
+			continue
+		}
+		rip, rport := ent.cn.c.RemoteAddr()
+		fp := ent.cn.c.HostFingerprint
+		sameServer := (hostFingerprint != "" && fp != "" && fp == hostFingerprint) ||
+			(remoteIP != "" && rip != "" && rip == remoteIP && (remotePort == 0 || rport == 0 || rport == remotePort))
+		if !sameServer {
+			continue
+		}
+		refs := make([]poolRefMeta, 0, len(ent.refs))
+		for r := range ent.refs {
+			if m, ok := ent.refMeta[r]; ok {
+				refs = append(refs, m)
+			} else {
+				refs = append(refs, poolRefMeta{Target: r.target})
+			}
+		}
+		sort.Slice(refs, func(i, j int) bool {
+			if refs[i].Kind != refs[j].Kind {
+				return refs[i].Kind < refs[j].Kind
+			}
+			if refs[i].Project != refs[j].Project {
+				return refs[i].Project < refs[j].Project
+			}
+			return refs[i].Target < refs[j].Target
+		})
+		out = append(out, poolConnSnap{
+			Conn:            ent.cn,
+			Label:           ent.cn.label,
+			HostFingerprint: fp,
+			RemoteIP:        rip,
+			RemotePort:      rport,
+			PrimaryPort:     ent.cn.c.LocalPort(),
+			ExtraPorts:      ent.cn.c.ExtraLocalPorts(),
+			RemoteAgentPID:  ent.cn.remoteAgentPID(),
+			Refs:            refs,
+			InUse:           ent.users,
+			Created:         ent.created,
+		})
+	}
 	return out
 }

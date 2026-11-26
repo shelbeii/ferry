@@ -33,3 +33,6 @@ type ServeRequest struct {
 
 // ServeEnd 请求做完的那一行里，请求号后面的标记。
 const ServeEnd = "!end "
+
+// ServeHello 常驻 agent 启动时向本机通告自己在服务器上的 PID（请求号固定为 0，老引擎会自动忽略）。
+const ServeHello = "!hello "

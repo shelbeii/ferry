@@ -17,6 +17,7 @@ import { useManualRefresh } from '../manualRefresh'
 import { useInteractionScope } from '../interactionScope'
 import PortPanel from './PortPanel.vue'
 import SshPanel from './SshPanel.vue'
+import { sessionFilterLabel, type SessionFilter } from '../sshSessions'
 import ServerInfoPanel from './ServerInfoPanel.vue'
 import { serverInfoCards } from '../serverinfo'
 import MonitorDialog from './MonitorDialog.vue'
@@ -777,10 +778,12 @@ const stats = computed(() => {
 type StatCard = { label: string; num?: string | number; small?: string; cls?: string; sub?: string; title?: string; bare?: boolean; filter?: string }
 const swFilter = ref<'all' | 'up' | 'down'>('all')
 const portFilter = ref<'all' | 'open' | 'blocked' | 'attention'>('all')
-const panelFilter = computed<string>(() => view.value === 'software' ? swFilter.value : view.value === 'ports' ? portFilter.value : 'all')
+const sshFilter = ref<SessionFilter>('all')
+const panelFilter = computed<string>(() => view.value === 'software' ? swFilter.value : view.value === 'ports' ? portFilter.value : view.value === 'ssh' ? sshFilter.value : 'all')
 function setPanelFilter(f: string) {
   if (view.value === 'software') swFilter.value = swFilter.value === f ? 'all' : f as typeof swFilter.value
   else if (view.value === 'ports') portFilter.value = portFilter.value === f ? 'all' : f as typeof portFilter.value
+  else if (view.value === 'ssh') sshFilter.value = sshFilter.value === f ? 'all' : f as SessionFilter
 }
 // 功能切换旁边的「只看……（几个）」：点叉恢复全部
 const filterTag = computed(() => {
@@ -791,6 +794,10 @@ const filterTag = computed(() => {
   if (view.value === 'ports' && portFilter.value !== 'all') {
     const name = { open: '对外开放', blocked: '已拦住', attention: '需要留意' }[portFilter.value]
     return { text: `只看${name}（${portPanel.value?.shownCount ?? 0}）`, clear: () => (portFilter.value = 'all') }
+  }
+  if (view.value === 'ssh' && sshFilter.value !== 'all') {
+    const label = sshFilter.value === 'non-ferry' ? sessionFilterLabel(sshFilter.value) : `只看${sessionFilterLabel(sshFilter.value)}`
+    return { text: `${label}（${sshPanel.value?.shownCount ?? 0}）`, clear: () => (sshFilter.value = 'all') }
   }
   return null
 })
@@ -825,12 +832,13 @@ const panelStats = computed<{ ready: boolean; busy: boolean; cards: StatCard[] }
   }
   if (view.value === 'ports') {
     const c = portPanel.value?.counts
+    const hasFw = !!c?.fw.kind || !!c?.fw.installed?.length
     cards = [
       {
         label: '防火墙',
-        num: c?.fw.active ? '在运行' : '没开',
+        num: c?.fw.active ? '在运行' : hasFw ? '没开' : '未安装',
         cls: c?.fw.active ? 'ok' : 'warn',
-        sub: `${c?.fw.kind || '没有找到防火墙'}${c?.fw.active && !c.fw.manage ? ' · 只能查看' : ''}`,
+        sub: `${c?.fw.kind || '没有找到防火墙'}${c?.fw.active && !c.fw.manage ? ' · 只能查看' : !hasFw && c?.fw.pkgMgr ? ' · 可安装' : ''}`,
       },
       { label: '对外开放', num: c?.open, cls: c?.open ? 'warn' : 'off', sub: `共 ${c?.listening} 个端口在监听`, filter: 'open' },
       { label: '已拦住', num: c?.blocked, cls: 'off', sub: '只有服务器本机能连', filter: 'blocked' },
@@ -839,10 +847,19 @@ const panelStats = computed<{ ready: boolean; busy: boolean; cards: StatCard[] }
     return { ready: !!c, busy, cards }
   }
   const c = sshPanel.value?.counts
+  const otherSub = c
+    ? c.sameIPOtherCount
+      ? `含 ${c.sameIPOtherCount} 个同 IP 非本机 · ${c.ips} 个来源 IP`
+      : c.natSameIPCount
+        ? `含 ${c.natSameIPCount} 个同出口 IP（经 NAT）`
+        : c.otherDeviceCount
+          ? `来自 ${c.ips} 个来源 IP`
+          : '当前全部来自本机'
+    : undefined
   cards = [
-    { label: '连接', num: c?.total, sub: `${c?.users} 个用户` },
-    { label: '来源 IP', num: c?.ips, sub: '从几个地址连进来' },
-    { label: '开着终端', num: c?.terminals, sub: '其余是传文件、执行命令等' },
+    { label: '连接', num: c?.total, sub: c ? `本机 ${c.localCount} · 其他 ${c.otherDeviceCount} · ${c.users} 个用户` : undefined },
+    { label: '其他设备', num: c?.otherDeviceCount, cls: c?.otherDeviceCount ? 'warn' : 'off', sub: otherSub, filter: 'others' },
+    { label: '开着终端', num: c?.terminals, sub: '其余是传文件、执行命令等', filter: 'terminal' },
     { label: '正在登录', num: c?.pending, cls: c?.pending ? 'warn' : 'off', sub: c?.pending ? '还没通过验证' : '没有' },
   ]
   return { ready: !!c, busy, cards }
@@ -1399,7 +1416,13 @@ async function onSaved(deployment?: DeploymentRequest) {
           <span class="muted small">{{ serverPanel?.readTime ? `上次采样 ${serverPanel.readTime} · ` : '' }}{{ serverPanel?.autoTip }}</span>
         </template>
         <template v-else-if="view === 'ssh'">
-          <el-input v-model="sessionQuery" class="session-search" placeholder="搜索用户、来源 IP 或命令" clearable aria-label="搜索登录会话" />
+          <el-input v-model="sessionQuery" class="session-search" placeholder="搜索用户、归属、IP、密钥备注或命令" clearable aria-label="搜索登录会话" />
+          <el-radio-group v-model="sshFilter" size="small" aria-label="按来源筛选">
+            <el-radio-button value="all">全部</el-radio-button>
+            <el-radio-button value="others">其他设备</el-radio-button>
+            <el-radio-button value="local">仅本机</el-radio-button>
+            <el-radio-button value="non-ferry">隐藏 Ferry</el-radio-button>
+          </el-radio-group>
           <el-button
             type="danger"
             plain
@@ -1486,6 +1509,7 @@ async function onSaved(deployment?: DeploymentRequest) {
         v-else-if="view === 'ssh' && activeTarget"
         ref="sshPanel"
         v-model:query="sessionQuery"
+        v-model:filter="sshFilter"
         :config="project.path"
         :target="activeTarget"
         :connected="!!conn?.connected"

@@ -697,6 +697,24 @@ export interface SSHSession {
   self?: boolean
   /** 登录用户能不能断开它 */
   kick: boolean
+  /** 归属分类：当前连接 / 本机 Ferry 其他连接 / 本机其他进程 / 同 IP 其他设备 / 经 NAT 的同出口 IP / 外部 IP */
+  origin?: 'self' | 'ferry-pool' | 'local-proc' | 'same-ip' | 'nat-same-ip' | 'remote'
+  /** 简短归属标签 */
+  originLabel?: string
+  /** 归属详情说明 */
+  originDetail?: string
+  /** 匹配到本机进程时的本地 PID */
+  localPid?: number
+  /** 匹配到本机进程时的进程名 */
+  localProcess?: string
+  /** 服务端认证方式（publickey | password | keyboard-interactive） */
+  authMethod?: string
+  /** 公钥登录指纹（SHA256:...） */
+  authKey?: string
+  /** 从目标用户 authorized_keys 反查到的公钥备注 */
+  authKeyComment?: string
+  /** 该 SSH 连接当前活跃的端口转发目标 */
+  forwards?: string[]
 }
 
 /** ferry server-info：Linux 服务器的一次只读采样；容量单位为字节。 */
@@ -741,6 +759,10 @@ export interface SSHReport {
   notes?: string[]
   /** 服务器上的当前时间（Unix 秒） */
   now: number
+  /** 当前连接在服务器侧看到的客户端 IP */
+  selfFrom?: string
+  /** 客户端本地源端口与服务器看到的源端口不一致（存在 NAT / 代理端口转换） */
+  natPortTranslated?: boolean
 }
 
 /** ferry port：服务器上的端口与防火墙 */
@@ -767,8 +789,48 @@ export interface Firewall {
   enable?: boolean
   /** 在运行、Ferry 能关掉 */
   disable?: boolean
-  /** Docker 正在运行（打开、关闭 firewalld 后要重启它） */
+  /** Docker 正在运行（打开、关闭、卸载 firewalld 后要重启它） */
   docker?: boolean
+  /** 服务器软件包管理器：dnf | yum | apt-get */
+  pkgMgr?: string
+  /** 服务器上已安装的防火墙列表 */
+  installed?: FirewallItem[]
+  /** 卸载防火墙前需要完成的认证方式 */
+  uninstallAuth?: FirewallAuth
+}
+
+export type FirewallKind = 'firewalld' | 'ufw' | 'nftables' | 'iptables'
+
+export interface FirewallItem {
+  kind: FirewallKind | string
+  active: boolean
+  manage?: boolean
+  uninstall?: boolean
+  why?: string
+}
+
+export interface FirewallAuth {
+  method: 'sudo-password' | 'ssh-password' | 'key-passphrase' | 'ssh-key-challenge'
+  prompt: string
+  user?: string
+  host?: string
+  port?: number
+  production?: boolean
+  canPasswordFallback?: boolean
+}
+
+export interface FirewallChallenge {
+  id: string
+  code: string
+  kind: string
+  expiresAt: string
+}
+
+export interface FirewallTicket {
+  token: string
+  kind: string
+  method: string
+  expiresAt: string
 }
 
 export interface PortInfo {
@@ -1349,7 +1411,16 @@ export interface AppSettings {
   ui: { theme: 'light' | 'dark' | 'system'; taskKeep: number; taskKeepDays: number; taskMaxMB: number; confirmClose: boolean; notify: boolean; glass: boolean; glassTransparency: number; particles: boolean; checkUpdate: boolean }
   ai: { models: AiModel[]; default: string; keepDays: number; maxMB: number }
   /** targets：只允许这些目标（「项目/目标」）；空 = 全部非生产目标 */
-  mcp: { allowChanges: boolean; targets: string[] | null; confirmIn?: string; logKeepDays: number; logMaxMB: number }
+  mcp: {
+    allowChanges: boolean
+    targets: string[] | null
+    confirmIn?: string
+    clientConfirmScope?: string
+    clientConfirmFallback?: string
+    forceDesktopOnDanger?: boolean
+    logKeepDays: number
+    logMaxMB: number
+  }
   notify: { channels: NotifyChannel[] }
   desktop: { projects: { path: string; name: string }[] | null; current: string }
   team: { name: string }
@@ -1475,7 +1546,7 @@ export const AUDIT_GROUPS: { label: string; kinds: Record<string, string> }[] = 
       'software-control': '启停软件', 'software-config': '改软件配置',
     },
   },
-  { label: '防火墙、端口', kinds: { port: '放行 / 关闭端口', 'firewall-on': '打开防火墙', 'firewall-off': '关闭防火墙' } },
+  { label: '防火墙、端口', kinds: { port: '放行 / 关闭端口', 'firewall-on': '打开防火墙', 'firewall-off': '关闭防火墙', 'firewall-install': '安装防火墙', 'firewall-uninstall': '卸载防火墙' } },
   {
     label: '告警、备份',
     kinds: {

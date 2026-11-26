@@ -28,10 +28,11 @@ const serveRetryAfter = 5 * time.Minute
 
 // agentServer 一条连接上常驻的 agent。
 type agentServer struct {
-	pipe   *remote.Pipe
-	wmu    sync.Mutex // 写请求
-	seq    atomic.Int64
-	served atomic.Int64 // 做完的请求数（启动后一个没做完就退出了，当作启动失败）
+	pipe      *remote.Pipe
+	wmu       sync.Mutex // 写请求
+	seq       atomic.Int64
+	served    atomic.Int64 // 做完的请求数（启动后一个没做完就退出了，当作启动失败）
+	remotePID atomic.Int64 // 常驻 agent 在服务器上的 PID（通过 0 !hello <pid> 收到）
 
 	mu    sync.Mutex
 	calls map[string]*serveCall
@@ -114,6 +115,14 @@ func (a *agentServer) read() {
 func (a *agentServer) dispatch(text string) {
 	id, rest, ok := strings.Cut(text, " ")
 	if !ok {
+		return
+	}
+	if id == "0" {
+		if pidStr, hello := strings.CutPrefix(rest, proto.ServeHello); hello {
+			if pid, err := strconv.Atoi(strings.TrimSpace(pidStr)); err == nil && pid > 0 {
+				a.remotePID.Store(int64(pid))
+			}
+		}
 		return
 	}
 	a.mu.Lock()

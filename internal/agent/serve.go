@@ -26,6 +26,7 @@ const (
 // 本机取消一个请求（{"id":…,"cancel":true}）时：还在排队的不做了，正在做的停下正在运行的命令。
 func Serve(sys System, in io.Reader, out io.Writer) int {
 	w := &serveOut{w: out}
+	w.line("0", proto.ServeHello+strconv.Itoa(os.Getpid()))
 	light := make(chan struct{}, serveLight)
 	heavy := make(chan struct{}, serveHeavy)
 	// 跨请求共用：防火墙结果（应用状态每分钟刷新，不用每次都起 firewall-cmd）与服务器信息 CPU 基线
