@@ -9,7 +9,7 @@ import { setParticles } from './fx/dialogParticles'
 import { commandTarget } from './commandContext'
 import { mergeRetries, queuedRequest } from './requestQueue'
 import type { SettingsSecretChange } from './settingsSecrets'
-import { syncAppIcon, waitForAppIcon } from './appIcon'
+import { syncAppIcon, syncFavicon, waitForAppIcon } from './appIcon'
 import type { CustomInstallDraft } from './customInstall'
 
 // ---------------------------------------------------------------- 设置
@@ -65,33 +65,61 @@ export function saveSettings(s: AppSettings, changes: SettingsSecretChange[] = [
 
 // ---------------------------------------------------------------- 主题
 
+const SYSTEM_ICON_DEBOUNCE_MS = 500
 let media: MediaQueryList | undefined
 let themeRevision = 0
 let nativeThemeUpdate = Promise.resolve()
 
-export function applyTheme(theme: string) {
+export interface ApplyThemeOptions {
+  /** 设置弹窗内实时预览：只切换界面、玻璃、favicon 与标题栏深浅色，不改桌面/任务栏快捷方式 */
+  preview?: boolean
+}
+
+export function applyTheme(theme: string, options: ApplyThemeOptions = {}) {
   const current = ++themeRevision
+  const preview = options.preview === true
   media ??= window.matchMedia('(prefers-color-scheme: dark)')
-  const set = (dark: boolean) => {
-    if (current !== themeRevision) return
+  const setDom = (dark: boolean) => {
+    if (current !== themeRevision) return false
     const root = document.documentElement
     if (root.classList.contains('dark') !== dark) {
       root.classList.toggle('dark', dark)
       themeChanged()
     }
-    void syncAppIcon(dark)
+    syncFavicon?.(dark)
+    return true
   }
-  media.onchange = theme === 'system' ? () => set(!!media?.matches) : null
-  set(theme === 'dark' || (theme === 'system' && media.matches))
+  media.onchange = theme === 'system'
+    ? () => {
+        const dark = !!media?.matches
+        if (!setDom(dark) || preview) return
+        void syncAppIcon(dark, { debounceMs: SYSTEM_ICON_DEBOUNCE_MS })
+      }
+    : null
+  const initialDark = theme === 'dark' || (theme === 'system' && media.matches)
+  setDom(initialDark)
+  // 固定深/浅色（或非 Tauri 预览页）直接同步外壳图标；
+  // Tauri 下的「跟随系统」等原生 window.theme() 权威结果回来后再同步一次，避免 WebView2 的 media.matches 滞后造成先错后改。
+  if (!preview && (!isTauri || theme !== 'system')) {
+    void syncAppIcon(initialDark)
+  }
   // 窗口标题栏跟着 Ferry 的主题，不然会跟着 Windows 自己的深色 / 浅色设置走（浅色主题配深色标题栏）
   if (isTauri) {
     nativeThemeUpdate = nativeThemeUpdate.then(async () => {
       if (current !== themeRevision) return
       const window = getCurrentWindow()
       await window.setTheme(theme === 'light' || theme === 'dark' ? theme : null)
-      // WebView2 的媒体查询会异步收到新主题；返回系统模式时先使用原生窗口的解析结果。
-      if (theme === 'system') set(await window.theme() === 'dark')
-    }).catch(error => console.warn('同步 Ferry 窗口主题失败', error))
+      // WebView2 的媒体查询会异步收到新主题；返回系统模式时以原生窗口的解析结果为准。
+      if (theme === 'system') {
+        const nativeDark = await window.theme() === 'dark'
+        if (setDom(nativeDark) && !preview) void syncAppIcon(nativeDark)
+      }
+    }).catch(error => {
+      console.warn('同步 Ferry 窗口主题失败', error)
+      if (current === themeRevision && !preview && theme === 'system') {
+        void syncAppIcon(!!media?.matches)
+      }
+    })
   }
 }
 
@@ -300,6 +328,7 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
   const now = Date.now()
   const migration = args[0] === 'db' && args[1] === 'migrate-run'
   const nativeMigration = args[0] === 'db' && args[1] === 'native-run'
+  const oneTimeAuthTask = args[0] === 'port' && args[1] === 'uninstall'
   const hid = now.toString(36) + '-' + Math.random().toString(36).slice(2, 8)
   const task = reactive<Task>({ id: nextId++, hid, title, status: 'running', lines: [], startedAt: now, lastAt: now, step: { text: '启动 ferry', at: now } }) as Task
   let sample: { t: number; done: number } | undefined
@@ -366,7 +395,7 @@ export function startTask(title: string, args: string[], onDone?: (t: Task) => v
   task.kill = run.kill
   task.config = configOf(args)
   task.target = targetOf(args)
-  if (!migration && !nativeMigration) {
+  if (!migration && !nativeMigration && !oneTimeAuthTask) {
     task.retry = () => startTask(title, args, onDone, env)
     task.retryWith = (extra) => startTask(title, [...args, ...extra], onDone, env)
   }

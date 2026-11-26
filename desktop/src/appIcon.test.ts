@@ -258,6 +258,8 @@ describe('主题图标', () => {
     expect(isVisible).toHaveBeenCalledTimes(3)
     expect(syncShell).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(500)
+    expect(syncShell).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(200)
     expect(syncShell).toHaveBeenCalledTimes(2)
     expect(setIcon).toHaveBeenCalledExactlyOnceWith(darkBytes)
     expect(syncShell.mock.invocationCallOrder[1]).toBeLessThan(setIcon.mock.invocationCallOrder[0])
@@ -293,5 +295,126 @@ describe('主题图标', () => {
     expect(syncShell).toHaveBeenCalledTimes(3)
     expect(setIcon).toHaveBeenCalledOnce()
     expect(refreshShell).not.toHaveBeenCalled()
+  })
+
+  it('sync_shell_icon 抛异常时不会单方面修改窗口图标，避免桌面与任务栏分裂', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    syncShell.mockRejectedValue(new Error('com unavailable'))
+    const { syncAppIcon } = await import('./appIcon')
+    const failed = syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    await failed
+    expect(syncShell).toHaveBeenCalledTimes(3)
+    expect(setIcon).not.toHaveBeenCalled()
+    expect(refreshShell).not.toHaveBeenCalled()
+    // 清除 requestedTheme 后，恢复正常时同主题可重新同步。
+    syncShell.mockResolvedValue(shown)
+    const recovered = syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    await recovered
+    expect(setIcon).toHaveBeenCalledExactlyOnceWith(darkBytes)
+    expect(refreshShell).toHaveBeenCalledOnce()
+  })
+
+  it('busy 为 0 的只读/无权限告警不浪费重试，同主题也不再反复尝试', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    syncShell.mockResolvedValue({ updated: 1, warnings: ['public desktop access denied'], busy: 0, generation: 1, refresh: true })
+    const { syncAppIcon } = await import('./appIcon')
+    const update = syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    await update
+    expect(syncShell).toHaveBeenCalledOnce()
+    expect(setIcon).toHaveBeenCalledExactlyOnceWith(darkBytes)
+    expect(refreshShell).toHaveBeenCalledOnce()
+    await syncAppIcon(true)
+    expect(syncShell).toHaveBeenCalledOnce()
+  })
+
+  it('busy 大于 0 的临时占用在重试耗尽后不标为已完成，后续同主题可自愈', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    syncShell
+      .mockResolvedValueOnce({ updated: 1, warnings: ['start menu busy'], busy: 1, generation: 1, refresh: true })
+      .mockResolvedValueOnce({ updated: 0, warnings: ['start menu busy'], busy: 1, generation: 2, refresh: true })
+      .mockResolvedValueOnce({ updated: 0, warnings: ['start menu busy'], busy: 1, generation: 3, refresh: true })
+      .mockResolvedValueOnce({ updated: 1, warnings: [], busy: 0, generation: 4, refresh: true })
+    const { syncAppIcon } = await import('./appIcon')
+    const first = syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    await first
+    expect(syncShell).toHaveBeenCalledTimes(3)
+    expect(refreshShell).toHaveBeenCalledExactlyOnceWith({ generation: 1 })
+    // 仍存在临时占用：不锁死 requestedTheme，下一次同主题可成功补齐并补刷任务栏。
+    const heal = syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    await heal
+    expect(syncShell).toHaveBeenCalledTimes(4)
+    expect(refreshShell).toHaveBeenLastCalledWith({ generation: 4 })
+  })
+
+  it('启动推迟等待窗口显示超时后会释放请求态，不会永久卡死同主题同步', async () => {
+    syncShell
+      .mockResolvedValueOnce({ ...report, pending: 2 })
+      .mockResolvedValueOnce({ ...shown, updated: 2, generation: 2 })
+    isVisible.mockResolvedValue(false)
+    const { syncAppIcon } = await import('./appIcon')
+    await syncAppIcon(true)
+    await vi.advanceTimersByTimeAsync(16000)
+    expect(syncShell).toHaveBeenCalledOnce()
+    expect(setIcon).not.toHaveBeenCalled()
+    // 窗口最终显示出来后再次触发同主题，能够正常完成同步。
+    isVisible.mockResolvedValue(true)
+    const later = syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    await later
+    expect(syncShell).toHaveBeenCalledTimes(2)
+    expect(setIcon).toHaveBeenCalledExactlyOnceWith(darkBytes)
+    expect(refreshShell).toHaveBeenCalledExactlyOnceWith({ generation: 2 })
+  })
+
+  it('启动推迟后若窗口瞬时隐藏再次返回 pending，会继续等待并最终完成', async () => {
+    syncShell
+      .mockResolvedValueOnce({ ...report, pending: 2 })
+      .mockResolvedValueOnce({ ...report, pending: 2, generation: 2 })
+      .mockResolvedValueOnce({ ...shown, updated: 2, generation: 3 })
+    isVisible.mockResolvedValue(true)
+    const { syncAppIcon } = await import('./appIcon')
+    await syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    expect(syncShell).toHaveBeenCalledTimes(3)
+    expect(setIcon).toHaveBeenCalledExactlyOnceWith(darkBytes)
+    expect(refreshShell).toHaveBeenCalledExactlyOnceWith({ generation: 3 })
+  })
+
+  it('防抖期间切回已生效主题时不触发任何原生写入', async () => {
+    syncShell.mockResolvedValue(shown)
+    const { syncAppIcon } = await import('./appIcon')
+    const init = syncAppIcon(true)
+    await vi.runAllTimersAsync()
+    await init
+    expect(syncShell).toHaveBeenCalledOnce()
+
+    const flashLight = syncAppIcon(false, { debounceMs: 500 })
+    await vi.advanceTimersByTimeAsync(150)
+    const backDark = syncAppIcon(true, { debounceMs: 500 })
+    await vi.runAllTimersAsync()
+    await Promise.all([flashLight, backDark])
+    expect(syncShell).toHaveBeenCalledOnce()
+    expect(setIcon).toHaveBeenCalledOnce()
+    expect(refreshShell).toHaveBeenCalledOnce()
+  })
+
+  it('主窗口刚显示出来紧接着收到新主题时，会先等满稳定窗口再修改快捷方式', async () => {
+    syncShell.mockResolvedValue(shown)
+    const { notifyWindowShown, syncAppIcon } = await import('./appIcon')
+    notifyWindowShown()
+    const update = syncAppIcon(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(syncShell).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(syncShell).toHaveBeenCalledExactlyOnceWith({ dark: false })
+    await vi.runAllTimersAsync()
+    await update
+    expect(setIcon).toHaveBeenCalledExactlyOnceWith(lightBytes)
+    expect(refreshShell).toHaveBeenCalledOnce()
   })
 })

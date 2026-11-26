@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import 'element-plus'
 import type { AppSettings } from './ferry'
 
-const { rpc, setTheme, nativeTheme, syncIcon, waitIcon } = vi.hoisted(() => ({
-  rpc: vi.fn(), setTheme: vi.fn(), nativeTheme: vi.fn(), syncIcon: vi.fn(), waitIcon: vi.fn(),
+const { rpc, setTheme, nativeTheme, syncIcon, syncFavicon, waitIcon } = vi.hoisted(() => ({
+  rpc: vi.fn(), setTheme: vi.fn(), nativeTheme: vi.fn(), syncIcon: vi.fn(), syncFavicon: vi.fn(), waitIcon: vi.fn(),
 }))
 vi.mock('./ferry', async original => ({ ...await original<typeof import('./ferry')>(), call: rpc }))
 vi.mock('./platform', () => ({ isTauri: true, storeGet: vi.fn() }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ setTheme, theme: nativeTheme }) }))
-vi.mock('./appIcon', () => ({ syncAppIcon: syncIcon, waitForAppIcon: waitIcon }))
+vi.mock('./appIcon', () => ({ syncAppIcon: syncIcon, syncFavicon, waitForAppIcon: waitIcon }))
 vi.mock('./glass/runtime', () => ({
   glass: { enabled: true, transparency: 90 }, GLASS_TRANSPARENCY_DEFAULT: 90, themeChanged: vi.fn(),
 }))
@@ -22,6 +22,7 @@ beforeEach(() => {
   setTheme.mockReset().mockResolvedValue(undefined)
   nativeTheme.mockReset().mockResolvedValue('light')
   syncIcon.mockReset().mockResolvedValue(undefined)
+  syncFavicon.mockReset()
   waitIcon.mockReset().mockResolvedValue(undefined)
   dark = false
   cache = new Map()
@@ -101,21 +102,44 @@ describe('主题初始化与系统跟随', () => {
     expect(setTheme).toHaveBeenLastCalledWith(null)
   })
 
-  it('切回跟随系统时采用原生解析结果，并响应后续系统主题变化', async () => {
+  it('切回跟随系统时只按原生解析结果同步一次图标，并防抖响应后续系统主题变化', async () => {
     nativeTheme.mockResolvedValue('dark')
     const { applyTheme, waitForTheme } = await import('./state')
     applyTheme('system')
     await waitForTheme()
     expect(setTheme).toHaveBeenCalledWith(null)
     expect(dark).toBe(true)
+    // media.matches 初始为 false，但原生解析结果为 dark：不能先按 false 误触发一次外壳图标同步。
+    expect(syncIcon).toHaveBeenCalledExactlyOnceWith(true)
     media.matches = false
     media.onchange!()
     expect(dark).toBe(false)
-    expect(syncIcon).toHaveBeenLastCalledWith(false)
+    expect(syncIcon).toHaveBeenLastCalledWith(false, { debounceMs: 500 })
     applyTheme('dark')
     await waitForTheme()
     expect(media.onchange).toBeNull()
     expect(dark).toBe(true)
+  })
+
+  it('设置页预览只切换界面、favicon 与标题栏，不触发桌面和任务栏图标同步', async () => {
+    const { applyTheme, waitForTheme } = await import('./state')
+    applyTheme('dark', { preview: true })
+    await waitForTheme()
+    expect(dark).toBe(true)
+    expect(setTheme).toHaveBeenLastCalledWith('dark')
+    expect(syncFavicon).toHaveBeenLastCalledWith(true)
+    expect(syncIcon).not.toHaveBeenCalled()
+
+    nativeTheme.mockResolvedValue('light')
+    applyTheme('system', { preview: true })
+    await waitForTheme()
+    expect(dark).toBe(false)
+    expect(setTheme).toHaveBeenLastCalledWith(null)
+    media.matches = true
+    media.onchange!()
+    expect(dark).toBe(true)
+    expect(syncFavicon).toHaveBeenLastCalledWith(true)
+    expect(syncIcon).not.toHaveBeenCalled()
   })
 
   it('过期的原生系统主题查询不会覆盖后选的固定主题', async () => {

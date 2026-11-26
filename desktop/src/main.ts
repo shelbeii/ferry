@@ -9,6 +9,7 @@ import { HOVER_DELAY } from './ui'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from './platform'
 import { startTheme } from './state'
+import { notifyWindowShown } from './appIcon'
 import { preloadLater } from './preload'
 import { installGlassMenus } from './glass/menus'
 import { installGlassSegments } from './glass/segments'
@@ -37,5 +38,5 @@ installPopperParticles()
 // 窗口在 Rust 里先隐藏：界面画好、主题切好再显示，免得先看到白底或浅色（Rust 那边 3 秒后也会显示，防止这里出错时一直看不到窗口）
 if (isTauri) {
   const w = getCurrentWindow()
-  void themeReady.finally(() => w.show().catch(() => {}))
+  void themeReady.finally(() => w.show().then(notifyWindowShown, () => {}))
 }

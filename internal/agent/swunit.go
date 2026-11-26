@@ -18,6 +18,11 @@ var (
 	reContainerNm = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 )
 
+const (
+	swunitPoll   = 500 * time.Millisecond
+	swunitStable = 1500 * time.Millisecond
+)
+
 func (a *Agent) swunit() int {
 	unit, ctr, action := a.req.SwUnit, a.req.SwContainer, a.req.Action
 	switch action {
@@ -62,27 +67,48 @@ func (a *Agent) swunitService(unit, action string, n int) int {
 		a.serviceDiag(unit)
 		return a.result(proto.CodeFailed, err.Error(), nil)
 	}
-	// 等它进入目标状态（最多 30 秒）：启动后马上退出的要报出来
+	// 等它进入目标状态（最多 30 秒）：Type=simple 服务在 systemctl 返回瞬间可能仍是 active/running 随即退出，
+	// 需要稳定观察 swunitStable 且主进程号未变才判就绪，避免漏报启动即崩退。
 	deadline := a.Sys.Now().Add(30 * time.Second)
+	var stableAt time.Time
+	var pid0 int
 	for {
 		p = a.Sys.UnitProps(unit)
 		switch {
 		case action == "stop" && !isRunning(p):
 			a.info(proto.EvStop, unit, "已停止")
 			return a.result(proto.CodeOK, "", nil)
-		case action != "stop" && p.Active == "active" && p.Sub != "auto-restart":
-			a.info(proto.EvReady, unit, "运行中（%s）", p.Sub)
-			return a.result(proto.CodeOK, "", nil)
 		case action != "stop" && (p.Active == "failed" || p.Active == "inactive" || p.Sub == "auto-restart"): // auto-restart：起来又退出，正在反复重启
 			a.fail(proto.EvCrash, unit, "没有起来（%s/%s）", p.Active, p.Sub)
 			a.serviceDiag(unit)
 			return a.result(proto.CodeFailed, unit+" 没有起来", nil)
+		case action != "stop" && p.Active == "active" && p.Sub != "auto-restart":
+			if p.Sub != "running" {
+				a.info(proto.EvReady, unit, "运行中（%s）", p.Sub)
+				return a.result(proto.CodeOK, "", nil)
+			}
+			now := a.Sys.Now()
+			if pid0 != 0 && p.PID != 0 && p.PID != pid0 {
+				a.fail(proto.EvCrash, unit, "启动后主进程发生变化（PID %d → %d）", pid0, p.PID)
+				a.serviceDiag(unit)
+				return a.result(proto.CodeFailed, unit+" 没有起来", nil)
+			}
+			if stableAt.IsZero() {
+				stableAt = now
+				pid0 = p.PID
+			} else if now.Sub(stableAt) >= swunitStable {
+				a.info(proto.EvReady, unit, "运行中（%s）", p.Sub)
+				return a.result(proto.CodeOK, "", nil)
+			}
+		default:
+			stableAt = time.Time{}
+			pid0 = 0
 		}
 		if !a.Sys.Now().Before(deadline) {
 			a.warn(proto.EvWarn, unit, "30 秒后还是 %s/%s，稍后刷新看看", p.Active, p.Sub)
 			return a.result(proto.CodeOK, "", nil)
 		}
-		a.Sys.Sleep(time.Second)
+		a.Sys.Sleep(swunitPoll)
 	}
 }
 

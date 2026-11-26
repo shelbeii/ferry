@@ -6,6 +6,17 @@ export function appIconPath(dark: boolean): string {
   return `/branding/ferry-${dark ? 'dark' : 'light'}.png`
 }
 
+/** 仅更新页面 favicon（预览与正式切换共用，不触碰 Windows 快捷方式与任务栏） */
+export function syncFavicon(dark: boolean): void {
+  const favicon = document.getElementById?.('ferry-favicon') as HTMLLinkElement | null | undefined
+  if (favicon) favicon.href = appIconPath(dark)
+}
+
+export interface SyncAppIconOptions {
+  /** 系统深浅色事件防抖（毫秒），避免短时间内连发多次导致反复写 .lnk 与 Explorer 通知乱序 */
+  debounceMs?: number
+}
+
 const iconBytes = new Map<string, Promise<ArrayBuffer>>()
 let revision = 0
 let appliedTheme: boolean | undefined
@@ -13,20 +24,33 @@ let appliedTheme: boolean | undefined
 let requestedTheme: boolean | undefined
 let nativeUpdate = Promise.resolve()
 let latestUpdate = Promise.resolve()
+/** 启动时主窗口刚显示出来的时刻：若紧接着收到与缓存不同的正式设置，先等满 AFTER_SHOW_MS 再改快捷方式 */
+let windowShownAt: number | undefined
 
 interface ShellReport {
   updated: number
   warnings: string[]
+  /** 属于临时文件占用（Explorer / 索引器 / OneDrive 锁住）导致的失败数 */
+  busy?: number
   generation: number
   refresh: boolean
   /** 窗口还没显示、有这么多个快捷方式要改：这次什么都没改，等窗口显示出来再同步一次（见 changeAfterShow） */
   pending?: number
 }
 
-/** 个别快捷方式没改成（被占用、只读）时，隔这么久再试（毫秒）；只重试快捷方式，不重复刷新任务栏 */
+/** 个别快捷方式没改成（被占用）时，隔这么久再试（毫秒）；只重试快捷方式，不重复刷新任务栏 */
 const SHORTCUT_RETRY_MS = [1000, 3000]
+/** 窗口显示出来后隔这么久再改快捷方式（毫秒）：等任务栏把按钮建好。实测显示后 0.7 秒改，8 次全对 */
+const AFTER_SHOW_MS = 700
+/** 启动推迟后最多等待多少轮可见态，避免窗口瞬时隐藏导致静默丢弃并锁死 requestedTheme */
+const MAX_PENDING_ROUNDS = 3
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+/** 主窗口刚由 main.ts 显示时调用，避免紧随其后的正式设置主题撞上任务栏按钮初始化期 */
+export function notifyWindowShown(): void {
+  windowShownAt = Date.now()
+}
 
 /** 启动期间主题可能被正式设置或系统事件替换，等待最后一次更新。 */
 export async function waitForAppIcon(): Promise<void> {
@@ -37,19 +61,23 @@ export async function waitForAppIcon(): Promise<void> {
   } while (pending !== latestUpdate)
 }
 
-/** 同步窗口、桌面和任务栏图标，包含「跟随系统」和设置预览；原生更新串行，避免旧请求覆盖新主题。 */
-export function syncAppIcon(dark: boolean): Promise<void> {
-  const path = appIconPath(dark)
-  const favicon = document.getElementById?.('ferry-favicon') as HTMLLinkElement | null | undefined
-  if (favicon) favicon.href = path
+/** 同步窗口、桌面和任务栏图标；原生更新串行，避免旧请求覆盖新主题。 */
+export function syncAppIcon(dark: boolean, options: SyncAppIconOptions = {}): Promise<void> {
+  syncFavicon(dark)
   if (!isTauri) return Promise.resolve()
   // 同一个主题正在做或已经做完：不重新来一遍（保存设置、切换项目、启动时读到正式设置都会再要求一次同样的主题，
   // 重来会重新扫快捷方式，并把等着刷新任务栏的那 2.5 秒从头算）
   if (requestedTheme === dark) return latestUpdate
 
+  const debounceMs = options.debounceMs ?? 0
   requestedTheme = dark
   const current = ++revision
-  latestUpdate = updateAppIcon(dark, current)
+  // 如果取消了一个尚在防抖等待期的新主题、且当前请求的主题本来就已经完整生效，无需再做任何原生写入。
+  if (appliedTheme === dark) {
+    latestUpdate = Promise.resolve()
+    return latestUpdate
+  }
+  latestUpdate = updateAppIcon(dark, current, 0, debounceMs)
   return latestUpdate
 }
 
@@ -76,19 +104,21 @@ function prepareIcon(dark: boolean, current: number, withIcon: boolean): Promise
     // 从这里开始可能已经改动一部分原生状态，旧的成功记录不再可靠。
     appliedTheme = undefined
     // 先改快捷方式、再换窗口图标：任务栏看到窗口图标变了会重新取这一组（合并的按钮）的图标并记下来，
-    // 快捷方式还没改好就记成旧的，之后任务栏按钮一直是旧图标（见 shellicon.rs 的 sync）
-    let report: ShellReport | undefined
-    try {
-      report = await invoke<ShellReport>('sync_shell_icon', { dark })
-      return report
-    } finally {
-      // 快捷方式留到窗口显示后再改的，窗口图标也留到那时一起换（和平时切主题一样的顺序）
-      if (icon && current === revision && !report?.pending) await getCurrentWindow().setIcon(icon)
-    }
+    // 快捷方式还没改好就记成旧的，之后任务栏按钮一直是旧图标（见 shellicon.rs 的 sync）。
+    // sync_shell_icon 抛异常时绝不能在 finally 里单方面换窗口图标，避免桌面和任务栏分裂。
+    const report = await invoke<ShellReport>('sync_shell_icon', { dark })
+    // 快捷方式留到窗口显示后再改的，窗口图标也留到那时一起换（和平时切主题一样的顺序）
+    if (icon && current === revision && !report.pending) await getCurrentWindow().setIcon(icon)
+    return report
   })
   // 只串行化实际写入，等待任务栏或重试期间允许新主题继续更新。
   nativeUpdate = update.then(() => undefined, () => undefined)
   return update
+}
+
+function hasRetryableWarnings(shell: ShellReport): boolean {
+  if (shell.busy !== undefined) return shell.busy > 0
+  return shell.warnings.length > 0
 }
 
 /** 让任务栏重新取一次图标。窗口显示着时先给 Explorer 读取快捷方式的时间；启动时窗口还隐藏着，直接完成 */
@@ -102,14 +132,14 @@ async function refreshTaskbar(shell: ShellReport, current: number): Promise<void
   }
 }
 
-/** 窗口图标和快捷方式改好之后的收尾：刷新任务栏（refresh 为 true 时），没改成的快捷方式再试几次，最后记下这个主题做完了 */
+/** 窗口图标和快捷方式改好之后的收尾：刷新任务栏（refresh 为 true 时），临时占用的快捷方式再试几次，最后记下状态 */
 async function settle(dark: boolean, current: number, first: ShellReport, refresh: boolean): Promise<void> {
   let shell = first
   if (refresh) await refreshTaskbar(shell, current)
-  // 个别快捷方式没改成：只把快捷方式再试几次，不把整个过程重来。
-  // 以前当成失败整个重来，每来一次任务栏就多刷新一次（窗口多隐藏、显示一次），一共三次
+  // 个别快捷方式因临时占用没改成：只把快捷方式再试几次，不把整个过程重来。
+  // 属于只读/无权限（busy === 0）的直接跳过无效重试，减少不必要的扫描与延迟。
   for (const wait of SHORTCUT_RETRY_MS) {
-    if (current !== revision || shell.warnings.length === 0) break
+    if (current !== revision || !hasRetryableWarnings(shell)) break
     await delay(wait)
     const again = await prepareIcon(dark, current, false)
     if (!again || current !== revision) return
@@ -119,9 +149,14 @@ async function settle(dark: boolean, current: number, first: ShellReport, refres
   }
   if (current !== revision) return
   if (shell.warnings.length > 0) {
-    // 一直改不了的（只读、没有权限）：这个主题算做完，不再反复试；下次切主题或重新打开 Ferry 时再改
     console.warn('部分 Ferry 快捷方式的图标没改成', shell.warnings)
   }
+  if ((shell.busy ?? 0) > 0) {
+    // 仍存在临时文件占用失败：不把该主题标为已完成，允许后续同主题或重启自愈。
+    requestedTheme = undefined
+    return
+  }
+  // 没有临时占用（全部成功，或仅剩只读/无权限等永久性警告）：这个主题算做完，不再反复试。
   appliedTheme = dark
 }
 
@@ -146,27 +181,19 @@ async function waitVisible(current: number): Promise<boolean> {
   return false
 }
 
-/** 窗口显示出来后隔这么久再改快捷方式（毫秒）：等任务栏把按钮建好。实测显示后 0.7 秒改，8 次全对 */
-const AFTER_SHOW_MS = 500
-
 /**
  * 启动时（窗口还没显示）发现快捷方式要改：上次关掉后系统换了深浅色、重装后快捷方式的图标被重置时会这样。
  * 这时先不改（sync_shell_icon 只检查），等窗口显示出来，再走平时切主题的那一套：改快捷方式、换窗口图标、
  * 等 2.5 秒刷新任务栏。任务栏在窗口出来两三秒后闪一下，换成对的图标。
- *
- * 任务栏只在「按钮已经在任务栏上、这时快捷方式变了」的情况下才可靠地换图标。窗口显示前就改好的话，
- * 任务栏建按钮时用的是它记着的这一组的旧图标，之后一直不变，直到下次切主题（实测每次都这样）。
- * 窗口显示前改好、再想办法补救的，实测都不行：
- * - 晚 1.5 秒再显示窗口：按钮照样是旧图标；
- * - 窗口显示后只刷新任务栏（等 2.5 秒、5 秒、十几秒）：一半以上没换成，刷新执行了但任务栏没重建按钮；
- * - 窗口显示后只再同步一次、不刷新：没换；
- * - 窗口显示后再同步一次、等 2.5 秒刷新：10 次里只有 3 次换成。
  */
-async function changeAfterShow(dark: boolean, current: number): Promise<void> {
+async function changeAfterShow(dark: boolean, current: number, round = 0): Promise<void> {
   try {
-    if (!await waitVisible(current)) return
+    if (!await waitVisible(current)) {
+      if (current === revision) requestedTheme = undefined
+      return
+    }
     await delay(AFTER_SHOW_MS)
-    if (current === revision) await updateAppIcon(dark, current, true)
+    if (current === revision) await updateAppIcon(dark, current, round + 1, 0)
   } catch (error) {
     if (current !== revision) return
     console.warn('同步 Ferry 主题图标失败，后续切换将重新尝试', error)
@@ -174,14 +201,29 @@ async function changeAfterShow(dark: boolean, current: number): Promise<void> {
   }
 }
 
-async function updateAppIcon(dark: boolean, current: number, shown = false): Promise<void> {
+async function updateAppIcon(dark: boolean, current: number, pendingRound = 0, debounceMs = 0): Promise<void> {
+  if (debounceMs > 0) {
+    await delay(debounceMs)
+    if (current !== revision) return
+  }
+  if (windowShownAt !== undefined && pendingRound === 0) {
+    const remaining = AFTER_SHOW_MS - (Date.now() - windowShownAt)
+    if (remaining > 0) {
+      await delay(remaining)
+      if (current !== revision) return
+    }
+  }
   for (let attempt = 0; attempt < 3 && current === revision; attempt++) {
     try {
       const shell = await prepareIcon(dark, current, true)
       if (!shell || current !== revision) return
       if (shell.pending) {
         // 启动时快捷方式要改：留到窗口显示出来再改，这里先返回，让 main.ts 显示窗口
-        if (!shown) void changeAfterShow(dark, current)
+        if (pendingRound < MAX_PENDING_ROUNDS) {
+          void changeAfterShow(dark, current, pendingRound)
+        } else if (current === revision) {
+          requestedTheme = undefined
+        }
         return
       }
       if (shell.refresh) {
