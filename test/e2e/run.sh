@@ -837,6 +837,14 @@ t "MCP Apps 卡片执行的命令已落盘" ok "mcp-app-e2e-ok" -- dx a 'cat /tm
 t "离线执行已写入桌面端任务历史（taskhist）" ok "离线执行" -- bash -c "cat \"$OUT/home/tasks\"/mcp-*.json"
 t "MCP Apps 卡片带理由拒绝" ok "先别改这个文件" -- env MCPCALL_APP=reject MCPCALL_APP_REASON="先别改这个文件" FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-reject-reason.conf","content":"token=sk-ant-api03-E2ESecretTokenShouldBeRedacted12345\n","reason":"e2e-reject-reason"}'
 t "MCP 调用日志 calls.jsonl 已对入参敏感信息脱敏" ok "REDACTED_OK" -- bash -c "grep -q 'E2ESecretTokenShouldBeRedacted' \"$OUT/home/mcp/calls.jsonl\" && echo LEAKED || echo REDACTED_OK"
+t "MCP 调用日志支持 --channel mcp-app 独立筛选" ok "mcp-app" -- env FERRY_HOME="$OUT/home" "$FERRY" mcp-log --channel mcp-app --json
+t "MCP 参数化资源模板：读取项目 ferry.yaml" ok "project: e2e" -- env MCPCALL_READ_RESOURCE="ferry://projects/e2e/config" FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E"
+t "MCP 参数化资源模板：读取服务器实时应用状态" ok '"name": "hk"' -- env MCPCALL_READ_RESOURCE="ferry://projects/e2e/e2e-a/status" FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E"
+env FERRY_HOME="$OUT/home" "$FERRY" mcp-downloads clean --all --json >/dev/null 2>&1 || true
+t "MCP files_download 下载文件并写入配额统计" ok '"bytes":' -- MC files_download '{"target":"e2e-a","paths":["/tmp/e2e-mcp-app.txt"]}'
+t "ferry mcp-downloads status 查看已下载占用" ok '"count":1' -- env FERRY_HOME="$OUT/home" "$FERRY" mcp-downloads status --json
+t "ferry mcp-downloads clean --all 清理全部下载" ok '"count":0' -- env FERRY_HOME="$OUT/home" "$FERRY" mcp-downloads clean --all --json
+t "ferry mcp-exec 统一执行器：重启 hk" ok '"ok":true' -- env FERRY_MCP_REQ='{"action":"restart","target":"e2e-a","apps":["hk"]}' FERRY_HOME="$OUT/home" "$FERRY" mcp-exec e2e-a -c "$E2E/ferry.yaml" --json
 t "MCP Apps 卡片下密码输入（ask_secret）仍强制需要 Ferry 桌面端" fail "Ferry 桌面版" -- env MCPCALL_APP=approve FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" ask_secret '{"target":"e2e-a","fields":[{"name":"e2e_pw","label":"测试密码"}],"purpose":"e2e"}'
 if [[ -n "$mcp_settings_bak" ]]; then
   printf '%s\n' "$mcp_settings_bak" > "$OUT/home/settings.json"

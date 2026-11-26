@@ -85,6 +85,27 @@ func Run(ctx context.Context, o Options) error {
 // maxConcurrentRemote 单个 ferry mcp 进程同时访问远程服务器的上限，防止并发风暴打满 OpenSSH MaxSessions（通常为 10）。
 const maxConcurrentRemote = 8
 
+// defaultReadTimeout 远程只读工具未显式指定超时时的兜底上限（防网络半开/远端命令卡死长期占用并发槽位）。
+var defaultReadTimeout = 2 * time.Minute
+
+func withReadTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok || defaultReadTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultReadTimeout)
+}
+
+type opTrackKey struct{}
+
+func trackOp(ctx context.Context, id string) {
+	if id == "" || ctx == nil {
+		return
+	}
+	if p, ok := ctx.Value(opTrackKey{}).(*string); ok && p != nil {
+		*p = id
+	}
+}
+
 type server struct {
 	o         Options
 	pool      *engine.Pool
@@ -597,6 +618,8 @@ func (s *server) engineFor(ctx context.Context, project, target string, conn boo
 		return nil, err // 错误里已列出可用的目标
 	}
 	st, _ := loadSettingsCached()
+	ctx, cancel := withReadTimeout(ctx)
+	defer cancel()
 	if s.remoteSem != nil {
 		select {
 		case s.remoteSem <- struct{}{}:
@@ -690,17 +713,19 @@ func redactLogArgs(in any) json.RawMessage {
 func loggedReq[In any](s *server, name string, fn func(context.Context, *mcp.CallToolRequest, In) (any, error)) mcp.ToolHandlerFor[In, any] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		start := time.Now()
+		var trackedOp string
+		callCtx := context.WithValue(ctx, opTrackKey{}, &trackedOp)
 		// 工具内部出错（panic）只让这一次调用失败，不让整个 ferry mcp 退出（编程软件里 Ferry 的工具会全部断开）
 		v, err := func() (v any, err error) {
 			defer safe.Recover("工具 "+name, &err)
 			if req != nil && req.Params != nil && req.Params.RequestState != "" {
-				return s.resumeMRTR(ctx, req)
+				return s.resumeMRTR(callCtx, req)
 			}
-			return fn(ctx, req, in)
+			return fn(callCtx, req, in)
 		}()
 		client := clientName(req)
 		args := redactLogArgs(in)
-		writeLog(callEntry{Time: start, Client: client, Tool: name, Args: args, OK: err == nil, Error: errText(err),
+		writeLog(callEntry{Time: start, Client: client, Tool: name, Op: trackedOp, Args: args, OK: err == nil, Error: errText(err),
 			Ms: time.Since(start).Milliseconds()})
 		if err != nil {
 			if ctx.Err() != nil {

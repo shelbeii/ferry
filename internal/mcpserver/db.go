@@ -106,6 +106,8 @@ func (s *server) addDBTools(m *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
+			ctx, cancel := withReadTimeout(ctx)
+			defer cancel()
 			return s.dbEngine(ctx).AIDBSchema(ctx, cn, engine.AIDBSchemaIn{Database: in.Database, Schema: in.Schema, Table: in.Table})
 		}))
 
@@ -120,6 +122,8 @@ func (s *server) addDBTools(m *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
+			ctx, cancel := withReadTimeout(ctx)
+			defer cancel()
 			return s.dbEngine(ctx).AIDBQuery(ctx, cn, in.Database, in.SQL, in.Limit)
 		}))
 
@@ -129,6 +133,8 @@ func (s *server) addDBTools(m *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
+			ctx, cancel := withReadTimeout(ctx)
+			defer cancel()
 			return s.dbEngine(ctx).AIRedisQuery(ctx, cn, in.Database, in.Command)
 		}))
 }

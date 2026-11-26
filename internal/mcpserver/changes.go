@@ -19,6 +19,7 @@ import (
 	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/engine"
+	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/safe"
 	"github.com/captain/ferry/internal/settings"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -242,18 +243,30 @@ func (s *server) cancelOp(ctx context.Context, id string) (any, error) {
 	if id == "" {
 		return nil, errors.New("要指定任务 id")
 	}
+	trackOp(ctx, id)
 	s.mu.Lock()
 	o := s.ops[id]
 	var pendingCard *pendingAppCard
-	for _, c := range s.appCards {
+	var pendingCardID string
+	for aid, c := range s.appCards {
 		if c.op == o && !c.decided {
 			pendingCard = c
+			pendingCardID = aid
 			c.decided = true
 			c.rejected = true
 			c.rejectMsg = "任务已取消，未执行任何改动"
 			if c.timer != nil {
 				c.timer.Stop()
 			}
+			// 保留短时间供卡片轮询终态，随后自动释放避免常驻内存
+			c.expiresAt = time.Now().Add(2 * time.Minute)
+			c.timer = time.AfterFunc(2*time.Minute, func() {
+				s.mu.Lock()
+				if cur, ok := s.appCards[pendingCardID]; ok && cur == c {
+					delete(s.appCards, pendingCardID)
+				}
+				s.mu.Unlock()
+			})
 			break
 		}
 	}
@@ -304,15 +317,15 @@ func ChangeAllowed(st settings.Settings, f *config.File, t *config.Target) error
 // PrepareRequest 收到请求、交给用户确认之前做完整校验并生成权威预览（防止绕过 ferry mcp 直接发请求、防止预览与执行脱节）；
 // 新建项目的 ferry.yaml 在这里按 Spec 重新生成，确认框里显示的就是要写入的。
 func PrepareRequest(r *approve.Request) error {
-	return prepareRequestWithPool(r, nil, os.Getenv)
+	return prepareRequestWithPool(r, nil, os.Getenv, false)
 }
 
 // PrepareRequestWithPool 同 PrepareRequest，允许桌面端（ferry serve）传入全局 SSH 连接池以复用连接、避免每次预检重建 SSH。
 func PrepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(string) string) error {
-	return prepareRequestWithPool(r, pool, getenv)
+	return prepareRequestWithPool(r, pool, getenv, false)
 }
 
-func prepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(string) string) error {
+func prepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(string) string, reuseDetail bool) error {
 	if _, ok := actionNames[r.Action]; !ok {
 		return fmt.Errorf("不支持的操作：%s", r.Action)
 	}
@@ -386,7 +399,9 @@ func prepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(s
 				return fmt.Errorf("端口不对：%q（写 8080/tcp 或 53/udp）", p)
 			}
 		}
-		r.Detail = preview(e, t.Name, *r)
+		if !reuseDetail || len(r.Detail) == 0 {
+			r.Detail = preview(e, t.Name, *r)
+		}
 		return nil
 	case "backup-run":
 		if r.Backup != "" && !reBackupName.MatchString(r.Backup) {
@@ -406,7 +421,9 @@ func prepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(s
 				return fmt.Errorf("PID 不对：%d", p)
 			}
 		}
-		r.Detail = preview(e, t.Name, *r)
+		if !reuseDetail || len(r.Detail) == 0 {
+			r.Detail = preview(e, t.Name, *r)
+		}
 		return nil
 	}
 	if len(r.Apps) == 0 {
@@ -427,9 +444,9 @@ func prepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(s
 	return nil
 }
 
-// prepareLocal 当 Ferry 桌面端未打开时，在 ferry mcp 内部复用连接池执行权威预检。
+// prepareLocal 当 Ferry 桌面端未打开时，在 ferry mcp 内部复用连接池执行权威预检（复用本进程刚预检好的 fw-enable / ssh-kick 详情避免二次 SSH）。
 func (s *server) prepareLocal(r *approve.Request) error {
-	return prepareRequestWithPool(r, s.pool, s.o.Getenv)
+	return prepareRequestWithPool(r, s.pool, s.o.Getenv, true)
 }
 
 // ---------------------------------------------------------------- 提请求、等结果
@@ -610,35 +627,7 @@ func preview(e *engine.Engine, target string, r approve.Request) []string {
 		if err != nil {
 			return append(out, "端口：读取失败（"+err.Error()+"）")
 		}
-		fw := rep.Firewall
-		switch {
-		case fw.Active:
-			out = append(out, "防火墙："+fw.Kind+" 已经在运行（执行时会报错）")
-		case !fw.Enable:
-			out = append(out, "防火墙：没有 Ferry 能打开的防火墙（执行时会报错）")
-		default:
-			out = append(out, "防火墙：打开 "+fw.Kind+"；SSH 端口一定放行，打开后连不上 SSH 时 3 分钟后自动关掉")
-		}
-		allow := "（只有 SSH 端口）"
-		if len(r.Allow) > 0 {
-			allow = strings.Join(r.Allow, "、")
-		}
-		out = append(out, "放行："+allow)
-		if r.RestartDocker {
-			out = append(out, "打开后重启 Docker（所有容器会重启一次）")
-		}
-		var lost []string
-		for _, p := range rep.Ports {
-			spec := fmt.Sprintf("%d/%s", p.Port, p.Proto)
-			if len(p.Listen) == 0 || p.SSH || p.Docker || p.Internal || slices.Contains(r.Allow, spec) || localOnly(p.Listen) {
-				continue
-			}
-			lost = append(lost, spec+"（"+orDash(strings.TrimSpace(p.Process+" "+p.Unit))+"）")
-		}
-		if len(lost) > 0 {
-			out = append(out, "打开后外部连不上："+strings.Join(lost, "、"))
-		}
-		return out
+		return append(out, formatFWEnablePreview(rep, r)...)
 	}
 	if r.Action == "backup-run" {
 		st, err := e2.Backup(target, "status", engine.BackupOptions{})
@@ -669,10 +658,7 @@ func preview(e *engine.Engine, target string, r approve.Request) []string {
 		if err != nil {
 			return append(out, "SSH 连接：读取失败（"+err.Error()+"）")
 		}
-		for _, pid := range r.Pids {
-			out = append(out, sshLine(rep, pid))
-		}
-		return out
+		return append(out, formatSSHKickPreview(rep, r)...)
 	}
 	if strings.HasPrefix(r.Action, "sw-") {
 		rep, err := e2.Software(target)
@@ -1011,6 +997,47 @@ func (o *op) view() (any, error) {
 		v["log"] = out.Log
 	}
 	return v, nil
+}
+
+func formatFWEnablePreview(rep *proto.PortReport, r approve.Request) []string {
+	var out []string
+	fw := rep.Firewall
+	switch {
+	case fw.Active:
+		out = append(out, "防火墙："+fw.Kind+" 已经在运行（执行时会报错）")
+	case !fw.Enable:
+		out = append(out, "防火墙：没有 Ferry 能打开的防火墙（执行时会报错）")
+	default:
+		out = append(out, "防火墙：打开 "+fw.Kind+"；SSH 端口一定放行，打开后连不上 SSH 时 3 分钟后自动关掉")
+	}
+	allow := "（只有 SSH 端口）"
+	if len(r.Allow) > 0 {
+		allow = strings.Join(r.Allow, "、")
+	}
+	out = append(out, "放行："+allow)
+	if r.RestartDocker {
+		out = append(out, "打开后重启 Docker（所有容器会重启一次）")
+	}
+	var lost []string
+	for _, p := range rep.Ports {
+		spec := fmt.Sprintf("%d/%s", p.Port, p.Proto)
+		if len(p.Listen) == 0 || p.SSH || p.Docker || p.Internal || slices.Contains(r.Allow, spec) || localOnly(p.Listen) {
+			continue
+		}
+		lost = append(lost, spec+"（"+orDash(strings.TrimSpace(p.Process+" "+p.Unit))+"）")
+	}
+	if len(lost) > 0 {
+		out = append(out, "打开后外部连不上："+strings.Join(lost, "、"))
+	}
+	return out
+}
+
+func formatSSHKickPreview(rep *engine.SSHReport, r approve.Request) []string {
+	out := make([]string, 0, len(r.Pids))
+	for _, pid := range r.Pids {
+		out = append(out, sshLine(rep, pid))
+	}
+	return out
 }
 
 // localOnly 只监听本机（127.0.0.1、[::1]）。

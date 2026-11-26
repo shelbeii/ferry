@@ -142,7 +142,8 @@ func (s *server) addExtraTools(m *mcp.Server) {
 			if len(in.Pids) == 0 || len(in.Pids) > 20 {
 				return nil, errors.New("pids 写 1～20 个连接（ssh_sessions 里的 pid）")
 			}
-			// 先看一眼：不在了、断不开的直接说
+			// 先看一眼：不在了、断不开的直接说；顺手把预览带入请求，离线预检时无需再连一次 SSH
+			var detail []string
 			_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
 				if err := allowedOn(e, t); err != nil {
 					return nil, err
@@ -168,12 +169,13 @@ func (s *server) addExtraTools(m *mcp.Server) {
 						return nil, fmt.Errorf("服务器上没有 PID %d 这个连接（已经断开了？用 ssh_sessions 再看一下）", p)
 					}
 				}
+				detail = formatSSHKickPreview(rep, approve.Request{Pids: in.Pids})
 				return nil, nil
 			})
 			if err != nil {
 				return nil, err
 			}
-			return s.change(ctx, req, in.targetIn, approve.Request{Action: "ssh-kick", Pids: in.Pids, Reason: in.Reason})
+			return s.change(ctx, req, in.targetIn, approve.Request{Action: "ssh-kick", Pids: in.Pids, Detail: detail, Reason: in.Reason})
 		}))
 
 	addTool(s, m, &mcp.Tool{Name: "firewall_enable", Title: "打开防火墙",
@@ -193,7 +195,8 @@ func (s *server) addExtraTools(m *mcp.Server) {
 				}
 				allow = append(allow, p)
 			}
-			// 先看一眼：已经开着、没有能打开的防火墙时不用问用户
+			// 先看一眼：已经开着、没有能打开的防火墙时不用问用户；顺手把预览带入请求，离线预检时无需再连一次 SSH
+			var detail []string
 			_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
 				if err := allowedOn(e, t); err != nil {
 					return nil, err
@@ -208,12 +211,13 @@ func (s *server) addExtraTools(m *mcp.Server) {
 				case !fw.Enable:
 					return nil, fmt.Errorf("%s 上没有 Ferry 能打开的防火墙（只支持装了没开的 firewalld、ufw；Ferry 不替你装防火墙）", t)
 				}
+				detail = formatFWEnablePreview(rep, approve.Request{Allow: allow, RestartDocker: in.RestartDocker})
 				return nil, nil
 			})
 			if err != nil {
 				return nil, err
 			}
-			return s.change(ctx, req, in.targetIn, approve.Request{Action: "fw-enable", Allow: allow, RestartDocker: in.RestartDocker, Reason: in.Reason})
+			return s.change(ctx, req, in.targetIn, approve.Request{Action: "fw-enable", Allow: allow, RestartDocker: in.RestartDocker, Detail: detail, Reason: in.Reason})
 		}))
 }
 

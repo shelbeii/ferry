@@ -438,8 +438,12 @@ func run(argv []string, cio *cliIO) int {
 		return aiHistoryCmd(c, cio, js, st, fail)
 	case cmd == "mcp-approvals" || cmd == "mcp-decide" || cmd == "mcp-sessions" || cmd == "mcp-unblock":
 		return mcpApprovalsCmd(cmd, c, cio, js, fail)
+	case cmd == "mcp-exec":
+		return mcpExecCmd(c, cio, rep, js, fail)
 	case cmd == "mcp-log":
 		return mcpLogCmd(c, cio, js, st, fail)
+	case cmd == "mcp-downloads":
+		return mcpDownloadsCmd(c, cio, js, st, fail)
 	case cmd == "audit" && len(c.pos) == 0 && c.has("local"):
 		return auditLocalCmd(c, js, fail)
 	case cmd == "mcp-tools":

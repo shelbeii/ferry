@@ -6,12 +6,13 @@
 // （用户填的密码按连接记，ask_secret 和用到它的命令要在同一个连接里），每个的结果前打印一行 「== 工具」。
 // 任何一个工具报错时退出码为 1（后面的照样调用）。
 //
-// 可选环境变量（用于端到端测试客户端确认渠道）：
+// 可选环境变量（用于端到端测试客户端确认渠道与资源模板）：
 //   - MCPCALL_ELICIT=approve|decline|fast-approve   开启 MCP Elicitation 表单处理器
 //   - MCPCALL_ELICIT_DELAY_MS=1600                  模拟人工查看耗时（毫秒）
 //   - MCPCALL_PROTOCOL=2025-11-25                   指定协商的 MCP 协议版本
 //   - MCPCALL_APP=approve|reject                    声明支持 MCP Apps（io.modelcontextprotocol/ui），自动拉取卡片资源并通过 app-only 工具确认/拒绝
 //   - MCPCALL_TWO_STEP=1                            遇到两段式 pendingConfirmation 时自动带着 confirmArgs 调用 confirm_change
+//   - MCPCALL_READ_RESOURCE=<uri>                   连接后直接读取指定 MCP 资源 / 资源模板并打印内容（无需传工具名）
 package main
 
 import (
@@ -28,7 +29,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 4 {
+	readResource := os.Getenv("MCPCALL_READ_RESOURCE")
+	if len(os.Args) < 3 || (readResource == "" && len(os.Args) < 4) {
 		fmt.Fprintln(os.Stderr, "用法：mcpcall <ferry> <目录> <工具> [参数 JSON] [<工具> <参数 JSON>]…")
 		os.Exit(2)
 	}
@@ -50,7 +52,7 @@ func main() {
 		}
 		calls = append(calls, c)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute*time.Duration(len(calls)))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute*time.Duration(max(len(calls), 1)))
 	defer cancel()
 	cmd := exec.Command(os.Args[1], "mcp")
 	cmd.Dir = os.Args[2]
@@ -98,6 +100,17 @@ func main() {
 		os.Exit(2)
 	}
 	defer cs.Close()
+	if readResource != "" {
+		res, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: readResource})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "读取资源失败：", err)
+			os.Exit(1)
+		}
+		for _, c := range res.Contents {
+			fmt.Println(c.Text)
+		}
+		os.Exit(0)
+	}
 	code := 0
 	for _, x := range calls {
 		if len(calls) > 1 {

@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/engine"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// downloadTimeout files_download 单次下载的超时兜底（大文件不受通用 2 分钟只读超时截断）。
+var downloadTimeout = 10 * time.Minute
 
 // 文件、服务器信息、应用详情、历史日志、保留扫描（只读）；上传文件（要用户在 Ferry 里确认）。
 
@@ -131,7 +133,8 @@ func (s *server) addFileTools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "files_download", Title: "下载文件到本机",
 		Description: "把服务器上的文件下载到运行 Ferry 的这台电脑的 Ferry 数据目录下的 downloads/<时间>/ 里（不会覆盖任何东西），" +
-			"返回本机路径；只支持单个文件、每个不超过 200 MiB（目录和更大的文件请在 Ferry 桌面版里下载，下载下来的文件可以直接打开看）。",
+			"返回本机路径；只支持单个文件、每个不超过 200 MiB（目录和更大的文件请在 Ferry 桌面版里下载，下载下来的文件可以直接打开看）。" +
+			"超过「设置 → 存储」中的保留天数或容量上限会自动清理最旧的下载。",
 		Annotations: readOnly},
 		logged(s, "files_download", func(ctx context.Context, in filesDownloadIn) (any, error) {
 			if len(in.Paths) == 0 || len(in.Paths) > 50 {
@@ -142,17 +145,16 @@ func (s *server) addFileTools(m *mcp.Server) {
 					return nil, fmt.Errorf("要下载服务器上的绝对路径：%q", p)
 				}
 			}
-			dir := filepath.Join(appdir.Dir(), "downloads", time.Now().Format("20060102-150405"))
-			for i := 2; ; i++ {
-				if _, err := os.Stat(dir); os.IsNotExist(err) {
-					break
-				}
-				dir = filepath.Join(appdir.Dir(), "downloads", fmt.Sprintf("%s-%d", time.Now().Format("20060102-150405"), i))
+			stCfg, _ := loadSettingsCached()
+			maxBytes := int64(stCfg.MCP.DownloadMaxMB) << 20
+			dlCtx := ctx
+			var cancel context.CancelFunc
+			if _, ok := ctx.Deadline(); !ok && downloadTimeout > 0 {
+				dlCtx, cancel = context.WithTimeout(ctx, downloadTimeout)
+				defer cancel()
 			}
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				return nil, err
-			}
-			return s.withEngineAny(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
+			return s.withEngineAny(dlCtx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
+				var totalBytes int64
 				for _, p := range in.Paths {
 					st, err := e.FileSize(t, p)
 					if err != nil {
@@ -164,11 +166,30 @@ func (s *server) addFileTools(m *mcp.Server) {
 					if st.Bytes > 200<<20 {
 						return nil, fmt.Errorf("%s 超过 200 MiB：请用 Ferry 桌面版下载", p)
 					}
+					totalBytes += st.Bytes
 				}
-				if err := e.Download(t, in.Paths, dir, false); err != nil {
+				if maxBytes > 0 && totalBytes > maxBytes {
+					return nil, fmt.Errorf("这批文件合计 %.1f MiB，超过「设置 → 存储 → MCP 下载的文件」的容量上限（%d MB）：请先清理已下载文件或调大上限，或用 Ferry 桌面版下载",
+						float64(totalBytes)/(1<<20), stCfg.MCP.DownloadMaxMB)
+				}
+				baseDir := DownloadsDir()
+				stamp := time.Now().Format("20060102-150405")
+				dir := filepath.Join(baseDir, stamp)
+				for i := 2; ; i++ {
+					if _, err := os.Stat(dir); os.IsNotExist(err) {
+						break
+					}
+					dir = filepath.Join(baseDir, fmt.Sprintf("%s-%d", stamp, i))
+				}
+				if err := os.MkdirAll(dir, 0o700); err != nil {
 					return nil, err
 				}
-				return map[string]any{"dir": dir, "paths": in.Paths}, nil
+				if err := e.Download(t, in.Paths, dir, false); err != nil {
+					_ = os.RemoveAll(dir)
+					return nil, err
+				}
+				CleanDownloads(stCfg.MCP.DownloadKeepDays, maxBytes, dir)
+				return map[string]any{"dir": dir, "paths": in.Paths, "bytes": totalBytes}, nil
 			})
 		}))
 

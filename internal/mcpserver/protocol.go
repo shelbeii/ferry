@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,9 +20,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const projectsResourceURI = "ferry://projects"
+const (
+	projectsResourceURI     = "ferry://projects"
+	projectConfigTemplate   = "ferry://projects/{project}/config"
+	projectTargetStatusTmpl = "ferry://projects/{project}/{target}/status"
+)
 
-// addResources 注册除 MCP App 卡片之外的只读 MCP 资源（支持客户端 @ 引用项目列表）。
+// addResources 注册除 MCP App 卡片之外的只读 MCP 资源与参数化资源模板（支持客户端 @ 引用项目、配置与服务器状态）。
 func (s *server) addResources(m *mcp.Server) {
 	m.AddResource(&mcp.Resource{
 		URI:         projectsResourceURI,
@@ -39,6 +44,104 @@ func (s *server) addResources(m *mcp.Server) {
 			}},
 		}, nil
 	})
+
+	m.AddResourceTemplate(&mcp.ResourceTemplate{
+		URITemplate: projectConfigTemplate,
+		Name:        "项目配置文件 ferry.yaml",
+		Title:       "项目配置",
+		Description: "只读读取指定项目的 ferry.yaml 内容（自动脱敏，不含本机凭据）",
+		MIMEType:    "text/yaml",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		uri := ""
+		if req != nil && req.Params != nil {
+			uri = req.Params.URI
+		}
+		rawProject, ok := parseProjectConfigURI(uri)
+		if !ok {
+			return nil, fmt.Errorf("无效的资源地址：%s（应为 %s）", uri, projectConfigTemplate)
+		}
+		p, err := s.configProject(rawProject)
+		if err != nil {
+			return nil, err
+		}
+		b, err := os.ReadFile(p.Config)
+		if err != nil {
+			return nil, err
+		}
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI:      uri,
+				MIMEType: "text/yaml",
+				Text:     ai.Clip(ai.Redact(string(b)), resultLimit),
+			}},
+		}, nil
+	})
+
+	m.AddResourceTemplate(&mcp.ResourceTemplate{
+		URITemplate: projectTargetStatusTmpl,
+		Name:        "服务器应用实时状态",
+		Title:       "目标状态快照",
+		Description: "只读读取指定项目在某台服务器上的实时应用运行状态（JSON，自动脱敏）",
+		MIMEType:    "application/json",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		uri := ""
+		if req != nil && req.Params != nil {
+			uri = req.Params.URI
+		}
+		project, target, ok := parseTargetStatusURI(uri)
+		if !ok {
+			return nil, fmt.Errorf("无效的资源地址：%s（应为 %s）", uri, projectTargetStatusTmpl)
+		}
+		res, err := s.withEngine(ctx, project, target, func(e *engine.Engine, t string) (any, error) {
+			return e.Status(t, nil)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI:      uri,
+				MIMEType: "application/json",
+				Text:     ai.Clip(redactJSON(res), resultLimit),
+			}},
+		}, nil
+	})
+}
+
+func parseProjectConfigURI(uri string) (string, bool) {
+	const prefix = "ferry://projects/"
+	const suffix = "/config"
+	if !strings.HasPrefix(uri, prefix) || !strings.HasSuffix(uri, suffix) {
+		return "", false
+	}
+	mid := uri[len(prefix) : len(uri)-len(suffix)]
+	if mid == "" || strings.Contains(mid, "/") {
+		return "", false
+	}
+	project, err := url.PathUnescape(mid)
+	if err != nil || strings.TrimSpace(project) == "" {
+		return "", false
+	}
+	return project, true
+}
+
+func parseTargetStatusURI(uri string) (project, target string, ok bool) {
+	const prefix = "ferry://projects/"
+	const suffix = "/status"
+	if !strings.HasPrefix(uri, prefix) || !strings.HasSuffix(uri, suffix) {
+		return "", "", false
+	}
+	mid := uri[len(prefix) : len(uri)-len(suffix)]
+	parts := strings.Split(mid, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	p, err1 := url.PathUnescape(parts[0])
+	t, err2 := url.PathUnescape(parts[1])
+	if err1 != nil || err2 != nil || strings.TrimSpace(p) == "" || strings.TrimSpace(t) == "" {
+		return "", "", false
+	}
+	return p, t, true
 }
 
 // uiMetaMiddleware 在「桌面端弹窗确认」模式下剥离 tools/list 返回里的 _meta.ui 元数据，
@@ -323,7 +426,11 @@ func (s *server) handleCompletion(ctx context.Context, req *mcp.CompleteRequest)
 			}
 		}
 	case "target":
-		if p, err := s.find(ctxArgs["project"]); err == nil {
+		ctxProject := ctxArgs["project"]
+		if u, err := url.PathUnescape(ctxProject); err == nil {
+			ctxProject = u
+		}
+		if p, err := s.find(ctxProject); err == nil {
 			for _, t := range p.Targets {
 				add(t.Name)
 			}
@@ -335,7 +442,11 @@ func (s *server) handleCompletion(ctx context.Context, req *mcp.CompleteRequest)
 			}
 		}
 	case "app":
-		if p, err := s.find(ctxArgs["project"]); err == nil {
+		ctxProject := ctxArgs["project"]
+		if u, err := url.PathUnescape(ctxProject); err == nil {
+			ctxProject = u
+		}
+		if p, err := s.find(ctxProject); err == nil {
 			for _, a := range p.Apps {
 				add(a.Name)
 			}

@@ -371,6 +371,7 @@ func (s *server) requestChange(ctx context.Context, req *mcp.CallToolRequest, r 
 	if r.ID == "" {
 		r.ID = newID()
 	}
+	trackOp(ctx, r.ID)
 	r.Session = s.session
 	r.Client = clientName(req)
 	r.ClientConfirmed = false
@@ -535,6 +536,7 @@ func (s *server) resumeMRTR(ctx context.Context, req *mcp.CallToolRequest) (any,
 	if !ok {
 		return nil, errors.New("这次确认已经失效或超时（ferry mcp 重启过，或已回答过）：要做的话请重新发起")
 	}
+	trackOp(ctx, c.req.ID)
 	res, _ := p.InputResponses[confirmKey].(*mcp.ElicitResult)
 	took := time.Since(c.at)
 	st, _ := settings.Load()
@@ -689,6 +691,7 @@ func (s *server) confirmChange(ctx context.Context, req *mcp.CallToolRequest, in
 	if !ok {
 		return nil, errors.New("这个 approvalId 不存在、已使用或已过期（5 分钟有效），请重新发起改动")
 	}
+	trackOp(ctx, plan.req.ID)
 	if !now.Before(plan.expiresAt) {
 		if plan.desktopOnline {
 			approve.Cancel(context.Background(), approverFile(), plan.prepareToken, plan.req.Session)
@@ -777,7 +780,16 @@ func (s *server) submitCommit(prepareToken string, r approve.Request, ev approve
 
 // runCommitOnOp 在已注册的 op 上执行桌面端 Commit；fallbackDirect 为 true 且桌面版在确认间隙关闭时自动转本地直接执行。
 func (s *server) runCommitOnOp(o *op, prepareToken string, r approve.Request, ev approve.ConfirmEvidence, fallbackDirect bool) {
+	if ev.FallbackToDesktop {
+		r.ClientConfirmed = false
+		r.ConfirmChannel = "desktop"
+	} else if ev.Channel != "" {
+		r.ClientConfirmed = true
+		r.ConfirmChannel = ev.Channel
+		r.ConfirmNote = ev.Note
+	}
 	o.mu.Lock()
+	o.req = r
 	o.cancelFn = func() {
 		_ = approve.CancelRun(context.Background(), approverFile(), r.ID, r.Session)
 	}
@@ -817,6 +829,10 @@ func (s *server) runCommitOnOp(o *op, prepareToken string, r approve.Request, ev
 }
 
 func (s *server) finishOp(o *op, r approve.Request, d approve.Decision, out *approve.Outcome, err error) {
+	ch := r.ConfirmChannel
+	if ch == "" && !r.ClientConfirmed && err == nil {
+		ch = "desktop"
+	}
 	args, _ := json.Marshal(map[string]any{
 		"project": r.Project,
 		"target":  r.Target,
@@ -824,7 +840,7 @@ func (s *server) finishOp(o *op, r approve.Request, d approve.Decision, out *app
 		"name":    cmp.Or(r.Software, r.Backup),
 		"port":    r.Port,
 		"action":  cmp.Or(actionNames[r.Action], r.Action),
-		"channel": r.ConfirmChannel,
+		"channel": ch,
 	})
 	entry := callEntry{
 		Time:   time.Now(),

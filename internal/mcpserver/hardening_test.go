@@ -14,6 +14,7 @@ import (
 	"github.com/captain/ferry/internal/appdir"
 	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
+	"github.com/captain/ferry/internal/engine"
 	"github.com/captain/ferry/internal/settings"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -486,4 +487,328 @@ func pathToFileURI(dir string) string {
 	}
 	u := url.URL{Scheme: "file", Path: slash}
 	return u.String()
+}
+
+func TestExecuteRequestUnifiedCreateAndConfigEdit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FERRY_HOME", home)
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+
+	st := settings.Defaults()
+	st.MCP.AllowChanges = true
+	if err := settings.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. DesktopOnline=false 的 create：生成 ferry.yaml 并自动登记到 settings.json
+	offlineDir := t.TempDir()
+	offlineCfg := filepath.Join(offlineDir, "ferry.yaml")
+	specRaw := json.RawMessage(`{"projectDir":"` + filepath.ToSlash(offlineDir) + `","project":"offlineproj","targets":[{"name":"test","host":"127.0.0.1","port":22,"user":"root","root":"/opt/offlineproj","runAs":"demo"}],"apps":[{"name":"web","type":"static","artifact":"dist"}]}`)
+	res, err := ExecuteRequest(context.Background(), approve.Request{
+		Action:  "create",
+		Project: "offlineproj",
+		Config:  offlineCfg,
+		Spec:    specRaw,
+	}, ExecOptions{DesktopOnline: false})
+	if err != nil {
+		t.Fatalf("离线 create 失败：%v", err)
+	}
+	if _, err := os.Stat(offlineCfg); err != nil {
+		t.Fatalf("离线 create 未生成文件：%v", err)
+	}
+	loaded, _ := settings.Load()
+	found := false
+	for _, p := range loaded.Desktop.Projects {
+		if samePath(p.Path, offlineCfg) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("离线 create 应写入 settings.json 项目列表：%#v", loaded.Desktop.Projects)
+	}
+	if m, ok := res.(map[string]any); !ok || m["project"] != "offlineproj" {
+		t.Fatalf("返回结果异常：%#v", res)
+	}
+
+	// 2. DesktopOnline=true 的 create：生成 ferry.yaml，不直接改写 settings.json（由桌面端 addProject 负责）
+	desktopDir := t.TempDir()
+	desktopCfg := filepath.Join(desktopDir, "ferry.yaml")
+	if _, err := ExecuteRequest(context.Background(), approve.Request{
+		Action:  "create",
+		Project: "desktopproj",
+		Config:  desktopCfg,
+		Spec:    json.RawMessage(`{"projectDir":"` + filepath.ToSlash(desktopDir) + `","project":"desktopproj","targets":[{"name":"test","host":"127.0.0.1","port":22,"user":"root","root":"/opt/desktopproj","runAs":"demo"}],"apps":[{"name":"web","type":"static","artifact":"dist"}]}`),
+	}, ExecOptions{DesktopOnline: true}); err != nil {
+		t.Fatalf("桌面端 create 失败：%v", err)
+	}
+	if _, err := os.Stat(desktopCfg); err != nil {
+		t.Fatalf("桌面端 create 未生成文件：%v", err)
+	}
+	loaded2, _ := settings.Load()
+	for _, p := range loaded2.Desktop.Projects {
+		if samePath(p.Path, desktopCfg) {
+			t.Fatalf("桌面端 create 不应绕过桌面端状态直接写 settings.json")
+		}
+	}
+
+	// 3. config-edit 正常写入与 Base 不一致（TOCTOU）拦截
+	editInput := engine.ConfigEditInput{
+		Edits: []config.Edit{{Op: "set", Path: "targets.test.host", Value: json.RawMessage(`"10.0.0.88"`)}},
+	}
+	plan, err := engine.PlanConfigEdit(desktopCfg, editInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editInput.Base = plan.Base
+	inBytes, _ := json.Marshal(editInput)
+	if _, err := ExecuteRequest(context.Background(), approve.Request{
+		Action: "config-edit",
+		Config: desktopCfg,
+		Input:  inBytes,
+	}, ExecOptions{DesktopOnline: true}); err != nil {
+		t.Fatalf("统一 config-edit 失败：%v", err)
+	}
+	b, _ := os.ReadFile(desktopCfg)
+	if !strings.Contains(string(b), "10.0.0.88") {
+		t.Fatalf("config-edit 未生效：%s", b)
+	}
+	// 用旧 Base 尝试另一处修改，必须因 TOCTOU 被拒绝
+	staleInput := engine.ConfigEditInput{
+		Base:  plan.Base,
+		Edits: []config.Edit{{Op: "set", Path: "targets.test.host", Value: json.RawMessage(`"10.0.0.77"`)}},
+	}
+	staleBytes, _ := json.Marshal(staleInput)
+	if _, err := ExecuteRequest(context.Background(), approve.Request{
+		Action: "config-edit",
+		Config: desktopCfg,
+		Input:  staleBytes,
+	}, ExecOptions{DesktopOnline: true}); err == nil || !strings.Contains(err.Error(), "确认之后被改过了") {
+		t.Fatalf("旧 Base 应被 TOCTOU 拦截，got：%v", err)
+	}
+}
+
+func TestDownloadsQuotaAndCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FERRY_HOME", home)
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+
+	base := DownloadsDir()
+	mkBatch := func(name string, size int, ageDays int) string {
+		d := filepath.Join(base, name)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "data.bin"), make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ts := time.Now().AddDate(0, 0, -ageDays)
+		if err := os.Chtimes(d, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+
+	oldDir := mkBatch("20250101-000001", 4096, 45)
+	midDir := mkBatch("20260101-000002", 4096, 5)
+	newDir := mkBatch("20260102-000003", 4096, 1)
+
+	cnt, sz := DownloadsUsage()
+	if cnt != 3 || sz != 4096*3 {
+		t.Fatalf("初始占用异常：count=%d size=%d", cnt, sz)
+	}
+
+	// 按天数清理应只删 oldDir
+	if removed := CleanDownloads(30, 10<<20, ""); removed != 1 {
+		t.Fatalf("按天数应删 1 批，got %d", removed)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatal("过期下载目录应被删除")
+	}
+
+	// 按容量上限清理：保留 keepDir（newDir），删掉更旧的 midDir
+	if removed := CleanDownloads(30, 5000, newDir); removed != 1 {
+		t.Fatalf("按容量应删 1 批，got %d", removed)
+	}
+	if _, err := os.Stat(midDir); !os.IsNotExist(err) {
+		t.Fatal("超配额的旧目录应被删除")
+	}
+	if _, err := os.Stat(newDir); err != nil {
+		t.Fatal("受保护的本次下载目录 keepDir 不应被删除")
+	}
+
+	// 全部清理
+	if removed := CleanAllDownloads(); removed != 1 {
+		t.Fatalf("全部清理应删 1 批，got %d", removed)
+	}
+	if cnt, sz := DownloadsUsage(); cnt != 0 || sz != 0 {
+		t.Fatalf("全部清理后应为 0：count=%d size=%d", cnt, sz)
+	}
+}
+
+func TestCallFilterChannelAndLegacyDesktop(t *testing.T) {
+	logHome(t)
+	now := time.Now()
+	entries := []callEntry{
+		{Time: now.Add(-4 * time.Minute), Client: "ide", Tool: "deploy（结果）", Op: "op-d", Decision: "同意", OK: true}, // 旧记录：无 channel 字段，按桌面弹窗识别
+		{Time: now.Add(-3 * time.Minute), Client: "ide", Tool: "restart（编程软件里确认）", Op: "op-a", Args: json.RawMessage(`{"channel":"mcp-app"}`), Decision: "在编程软件里同意", OK: true},
+		{Time: now.Add(-2 * time.Minute), Client: "ide", Tool: "restart（结果）", Op: "op-a", Args: json.RawMessage(`{"channel":"mcp-app"}`), Decision: "同意", OK: true},
+		{Time: now.Add(-1 * time.Minute), Client: "ide", Tool: "write-file（结果）", Op: "op-e", Args: json.RawMessage(`{"channel":"elicitation"}`), Decision: "同意", OK: true},
+		{Time: now, Client: "ide", Tool: "restart（结果）", Op: "op-t", Args: json.RawMessage(`{"channel":"two-step"}`), Decision: "同意", OK: true},
+	}
+	for _, e := range entries {
+		writeLog(e)
+	}
+
+	if pg := Calls(CallFilter{Channel: "desktop"}, 0, 10); pg.Total != 1 {
+		t.Fatalf("desktop 渠道筛选应兼容旧记录（1 条），got %d", pg.Total)
+	}
+	if pg := Calls(CallFilter{Channel: "mcp-app"}, 0, 10); pg.Total != 2 {
+		t.Fatalf("mcp-app 渠道应命中 2 条（确认+结果），got %d", pg.Total)
+	}
+	if pg := Calls(CallFilter{Channel: "elicitation"}, 0, 10); pg.Total != 1 {
+		t.Fatalf("elicitation 渠道应命中 1 条，got %d", pg.Total)
+	}
+	if pg := Calls(CallFilter{Channel: "two-step"}, 0, 10); pg.Total != 1 {
+		t.Fatalf("two-step 渠道应命中 1 条，got %d", pg.Total)
+	}
+}
+
+func TestResourceTemplatesAndCompletion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FERRY_HOME", home)
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+
+	secretYAML := shopYAML + "# token=sk-ant-api03-ResourceTemplateSecret1234567890\n"
+	shop := writeProject(t, filepath.Join(t.TempDir(), "shop"), secretYAML)
+	st := settings.Defaults()
+	st.Desktop.Projects = []settings.Project{{Path: shop, Name: "商城"}}
+	settings.Save(st)
+
+	cs := connect(t, t.TempDir())
+	ctx := context.Background()
+
+	tmpls, err := cs.ListResourceTemplates(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotURIs := map[string]bool{}
+	for _, rt := range tmpls.ResourceTemplates {
+		gotURIs[rt.URITemplate] = true
+	}
+	if !gotURIs[projectConfigTemplate] || !gotURIs[projectTargetStatusTmpl] {
+		t.Fatalf("缺少参数化资源模板：%v", gotURIs)
+	}
+
+	// 读取 ferry://projects/{project}/config：返回脱敏后的 YAML
+	cfgRes, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: "ferry://projects/shop/config"})
+	if err != nil || len(cfgRes.Contents) != 1 {
+		t.Fatalf("读取项目配置资源失败：%v %+v", err, cfgRes)
+	}
+	if cfgRes.Contents[0].MIMEType != "text/yaml" || !strings.Contains(cfgRes.Contents[0].Text, "project: shop") {
+		t.Fatalf("配置资源内容异常：%+v", cfgRes.Contents[0])
+	}
+	if strings.Contains(cfgRes.Contents[0].Text, "ResourceTemplateSecret1234567890") {
+		t.Fatalf("配置资源未脱敏：%s", cfgRes.Contents[0].Text)
+	}
+
+	// 支持中文登记名 URL 编码读取
+	encodedURI := "ferry://projects/" + url.PathEscape("商城") + "/config"
+	if resCN, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: encodedURI}); err != nil || len(resCN.Contents) != 1 {
+		t.Fatalf("中文名 URL 编码读取失败：%v %+v", err, resCN)
+	}
+
+	// ref/resource 补全（project 与 target）
+	compProj, err := cs.Complete(ctx, &mcp.CompleteParams{
+		Ref:      &mcp.CompleteReference{Type: "ref/resource", URI: projectConfigTemplate},
+		Argument: mcp.CompleteParamsArgument{Name: "project", Value: "sh"},
+	})
+	if err != nil || len(compProj.Completion.Values) == 0 || compProj.Completion.Values[0] != "shop" {
+		t.Fatalf("资源模板 project 补全失败：%v %+v", err, compProj)
+	}
+	compTarget, err := cs.Complete(ctx, &mcp.CompleteParams{
+		Ref:      &mcp.CompleteReference{Type: "ref/resource", URI: projectTargetStatusTmpl},
+		Argument: mcp.CompleteParamsArgument{Name: "target", Value: "te"},
+		Context:  &mcp.CompleteContext{Arguments: map[string]string{"project": url.PathEscape("商城")}},
+	})
+	if err != nil || len(compTarget.Completion.Values) == 0 || compTarget.Completion.Values[0] != "test" {
+		t.Fatalf("资源模板 target 补全失败：%v %+v", err, compTarget)
+	}
+}
+
+func TestReadTimeoutAndAppCardExpiryDeletionAndPrecheckReuse(t *testing.T) {
+	// 1. withReadTimeout：无截止时间时注入兜底超时；已有截止时间时不缩短
+	oldRT := defaultReadTimeout
+	defaultReadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { defaultReadTimeout = oldRT })
+
+	ctx1, cancel1 := withReadTimeout(context.Background())
+	defer cancel1()
+	if dl, ok := ctx1.Deadline(); !ok || time.Until(dl) > 200*time.Millisecond {
+		t.Fatalf("未设置截止时间时应注入 defaultReadTimeout：%v", ok)
+	}
+	longCtx, longCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer longCancel()
+	ctx2, cancel2 := withReadTimeout(longCtx)
+	defer cancel2()
+	if dl, ok := ctx2.Deadline(); !ok || time.Until(dl) < 4*time.Minute {
+		t.Fatalf("调用方已设长超时时不应被 defaultReadTimeout 截断：%v", time.Until(dl))
+	}
+
+	// 2. prepareLocal 复用 extra.go 预检出的 Detail 时不重复发起 SSH 连接
+	home := t.TempDir()
+	t.Setenv("FERRY_HOME", home)
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+	shop := writeProject(t, filepath.Join(t.TempDir(), "shop"), shopYAML)
+	st := settings.Defaults()
+	st.MCP.AllowChanges = true
+	settings.Save(st)
+	s, _ := newServer(Options{Version: "test", Dir: t.TempDir()})
+	defer s.pool.Close()
+
+	reqWithDetail := approve.Request{
+		Action: "fw-enable",
+		Config: shop,
+		Target: "test",
+		Allow:  []string{"80/tcp"},
+		Detail: []string{"防火墙：打开 firewalld", "放行：80/tcp"},
+	}
+	if err := s.prepareLocal(&reqWithDetail); err != nil {
+		t.Fatalf("prepareLocal 失败：%v", err)
+	}
+	if len(reqWithDetail.Detail) != 2 || reqWithDetail.Detail[0] != "防火墙：打开 firewalld" {
+		t.Fatalf("prepareLocal 应复用已预检好的 Detail，避免重复 SSH：%v", reqWithDetail.Detail)
+	}
+
+	// 3. MCP App 卡片到期定时器触发后应直接从 s.appCards 删除，防止内存滞留
+	card := &pendingAppCard{
+		req:       approve.Request{ID: "op-exp", Action: "restart", Target: "test"},
+		op:        &op{req: approve.Request{ID: "op-exp", Action: "restart", Target: "test"}, started: time.Now(), state: "waiting", done: make(chan struct{})},
+		appToken:  "tok",
+		createdAt: time.Now(),
+		expiresAt: time.Now().Add(20 * time.Millisecond),
+	}
+	s.mu.Lock()
+	s.appCards["exp-card"] = card
+	s.mu.Unlock()
+	done := make(chan struct{})
+	card.timer = time.AfterFunc(20*time.Millisecond, func() {
+		s.mu.Lock()
+		if cur, ok := s.appCards["exp-card"]; ok && cur == card {
+			delete(s.appCards, "exp-card")
+		}
+		s.mu.Unlock()
+		close(done)
+	})
+	<-done
+	s.mu.Lock()
+	_, stillThere := s.appCards["exp-card"]
+	s.mu.Unlock()
+	if stillThere {
+		t.Fatal("到期的 appCard 应已从 map 删除")
+	}
 }

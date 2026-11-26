@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/captain/ferry/internal/ai"
@@ -115,4 +117,44 @@ func mcpApprovalsCmd(cmd string, c *cli, cio *cliIO, js *ui.JSON, fail func(erro
 	defer unsub()
 	<-cio.ctx.Done()
 	return ok0(js, nil)
+}
+
+// mcpExecCmd 统一执行已确认的 MCP 改动请求（桌面版与离线执行共用 mcpserver.ExecuteRequest，不再在前端拼接各子命令参数）。
+// 请求 JSON 通过环境变量 FERRY_MCP_REQ 传入；可选 -c 与位置参数 <目标> 供任务面板归属和认证重试使用。
+func mcpExecCmd(c *cli, cio *cliIO, rep engine.Reporter, js *ui.JSON, fail func(error) int) int {
+	raw := strings.TrimSpace(cio.getenv("FERRY_MCP_REQ"))
+	if raw == "" {
+		return fail(errors.New("缺少环境变量 FERRY_MCP_REQ（MCP 改动请求 JSON）"))
+	}
+	var r approve.Request
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return fail(fmt.Errorf("FERRY_MCP_REQ 不是合法的 JSON：%v", err))
+	}
+	if r.Config == "" && c.flags["config"] != "" {
+		r.Config = c.flags["config"]
+	}
+	if r.Target == "" && len(c.pos) > 0 {
+		r.Target = strings.Split(c.pos[0], ",")[0]
+	}
+	data, err := mcpserver.ExecuteRequest(cio.ctx, r, mcpserver.ExecOptions{
+		Rep:           rep,
+		Pool:          cio.pool,
+		Getenv:        cio.getenv,
+		DesktopOnline: true,
+	})
+	if err != nil {
+		if js != nil && data != nil {
+			js.Result(false, data, err)
+			return 1
+		}
+		return fail(err)
+	}
+	if js != nil {
+		return ok0(js, data)
+	}
+	if data != nil {
+		b, _ := json.MarshalIndent(data, "", "  ")
+		fmt.Fprintln(cio.stdout, string(b))
+	}
+	return 0
 }

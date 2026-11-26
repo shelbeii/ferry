@@ -84,6 +84,9 @@ type MCP struct {
 	// 调用记录（数据目录的 mcp/calls.jsonl）：保留多少天、最多占用多少 MB（超出时从最旧的删起）
 	LogKeepDays int `json:"logKeepDays"` // 默认 30
 	LogMaxMB    int `json:"logMaxMB"`    // 默认 20
+	// 通过 MCP 下载到本机的文件（数据目录的 downloads/）：保留多少天、最多占用多少 MB（超出时从最旧的删起）
+	DownloadKeepDays int `json:"downloadKeepDays"` // 默认 30
+	DownloadMaxMB    int `json:"downloadMaxMB"`    // 默认 1024
 }
 
 // ConfirmInClient 是否优先在编程软件中确认改动。
@@ -237,7 +240,7 @@ type Runtime struct {
 
 // UI 桌面版界面。
 type UI struct {
-	Theme    string `json:"theme"`    // light | dark | system（默认）
+	Theme    string `json:"theme"`    // light | dark | warm-paper | warm-dusk | dimmed-sage | obsidian | system（默认）
 	TaskKeep int    `json:"taskKeep"` // 任务面板最多保留的已完成任务，默认 50
 	// 任务记录（数据目录的 tasks/，重启桌面版后还在）：保留多少天、最多占用多少 MB（超出时从最旧的删起）
 	TaskKeepDays int  `json:"taskKeepDays"` // 默认 30
@@ -338,7 +341,7 @@ func (s *Settings) normalize() {
 	}
 	s.UI.TaskMaxMB = min(max(s.UI.TaskMaxMB, 10), 100*1024)
 	switch s.UI.Theme {
-	case "light", "dark", "system":
+	case "light", "dark", "warm-paper", "warm-dusk", "dimmed-sage", "obsidian", "system":
 	default:
 		s.UI.Theme = "system"
 	}
@@ -425,6 +428,14 @@ func (s *Settings) normalize() {
 		s.MCP.LogMaxMB = 20
 	}
 	s.MCP.LogMaxMB = min(s.MCP.LogMaxMB, 1024)
+	if s.MCP.DownloadKeepDays <= 0 {
+		s.MCP.DownloadKeepDays = 30
+	}
+	s.MCP.DownloadKeepDays = min(s.MCP.DownloadKeepDays, 3650)
+	if s.MCP.DownloadMaxMB <= 0 {
+		s.MCP.DownloadMaxMB = 1024
+	}
+	s.MCP.DownloadMaxMB = min(max(s.MCP.DownloadMaxMB, 50), 100*1024)
 	chans := []NotifyChannel{} // 没有时也是空列表（不是 null）
 	ids := map[string]bool{}
 	for i, c := range s.Notify.Channels {

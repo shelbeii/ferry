@@ -32,7 +32,7 @@ func mcpLogCmd(c *cli, cio *cliIO, js *ui.JSON, st settings.Settings, fail func(
 		if v, err := strconv.Atoi(c.flags["limit"]); err == nil {
 			limit = max(v, 1)
 		}
-		f := mcpserver.CallFilter{Client: c.flags["client"], Result: c.flags["result"], Changes: c.has("changes"), Keyword: c.flags["q"]}
+		f := mcpserver.CallFilter{Client: c.flags["client"], Channel: c.flags["channel"], Result: c.flags["result"], Changes: c.has("changes"), Keyword: c.flags["q"]}
 		if v := c.flags["tool"]; v != "" {
 			f.Tools = strings.Split(v, ",")
 		}
@@ -77,6 +77,57 @@ func mcpLogCmd(c *cli, cio *cliIO, js *ui.JSON, st settings.Settings, fail func(
 	}
 	js.Result(true, res, nil)
 	return 0
+}
+
+// mcpDownloadsCmd ferry mcp-downloads [status] | clean [--days N] [--max-mb N] [--all]：查看与清理经 MCP 下载到本机的临时文件。
+func mcpDownloadsCmd(c *cli, cio *cliIO, js *ui.JSON, st settings.Settings, fail func(error) int) int {
+	action := "status"
+	if len(c.pos) > 0 {
+		action = c.pos[0]
+	}
+	usage := func() map[string]any {
+		n, b := mcpserver.DownloadsUsage()
+		return map[string]any{
+			"count":    n,
+			"bytes":    b,
+			"keepDays": st.MCP.DownloadKeepDays,
+			"maxMB":    st.MCP.DownloadMaxMB,
+			"dir":      mcpserver.DownloadsDir(),
+		}
+	}
+	switch action {
+	case "status", "list":
+		res := usage()
+		if js == nil {
+			fmt.Fprintf(cio.stdout, "现有 %d 批下载，共 %d 字节（目录：%s）\n", res["count"], res["bytes"], res["dir"])
+			return 0
+		}
+		js.Result(true, res, nil)
+		return 0
+	case "clean":
+		var n int
+		if c.has("all") {
+			n = mcpserver.CleanAllDownloads()
+		} else {
+			if v, err := strconv.Atoi(c.flags["days"]); err == nil && v > 0 {
+				st.MCP.DownloadKeepDays = v
+			}
+			if v, err := strconv.Atoi(c.flags["max-mb"]); err == nil && v > 0 {
+				st.MCP.DownloadMaxMB = v
+			}
+			n = mcpserver.CleanDownloads(st.MCP.DownloadKeepDays, int64(st.MCP.DownloadMaxMB)<<20, "")
+		}
+		if js == nil {
+			fmt.Fprintf(cio.stdout, "删除了 %d 批已下载文件\n", n)
+			return 0
+		}
+		res := usage()
+		res["removed"] = n
+		js.Result(true, res, nil)
+		return 0
+	default:
+		return fail(errors.New("用法：ferry mcp-downloads [status] | clean [--days N] [--max-mb N] [--all]"))
+	}
 }
 
 // mcpToolsCmd ferry mcp-tools：编程软件能用的 MCP 工具（桌面版「MCP 工具列表」用）。

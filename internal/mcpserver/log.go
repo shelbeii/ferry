@@ -125,6 +125,7 @@ func toolKey(tool string) string {
 type CallFilter struct {
 	Tools   []string  // 只看这些工具（ResultTool = 改动的结果）
 	Client  string    // 编程软件（记录里的名称和版本）
+	Channel string    // 确认渠道：desktop | mcp-app | elicitation | two-step
 	Result  string    // ok = 只看成功，fail = 只看失败
 	Changes bool      // 只看改动服务器的（请求和结果）
 	Since   time.Time // 不早于
@@ -132,11 +133,28 @@ type CallFilter struct {
 	Keyword string    // 在参数、错误、编程软件、同意与否里找（不区分大小写）
 }
 
+func entryChannel(e *callEntry) string {
+	if len(e.Args) > 0 {
+		var a struct {
+			Channel string `json:"channel"`
+		}
+		if json.Unmarshal(e.Args, &a) == nil && a.Channel != "" {
+			return a.Channel
+		}
+	}
+	// 兼容旧记录：带 Decision 的结果条目若未写 channel 字段，属于桌面端弹窗确认
+	if e.Decision != "" && strings.HasSuffix(e.Tool, ResultTool) {
+		return "desktop"
+	}
+	return ""
+}
+
 func (f CallFilter) match(e *callEntry) bool {
 	key := toolKey(e.Tool)
 	switch {
 	case len(f.Tools) > 0 && !slices.Contains(f.Tools, key),
 		f.Client != "" && e.Client != f.Client,
+		f.Channel != "" && entryChannel(e) != f.Channel,
 		f.Result == "ok" && !e.OK,
 		f.Result == "fail" && e.OK,
 		f.Changes && !changeTools[key] && e.Op == "",

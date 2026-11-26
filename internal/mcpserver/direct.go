@@ -89,9 +89,17 @@ func (s *server) execDirectIntoOp(o *op, r approve.Request, ev approve.ConfirmEv
 	saveDirectTaskHist(taskID, taskTitle, r, taskhist.Running, startedMs, 0, "", nil, nil)
 
 	rep := newDirectReporter(o.addProgress)
-	data, execErr := s.executeDirect(execCtx, r, ev, rep)
+	data, execErr := ExecuteRequest(execCtx, r, ExecOptions{
+		Rep:           rep,
+		Pool:          s.pool,
+		Getenv:        s.directGetenv(r, ev),
+		DesktopOnline: false,
+	})
 	var out approve.Outcome
 	out.Log = rep.tail()
+	if data != nil {
+		out.Data, _ = json.Marshal(data)
+	}
 	if execErr != nil {
 		out.OK = false
 		if execCtx.Err() != nil {
@@ -101,9 +109,6 @@ func (s *server) execDirectIntoOp(o *op, r approve.Request, ev approve.ConfirmEv
 		}
 	} else {
 		out.OK = true
-		if data != nil {
-			out.Data, _ = json.Marshal(data)
-		}
 	}
 	status := taskhist.OK
 	if !out.OK {
@@ -198,20 +203,38 @@ func (s *server) directGetenv(r approve.Request, ev approve.ConfirmEvidence) fun
 	}
 }
 
-func (s *server) executeDirect(ctx context.Context, r approve.Request, ev approve.ConfirmEvidence, rep *directReporter) (any, error) {
-	if reason := desktopOnlyExecReason(r); reason != "" {
-		return nil, desktopRequiredError(reason)
+// ExecOptions 统一执行已确认 MCP 改动请求的参数（桌面端 ferry mcp-exec 与离线直连执行共用）。
+type ExecOptions struct {
+	Rep           engine.Reporter
+	Pool          *engine.Pool
+	Getenv        func(string) string
+	DesktopOnline bool // true = 由运行中的桌面端执行（允许需要桌面端交互/凭据的操作；create 由桌面端 addProject 写入项目列表）
+}
+
+// ExecuteRequest 执行一条已经用户确认的 MCP 改动请求（桌面端 ferry mcp-exec 与离线直接执行共用同一套校验与引擎调用）。
+func ExecuteRequest(ctx context.Context, r approve.Request, o ExecOptions) (any, error) {
+	if !o.DesktopOnline {
+		if reason := desktopOnlyExecReason(r); reason != "" {
+			return nil, desktopRequiredError(reason)
+		}
+	}
+	rep := o.Rep
+	if rep == nil {
+		rep = quiet{}
+	}
+	getenv := o.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
 	}
 	st, _ := settings.Load()
-	getenv := s.directGetenv(r, ev)
 
 	switch r.Action {
 	case "create":
-		return executeDirectCreate(r)
+		return executeCreate(r, !o.DesktopOnline)
 	case "config-edit":
-		return executeDirectConfigEdit(st, r)
+		return executeConfigEdit(st, r)
 	case "db-exec":
-		return s.executeDirectDB(ctx, st, r, getenv, rep)
+		return executeDB(ctx, st, r, rep, o.Pool, getenv)
 	}
 
 	f, err := config.LoadWithLocal(r.Config)
@@ -228,9 +251,10 @@ func (s *server) executeDirect(ctx context.Context, r approve.Request, ev approv
 	e := &engine.Engine{
 		File:             f,
 		Rep:              rep,
+		Yes:              true,
 		Settings:         st,
 		AcceptNewHostKey: st.Connect.AcceptNewHostKey,
-		Pool:             s.pool,
+		Pool:             o.Pool,
 		Ctx:              ctx,
 		Getenv:           getenv,
 	}
@@ -320,7 +344,7 @@ func (s *server) executeDirect(ctx context.Context, r approve.Request, ev approv
 	}
 }
 
-func executeDirectCreate(r approve.Request) (any, error) {
+func executeCreate(r approve.Request, registerProject bool) (any, error) {
 	content, err := generateProject(r.Spec, r.Config)
 	if err != nil {
 		return nil, err
@@ -341,31 +365,33 @@ func executeDirectCreate(r approve.Request) (any, error) {
 	if cerr != nil {
 		return nil, cerr
 	}
-	// 加入 Ferry 项目列表（跨进程加锁，防止与桌面端并发改设置丢数据），下次打开桌面版即可看到
-	if unlock, lerr := flock.Lock(filepath.Join(appdir.Dir(), "settings.lock"), 3*time.Second, nil); lerr == nil {
-		defer unlock()
-	}
-	if st, err := settings.Load(); err == nil {
-		exists := false
-		for _, p := range st.Desktop.Projects {
-			if samePath(p.Path, r.Config) {
-				exists = true
-				break
-			}
+	if registerProject {
+		// 加入 Ferry 项目列表（跨进程加锁，防止与桌面端并发改设置丢数据），下次打开桌面版即可看到
+		if unlock, lerr := flock.Lock(filepath.Join(appdir.Dir(), "settings.lock"), 3*time.Second, nil); lerr == nil {
+			defer unlock()
 		}
-		if !exists {
-			st.Desktop.Projects = append(st.Desktop.Projects, settings.Project{Path: r.Config, Name: r.Project})
-			_ = settings.Save(st)
+		if st, err := settings.Load(); err == nil {
+			exists := false
+			for _, p := range st.Desktop.Projects {
+				if samePath(p.Path, r.Config) {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				st.Desktop.Projects = append(st.Desktop.Projects, settings.Project{Path: r.Config, Name: r.Project})
+				_ = settings.Save(st)
+			}
 		}
 	}
 	return map[string]any{
-		"path":    r.Config,
+		"path":    filepath.ToSlash(r.Config),
 		"project": r.Project,
 		"note":    "已生成配置文件并加进 Ferry 的项目列表；新服务器第一次连接前要在 Ferry 里核对主机公钥",
 	}, nil
 }
 
-func executeDirectConfigEdit(st settings.Settings, r approve.Request) (any, error) {
+func executeConfigEdit(st settings.Settings, r approve.Request) (any, error) {
 	if !st.MCP.AllowChanges {
 		return nil, errors.New("Ferry 没有允许编程软件改动")
 	}
@@ -389,7 +415,7 @@ func executeDirectConfigEdit(st settings.Settings, r approve.Request) (any, erro
 	return engine.ConfigPlanResult(plan, true), nil
 }
 
-func (s *server) executeDirectDB(ctx context.Context, st settings.Settings, r approve.Request, getenv func(string) string, rep *directReporter) (any, error) {
+func executeDB(ctx context.Context, st settings.Settings, r approve.Request, rep engine.Reporter, pool *engine.Pool, getenv func(string) string) (any, error) {
 	cn, err := dbx.Get(r.DB)
 	if err != nil {
 		return nil, err
@@ -407,7 +433,7 @@ func (s *server) executeDirectDB(ctx context.Context, st settings.Settings, r ap
 	if err := dbx.CheckAIWriteStmts(cn.Kind, r.Database, r.Stmts); err != nil {
 		return nil, err
 	}
-	e := &engine.Engine{Rep: rep, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Pool: s.pool, Ctx: ctx, Getenv: getenv}
+	e := &engine.Engine{Rep: rep, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Pool: pool, Ctx: ctx, Getenv: getenv}
 	cl, release, err := e.OpenAIDB(cn)
 	if err != nil {
 		return nil, err
@@ -434,7 +460,7 @@ func (s *server) executeDirectDB(ctx context.Context, st settings.Settings, r ap
 	}
 	detail := strings.Join(r.Stmts, ";\n")
 	if f != nil && t != nil {
-		ae := &engine.Engine{File: f, Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Pool: s.pool, Ctx: ctx, Getenv: getenv}
+		ae := &engine.Engine{File: f, Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Pool: pool, Ctx: ctx, Getenv: getenv}
 		ae.Audit(t.Name, kind, obj, detail, err)
 	} else {
 		engine.AuditLocal(e.Actor(), kind, obj, detail, err)

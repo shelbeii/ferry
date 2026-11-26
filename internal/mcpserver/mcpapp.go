@@ -203,6 +203,9 @@ func (s *server) startMCPAppConfirm(r approve.Request, prepareToken string, desk
 		card.decided = true
 		card.rejected = true
 		card.rejectMsg = "超过 5 分钟没有操作，已自动取消"
+		if cur, ok := s.appCards[approvalID]; ok && cur == card {
+			delete(s.appCards, approvalID)
+		}
 		s.mu.Unlock()
 		if desktopOnline {
 			approve.Cancel(context.Background(), approverFile(), prepareToken, r.Session)
@@ -297,7 +300,8 @@ func (s *server) mcpAppDecide(ctx context.Context, req *mcp.CallToolRequest, in 
 	}
 	now := time.Now()
 	s.mu.Lock()
-	card, ok := s.appCards[strings.TrimSpace(in.ApprovalID)]
+	approvalID := strings.TrimSpace(in.ApprovalID)
+	card, ok := s.appCards[approvalID]
 	if !ok {
 		s.mu.Unlock()
 		return nil, errors.New("确认卡片不存在或已过期，请重新发起")
@@ -311,7 +315,7 @@ func (s *server) mcpAppDecide(ctx context.Context, req *mcp.CallToolRequest, in 
 		return nil, errors.New("这张确认卡片已经处理过了")
 	}
 	if !now.Before(card.expiresAt) {
-		delete(s.appCards, in.ApprovalID)
+		delete(s.appCards, approvalID)
 		s.mu.Unlock()
 		return nil, errors.New("确认卡片已超过 5 分钟有效期，请重新发起")
 	}
@@ -319,8 +323,15 @@ func (s *server) mcpAppDecide(ctx context.Context, req *mcp.CallToolRequest, in 
 	if card.timer != nil {
 		card.timer.Stop()
 	}
-	// 已处理后延长 10 分钟供卡片轮询任务进度
+	// 已处理后延长 10 分钟供卡片轮询任务进度，到期后自动释放
 	card.expiresAt = now.Add(10 * time.Minute)
+	card.timer = time.AfterFunc(10*time.Minute, func() {
+		s.mu.Lock()
+		if cur, ok := s.appCards[approvalID]; ok && cur == card {
+			delete(s.appCards, approvalID)
+		}
+		s.mu.Unlock()
+	})
 	r := card.req
 	o := card.op
 	prepToken := card.prepareToken

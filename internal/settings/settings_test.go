@@ -34,6 +34,16 @@ func TestLoadSaveDefaults(t *testing.T) {
 	}
 	s.Build.Env = map[string]string{"JAVA_HOME": "/jdk", "PATH": "ignored"}
 	s.Build.Path = []string{"/opt/maven/bin"}
+	for _, theme := range []string{"light", "dark", "warm-paper", "warm-dusk", "dimmed-sage", "obsidian"} {
+		s.UI.Theme = theme
+		if err := Save(s); err != nil {
+			t.Fatal(err)
+		}
+		gotTheme, err := Load()
+		if err != nil || gotTheme.UI.Theme != theme {
+			t.Fatalf("主题 %s 未保留：%+v %v", theme, gotTheme.UI.Theme, err)
+		}
+	}
 	s.UI.Theme = "weird"
 	if err := Save(s); err != nil {
 		t.Fatal(err)
