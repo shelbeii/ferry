@@ -181,6 +181,7 @@ export function trackLight(element: HTMLElement): () => void {
 // 取玻璃上几个点下面的元素，向上找第一个有背景色或渐变的，取颜色平均亮度。滚动、尺寸变化时重新看。
 const toned = new Set<HTMLElement>()
 let toneTimer: number | undefined
+let settleTimer: number | undefined
 
 function luminance(rgb: number[]): number {
   const [r, g, b] = rgb.map((c) => { const v = c / 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4 })
@@ -192,16 +193,24 @@ function colors(text: string): { rgb: number[]; alpha: number }[] {
     return { rgb: parts.slice(0, 3), alpha: parts[3] ?? 1 }
   })
 }
-function backdropLuminance(glassElement: HTMLElement, x: number, y: number): number | undefined {
+function elementLuminance(element: Element, seen: Map<Element, number | null>): number | null {
+  const cached = seen.get(element)
+  if (cached !== undefined) return cached
+  const style = getComputedStyle(element)
+  const found = [...colors(style.backgroundImage), ...colors(style.backgroundColor)].filter((c) => c.alpha >= .5)
+  const value = found.length ? found.reduce((sum, c) => sum + luminance(c.rgb), 0) / found.length : null
+  seen.set(element, value)
+  return value
+}
+function backdropLuminance(glassElement: HTMLElement, x: number, y: number, seen: Map<Element, number | null>): number | undefined {
   // 只看叠在玻璃下面的：盖在上面的（对话框遮罩、弹出菜单）不算
   const stack = document.elementsFromPoint(x, y)
   const own = stack.findIndex((element) => glassElement.contains(element))
   if (own < 0) return undefined
   const hit = stack.slice(own + 1).find((element) => !element.closest('.cg'))
   for (let element: Element | null = hit ?? null; element; element = element.parentElement) {
-    const style = getComputedStyle(element)
-    const found = [...colors(style.backgroundImage), ...colors(style.backgroundColor)].filter((c) => c.alpha >= .5)
-    if (found.length) return found.reduce((sum, c) => sum + luminance(c.rgb), 0) / found.length
+    const value = elementLuminance(element, seen)
+    if (value !== null) return value
   }
   return undefined
 }
@@ -214,18 +223,24 @@ function probe() {
   toneTimer = undefined
   const areas = scrolled && [...scrolled].map((element) => element.getBoundingClientRect())
   scrolled = new Set()
+  const vw = window.innerWidth, vh = window.innerHeight
+  // 读写分离：先集中读取所有玻璃背后亮度，再一次性回写 dataset.tone，避免切换主题时循环内反复触发布局重算
+  const seen = new Map<Element, number | null>()
+  const updates: [HTMLElement, 'dark' | 'light'][] = []
   for (const element of toned) {
     const box = element.getBoundingClientRect()
-    if (!box.width || (areas && !areas.some((area) => overlaps(area, box)))) continue
-    const samples = [.2, .5, .8].map((fx) => backdropLuminance(element, box.left + box.width * fx, box.top + box.height / 2)).filter((v): v is number => v !== undefined)
+    if (!box.width || (vw > 0 && vh > 0 && (box.right <= 0 || box.left >= vw || box.bottom <= 0 || box.top >= vh))) continue
+    if (areas && !areas.some((area) => overlaps(area, box))) continue
+    const samples = [.2, .5, .8].map((fx) => backdropLuminance(element, box.left + box.width * fx, box.top + box.height / 2, seen)).filter((v): v is number => v !== undefined)
     if (!samples.length) continue
     const value = samples.reduce((a, b) => a + b, 0) / samples.length
     // 留一段滞后，亮度在中间来回时不闪
     const current = element.dataset.tone
-    if (!current) element.dataset.tone = value < .28 ? 'dark' : 'light'
-    else if (value < .22 && current !== 'dark') element.dataset.tone = 'dark'
-    else if (value > .34 && current !== 'light') element.dataset.tone = 'light'
+    if (!current) updates.push([element, value < .28 ? 'dark' : 'light'])
+    else if (value < .22 && current !== 'dark') updates.push([element, 'dark'])
+    else if (value > .34 && current !== 'light') updates.push([element, 'light'])
   }
+  for (const [element, next] of updates) element.dataset.tone = next
 }
 function queueProbe() {
   scrolled = undefined
@@ -265,11 +280,14 @@ export function retone() { queueProbe() }
 export function themeChanged() {
   for (const element of document.querySelectorAll<HTMLElement>('.cg[data-tone]')) delete element.dataset.tone
   clearTimeout(toneTimer)
+  toneTimer = undefined
+  clearTimeout(settleTimer)
+  settleTimer = undefined
   scrolled = undefined
   if (!toned.size) return
   probe()
   // 背后有带颜色过渡的元素（按钮、卡片 0.3 秒左右）时，上面读到的可能是过渡中间的颜色：过渡完再看一次
-  window.setTimeout(queueProbe, 400)
+  settleTimer = window.setTimeout(() => { settleTimer = undefined; queueProbe() }, 400)
 }
 
 /** 写 CSS 变量，值没变就不写：拖动窗口时尺寸回调很频繁，WebView2 131 在频繁改 CSS 变量、同时重算样式时会崩溃 */

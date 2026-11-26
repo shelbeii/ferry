@@ -72,6 +72,7 @@ const SYSTEM_ICON_DEBOUNCE_MS = 500
 let media: MediaQueryList | undefined
 let themeRevision = 0
 let nativeThemeUpdate = Promise.resolve()
+let appliedNativeMode: 'dark' | 'light' | null | undefined
 
 export interface ApplyThemeOptions {
   /** 设置弹窗内实时预览：只切换界面、玻璃、favicon 与标题栏深浅色，不改桌面/任务栏快捷方式 */
@@ -117,7 +118,10 @@ export function applyTheme(theme: string, options: ApplyThemeOptions = {}) {
       if (current !== themeRevision) return
       const window = getCurrentWindow()
       const nativeMode = theme === 'system' ? null : (initialDark ? 'dark' : 'light')
-      await window.setTheme(nativeMode)
+      if (appliedNativeMode !== nativeMode) {
+        await window.setTheme(nativeMode)
+        appliedNativeMode = nativeMode
+      }
       // WebView2 的媒体查询会异步收到新主题；返回系统模式时以原生窗口的解析结果为准。
       if (theme === 'system') {
         const nativeResolved: ResolvedTheme = await window.theme() === 'dark' ? 'dark' : 'light'

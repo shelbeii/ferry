@@ -4,7 +4,7 @@ import { glass, lensImage, reducedMotion } from './runtime'
 import './buttons.css'
 
 // 事件委托也覆盖挂在 body 上的 ElMessageBox、el-popconfirm 和按需渲染的按钮。
-const buttons = 'button:not(.cg-switch, .cg-tab, .el-collapse-item__header), .el-button, [role="button"], .install-template-card'
+const buttons = 'button:not(.cg-switch, .cg-tab, .el-collapse-item__header, .theme-card), .el-button, [role="button"], .install-template-card'
 const compact = '.is-link, .is-text, [role="button"], .rail-btn, .cg-menu-item'
 const svgNS = 'http://www.w3.org/2000/svg'
 const filterId = 'ferry-pressed-button-lens'

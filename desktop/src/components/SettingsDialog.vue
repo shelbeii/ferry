@@ -1273,6 +1273,7 @@ async function pickKeyDir() {
               <button
                 type="button"
                 role="radio"
+                data-glass-motion="local"
                 class="theme-card"
                 :class="{ active: form.ui.theme === 'system' }"
                 :aria-checked="form.ui.theme === 'system'"
@@ -1292,6 +1293,7 @@ async function pickKeyDir() {
                 :key="item.id"
                 type="button"
                 role="radio"
+                data-glass-motion="local"
                 class="theme-card"
                 :class="{ active: form.ui.theme === item.id }"
                 :aria-checked="form.ui.theme === item.id"
@@ -1626,10 +1628,15 @@ h4.sub {
   color: var(--el-text-color-primary);
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.16s, background-color 0.16s, box-shadow 0.16s;
+  /* 切换主题时整页变量瞬时替换，关闭背景/边框/阴影过渡避免 7 张卡片拖尾卡顿 */
+  transition: none;
 }
 .theme-card:hover {
   border-color: var(--el-color-primary-light-3);
+}
+.theme-card:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 .theme-card.active {
   border-color: var(--el-color-primary);

@@ -178,19 +178,21 @@ describe('主题初始化与系统跟随', () => {
     expect(syncIcon).toHaveBeenLastCalledWith('warm-paper')
 
     glassThemeChanged.mockClear()
+    setTheme.mockClear()
     applyTheme('warm-dusk')
     await waitForTheme()
     expect(dark).toBe(true)
     expect(dataset.theme).toBe('warm-dusk')
-    expect(setTheme).toHaveBeenLastCalledWith('dark')
+    expect(setTheme).toHaveBeenCalledExactlyOnceWith('dark')
     expect(syncIcon).toHaveBeenLastCalledWith('warm-dusk')
     expect(glassThemeChanged).toHaveBeenCalledTimes(1)
 
-    // 同为深色基座切换：warm-dusk -> dimmed-sage -> obsidian 也应通知液态玻璃刷新明暗
+    // 同为深色基座切换：warm-dusk -> dimmed-sage -> obsidian 不重复调用原生 setTheme，但仍通知液态玻璃刷新明暗
     applyTheme('dimmed-sage')
     await waitForTheme()
     expect(dark).toBe(true)
     expect(dataset.theme).toBe('dimmed-sage')
+    expect(setTheme).toHaveBeenCalledTimes(1)
     expect(syncIcon).toHaveBeenLastCalledWith('dimmed-sage')
     expect(glassThemeChanged).toHaveBeenCalledTimes(2)
 
@@ -198,6 +200,7 @@ describe('主题初始化与系统跟随', () => {
     await waitForTheme()
     expect(dark).toBe(true)
     expect(dataset.theme).toBe('obsidian')
+    expect(setTheme).toHaveBeenCalledTimes(1)
     expect(syncIcon).toHaveBeenLastCalledWith('obsidian')
     expect(glassThemeChanged).toHaveBeenCalledTimes(3)
   })
