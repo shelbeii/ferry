@@ -93,8 +93,8 @@ func (s *server) addAITools(m *mcp.Server) {
 	change := func() *mcp.ToolAnnotations {
 		return &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}
 	}
-	const how = "需要用户在 Ferry 设置里允许编程软件请求改动；每次都要用户确认（在 Ferry 桌面版里，或者用户设置了在编程软件里确认时在这里），不能授权自动同意；" +
-		"同意后由 Ferry 桌面版执行，生产服务器、「新建连接」的服务器不允许。最多等 40 秒，没结束返回 id，再用 task_status 查。"
+	const how = "需要用户在 Ferry 设置里允许编程软件请求改动；每次都要用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认，高危操作默认仍在桌面端确认）；" +
+		"生产服务器、「新建连接」的服务器不允许。最多等 40 秒，没结束返回 id，再用 task_status 查。"
 	const secrets = "用到用户填的密码时：先用 ask_secret 让用户在 Ferry 里填，你只拿到代号；"
 
 	addTool(s, m, &mcp.Tool{Name: "run_change_command", Title: "执行改动服务器的命令",

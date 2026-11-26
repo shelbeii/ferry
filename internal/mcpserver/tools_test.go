@@ -21,6 +21,9 @@ func TestTools(t *testing.T) {
 	}
 	var want, got []string
 	for _, tl := range listed.Tools {
+		if isAppOnlyTool(tl) {
+			continue
+		}
 		want = append(want, tl.Name)
 	}
 	byName := map[string]ToolInfo{}

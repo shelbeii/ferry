@@ -101,14 +101,29 @@ func TestMCP(t *testing.T) {
 	var names []string
 	changes := map[string]bool{"deploy": true, "app_control": true, "rollback": true, "software_control": true, "port_control": true, "create_project": true, "ssh_disconnect": true, "firewall_enable": true, "backup_run": true, "backup_fetch": true, "run_job": true,
 		"run_change_command": true, "write_file": true, "software_install": true, "save_software_template": true, "ask_secret": true,
-		"software_upgrade": true, "software_restore": true, "software_backup": true, "db_execute": true, "redis_execute": true, "config_edit": true, "files_upload": true}
+		"software_upgrade": true, "software_restore": true, "software_backup": true, "db_execute": true, "redis_execute": true, "config_edit": true, "files_upload": true,
+		"confirm_change": true, "task_cancel": true, "mcp_app_decide": true, "mcp_app_cancel": true}
+	var appOnly []string
 	for _, tl := range tools.Tools {
-		names = append(names, tl.Name)
+		if isAppOnlyTool(tl) {
+			appOnly = append(appOnly, tl.Name)
+		} else {
+			names = append(names, tl.Name)
+		}
 		if tl.Annotations == nil || tl.Annotations.ReadOnlyHint == changes[tl.Name] {
 			t.Errorf("%s 的只读标记不对", tl.Name)
 		}
+		// 默认桌面端确认模式下，改动工具不应携带 MCP App UI 元数据（避免渲染空卡片）
+		if !isAppOnlyTool(tl) && changes[tl.Name] {
+			if tl.Meta != nil && (tl.Meta["ui"] != nil || tl.Meta["ui/resourceUri"] != nil) {
+				t.Errorf("桌面端模式下 %s 不应带 MCP App UI 元数据：%+v", tl.Name, tl.Meta)
+			}
+		}
 	}
-	if got := strings.Join(names, ","); got != "app_control,app_info,app_log_runs,app_logs,app_releases,app_secrets,app_status,ask_secret,audit_log,backup_fetch,backup_run,backup_status,build_log,config_check,config_edit,config_get,config_schema,create_project,db_connections,db_execute,db_query,db_schema,deploy,deploy_changes,deploy_history,detect_project,files_access,files_download,files_list,files_preview,files_size,files_upload,firewall_enable,keep_scan,list_projects,monitor_status,port_check,port_control,preflight,redis_execute,redis_query,rollback,run_change_command,run_command,run_job,save_software_template,server_check,server_info,server_ports,server_software,software_backup,software_control,software_install,software_logs,software_restore,software_templates,software_upgrade,ssh_disconnect,ssh_sessions,task_status,template_guide,write_file" {
+	if got := strings.Join(appOnly, ","); got != "mcp_app_cancel,mcp_app_decide,mcp_app_status" {
+		t.Fatalf("app-only 工具：%s", got)
+	}
+	if got := strings.Join(names, ","); got != "app_control,app_info,app_log_runs,app_logs,app_releases,app_secrets,app_status,ask_secret,audit_log,backup_fetch,backup_run,backup_status,build_log,config_check,config_edit,config_get,config_schema,confirm_change,create_project,db_connections,db_execute,db_query,db_schema,deploy,deploy_changes,deploy_history,detect_project,files_access,files_download,files_list,files_preview,files_size,files_upload,firewall_enable,keep_scan,list_projects,monitor_status,port_check,port_control,preflight,redis_execute,redis_query,rollback,run_change_command,run_command,run_job,save_software_template,server_check,server_info,server_ports,server_software,software_backup,software_control,software_install,software_logs,software_restore,software_templates,software_upgrade,ssh_disconnect,ssh_sessions,task_cancel,task_status,template_guide,write_file" {
 		t.Fatalf("工具：%s", got)
 	}
 

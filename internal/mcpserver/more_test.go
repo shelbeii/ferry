@@ -128,7 +128,7 @@ func TestMoreTools(t *testing.T) {
 
 	// 提示
 	ps, err := cs.ListPrompts(context.Background(), nil)
-	if err != nil || len(ps.Prompts) != 2 {
+	if err != nil || len(ps.Prompts) != 5 {
 		t.Fatalf("prompts：%v %+v", err, ps)
 	}
 	g, err := cs.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: "diagnose", Arguments: map[string]string{"app": "api", "symptom": "接口 500"}})

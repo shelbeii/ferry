@@ -164,9 +164,9 @@ func (s *server) addMoreTools(m *mcp.Server) {
 			return map[string]any{"file": pick.Name, "time": pick.Time, "files": files, "content": text}, nil
 		}))
 
+	const confirmHow = "和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次都要用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认）；生产服务器不允许。最多等 40 秒，没结束用 task_status 查。"
 	addTool(s, m, &mcp.Tool{Name: "software_control", Title: "启停 Ferry 装的软件",
-		Description: "启动、停止或重启 Ferry 在服务器上装的软件（MySQL、Redis、Nacos 等；先用 server_software 看 instance）。" +
-			"和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次在 Ferry 桌面版里确认，同意后由桌面版执行；生产服务器不允许。最多等 40 秒，没结束用 task_status 查。",
+		Description: "启动、停止或重启 Ferry 在服务器上装的软件（MySQL、Redis、Nacos 等；先用 server_software 看 instance）。" + confirmHow,
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "software_control", func(ctx context.Context, req *mcp.CallToolRequest, in softwareIn) (any, error) {
 			if in.Action != "start" && in.Action != "stop" && in.Action != "restart" {
@@ -180,8 +180,7 @@ func (s *server) addMoreTools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "port_control", Title: "放行 / 关闭端口",
 		Description: "用服务器的防火墙（firewalld / ufw）放行或关闭一个端口（运行时和永久配置一起改；先用 server_ports 看现状）。" +
-			"SSH 端口不能关；Docker 映射的端口不经过防火墙，关闭时在 Docker 的 DOCKER-USER 规则链里拦外部访问（本机、其他容器照常能连）；端口范围、限制来源的规则 Ferry 不改。" +
-			"和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次在 Ferry 桌面版里确认，同意后由桌面版执行；生产服务器不允许。最多等 40 秒，没结束用 task_status 查。",
+			"SSH 端口不能关；Docker 映射的端口不经过防火墙，关闭时在 Docker 的 DOCKER-USER 规则链里拦外部访问（本机、其他容器照常能连）；端口范围、限制来源的规则 Ferry 不改。" + confirmHow,
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "port_control", func(ctx context.Context, req *mcp.CallToolRequest, in portIn) (any, error) {
 			if in.Action != "open" && in.Action != "close" {
@@ -211,7 +210,7 @@ func (s *server) addMoreTools(m *mcp.Server) {
 	addTool(s, m, &mcp.Tool{Name: "create_project", Title: "新建项目",
 		Description: "在 Ferry 里新建项目：按 spec 生成 ferry.yaml（已有文件不会覆盖），加进 Ferry 的项目列表。不连服务器、不部署。" +
 			"spec 照 detect_project 的结果填应用；服务器要用户提供地址、登录用户、部署目录、运行用户，不要自己编。" +
-			"会在 Ferry 桌面版里弹出确认，显示要写入的 ferry.yaml，用户同意后才创建。新服务器第一次连接前，用户还要在 Ferry 里核对主机公钥。" +
+			"每次都会展示要写入的 ferry.yaml 让用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认），用户同意后才创建。新服务器第一次连接前，用户还要在 Ferry 里核对主机公钥。" +
 			"最多等 40 秒，没结束用 task_status 查。",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptr(false)}},
 		loggedReq(s, "create_project", func(ctx context.Context, req *mcp.CallToolRequest, in createIn) (any, error) {
@@ -251,7 +250,33 @@ func generateProject(spec json.RawMessage, path string) (string, error) {
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+func createDetail(spec json.RawMessage) []string {
+	var sp scaffold.Spec
+	if json.Unmarshal(spec, &sp) != nil {
+		return nil
+	}
+	var detail []string
+	for _, t := range sp.Targets {
+		user := t.User
+		if user == "" {
+			user = "root"
+		}
+		detail = append(detail, fmt.Sprintf("服务器 %s：%s@%s，部署目录 %s，运行用户 %s", t.Name, user, t.Host, orDash(t.Root), orDash(t.RunAs)))
+	}
+	for _, a := range sp.Apps {
+		line := fmt.Sprintf("应用 %s（%s）：构建 %s，产物 %s", a.Name, a.Type, orDash(a.Command), orDash(a.Artifact))
+		if len(a.Exec) > 0 {
+			line += "，启动 " + strings.Join(a.Exec, " ")
+		}
+		detail = append(detail, line)
+	}
+	return detail
+}
+
 func (s *server) create(ctx context.Context, req *mcp.CallToolRequest, in createIn) (any, error) {
+	if req != nil && req.Params != nil && req.Params.RequestState != "" {
+		return s.resumeMRTR(ctx, req)
+	}
 	var sp scaffold.Spec // 字段名和向导一样：转一下
 	b, _ := json.Marshal(in.Spec)
 	if err := json.Unmarshal(b, &sp); err != nil {
@@ -271,24 +296,9 @@ func (s *server) create(ctx context.Context, req *mcp.CallToolRequest, in create
 	if _, err := generateProject(raw, path); err != nil {
 		return nil, err
 	}
-	var detail []string
-	for _, t := range sp.Targets {
-		user := t.User
-		if user == "" {
-			user = "root"
-		}
-		detail = append(detail, fmt.Sprintf("服务器 %s：%s@%s，部署目录 %s，运行用户 %s", t.Name, user, t.Host, orDash(t.Root), orDash(t.RunAs)))
-	}
-	for _, a := range sp.Apps {
-		line := fmt.Sprintf("应用 %s（%s）：构建 %s，产物 %s", a.Name, a.Type, orDash(a.Command), orDash(a.Artifact))
-		if len(a.Exec) > 0 {
-			line += "，启动 " + strings.Join(a.Exec, " ")
-		}
-		detail = append(detail, line)
-	}
-	o := s.submit(approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "create",
-		Project: sp.Project, Config: path, Spec: raw, Detail: detail, Reason: strings.TrimSpace(in.Reason)})
-	return o.wait(ctx, req, waitCap)
+	r := approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "create",
+		Project: sp.Project, Config: path, Spec: raw, Detail: createDetail(raw), Reason: strings.TrimSpace(in.Reason)}
+	return s.ask(ctx, req, r)
 }
 
 // ---------------------------------------------------------------- 提示（编程软件里显示成可以直接选的命令）
@@ -331,5 +341,40 @@ func (s *server) addPrompts(m *mcp.Server) {
 2. app_status 看是否在运行、健康检查是否通过、监听端口对不对。
 3. app_logs 看这次启动以来的日志，用 keyword 搜 ERROR、Exception、WARN，列出值得注意的地方。
 4. 有问题时说明原因和建议；需要回滚时先问我，不要自己回滚。`, where(a), orDash(a["app"]))), nil
+		})
+	m.AddPrompt(&mcp.Prompt{Name: "pre_deploy_review", Title: "发布前检查",
+		Description: "部署前检查代码差异、服务器预检、目标环境和正在运行的任务，降低上线风险",
+		Arguments:   []*mcp.PromptArgument{arg("project", "项目名（不填 = 当前目录的项目）", false), arg("target", "服务器（目标名）", false), arg("app", "应用名（不填 = 全部）", false)}},
+		func(ctx context.Context, r *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			a := r.Params.Arguments
+			return text("发布前检查", fmt.Sprintf(`对 %s 的应用 %s 做一次部署前检查（只读，不要直接发起部署）：
+1. list_projects 确认项目、目标是否为生产环境及本机缺失项（machine）。
+2. app_status 看应用当前状态与是否有别人正在部署（busy）。
+3. deploy_changes 看这次上线会包含的提交、systemd 单元变化与附带文件变化（注意 warn 字段）。
+4. preflight 检查磁盘空间、JDK / 运行环境、目录权限与端口占用。
+5. 汇总检查结论、风险点与建议部署参数，等我确认后再决定是否部署。`, where(a), orDash(a["app"]))), nil
+		})
+	m.AddPrompt(&mcp.Prompt{Name: "db_diagnose", Title: "排查数据库问题",
+		Description: "先看表结构与索引，再用受限只读查询定位数据异常或慢查原因",
+		Arguments:   []*mcp.PromptArgument{arg("connection", "数据库连接名（db_connections 里的 name）", false), arg("database", "库名", false), arg("question", "要排查的数据问题", false)}},
+		func(ctx context.Context, r *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			a := r.Params.Arguments
+			return text("排查数据库问题", fmt.Sprintf(`帮我排查数据库问题（连接：%s，库：%s，问题：%s）：
+1. db_connections 确认可用的数据库连接与类型（SQL / Redis / MongoDB）。
+2. db_schema 先看目标库的表结构、字段类型、索引与估算行数，不要盲猜列名。
+3. 用带明确条件与 LIMIT 的只读 db_query / redis_query 核查数据。
+4. 给出问题根因与修复方案；如果需要修改数据，先说明影响范围，等我确认后再执行。`, orDash(a["connection"]), orDash(a["database"]), orDash(a["question"]))), nil
+		})
+	m.AddPrompt(&mcp.Prompt{Name: "server_audit", Title: "服务器健康与安全巡检",
+		Description: "全面巡检服务器资源、告警、端口防火墙、SSH 登录和最近审计记录",
+		Arguments:   []*mcp.PromptArgument{arg("project", "项目名（不填 = 当前目录的项目）", false), arg("target", "服务器（目标名）", false)}},
+		func(ctx context.Context, r *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			a := r.Params.Arguments
+			return text("服务器健康与安全巡检", fmt.Sprintf(`对 %s 做一次只读健康与安全巡检：
+1. server_info 与 server_check 看 CPU、内存、磁盘/inode 使用率及网络延迟。
+2. monitor_status(check=true) 检查应用、磁盘、证书、备份与定时任务告警。
+3. server_ports 与 ssh_sessions 检查对外开放端口、防火墙状态与当前登录会话。
+4. audit_log(sinceHours=72) 查看最近 72 小时的变更与操作记录。
+5. 按严重程度输出巡检报告与改进建议，不要直接修改服务器。`, where(a))), nil
 		})
 }

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/captain/ferry/internal/appdir"
-	"github.com/captain/ferry/internal/settings"
+	"github.com/captain/ferry/internal/flock"
 )
 
 // callEntry 一次工具调用的记录（mcp/calls.jsonl）。
@@ -36,26 +36,44 @@ var (
 // LogFile 调用记录的位置。
 func LogFile() string { return filepath.Join(appdir.SubDir("mcp"), "calls.jsonl") }
 
+func logLockFile() string { return filepath.Join(filepath.Dir(LogFile()), "calls.lock") }
+
+// withLogLock 进程内互斥 + 跨进程文件锁，避免多个 ferry mcp 与桌面端并发追加/清理 calls.jsonl 丢记录或 rename 冲突。
+func withLogLock(fn func()) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	unlock, err := flock.Lock(logLockFile(), 3*time.Second, nil)
+	if err == nil {
+		defer unlock()
+	}
+	fn()
+}
+
+func logLimitsLocked() (days int, maxBytes int64) {
+	st, _ := loadSettingsCached()
+	return st.MCP.LogKeepDays, int64(st.MCP.LogMaxMB) << 20
+}
+
 // oldLogFile 0.12.54 及以前超过 10 MB 时换下来的记录；清理时并回 calls.jsonl。
 func oldLogFile() string { return filepath.Join(filepath.Dir(LogFile()), "calls.1.jsonl") }
 
 func writeLog(e callEntry) {
-	logMu.Lock()
-	defer logMu.Unlock()
-	p := LogFile()
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	b, _ := json.Marshal(e)
-	f.Write(append(b, '\n'))
-	f.Close()
-	// 超过最多占用，或这个进程一小时没按天数清理过：按设置（设置 → 存储）清理
-	st, _ := settings.Load()
-	fi, err := os.Stat(p)
-	if (err == nil && fi.Size() > int64(st.MCP.LogMaxMB)<<20) || time.Since(lastClean) > time.Hour {
-		cleanLocked(st.MCP.LogKeepDays, int64(st.MCP.LogMaxMB)<<20)
-	}
+	withLogLock(func() {
+		p := LogFile()
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return
+		}
+		b, _ := json.Marshal(e)
+		f.Write(append(b, '\n'))
+		f.Close()
+		// 超过最多占用，或这个进程一小时没按天数清理过：按设置（设置 → 存储）清理
+		days, maxBytes := logLimitsLocked()
+		fi, err := os.Stat(p)
+		if (err == nil && maxBytes > 0 && fi.Size() > maxBytes) || time.Since(lastClean) > time.Hour {
+			cleanLocked(days, maxBytes)
+		}
+	})
 }
 
 // readLog 全部记录，旧的在前。
@@ -78,12 +96,27 @@ func readLog() [][]byte {
 // ResultTool 改动结果那条记录在筛选里的「工具」（记录里是「deploy（结果）」这样的动作名）。
 const ResultTool = "（结果）"
 
+// ClientConfirmTool 编程软件里确认那条记录在筛选里的「工具」。
+const ClientConfirmTool = "（编程软件里确认）"
+
 // changeTools 请求改动服务器的工具。
-var changeTools = map[string]bool{"deploy": true, "app_control": true, "rollback": true, "software_control": true, "create_project": true}
+var changeTools = map[string]bool{
+	"deploy": true, "app_control": true, "rollback": true, "software_control": true,
+	"port_control": true, "firewall_enable": true, "ssh_disconnect": true,
+	"backup_run": true, "backup_fetch": true, "run_job": true,
+	"run_change_command": true, "write_file": true, "files_upload": true,
+	"software_install": true, "software_upgrade": true, "software_restore": true,
+	"software_backup": true, "save_software_template": true, "ask_secret": true,
+	"db_execute": true, "redis_execute": true, "config_edit": true,
+	"create_project": true, "confirm_change": true,
+}
 
 func toolKey(tool string) string {
 	if strings.HasSuffix(tool, ResultTool) {
 		return ResultTool
+	}
+	if strings.HasSuffix(tool, ClientConfirmTool) {
+		return ClientConfirmTool
 	}
 	return tool
 }
@@ -112,7 +145,7 @@ func (f CallFilter) match(e *callEntry) bool {
 		return false
 	}
 	if kw := strings.ToLower(strings.TrimSpace(f.Keyword)); kw != "" {
-		hay := strings.ToLower(string(e.Args) + "\n" + e.Error + "\n" + e.Client + "\n" + e.Decision + "\n" + e.Tool)
+		hay := strings.ToLower(string(e.Args) + "\n" + e.Error + "\n" + e.Client + "\n" + e.Decision + "\n" + e.Tool + "\n" + e.Op)
 		return strings.Contains(hay, kw)
 	}
 	return true
@@ -128,9 +161,10 @@ type CallPage struct {
 
 // Calls 符合筛选的调用记录，新的在前：跳过 offset 条后最多 limit 条。
 func Calls(f CallFilter, offset, limit int) CallPage {
-	logMu.Lock()
-	all := readLog()
-	logMu.Unlock()
+	var all [][]byte
+	withLogLock(func() {
+		all = readLog()
+	})
 	page := CallPage{Items: []json.RawMessage{}, Clients: []string{}, Tools: []string{}}
 	clients, tools := map[string]bool{}, map[string]bool{}
 	for i := len(all) - 1; i >= 0; i-- {
@@ -161,22 +195,25 @@ func Calls(f CallFilter, offset, limit int) CallPage {
 
 // LogUsage 记录条数和占用的字节数。
 func LogUsage() (count int, size int64) {
-	for _, p := range []string{oldLogFile(), LogFile()} {
-		if fi, err := os.Stat(p); err == nil {
-			size += fi.Size()
+	withLogLock(func() {
+		for _, p := range []string{oldLogFile(), LogFile()} {
+			if fi, err := os.Stat(p); err == nil {
+				size += fi.Size()
+			}
 		}
-	}
-	logMu.Lock()
-	defer logMu.Unlock()
-	return len(readLog()), size
+		count = len(readLog())
+	})
+	return count, size
 }
 
 // CleanLog 删掉超过 days 天的记录；还超过 maxBytes 时从最旧的删起，删到 maxBytes 的九成（免得之后每记一条都要重写）。
 // 返回删掉的条数。
 func CleanLog(days int, maxBytes int64) int {
-	logMu.Lock()
-	defer logMu.Unlock()
-	return cleanLocked(days, maxBytes)
+	var n int
+	withLogLock(func() {
+		n = cleanLocked(days, maxBytes)
+	})
+	return n
 }
 
 func cleanLocked(days int, maxBytes int64) int {
@@ -219,10 +256,11 @@ func cleanLocked(days int, maxBytes int64) int {
 
 // CleanAllLog 删除全部调用记录，返回删掉的条数。
 func CleanAllLog() int {
-	logMu.Lock()
-	defer logMu.Unlock()
-	n := len(readLog())
-	os.Remove(LogFile())
-	os.Remove(oldLogFile())
+	var n int
+	withLogLock(func() {
+		n = len(readLog())
+		os.Remove(LogFile())
+		os.Remove(oldLogFile())
+	})
 	return n
 }

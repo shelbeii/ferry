@@ -22,6 +22,7 @@ func Lock(path string, wait time.Duration, onWait func()) (func(), error) {
 	}
 	deadline := time.Now().Add(wait)
 	notified := false
+	backoff := 20 * time.Millisecond
 	for {
 		ok, err := tryLock(f)
 		if err != nil {
@@ -39,6 +40,12 @@ func Lock(path string, wait time.Duration, onWait func()) (func(), error) {
 			onWait()
 			notified = true
 		}
-		time.Sleep(500 * time.Millisecond)
+		remain := time.Until(deadline)
+		if remain > 0 {
+			time.Sleep(min(backoff, remain))
+		}
+		if backoff < 500*time.Millisecond {
+			backoff = min(backoff*2, 500*time.Millisecond)
+		}
 	}
 }

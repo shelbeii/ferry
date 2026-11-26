@@ -102,10 +102,10 @@ func (s *server) addDataTools(m *mcp.Server) {
 			})
 		}))
 
+	const confirmHow = "和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次都要用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认）；生产服务器不允许。最多等 40 秒，没结束用 task_status 查。"
 	addTool(s, m, &mcp.Tool{Name: "backup_run", Title: "现在备份",
 		Description: "在服务器上现在备份一次配置里的 backups（一项或全部；没打开数据备份也能用），备份文件留在服务器上，按 keep 只保留最近几份。" +
-			"改数据库、改数据目录之类的操作前先备份。" +
-			"和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次在 Ferry 桌面版里确认，同意后由桌面版执行；生产服务器不允许。最多等 40 秒，没结束用 task_status 查。",
+			"改数据库、改数据目录之类的操作前先备份。" + confirmHow,
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "backup_run", func(ctx context.Context, req *mcp.CallToolRequest, in backupRunIn) (any, error) {
 			if in.Name != "" && !reBackupName.MatchString(in.Name) {
@@ -123,10 +123,9 @@ func (s *server) addDataTools(m *mcp.Server) {
 			return s.change(ctx, req, in.targetIn, approve.Request{Action: "backup-run", Backup: in.Name, Reason: in.Reason})
 		}))
 
-	how := "和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次在 Ferry 桌面版里确认，同意后由桌面版执行；生产服务器不允许。最多等 40 秒，没结束用 task_status 查。"
 	addTool(s, m, &mcp.Tool{Name: "backup_fetch", Title: "取回异地的备份",
 		Description: "把传到异地（S3 兼容存储）的一份备份取回服务器的备份目录（加密的自动解密），服务器上那份被清掉了、坏了时用。" +
-			"先用 backup_status 的 remote 列出异地的（local 为 true 的服务器上已经有了，不用取回）。取回后恢复要用户在 Ferry 的「数据备份」里做。" + how,
+			"先用 backup_status 的 remote 列出异地的（local 为 true 的服务器上已经有了，不用取回）。取回后恢复要用户在 Ferry 的「数据备份」里做。" + confirmHow,
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "backup_fetch", func(ctx context.Context, req *mcp.CallToolRequest, in backupFetchIn) (any, error) {
 			_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {
@@ -143,7 +142,7 @@ func (s *server) addDataTools(m *mcp.Server) {
 
 	addTool(s, m, &mcp.Tool{Name: "run_job", Title: "现在运行定时任务",
 		Description: "现在运行一次定时任务（配置里写了 job 的应用，list_projects 里有 schedule）：等它运行完，返回结果（成功、退出码、用了多久）。" +
-			"不影响定时器，到点照样运行。先用 app_status 看它上次运行的结果、是不是正在运行。" + how,
+			"不影响定时器，到点照样运行。先用 app_status 看它上次运行的结果、是不是正在运行。" + confirmHow,
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "run_job", func(ctx context.Context, req *mcp.CallToolRequest, in runJobIn) (any, error) {
 			_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, t string) (any, error) {

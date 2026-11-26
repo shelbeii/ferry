@@ -64,17 +64,40 @@ var NotifyKinds = map[string]string{"wecom": "企业微信", "dingtalk": "钉钉
 
 // MCP 编程软件通过 ferry mcp 使用 Ferry。
 type MCP struct {
-	// AllowChanges 允许编程软件请求部署、启停、回滚。每次都要在 Ferry 桌面版里确认；
+	// AllowChanges 允许编程软件请求部署、启停、回滚等改动。
 	// 生产服务器（production: true）和 aiChanges: false 的服务器始终不允许
 	AllowChanges bool `json:"allowChanges"`
 	// Targets 只允许这些目标（「项目/目标」，项目是 ferry.yaml 里的 project）；为空 = 全部非生产目标
 	Targets []string `json:"targets"`
-	// ConfirmIn 改动在哪里确认：空 = 在 Ferry 桌面版里弹窗 | client = 编程软件支持时在编程软件里确认（不支持时仍在 Ferry 里）。
-	// 不管在哪确认都由桌面版执行；要用户填的密码始终在 Ferry 里填，不经过编程软件
+	// ConfirmIn 改动在哪里确认：空 = 在 Ferry 桌面版里弹窗 | client = 优先在编程软件里确认（MCP App / 表单 / 两段式）。
+	// 要用户填的密码（ask_secret）始终在 Ferry 桌面端填，不经过编程软件
 	ConfirmIn string `json:"confirmIn"`
+	// ClientConfirmScope 允许在编程软件里确认的操作范围：空（默认，等同 standard）= 仅常规运维（部署、启停、回滚、启停软件、定时任务、备份）
+	// | all = 全部允许的改动（含命令、写文件、改配置、改数据库等；密码和生产服务器始终禁止在客户端确认）
+	ClientConfirmScope string `json:"clientConfirmScope,omitempty"`
+	// ClientConfirmFallback 编程软件不支持 MCP 卡片和表单确认时的处理方式：空（默认，等同 desktop）= 自动切回 Ferry 桌面端确认
+	// | two_step = 使用两段式预检 + confirm_change 工具在编程软件内确认
+	ClientConfirmFallback string `json:"clientConfirmFallback,omitempty"`
+	// ForceDesktopOnDanger 检测到高危操作（Danger 非空，如危险命令、无 WHERE 删改、改构建/钩子命令等）时，
+	// 强制在 Ferry 桌面端弹窗确认（默认 true；nil 时视为 true）
+	ForceDesktopOnDanger *bool `json:"forceDesktopOnDanger,omitempty"`
 	// 调用记录（数据目录的 mcp/calls.jsonl）：保留多少天、最多占用多少 MB（超出时从最旧的删起）
 	LogKeepDays int `json:"logKeepDays"` // 默认 30
 	LogMaxMB    int `json:"logMaxMB"`    // 默认 20
+}
+
+// ConfirmInClient 是否优先在编程软件中确认改动。
+func (m MCP) ConfirmInClient() bool { return m.ConfirmIn == "client" }
+
+// AllowAllInClient 是否允许全部非红线改动在编程软件中确认（否则仅常规运维）。
+func (m MCP) AllowAllInClient() bool { return m.ClientConfirmScope == "all" }
+
+// FallbackTwoStep 客户端不支持卡片/表单确认时，是否使用两段式 confirm_change 确认。
+func (m MCP) FallbackTwoStep() bool { return m.ClientConfirmFallback == "two_step" }
+
+// DangerRequiresDesktop 命中高危标记时是否强制在 Ferry 桌面端确认（默认 true）。
+func (m MCP) DangerRequiresDesktop() bool {
+	return m.ForceDesktopOnDanger == nil || *m.ForceDesktopOnDanger
 }
 
 // AI 服务器助手。可以配置多个模型，对话时选用；各模型的 API Key 存在系统凭据库（ferry ai-key set --model <ID>），不在这里。
@@ -249,10 +272,12 @@ const DefaultGlassTransparency = 90
 
 // Defaults 默认设置。
 func Defaults() Settings {
+	forceDanger := true
 	return Settings{
 		Connect: Connect{TimeoutSec: 15, UploadStreams: 6, IdleMinutes: 15, StatusMinutes: 1},
 		Logs:    Logs{BuildLogDays: 30},
 		UI:      UI{Theme: "system", TaskKeep: 50, TaskKeepDays: 30, TaskMaxMB: 100, ConfirmClose: true, Notify: true, Glass: true, GlassTransparency: DefaultGlassTransparency, Particles: true, CheckUpdate: true},
+		MCP:     MCP{ForceDesktopOnDanger: &forceDanger},
 	}
 }
 
@@ -379,6 +404,19 @@ func (s *Settings) normalize() {
 		s.AI.MaxMB = 200
 	}
 	s.AI.MaxMB = min(max(s.AI.MaxMB, 10), 100*1024)
+	if s.MCP.ConfirmIn != "client" {
+		s.MCP.ConfirmIn = ""
+	}
+	if s.MCP.ClientConfirmScope != "all" {
+		s.MCP.ClientConfirmScope = ""
+	}
+	if s.MCP.ClientConfirmFallback != "two_step" {
+		s.MCP.ClientConfirmFallback = ""
+	}
+	if s.MCP.ForceDesktopOnDanger == nil {
+		v := true
+		s.MCP.ForceDesktopOnDanger = &v
+	}
 	if s.MCP.LogKeepDays <= 0 {
 		s.MCP.LogKeepDays = 30
 	}

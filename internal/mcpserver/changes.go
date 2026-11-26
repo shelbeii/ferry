@@ -1,7 +1,6 @@
 package mcpserver
 
 import (
-	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -117,12 +116,16 @@ type statusTaskIn struct {
 	Wait int    `json:"wait,omitempty" jsonschema:"最多等多少秒看它结束，默认 30，最多 40"`
 }
 
+type cancelTaskIn struct {
+	ID string `json:"id" jsonschema:"要停止或取消的改动任务 id"`
+}
+
 var actionNames = map[string]string{"deploy": "部署", "start": "启动", "stop": "停止", "restart": "重启", "rollback": "回滚",
 	"sw-start": "启动软件", "sw-stop": "停止软件", "sw-restart": "重启软件", "port-open": "放行端口", "port-close": "关闭端口",
 	"fw-enable": "打开防火墙", "ssh-kick": "断开 SSH 连接", "backup-run": "现在备份", "create": "新建项目",
 	"exec": "执行命令", "write-file": "写文件", "install": "安装软件", "tpl-save": "保存软件模板", "secret": "填写密码",
 	"sw-upgrade": "升级软件", "sw-restore": "恢复软件", "sw-backup": "设置数据备份", "db-exec": "改数据库", "config-edit": "改项目配置",
-	"run-job": "现在运行定时任务", "backup-fetch": "取回异地的备份"}
+	"run-job": "现在运行定时任务", "backup-fetch": "取回异地的备份", "upload-file": "上传文件"}
 
 // reSoftware Ferry 装的软件的名称（安装时的 --name）。
 var reSoftware = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -144,7 +147,7 @@ func (s *server) addChangeTools(m *mcp.Server) {
 	change := func() *mcp.ToolAnnotations {
 		return &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}
 	}
-	const how = "需要用户在 Ferry 设置里允许编程软件请求改动，每次都在 Ferry 桌面版里确认，同意后由桌面版执行（任务面板里能看到）；生产服务器不允许。" +
+	const how = "需要用户在 Ferry 设置里允许编程软件请求改动；每次都要用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认）；生产服务器不允许。" +
 		"最多等 40 秒：结束了直接返回结果，没结束返回 id 和当前进展，再用 task_status 查。"
 	addTool(s, m, &mcp.Tool{Name: "deploy", Title: "部署",
 		Description: "把项目里的应用部署到某台服务器：先在本机构建（skipBuild 时跳过），上传，逐个切换到新版本并等健康检查通过；失败自动回滚该应用。" +
@@ -226,6 +229,58 @@ func (s *server) addChangeTools(m *mcp.Server) {
 			}
 			return o.wait(ctx, req, min(wait, waitCap))
 		}))
+
+	addTool(s, m, &mcp.Tool{Name: "task_cancel", Title: "停止 / 取消任务",
+		Description: "停止正在执行中的改动任务（支持离线直接执行与 Ferry 桌面端任务），或取消一张尚未操作的待确认卡片。",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)}},
+		loggedReq(s, "task_cancel", func(ctx context.Context, req *mcp.CallToolRequest, in cancelTaskIn) (any, error) {
+			return s.cancelOp(ctx, strings.TrimSpace(in.ID))
+		}))
+}
+
+func (s *server) cancelOp(ctx context.Context, id string) (any, error) {
+	if id == "" {
+		return nil, errors.New("要指定任务 id")
+	}
+	s.mu.Lock()
+	o := s.ops[id]
+	var pendingCard *pendingAppCard
+	for _, c := range s.appCards {
+		if c.op == o && !c.decided {
+			pendingCard = c
+			c.decided = true
+			c.rejected = true
+			c.rejectMsg = "任务已取消，未执行任何改动"
+			if c.timer != nil {
+				c.timer.Stop()
+			}
+			break
+		}
+	}
+	s.mu.Unlock()
+	if o == nil {
+		return nil, fmt.Errorf("没有这个 id：%s", id)
+	}
+	if pendingCard != nil {
+		if pendingCard.desktopOnline {
+			approve.Cancel(context.Background(), approverFile(), pendingCard.prepareToken, pendingCard.req.Session)
+		}
+		s.finishOp(o, pendingCard.req, approve.Decision{Approve: false, Note: "任务已取消，未执行任何改动"}, nil, nil)
+		return map[string]any{"id": id, "state": "已取消", "title": opTitle(pendingCard.req)}, nil
+	}
+	o.mu.Lock()
+	state := o.state
+	cancelFn := o.cancelFn
+	title := opTitle(o.req)
+	o.mu.Unlock()
+	if state == "done" {
+		return map[string]any{"id": id, "state": "已结束", "title": title, "note": "任务已经结束了"}, nil
+	}
+	if cancelFn != nil {
+		cancelFn()
+		return map[string]any{"id": id, "state": "已发送停止请求", "title": title, "note": "正在停止，可用 task_status 查看最终状态"}, nil
+	}
+	return nil, fmt.Errorf("%s 当前处于等待状态，无法从此处直接取消（请在确认界面拒绝）", title)
 }
 
 // ---------------------------------------------------------------- 是否允许
@@ -246,17 +301,26 @@ func ChangeAllowed(st settings.Settings, f *config.File, t *config.Target) error
 	return nil
 }
 
-// PrepareRequest 桌面版收到请求、交给用户之前再检查一遍（防止有人绕过 ferry mcp 直接发请求）；
+// PrepareRequest 收到请求、交给用户确认之前做完整校验并生成权威预览（防止绕过 ferry mcp 直接发请求、防止预览与执行脱节）；
 // 新建项目的 ferry.yaml 在这里按 Spec 重新生成，确认框里显示的就是要写入的。
 func PrepareRequest(r *approve.Request) error {
+	return prepareRequestWithPool(r, nil, os.Getenv)
+}
+
+// PrepareRequestWithPool 同 PrepareRequest，允许桌面端（ferry serve）传入全局 SSH 连接池以复用连接、避免每次预检重建 SSH。
+func PrepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(string) string) error {
+	return prepareRequestWithPool(r, pool, getenv)
+}
+
+func prepareRequestWithPool(r *approve.Request, pool *engine.Pool, getenv func(string) string) error {
 	if _, ok := actionNames[r.Action]; !ok {
 		return fmt.Errorf("不支持的操作：%s", r.Action)
 	}
 	if r.ClientConfirmed {
-		return errors.New("此操作需要在 Ferry 里确认")
+		return errors.New("此操作需要通过预检令牌或在 Ferry 里确认")
 	}
 	if r.Action == "db-exec" {
-		return prepareDB(r)
+		return prepareDB(r, pool, getenv)
 	}
 	if r.Action == "config-edit" {
 		return prepareConfigEdit(r)
@@ -267,6 +331,9 @@ func PrepareRequest(r *approve.Request) error {
 			return err
 		}
 		r.Content = content
+		if len(r.Detail) == 0 {
+			r.Detail = createDetail(r.Spec)
+		}
 		return nil
 	}
 	f, err := config.LoadWithLocal(r.Config)
@@ -282,23 +349,34 @@ func PrepareRequest(r *approve.Request) error {
 		return err
 	}
 	r.Config, r.Project, r.Target, r.Host = f.Path, f.Project, t.Name, t.Host
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	e := &engine.Engine{File: f, Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Pool: pool, Ctx: context.Background(), Getenv: getenv, DisableAgentInstall: true}
 	if _, ok := aiActionTool[r.Action]; ok {
-		e := &engine.Engine{File: f, Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Ctx: context.Background(), Getenv: os.Getenv}
 		return prepareAI(e, r)
 	}
 	if r.Action == "secret" {
-		return ai.CheckSecretFields(r.Fields)
+		if err := ai.CheckSecretFields(r.Fields); err != nil {
+			return err
+		}
+		if len(r.Detail) == 0 {
+			r.Detail, _ = aiPreview(e, t.Name, *r)
+		}
+		return nil
 	}
 	if strings.HasPrefix(r.Action, "sw-") {
 		if !reSoftware.MatchString(r.Software) {
 			return fmt.Errorf("软件名称不对：%q", r.Software)
 		}
+		r.Detail = preview(e, t.Name, *r)
 		return nil
 	}
 	if strings.HasPrefix(r.Action, "port-") {
 		if !validPort(r.Port) {
 			return fmt.Errorf("端口不对：%q（写 8080/tcp 或 53/udp）", r.Port)
 		}
+		r.Detail = preview(e, t.Name, *r)
 		return nil
 	}
 	switch r.Action {
@@ -308,12 +386,17 @@ func PrepareRequest(r *approve.Request) error {
 				return fmt.Errorf("端口不对：%q（写 8080/tcp 或 53/udp）", p)
 			}
 		}
+		r.Detail = preview(e, t.Name, *r)
 		return nil
 	case "backup-run":
 		if r.Backup != "" && !reBackupName.MatchString(r.Backup) {
 			return fmt.Errorf("备份的名字不对：%q", r.Backup)
 		}
-		return hasBackup(&engine.Engine{File: f}, t.Name, r.Backup)
+		if err := hasBackup(e, t.Name, r.Backup); err != nil {
+			return err
+		}
+		r.Detail = preview(e, t.Name, *r)
+		return nil
 	case "ssh-kick":
 		if len(r.Pids) == 0 {
 			return errors.New("没有写明断开哪个连接")
@@ -323,6 +406,7 @@ func PrepareRequest(r *approve.Request) error {
 				return fmt.Errorf("PID 不对：%d", p)
 			}
 		}
+		r.Detail = preview(e, t.Name, *r)
 		return nil
 	}
 	if len(r.Apps) == 0 {
@@ -339,15 +423,21 @@ func PrepareRequest(r *approve.Request) error {
 			return fmt.Errorf("%s 上没有应用 %s", t.Name, a)
 		}
 	}
+	r.Detail = preview(e, t.Name, *r)
 	return nil
+}
+
+// prepareLocal 当 Ferry 桌面端未打开时，在 ferry mcp 内部复用连接池执行权威预检。
+func (s *server) prepareLocal(r *approve.Request) error {
+	return prepareRequestWithPool(r, s.pool, s.o.Getenv)
 }
 
 // ---------------------------------------------------------------- 提请求、等结果
 
-// change 检查是否允许，补上给人看的信息，交给桌面版；最多等 waitCap，没结束就返回 id。
+// change 检查是否允许，补上给人看的信息，按确认设置路由；最多等 waitCap，没结束就返回 id。
 func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in targetIn, r approve.Request) (any, error) {
 	if req != nil && req.Params != nil && req.Params.RequestState != "" {
-		return nil, errors.New("旧的客户端确认已失效，请重新发起并在 Ferry 里确认")
+		return s.resumeMRTR(ctx, req)
 	}
 	_, err := s.withEngine(ctx, in.Project, in.Target, func(e *engine.Engine, target string) (any, error) {
 		t, _ := e.File.Target(target)
@@ -369,10 +459,10 @@ func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in target
 			return nil, err
 		}
 		r.Reason = strings.TrimSpace(r.Reason)
-		if r.Tool != "" || r.Action == "secret" {
-			r.Detail, r.Danger = aiPreview(e, target, r)
-		} else {
-			r.Detail = preview(e, target, r)
+		// 仅填写密码（纯本地表单，不连 SSH）在发给桌面版前补预览；
+		// 其余改动交给桌面端 PrepareRequest（复用 ferry serve 连接池）或离线 prepareLocal 一次性计算权威预览，避免双倍 SSH 预检。
+		if r.Action == "secret" {
+			r.Detail, _ = aiPreview(e, target, r)
 		}
 		return nil, nil
 	})
@@ -382,9 +472,9 @@ func (s *server) change(ctx context.Context, req *mcp.CallToolRequest, in target
 	return s.ask(ctx, req, r)
 }
 
-// ask waits for the local Ferry approver.
+// ask 按确认策略路由到 Ferry 桌面端或编程软件客户端确认。
 func (s *server) ask(ctx context.Context, req *mcp.CallToolRequest, r approve.Request) (any, error) {
-	return s.submit(r).wait(ctx, req, waitCap)
+	return s.requestChange(ctx, req, r)
 }
 
 func appsOn(f *config.File, t *config.Target) []string {
@@ -637,24 +727,90 @@ func errOr(err error, s string) string {
 	return s
 }
 
-// op 一个交给桌面版的改动：等确认、执行中、结束。ferry mcp 退出时就没了（桌面版那边照样执行完）。
+// op 一个交给桌面版或本地直接执行的改动：等确认、执行中、结束。ferry mcp 退出时就没了（桌面版那边照样执行完）。
 type op struct {
 	req     approve.Request
 	started time.Time
 
-	mu       sync.Mutex
-	state    string // waiting | running | done
-	decision *approve.Decision
-	outcome  *approve.Outcome
-	err      error
-	progress []string
-	notify   func(string) // 有工具调用在等时：把进展转成 MCP 的进度通知
-	done     chan struct{}
+	mu             sync.Mutex
+	state          string // waiting | running | done
+	waitState      string // waiting 态展示文案（空 = 默认「等用户在 Ferry 里确认」）
+	waiters        int    // 当前正在阻塞等待结果的 task_status 调用数
+	modelDelivered bool   // 终态结果已通过 task_status / 原工具返回给模型
+	finishedAt     time.Time
+	decision       *approve.Decision
+	outcome        *approve.Outcome
+	err            error
+	progress       []string
+	notifiers      map[int]func(string) // 并发等待的 task_status 各自注册进度回调，互不覆盖
+	nextNotify     int
+	cancelFn       func() // 停止正在执行的任务（本地取消或向桌面端发取消）
+	doneOnce       sync.Once
+	done           chan struct{}
+}
+
+func (o *op) closeDone() {
+	o.doneOnce.Do(func() { close(o.done) })
+}
+
+func (o *op) isModelListeningLocked() bool {
+	return o.waiters > 0 || o.modelDelivered
+}
+
+const (
+	opRetainTTL = 30 * time.Minute // 已完成的 op 保留多久供 task_status 回查，超时后自动淘汰防内存增长
+	opMaxDone   = 200              // 已完成的 op 最多保留条数
+)
+
+// sweepOpsLocked 淘汰已完成且不再被等待的旧 op（仅在持有 s.mu 时调用）。
+func (s *server) sweepOpsLocked(now time.Time) {
+	type doneItem struct {
+		id string
+		at time.Time
+	}
+	var finished []doneItem
+	for id, o := range s.ops {
+		o.mu.Lock()
+		isDone := o.state == "done" && o.waiters == 0
+		at := o.finishedAt
+		if at.IsZero() {
+			at = o.started
+		}
+		o.mu.Unlock()
+		if !isDone {
+			continue
+		}
+		if now.Sub(at) > opRetainTTL {
+			delete(s.ops, id)
+			continue
+		}
+		finished = append(finished, doneItem{id: id, at: at})
+	}
+	if len(finished) <= opMaxDone {
+		return
+	}
+	slices.SortFunc(finished, func(a, b doneItem) int {
+		if a.at.Before(b.at) {
+			return -1
+		}
+		if a.at.After(b.at) {
+			return 1
+		}
+		return 0
+	})
+	for _, x := range finished[:len(finished)-opMaxDone] {
+		delete(s.ops, x.id)
+	}
 }
 
 func (s *server) submit(r approve.Request) *op {
-	o := &op{req: r, started: time.Now(), state: "waiting", done: make(chan struct{})}
+	now := time.Now()
+	o := &op{req: r, started: now, state: "waiting", done: make(chan struct{})}
+	o.cancelFn = func() {
+		_ = approve.CancelRun(context.Background(), approverFile(), r.ID, r.Session)
+	}
 	s.mu.Lock()
+	s.sweepOpsLocked(now)
 	s.ops[r.ID] = o
 	s.mu.Unlock()
 	safe.Go("等待桌面版确认", func() {
@@ -669,31 +825,7 @@ func (s *server) submit(r approve.Request) *op {
 				o.mu.Unlock()
 			},
 			o.addProgress)
-		args, _ := json.Marshal(map[string]any{"project": r.Project, "target": r.Target, "apps": r.Apps, "name": cmp.Or(r.Software, r.Backup), "port": r.Port, "action": actionNames[r.Action]})
-		entry := callEntry{Time: time.Now(), Client: r.Client, Tool: r.Action + "（结果）", Op: r.ID, Args: args, Ms: time.Since(o.started).Milliseconds()}
-		switch {
-		case err != nil:
-			entry.Error = errText(err)
-		case !d.Approve:
-			entry.Decision, entry.Error = "拒绝", d.Note
-		default:
-			entry.Decision = "同意"
-			if d.Note != "" {
-				entry.Decision = d.Note
-			}
-			entry.OK = out != nil && out.OK
-			if out != nil && !out.OK {
-				entry.Error = errText(errors.New(out.Error))
-			}
-		}
-		writeLog(entry)
-		o.mu.Lock()
-		o.state, o.outcome, o.err = "done", out, err
-		if o.decision == nil && err == nil {
-			o.decision = &d
-		}
-		o.mu.Unlock()
-		close(o.done) // 日志落盘后，等待和轮询的调用都可以看到完成状态。
+		s.finishOp(o, r, d, out, err)
 	})
 	return o
 }
@@ -726,6 +858,10 @@ func opTitle(r approve.Request) string {
 		var in struct{ Path string }
 		json.Unmarshal(r.Input, &in)
 		return actionNames[r.Action] + " " + in.Path + "（" + r.Target + "）"
+	case r.Action == "upload-file":
+		var in struct{ Locals []string }
+		json.Unmarshal(r.Input, &in)
+		return fmt.Sprintf("%s %d 个文件（%s）", actionNames[r.Action], len(in.Locals), r.Target)
 	case r.Action == "db-exec":
 		unit := "语句"
 		if r.DBKind == "redis" {
@@ -772,25 +908,45 @@ func (o *op) addProgress(line string) {
 	if len(o.progress) > 40 {
 		o.progress = o.progress[len(o.progress)-40:]
 	}
-	notify := o.notify
+	var fns []func(string)
+	for _, fn := range o.notifiers {
+		fns = append(fns, fn)
+	}
 	o.mu.Unlock()
-	if notify != nil {
-		notify(line)
+	for _, fn := range fns {
+		fn(line)
 	}
 }
 
 // wait 最多等 d，返回现在的情况；拒绝、失败作为错误返回（编程软件那边标成失败）。
 func (o *op) wait(ctx context.Context, req *mcp.CallToolRequest, d time.Duration) (any, error) {
+	o.mu.Lock()
+	o.waiters++
+	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		o.waiters--
+		o.mu.Unlock()
+	}()
 	if req != nil && req.Session != nil && req.Params != nil {
 		if tok := req.Params.GetProgressToken(); tok != nil {
 			n := 0
 			o.mu.Lock()
-			o.notify = func(line string) {
+			if o.notifiers == nil {
+				o.notifiers = map[int]func(string){}
+			}
+			nid := o.nextNotify
+			o.nextNotify++
+			o.notifiers[nid] = func(line string) {
 				n++
 				req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{ProgressToken: tok, Message: line, Progress: float64(n)})
 			}
 			o.mu.Unlock()
-			defer func() { o.mu.Lock(); o.notify = nil; o.mu.Unlock() }()
+			defer func() {
+				o.mu.Lock()
+				delete(o.notifiers, nid)
+				o.mu.Unlock()
+			}()
 		}
 	}
 	select {
@@ -808,15 +964,21 @@ func (o *op) view() (any, error) {
 	v := map[string]any{"id": o.req.ID, "title": title, "elapsed": time.Since(o.started).Round(time.Second).String()}
 	switch o.state {
 	case "waiting":
-		v["state"] = "等用户在 Ferry 里确认"
-		v["next"] = "还没确认（最多等 5 分钟）。过一会儿用 task_status 查这个 id"
+		if o.waitState != "" {
+			v["state"] = o.waitState
+			v["next"] = "用户还没点同意或拒绝（最多等 5 分钟）。请不要提前结束回复，继续调用 task_status(id=\"" + o.req.ID + "\", wait=40) 等待结果"
+		} else {
+			v["state"] = "等用户在 Ferry 里确认"
+			v["next"] = "还没确认（最多等 5 分钟）。过一会儿用 task_status 查这个 id"
+		}
 		return v, nil
 	case "running":
-		v["state"] = "已同意，Ferry 正在执行"
+		v["state"] = "已同意，正在执行"
 		v["progress"] = slices.Clone(o.progress)
-		v["next"] = "还没结束。过一会儿用 task_status 查这个 id"
+		v["next"] = "还没结束。请继续用 task_status(id=\"" + o.req.ID + "\", wait=40) 等待执行完成"
 		return v, nil
 	}
+	o.modelDelivered = true
 	if o.err != nil {
 		if errors.Is(o.err, approve.ErrNoDesktop) {
 			return nil, o.err

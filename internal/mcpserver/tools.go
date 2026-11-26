@@ -30,6 +30,13 @@ type ParamInfo struct {
 
 // addTool 注册工具，同时记下它的说明和参数（参数按结构体里字段的顺序）。
 func addTool[In, Out any](s *server, m *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
+	if t.Annotations != nil && !t.Annotations.ReadOnlyHint && t.Name != "ask_secret" && t.Name != "confirm_change" && t.Name != "task_cancel" {
+		if t.Meta == nil {
+			t.Meta = mcp.Meta{}
+		}
+		t.Meta["ui"] = map[string]any{"resourceUri": confirmAppURI}
+		t.Meta["ui/resourceUri"] = confirmAppURI
+	}
 	mcp.AddTool(m, t, h)
 	info := ToolInfo{Name: t.Name, Title: t.Title, Description: t.Description, Params: []ParamInfo{}}
 	if a := t.Annotations; a != nil {

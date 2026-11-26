@@ -53,7 +53,7 @@ func TestAITools(t *testing.T) {
 	settings.Save(st)
 
 	hub := approve.NewHub(file)
-	hub.Prepare = PrepareRequest
+	AttachApprovalHandlers(hub)
 	reqs := make(chan approve.Request, 4)
 	unsub, err := hub.Subscribe(func(kind string, v any) {
 		if kind == "request" {
@@ -92,24 +92,32 @@ func TestAITools(t *testing.T) {
 		t.Fatalf("名字不对应该报错：%s", text)
 	}
 
-	// An older desktop setting still routes each request to Ferry.
+	// 设置里选了在编程软件里确认：编程软件瞬间回答（< minAnswer）→ 判定为未展示确认框，改回 Ferry 弹窗确认
 	st.MCP.ConfirmIn = "client"
 	settings.Save(st)
 	restart := map[string]any{"target": "test", "action": "restart", "apps": []string{"api"}, "reason": "改了配置"}
 	go func() {
 		r := <-reqs
-		if r.ClientConfirmed || r.Action != "restart" || r.Reason != "改了配置" {
-			t.Errorf("Ferry 审批请求：%+v", r)
+		if r.ClientConfirmed || r.Action != "restart" || r.Reason != "改了配置" || len(r.Detail) == 0 || !strings.Contains(r.Detail[0], "没有展示确认框") {
+			t.Errorf("瞬间回答应回退到 Ferry 审批：%+v", r)
 		}
 		hub.Decide(r.ID, approve.Decision{Note: "你在 Ferry 里拒绝了"})
 	}()
-	if text, isErr := callText(t, cs, "app_control", restart); !isErr || !strings.Contains(text, "你在 Ferry 里拒绝了") || len(asked) != 0 {
-		t.Fatalf("Ferry 里拒绝：%v %s，客户端弹窗：%v", isErr, text, asked)
+	if text, isErr := callText(t, cs, "app_control", restart); !isErr || !strings.Contains(text, "你在 Ferry 里拒绝了") || len(asked) != 1 {
+		t.Fatalf("瞬间回答回退 Ferry 拒绝：%v %s，客户端弹窗：%v", isErr, text, asked)
+	}
+
+	// 用户正常时间看后明确拒绝：不再弹窗打扰 Ferry 桌面端
+	oldMin := minAnswer
+	minAnswer = 0
+	t.Cleanup(func() { minAnswer = oldMin })
+	if text, isErr := callText(t, cs, "app_control", restart); !isErr || !strings.Contains(text, "test-client 1.0 里拒绝或取消了") || len(asked) != 2 {
+		t.Fatalf("客户端明确拒绝：%v %s，客户端弹窗：%v", isErr, text, asked)
 	}
 
 	r := approve.Request{Action: "restart", Config: shop, Target: "test", Apps: []string{"api"}, ClientConfirmed: true}
-	if err := PrepareRequest(&r); err == nil || !strings.Contains(err.Error(), "在 Ferry 里确认") {
-		t.Fatalf("没选在编程软件里确认：%v", err)
+	if err := PrepareRequest(&r); err == nil || !strings.Contains(err.Error(), "确认") {
+		t.Fatalf("直接伪造 ClientConfirmed 应报错：%v", err)
 	}
 	r = approve.Request{Action: "secret", Config: shop, Target: "test", Fields: fields, ClientConfirmed: true}
 	if err := PrepareRequest(&r); err == nil {

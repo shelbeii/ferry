@@ -148,3 +148,48 @@ func TestAIModelsMigrate(t *testing.T) {
 		t.Fatal("没有的模型")
 	}
 }
+
+func TestMCPConfirmSettings(t *testing.T) {
+	t.Setenv("FERRY_HOME", t.TempDir())
+	appdir.Reset()
+	t.Cleanup(appdir.Reset)
+
+	// 默认值：在 Ferry 桌面端确认，命中高危强制回退桌面端
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.MCP.ConfirmInClient() || s.MCP.AllowAllInClient() || s.MCP.FallbackTwoStep() || !s.MCP.DangerRequiresDesktop() {
+		t.Fatalf("默认 MCP 确认设置不对：%+v", s.MCP)
+	}
+
+	// 合法值保存与读取
+	off := false
+	s.MCP.AllowChanges = true
+	s.MCP.ConfirmIn = "client"
+	s.MCP.ClientConfirmScope = "all"
+	s.MCP.ClientConfirmFallback = "two_step"
+	s.MCP.ForceDesktopOnDanger = &off
+	if err := Save(s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.MCP.ConfirmInClient() || !got.MCP.AllowAllInClient() || !got.MCP.FallbackTwoStep() || got.MCP.DangerRequiresDesktop() {
+		t.Fatalf("保存后的 MCP 确认设置不对：%+v", got.MCP)
+	}
+
+	// 非法值被规范化回安全默认
+	if err := os.WriteFile(appdir.SettingsFile(), []byte(`{"mcp":{"confirmIn":"bogus","clientConfirmScope":"weird","clientConfirmFallback":"magic"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	norm, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if norm.MCP.ConfirmIn != "" || norm.MCP.ClientConfirmScope != "" || norm.MCP.ClientConfirmFallback != "" || !norm.MCP.DangerRequiresDesktop() {
+		t.Fatalf("非法值未规范化：%+v", norm.MCP)
+	}
+}

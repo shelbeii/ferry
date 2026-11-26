@@ -144,7 +144,7 @@ func (s *server) addConfigTools(m *mcp.Server) {
 		}))
 	addTool(s, m, &mcp.Tool{Name: "config_edit", Title: "改配置",
 		Description: "按路径增删改项目配置 ferry.yaml（scope 为 local 时改这台电脑的本机设置）：只改要改的那几行，注释、空行和写法保留；改完先校验，不通过不改、返回问题。" +
-			"通过了交给 Ferry 桌面版，用户看过差异、同意后写入（最多等 5 分钟确认；需要用户在 Ferry 设置里允许编程软件请求改动）。" +
+			"通过了把差异交给用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认，改构建/钩子命令等高危项默认仍在桌面端确认），同意后写入（最多等 5 分钟确认；需要用户在 Ferry 设置里允许编程软件请求改动）。" +
 			"改之前先用 config_schema 查写法、config_get 看现在的；拿不准时先用 config_check 试改。改了的配置下次部署才生效。" +
 			"生产服务器（production）、aiChanges: false 的服务器的配置，以及 production、aiChanges、deployers 这几项只能用户在 Ferry 里改。",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(false)}},
@@ -152,6 +152,9 @@ func (s *server) addConfigTools(m *mcp.Server) {
 }
 
 func (s *server) configEdit(ctx context.Context, req *mcp.CallToolRequest, in configEditIn) (any, error) {
+	if req != nil && req.Params != nil && req.Params.RequestState != "" {
+		return s.resumeMRTR(ctx, req)
+	}
 	st, _ := settings.Load()
 	if !st.MCP.AllowChanges {
 		return nil, errors.New("Ferry 没有允许编程软件改动：用户可以在 Ferry「设置 → 命令行与 MCP」里打开「允许编程软件请求部署、启停、回滚等改动」，或者自己在 Ferry 里改配置")
@@ -177,10 +180,10 @@ func (s *server) configEdit(ctx context.Context, req *mcp.CallToolRequest, in co
 	if name == "" {
 		name = p.Name
 	}
-	o := s.submit(approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "config-edit",
+	r := approve.Request{ID: newID(), Session: s.session, Client: clientName(req), Action: "config-edit",
 		Project: name, Config: p.Config, Input: raw, Detail: engine.ConfigPlanDetail(plan), Danger: plan.Danger,
-		Reason: strings.TrimSpace(in.Reason)})
-	return o.wait(ctx, req, waitCap)
+		Reason: strings.TrimSpace(in.Reason)}
+	return s.ask(ctx, req, r)
 }
 
 // prepareConfigEdit 桌面版收到请求后按 Input 重新算一遍（确认框里显示的就是要写的），记下原文的摘要。
@@ -190,7 +193,7 @@ func prepareConfigEdit(r *approve.Request) error {
 		return errors.New("Ferry 没有允许编程软件改动")
 	}
 	if r.ClientConfirmed {
-		return errors.New("改配置只能在 Ferry 里确认")
+		return errors.New("此操作需要通过预检令牌或在 Ferry 里确认")
 	}
 	var in engine.ConfigEditInput
 	if err := json.Unmarshal(r.Input, &in); err != nil {

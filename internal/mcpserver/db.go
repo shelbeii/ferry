@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
@@ -56,7 +57,7 @@ type dbExecIn struct {
 }
 
 func (s *server) dbEngine(ctx context.Context) *engine.Engine {
-	st, _ := settings.Load()
+	st, _ := loadSettingsCached()
 	return &engine.Engine{Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey,
 		Pool: s.pool, Ctx: ctx, Getenv: s.o.Getenv}
 }
@@ -137,13 +138,13 @@ func (s *server) addDBChangeTools(m *mcp.Server) {
 	addTool(s, m, &mcp.Tool{Name: "db_execute", Title: "改数据库",
 		Description: "在数据库里执行改动：插入、修改、删除数据，建表改表。" + engine.AIMongoWriteDesc +
 			"只能用 db_connections 里 write 为 true 的连接（用户在连接上勾选了「允许 AI 修改」），要用户在 Ferry 设置里允许编程软件请求改动；经生产服务器连的不行。" +
-			"每次都把完整操作和数据库的回滚规则交给用户在 Ferry 里确认。ClickHouse 每次一条，达梦的建表改表单独确认。" +
+			"每次都把完整操作、影响行数估算和数据库的回滚规则交给用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认，高危操作默认仍在桌面端确认）。ClickHouse 每次一条，达梦的建表改表单独确认。" +
 			"一次最多 100 条；不要写 BEGIN、COMMIT；不能建库删库，不能动账号权限（GRANT、CREATE USER）、SET、CALL、LOAD DATA、COPY。" +
 			"改之前先用 db_schema、db_query 看清楚结构和要改的行；UPDATE、DELETE 要写 WHERE。最多等 40 秒：没结束返回 id，再用 task_status 查。",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "db_execute", func(ctx context.Context, req *mcp.CallToolRequest, in dbExecIn) (any, error) {
 			if req != nil && req.Params != nil && req.Params.RequestState != "" {
-				return nil, errors.New("旧的客户端确认已失效，请重新发起并在 Ferry 里确认")
+				return s.resumeMRTR(ctx, req)
 			}
 			return s.dbChange(ctx, req, in.Connection, in.Database, in.SQL, in.Reason, false)
 		}))
@@ -153,7 +154,7 @@ func (s *server) addDBChangeTools(m *mcp.Server) {
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(true)}},
 		loggedReq(s, "redis_execute", func(ctx context.Context, req *mcp.CallToolRequest, in redisExecIn) (any, error) {
 			if req != nil && req.Params != nil && req.Params.RequestState != "" {
-				return nil, errors.New("旧的客户端确认已失效，请重新发起并在 Ferry 里确认")
+				return s.resumeMRTR(ctx, req)
 			}
 			return s.dbChange(ctx, req, in.Connection, in.Database, in.Commands, in.Reason, true)
 		}))
@@ -276,11 +277,11 @@ func orZero(s string) string {
 	return s
 }
 
-// prepareDB 桌面版收到改数据库的请求、给用户看之前再查一遍，确认框里的内容按连接重新生成。
-func prepareDB(r *approve.Request) error {
+// prepareDB 收到改数据库的请求、给用户看之前再查一遍，确认框里的内容按连接重新生成，并尝试 EXPLAIN 估算影响行数。
+func prepareDB(r *approve.Request, pool *engine.Pool, getenv func(string) string) error {
 	st, _ := settings.Load()
 	if r.ClientConfirmed {
-		return errors.New("改数据库只能在 Ferry 里确认")
+		return errors.New("此操作需要通过预检令牌或在 Ferry 里确认")
 	}
 	cn, err := dbx.Get(r.DB)
 	if err != nil {
@@ -300,5 +301,32 @@ func prepareDB(r *approve.Request) error {
 		return err
 	}
 	fillDB(r, cn, f, t)
+	r.DBEstimate, r.DBEstimateMax = estimateDBRows(st, cn, r.Database, r.Stmts, pool, getenv)
 	return nil
+}
+
+// estimateDBRows 尝试用 EXPLAIN 估算 MySQL / PostgreSQL 的 UPDATE / DELETE 影响行数（不执行语句，最多等 5 秒）。
+func estimateDBRows(st settings.Settings, cn *dbx.Conn, database string, stmts []string, pool *engine.Pool, getenv func(string) string) (string, int64) {
+	if (cn.Kind != dbx.MySQL && cn.Kind != dbx.Postgres) || len(dbx.EstimateCandidates(cn.Kind, stmts)) == 0 {
+		return "", 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	e := &engine.Engine{Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey, Pool: pool, Ctx: ctx, Getenv: getenv, DisableAgentInstall: true}
+	cl, release, err := e.OpenAIDB(cn)
+	if err != nil {
+		return "", 0
+	}
+	defer release()
+	est, err := cl.EstimateRows(ctx, database, stmts)
+	if err != nil {
+		return "", 0
+	}
+	var maxRows int64
+	for _, x := range est {
+		if x.Rows > maxRows {
+			maxRows = x.Rows
+		}
+	}
+	return dbx.EstimateText(stmts, est), maxRows
 }

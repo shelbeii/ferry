@@ -133,7 +133,7 @@ func (s *server) addExtraTools(m *mcp.Server) {
 			})
 		}))
 
-	const how = "和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次在 Ferry 桌面版里确认（不能授权自动同意），同意后由桌面版执行；生产服务器、「新建连接」的服务器不允许。最多等 40 秒，没结束用 task_status 查。"
+	const how = "和 deploy 一样：需要用户在 Ferry 设置里允许编程软件请求改动，每次都要用户确认（默认在 Ferry 桌面版弹窗，也可在设置里开启在编程软件中确认，高危操作默认仍在桌面端确认）；生产服务器、「新建连接」的服务器不允许。最多等 40 秒，没结束用 task_status 查。"
 	addTool(s, m, &mcp.Tool{Name: "ssh_disconnect", Title: "断开 SSH 连接",
 		Description: "断开服务器上的 SSH 连接（先用 ssh_sessions 看 pid），里面正在运行的命令会被结束。对方可以重新连上：不想让他再连，要改密码或去掉他的公钥。" +
 			"Ferry 自己正在用的连接不能断开。" + how,

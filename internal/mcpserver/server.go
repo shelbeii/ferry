@@ -21,12 +21,12 @@ import (
 
 	"github.com/captain/ferry/internal/ai"
 	"github.com/captain/ferry/internal/appdir"
+	"github.com/captain/ferry/internal/approve"
 	"github.com/captain/ferry/internal/config"
 	"github.com/captain/ferry/internal/dbx"
 	"github.com/captain/ferry/internal/engine"
 	"github.com/captain/ferry/internal/proto"
 	"github.com/captain/ferry/internal/safe"
-	"github.com/captain/ferry/internal/settings"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -44,7 +44,9 @@ const instructions = `Ferry 是把后端（Java、Go 等原生程序、Python、
   部署前用 deploy_changes 看这次会带上线的提交、单元文件和附带文件的变化；app_status 里的 busy 表示团队里有人正在部署、启停这台服务器上的应用。
   list_projects 里的 machine 是这台电脑上缺的东西（别的电脑上的私钥、源码目录），要用户在 Ferry 的「本机设置」里补上。
 - 改动服务器：deploy 部署（先在本机构建；targets 一次部署到几台，可以分批、先发几台让用户确认、有一台失败就把已切换的回滚；full 全量上传、noRollback 失败不自动回滚、keepPerms 不自动修正权限、keep 这次保留的文件）、app_control 启动 / 停止 / 重启（定时任务的停止 = 关掉定时器、启动 = 打开）、rollback 回滚、run_job 现在运行一次定时任务、files_upload 把本机文件上传到服务器。用户在 Ferry 设置里打开了「允许编程软件请求改动」才能用，
-  每次都要用户确认（在 Ferry 桌面版弹窗，或者用户设置了在编程软件里确认时在这里），用户同意后由桌面版执行（最多等 5 分钟确认）；生产服务器不允许。用户拒绝后不要换个办法做同样的事，先问用户。
+  每次都要用户确认（默认在 Ferry 桌面版弹窗；用户开启「优先在编程软件里确认」时，按客户端能力通过交互卡片、MCP 表单或两段式 confirm_change 在编程软件里确认，高危操作和密码输入仍在 Ferry 桌面版；桌面版开着时由桌面版后台静默执行，未打开且允许在编程软件里确认执行时由 ferry mcp 直接执行）。用户拒绝后不要换个办法做同样的事，先问用户。
+  遇到工具返回 pendingConfirmation 和 approvalId（两段式确认）时，先把完整预览、差异和风险展示给用户，再带着 confirmArgs 里的全部字段（一字不差）调用 confirm_change 触发编程软件确认并执行。
+  遇到工具返回确认卡片（MCP App）时，确认卡片已经展示在界面上：请不要提前结束回复，立即调用 task_status(id, wait=40) 等待用户在卡片中点击「同意执行」或「拒绝」并获取最终结果（若返回仍在等待或执行中则继续用 task_status 查，直到完成、拒绝或超时）；不要重复发起原改动工具。
   run_change_command 执行改动服务器的命令，write_file 写文件（改配置文件用它，确认时显示差异、自动备份原文件），software_templates / software_install 用模板装软件（模板参数没有的设置写在 software_install 的 extra 里，不要另写模板），software_upgrade 升级、software_restore 恢复卸载时保留了数据的、software_backup 给装好的数据库设置数据备份（Ferry 装的软件），
   template_guide / save_software_template 写、存软件模板；要用户提供密码、账号时用 ask_secret（用户在 Ferry 里填，你只拿到代号 {{secret:名字}}，
   命令里用环境变量 "$FERRY_SECRET_<名字大写>"，写文件、装软件的参数里写代号），不要让用户在对话里发密码。
@@ -80,13 +82,22 @@ func Run(ctx context.Context, o Options) error {
 	return m.Run(ctx, &mcp.StdioTransport{})
 }
 
-type server struct {
-	o       Options
-	pool    *engine.Pool
-	session string // 这个 ferry mcp 进程的随机标识（桌面版「这次连接内不再询问」按它算）
+// maxConcurrentRemote 单个 ferry mcp 进程同时访问远程服务器的上限，防止并发风暴打满 OpenSSH MaxSessions（通常为 10）。
+const maxConcurrentRemote = 8
 
-	mu  sync.Mutex
-	ops map[string]*op // 交给桌面版的改动
+type server struct {
+	o         Options
+	pool      *engine.Pool
+	remoteSem chan struct{} // 远端 SSH/文件/数据库并发限流信号量
+	session   string        // 这个 ferry mcp 进程的随机标识（桌面版「这次连接不再接受」按它算）
+
+	mu        sync.Mutex
+	ops       map[string]*op             // 交给桌面版或本地直接执行的改动
+	confirms  map[string]pendingConfirm  // SEP-2322 MRTR 待确认表单（按 requestState）
+	plans     map[string]pendingPlan     // 两段式 confirm_change 待确认计划（按 approvalId）
+	appCards  map[string]*pendingAppCard // MCP Apps 交互确认卡片（按 approvalId）
+	roots     []string                   // 客户端经 MCP Roots 提供的当前工作区目录列表
+	helloSent bool                       // 是否已向桌面端上报过连接能力诊断信息
 
 	tools []ToolInfo // 注册的工具（桌面版「MCP 工具列表」用），按注册的顺序
 }
@@ -94,18 +105,35 @@ type server struct {
 // New 建好 MCP 服务（测试时接到内存里的传输上）；用完调用 close 断开服务器连接。
 func New(o Options) (_ *mcp.Server, close func()) {
 	s, m := newServer(o)
-	return m, s.pool.Close
+	return m, func() {
+		approve.Bye(approverFile(), s.session)
+		s.pool.Close()
+	}
 }
 
 func newServer(o Options) (*server, *mcp.Server) {
 	if o.Getenv == nil {
 		o.Getenv = os.Getenv
 	}
-	st, _ := settings.Load()
-	s := &server{o: o, pool: engine.NewPool(time.Duration(max(st.Connect.IdleMinutes, 1)) * time.Minute),
-		session: newID() + newID(), ops: map[string]*op{}}
+	st, _ := loadSettingsCached()
+	s := &server{
+		o:         o,
+		pool:      engine.NewPool(time.Duration(max(st.Connect.IdleMinutes, 1)) * time.Minute),
+		remoteSem: make(chan struct{}, maxConcurrentRemote),
+		session:   newID() + newID(),
+		ops:       map[string]*op{},
+		confirms:  map[string]pendingConfirm{},
+		plans:     map[string]pendingPlan{},
+		appCards:  map[string]*pendingAppCard{},
+	}
 	m := mcp.NewServer(&mcp.Implementation{Name: "ferry", Title: "Ferry", Version: o.Version},
-		&mcp.ServerOptions{Instructions: instructions})
+		&mcp.ServerOptions{
+			Instructions:            instructions,
+			InitializedHandler:      s.onInitialized,
+			RootsListChangedHandler: s.onRootsChanged,
+			CompletionHandler:       s.handleCompletion,
+		})
+	m.AddReceivingMiddleware(s.uiMetaMiddleware)
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(true)}
 
 	addTool(s, m, &mcp.Tool{Name: "list_projects", Title: "Ferry 项目",
@@ -218,6 +246,9 @@ func newServer(o Options) (*server, *mcp.Server) {
 	s.addDataTools(m)
 	s.addDBTools(m)
 	s.addDBChangeTools(m)
+	s.addConfirmTools(m)
+	s.addMCPApp(m)
+	s.addResources(m)
 	s.addPrompts(m)
 	return s, m
 }
@@ -340,14 +371,15 @@ type appInfo struct {
 	Schedule []string `json:"schedule,omitempty"`
 }
 
-// projects Ferry 桌面版里的项目，加上当前目录的（不在列表里时）。
+// projects Ferry 桌面版里的项目，加上当前目录 / 工作区的（不在列表里时）。
+// 始终完整返回每个项目的配置与实时 MachineProblems 检测结果，保证不缺字段、不读旧数据。
 func (s *server) projects() []projectInfo {
-	st, _ := settings.Load()
-	here, _ := config.Find(s.o.Dir)
+	st, _ := loadSettingsCached()
+	here := s.currentDirConfig()
 	var out []projectInfo
 	seen := map[string]bool{}
 	add := func(name, path string) {
-		p := describe(name, path)
+		p := describeWith(name, path, true)
 		if seen[strings.ToLower(p.Config)] {
 			return
 		}
@@ -371,6 +403,10 @@ func (s *server) projects() []projectInfo {
 const connectionsName = "新建连接"
 
 func describe(name, path string) projectInfo {
+	return describeWith(name, path, true)
+}
+
+func describeWith(name, path string, withMachine bool) projectInfo {
 	p := projectInfo{Name: name, Config: path}
 	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
 		if found, err := config.Find(path); err == nil {
@@ -380,7 +416,7 @@ func describe(name, path string) projectInfo {
 	if abs, err := filepath.Abs(p.Config); err == nil {
 		p.Config = abs
 	}
-	f, err := config.LoadWithLocal(p.Config)
+	f, err := loadConfigCached(p.Config)
 	if err != nil {
 		p.Error = err.Error()
 		if p.Name == "" {
@@ -393,7 +429,7 @@ func describe(name, path string) projectInfo {
 	if p.Name == "" {
 		p.Name = f.Project
 	}
-	if f.Kind != config.KindConnections {
+	if withMachine && f.Kind != config.KindConnections {
 		p.Machine = f.MachineProblems()
 	}
 	if f.Kind == config.KindConnections {
@@ -443,7 +479,51 @@ func (s *server) resolve(project string) (*config.File, error) {
 }
 
 // find 同 resolve，配置有错的项目也返回（看、改配置时用）。
+// 优先按名称/路径精准定位单个项目（避免解析其余无关项目）；按名称未命中时自动回退全量扫描匹配 ferry.yaml 里的 project 字段，绝不漏找任何项目。
 func (s *server) find(project string) (projectInfo, error) {
+	st, _ := loadSettingsCached()
+	here := s.currentDirConfig()
+	project = strings.TrimSpace(project)
+
+	if project == "" {
+		if here != "" {
+			regName := ""
+			for _, dp := range st.Desktop.Projects {
+				if samePath(dp.Path, here) || samePath(filepath.Dir(dp.Path), filepath.Dir(here)) {
+					regName = dp.Name
+					break
+				}
+			}
+			p := describeWith(regName, here, false)
+			p.Here = true
+			return p, nil
+		}
+		if len(st.Desktop.Projects) == 1 {
+			dp := st.Desktop.Projects[0]
+			return describeWith(dp.Name, dp.Path, false), nil
+		}
+	} else {
+		// 精准路径或登记名命中：只解析目标项目本身
+		for _, dp := range st.Desktop.Projects {
+			if strings.EqualFold(dp.Name, project) || samePath(dp.Path, project) || samePath(filepath.Dir(dp.Path), project) {
+				p := describeWith(dp.Name, dp.Path, false)
+				p.Here = here != "" && samePath(p.Config, here)
+				return p, nil
+			}
+		}
+		if strings.EqualFold(connectionsName, project) {
+			if conn := appdir.Path("connections.yaml"); fileExists(conn) {
+				return describeWith(connectionsName, conn, false), nil
+			}
+		}
+		if here != "" && (samePath(here, project) || samePath(filepath.Dir(here), project)) {
+			p := describeWith("", here, false)
+			p.Here = true
+			return p, nil
+		}
+	}
+
+	// 回退完整扫描（支持按 ferry.yaml 内部 project 字段匹配，以及报错时完整列出全部可用项目）
 	list := s.projects()
 	names := func() string {
 		var n []string
@@ -455,7 +535,6 @@ func (s *server) find(project string) (projectInfo, error) {
 		}
 		return "可用的项目：" + strings.Join(n, "、")
 	}
-	project = strings.TrimSpace(project)
 	if project == "" {
 		for _, p := range list {
 			if p.Here {
@@ -479,7 +558,7 @@ func (s *server) find(project string) (projectInfo, error) {
 		}
 	}
 	if _, err := os.Stat(project); err == nil {
-		return describe("", project), nil
+		return describeWith("", project, false), nil
 	}
 	for _, p := range list {
 		if samePath(p.Config, project) || samePath(filepath.Dir(p.Config), project) {
@@ -517,7 +596,15 @@ func (s *server) engineFor(ctx context.Context, project, target string, conn boo
 	if _, err := f.Target(target); err != nil {
 		return nil, err // 错误里已列出可用的目标
 	}
-	st, _ := settings.Load()
+	st, _ := loadSettingsCached()
+	if s.remoteSem != nil {
+		select {
+		case s.remoteSem <- struct{}{}:
+			defer func() { <-s.remoteSem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	e := &engine.Engine{File: f, Rep: quiet{}, Settings: st, AcceptNewHostKey: st.Connect.AcceptNewHostKey,
 		Pool: s.pool, Ctx: ctx, Getenv: s.o.Getenv, DisableAgentInstall: true}
 	return fn(e, target)
@@ -530,14 +617,73 @@ func logged[In any](s *server, name string, fn func(context.Context, In) (any, e
 	return loggedReq(s, name, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (any, error) { return fn(ctx, in) })
 }
 
-// clientName 编程软件自己报的名称和版本。
+// clientName 编程软件自己报的名称和版本（去掉控制字符并限制长度，防止污染审计日志）。
 func clientName(req *mcp.CallToolRequest) string {
 	if req != nil && req.Session != nil {
 		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil {
-			return strings.TrimSpace(p.ClientInfo.Name + " " + p.ClientInfo.Version)
+			raw := strings.TrimSpace(p.ClientInfo.Name + " " + p.ClientInfo.Version)
+			var b strings.Builder
+			for _, r := range raw {
+				if r < 0x20 || r == 0x7f {
+					b.WriteByte(' ')
+				} else {
+					b.WriteRune(r)
+				}
+			}
+			clean := strings.Join(strings.Fields(b.String()), " ")
+			if rs := []rune(clean); len(rs) > 80 {
+				return string(rs[:80])
+			}
+			return clean
 		}
 	}
 	return ""
+}
+
+// redactLogArgs 写入 calls.jsonl 前对入参做敏感信息脱敏与体积截断，避免密码/Token 明文落盘或大文件撑爆日志。
+func redactLogArgs(in any) json.RawMessage {
+	const (
+		maxFieldBytes = 2048
+		maxTotalBytes = 8192
+	)
+	b, err := json.Marshal(in)
+	if err != nil || len(b) == 0 || string(b) == "null" || string(b) == "{}" {
+		return b
+	}
+	var tree any
+	if json.Unmarshal(b, &tree) != nil {
+		s, _ := json.Marshal(ai.Clip(ai.Redact(string(b)), maxFieldBytes))
+		return s
+	}
+	var walk func(any) any
+	walk = func(x any) any {
+		switch t := x.(type) {
+		case string:
+			return ai.Clip(ai.Redact(t), maxFieldBytes)
+		case []any:
+			for i := range t {
+				t[i] = walk(t[i])
+			}
+		case map[string]any:
+			for k := range t {
+				t[k] = walk(t[k])
+			}
+		}
+		return x
+	}
+	redacted, err := json.Marshal(walk(tree))
+	if err != nil {
+		return nil
+	}
+	if len(redacted) <= maxTotalBytes {
+		return redacted
+	}
+	clipped, _ := json.Marshal(map[string]any{
+		"_truncated": true,
+		"_bytes":     len(redacted),
+		"preview":    ai.Clip(string(redacted), maxTotalBytes-256),
+	})
+	return clipped
 }
 
 // loggedReq 同 logged，工具要用到请求本身（编程软件的名称、进度通知）。
@@ -547,10 +693,13 @@ func loggedReq[In any](s *server, name string, fn func(context.Context, *mcp.Cal
 		// 工具内部出错（panic）只让这一次调用失败，不让整个 ferry mcp 退出（编程软件里 Ferry 的工具会全部断开）
 		v, err := func() (v any, err error) {
 			defer safe.Recover("工具 "+name, &err)
+			if req != nil && req.Params != nil && req.Params.RequestState != "" {
+				return s.resumeMRTR(ctx, req)
+			}
 			return fn(ctx, req, in)
 		}()
 		client := clientName(req)
-		args, _ := json.Marshal(in)
+		args := redactLogArgs(in)
 		writeLog(callEntry{Time: start, Client: client, Tool: name, Args: args, OK: err == nil, Error: errText(err),
 			Ms: time.Since(start).Milliseconds()})
 		if err != nil {
