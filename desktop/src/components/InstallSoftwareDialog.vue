@@ -1464,7 +1464,7 @@ async function installCustom() {
   cursor: pointer;
 }
 .adv-collapse {
-  margin-top: 8px;
+  margin-top: 12px;
 }
 .env-list {
   display: flex;

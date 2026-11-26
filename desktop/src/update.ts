@@ -1,12 +1,12 @@
 // 检查更新：GitHub 上发布了新版本时提示，点「更新」下载这台电脑用的安装包（校验 SHA256）并安装（ferry update）。
 // Windows：运行安装程序的更新模式，先优雅关闭 ferry serve 与 Ferry 主程序，装好后自动重新打开；macOS：打开 .dmg，拖进「应用程序」替换。
 // 同时在启动时做本机健康检查：核对桌面版与内置 ferry 命令行版本是否一致、检查是否仍有旧版 ferry.exe.old-* 被外部进程（如 ferry mcp）占用。
-import { h, reactive } from 'vue'
+import { defineComponent, h, reactive } from 'vue'
 import { ElNotification } from 'element-plus'
 import { appIconPath } from './appIcon'
 import { call, ferry, type Running } from './ferry'
 import { appInfo, cleanupOldBinaries, exitApp, isTauri, shutdownFerry } from './platform'
-import { appSettings } from './state'
+import { appSettings, resolvedTheme } from './state'
 
 /** ferry update check 的结果 */
 export interface UpdateInfo {
@@ -77,12 +77,11 @@ let notified = ''
 let notifiedMismatch = ''
 let notifiedStale = false
 
-/** 提示左边的图标：Ferry 的小图标，跟着主题用浅色 / 深色那张（两张都放着，style.css 按 html.dark 显示一张，提示开着时切主题也跟着换） */
-const FerryNoteIcon = () =>
-  h('span', { class: 'ferry-note-icon' }, [
-    h('img', { class: 'light-only', src: appIconPath(false), alt: '' }),
-    h('img', { class: 'dark-only', src: appIconPath(true), alt: '' }),
-  ])
+/** 提示左边的图标：跟着当前主题实时切换对应版本的 Ferry 小图标 */
+const FerryNoteIcon = defineComponent({
+  name: 'FerryNoteIcon',
+  render: () => h('span', { class: 'ferry-note-icon' }, [h('img', { src: appIconPath(resolvedTheme.value), alt: '' })]),
+})
 
 function notifyMismatch(m: VersionMismatch): void {
   const key = `${m.desktop}:${m.cli}`

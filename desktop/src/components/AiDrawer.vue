@@ -1264,6 +1264,10 @@ function copy(text: string) {
 .cg.ai-head-glass, .cg.composer-glass { --cg-blur: max(12px, calc(var(--cg-frost) * var(--cg-frost-k, 1) * var(--cg-blur-k, 1))); }
 .cg.ai-head-glass { position: absolute; inset: 0; z-index: -1; --cg-frost: 18px; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / clamp(.8, calc(.92 * var(--cg-k, 1)), .98)), rgb(255 255 255 / clamp(.72, calc(.86 * var(--cg-k, 1)), .96))); box-shadow: 0 1px 0 rgb(16 24 40 / .06); }
 html.dark .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(24 30 44 / clamp(.84, calc(.94 * var(--cg-k, 1)), .98)), rgb(20 26 38 / clamp(.78, calc(.88 * var(--cg-k, 1)), .96))); box-shadow: 0 1px 0 rgb(0 0 0 / .4); }
+html[data-theme="warm-paper"] .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(252 248 240 / clamp(.84, calc(.94 * var(--cg-k, 1)), .98)), rgb(246 239 226 / clamp(.76, calc(.88 * var(--cg-k, 1)), .96))); box-shadow: 0 1px 0 rgb(68 52 32 / .08); }
+html.dark[data-theme="warm-dusk"] .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(34 28 23 / clamp(.86, calc(.94 * var(--cg-k, 1)), .98)), rgb(25 21 17 / clamp(.8, calc(.88 * var(--cg-k, 1)), .96))); }
+html.dark[data-theme="dimmed-sage"] .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(36 47 51 / clamp(.86, calc(.94 * var(--cg-k, 1)), .98)), rgb(29 38 42 / clamp(.8, calc(.88 * var(--cg-k, 1)), .96))); }
+html.dark[data-theme="obsidian"] .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(14 16 22 / clamp(.88, calc(.95 * var(--cg-k, 1)), .98)), rgb(9 10 14 / clamp(.82, calc(.9 * var(--cg-k, 1)), .97))); }
 .ai-drawer.ai-glass .pending-banner { position: absolute; top: var(--ai-head, 0px); left: 0; right: 0; z-index: 2; }
 .ai-drawer.ai-glass .ai-body { padding-top: calc(var(--ai-head, 0px) + var(--ai-banner, 0px) + 14px); padding-bottom: calc(var(--ai-input, 0px) + 4px); scroll-padding-top: calc(var(--ai-head, 0px) + var(--ai-banner, 0px)); }
 .ai-drawer.ai-glass .ai-input { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; pointer-events: none; }
@@ -1274,6 +1278,10 @@ html.dark .cg.ai-head-glass { --cg-fill: linear-gradient(180deg, rgb(24 30 44 / 
 .ai-drawer.ai-glass .composer:focus-within { border-color: color-mix(in srgb, var(--el-color-primary) 45%, transparent); }
 .cg.composer-glass { position: absolute; inset: -1px; z-index: -1; --cg-frost: 16px; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / clamp(.82, calc(.94 * var(--cg-k, 1)), .98)), rgb(255 255 255 / clamp(.76, calc(.9 * var(--cg-k, 1)), .96))); }
 html.dark .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(28 34 50 / clamp(.86, calc(.96 * var(--cg-k, 1)), .98)), rgb(22 28 42 / clamp(.8, calc(.92 * var(--cg-k, 1)), .97))); }
+html[data-theme="warm-paper"] .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(255 252 246 / clamp(.86, calc(.95 * var(--cg-k, 1)), .98)), rgb(248 242 230 / clamp(.78, calc(.9 * var(--cg-k, 1)), .96))); }
+html.dark[data-theme="warm-dusk"] .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(38 31 25 / clamp(.88, calc(.96 * var(--cg-k, 1)), .98)), rgb(28 23 19 / clamp(.82, calc(.92 * var(--cg-k, 1)), .97))); }
+html.dark[data-theme="dimmed-sage"] .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(40 52 57 / clamp(.88, calc(.96 * var(--cg-k, 1)), .98)), rgb(31 41 45 / clamp(.82, calc(.92 * var(--cg-k, 1)), .97))); }
+html.dark[data-theme="obsidian"] .cg.composer-glass { --cg-fill: linear-gradient(180deg, rgb(18 21 28 / clamp(.88, calc(.96 * var(--cg-k, 1)), .98)), rgb(11 13 18 / clamp(.84, calc(.92 * var(--cg-k, 1)), .97))); }
 .ai-drawer.ai-glass .conversation-position { pointer-events: none; }
 .position-pill { display: inline-flex; align-items: center; gap: 12px; }
 .ai-drawer.ai-glass .position-pill { gap: 10px; padding: 2px 6px 2px 14px; pointer-events: auto; }

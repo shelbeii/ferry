@@ -1,6 +1,7 @@
 // 调用内置的 ferry 命令行（Tauri sidecar）。--json 模式下每行一个 JSON，最后一行 kind=result。
 import { spawnFerry } from './platform'
 import { reactive } from 'vue'
+import type { ThemeSetting } from './theme'
 
 export interface FerryLine {
   kind: 'step' | 'info' | 'warn' | 'error' | 'event' | 'progress' | 'confirm-required' | 'result' | string
@@ -1408,7 +1409,7 @@ export interface AppSettings {
   logs: { buildLogDays: number }
   deploy: { skipBuild: boolean; full: boolean; keepPerms: boolean; allowPublicPerms?: boolean }
   runtime: { source: string; cacheDir: string; nginxSource: string; githubMirror: string; mysqlSource: string }
-  ui: { theme: 'light' | 'dark' | 'system'; taskKeep: number; taskKeepDays: number; taskMaxMB: number; confirmClose: boolean; notify: boolean; glass: boolean; glassTransparency: number; particles: boolean; checkUpdate: boolean }
+  ui: { theme: ThemeSetting; taskKeep: number; taskKeepDays: number; taskMaxMB: number; confirmClose: boolean; notify: boolean; glass: boolean; glassTransparency: number; particles: boolean; checkUpdate: boolean }
   ai: { models: AiModel[]; default: string; keepDays: number; maxMB: number }
   /** targets：只允许这些目标（「项目/目标」）；空 = 全部非生产目标 */
   mcp: {
@@ -1420,6 +1421,8 @@ export interface AppSettings {
     forceDesktopOnDanger?: boolean
     logKeepDays: number
     logMaxMB: number
+    downloadKeepDays?: number
+    downloadMaxMB?: number
   }
   notify: { channels: NotifyChannel[] }
   desktop: { projects: { path: string; name: string }[] | null; current: string }

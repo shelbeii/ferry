@@ -11,6 +11,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 const darkBytes = new ArrayBuffer(1)
 const lightBytes = new ArrayBuffer(2)
+const warmPaperBytes = new ArrayBuffer(3)
+const warmDuskBytes = new ArrayBuffer(4)
 // report：启动时（窗口还没显示）快捷方式本来就对；shown：窗口显示着切主题，改了快捷方式
 const report = { updated: 0, warnings: [] as string[], generation: 1, refresh: false }
 const shown = { ...report, updated: 1, refresh: true }
@@ -22,7 +24,11 @@ beforeEach(() => {
   setIcon.mockReset().mockResolvedValue(undefined)
   isVisible.mockReset().mockResolvedValue(true)
   fetchIcon.mockReset().mockImplementation(async (path: string) => ({
-    ok: true, arrayBuffer: async () => path.includes('dark') ? darkBytes : lightBytes,
+    ok: true,
+    arrayBuffer: async () =>
+      path.includes('warm-paper') ? warmPaperBytes
+        : path.includes('warm-dusk') ? warmDuskBytes
+          : path.includes('dark') ? darkBytes : lightBytes,
   }))
   syncShell.mockReset().mockResolvedValue(report)
   refreshShell.mockReset().mockResolvedValue(true)
@@ -48,7 +54,20 @@ describe('主题图标', () => {
     finishDark({ ok: true, arrayBuffer: async () => darkBytes })
     await Promise.all([dark, light])
     expect(setIcon).toHaveBeenCalledExactlyOnceWith(lightBytes)
-    expect(syncShell).toHaveBeenCalledExactlyOnceWith({ dark: false })
+    expect(syncShell).toHaveBeenCalledExactlyOnceWith({ theme: 'light', dark: false })
+  })
+
+  it('多套主题使用各自图标路径并向原生命令传入具体主题名', async () => {
+    const { syncAppIcon } = await import('./appIcon')
+    await syncAppIcon('warm-paper')
+    expect(favicon.href).toBe('/branding/ferry-warm-paper.png')
+    expect(setIcon).toHaveBeenLastCalledWith(warmPaperBytes)
+    expect(syncShell).toHaveBeenLastCalledWith({ theme: 'warm-paper', dark: false })
+
+    await syncAppIcon('warm-dusk')
+    expect(favicon.href).toBe('/branding/ferry-warm-dusk.png')
+    expect(setIcon).toHaveBeenLastCalledWith(warmDuskBytes)
+    expect(syncShell).toHaveBeenLastCalledWith({ theme: 'warm-dusk', dark: true })
   })
 
   it('原生窗口写入串行，只有最后一次更新确认完成后才跳过同主题请求', async () => {
@@ -98,7 +117,7 @@ describe('主题图标', () => {
     expect(syncShell).toHaveBeenCalledTimes(4)
     await syncAppIcon(true)
     expect(setIcon).toHaveBeenLastCalledWith(darkBytes)
-    expect(syncShell).toHaveBeenLastCalledWith({ dark: true })
+    expect(syncShell).toHaveBeenLastCalledWith({ theme: 'dark', dark: true })
     expect(syncShell).toHaveBeenCalledTimes(5)
   })
 
@@ -411,7 +430,7 @@ describe('主题图标', () => {
     await vi.advanceTimersByTimeAsync(500)
     expect(syncShell).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(200)
-    expect(syncShell).toHaveBeenCalledExactlyOnceWith({ dark: false })
+    expect(syncShell).toHaveBeenCalledExactlyOnceWith({ theme: 'light', dark: false })
     await vi.runAllTimersAsync()
     await update
     expect(setIcon).toHaveBeenCalledExactlyOnceWith(lightBytes)

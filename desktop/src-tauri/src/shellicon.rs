@@ -16,9 +16,14 @@ pub struct SyncReport {
 pub async fn sync_shell_icon(
     webview: tauri::Webview,
     app: tauri::AppHandle,
-    dark: bool,
+    theme: Option<String>,
+    dark: Option<bool>,
 ) -> Result<SyncReport, String> {
     crate::main_only(&webview)?;
+    let resolved = match theme.as_deref() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => if dark.unwrap_or(false) { "dark" } else { "light" }.to_string(),
+    };
     #[cfg(windows)]
     {
         use tauri::Manager;
@@ -34,14 +39,14 @@ pub async fn sync_shell_icon(
             .join(&app.config().identifier);
         let identifier = app.config().identifier.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            windows_shell::sync(window, &executable, &cache, &identifier, dark)
+            windows_shell::sync(window, &executable, &cache, &identifier, &resolved)
         })
         .await
         .map_err(|e| e.to_string())?
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, dark);
+        let _ = (app, resolved);
         Ok(SyncReport::default())
     }
 }
@@ -117,6 +122,21 @@ mod windows_shell {
 
     const DARK_ICON: &[u8] = include_bytes!("../icons/themes/ferry-dark.ico");
     const LIGHT_ICON: &[u8] = include_bytes!("../icons/themes/ferry-light.ico");
+    const WARM_PAPER_ICON: &[u8] = include_bytes!("../icons/themes/ferry-warm-paper.ico");
+    const WARM_DUSK_ICON: &[u8] = include_bytes!("../icons/themes/ferry-warm-dusk.ico");
+    const DIMMED_SAGE_ICON: &[u8] = include_bytes!("../icons/themes/ferry-dimmed-sage.ico");
+    const OBSIDIAN_ICON: &[u8] = include_bytes!("../icons/themes/ferry-obsidian.ico");
+
+    fn icon_asset(theme: &str) -> (&'static str, &'static [u8]) {
+        match theme {
+            "dark" => ("dark", DARK_ICON),
+            "warm-paper" => ("warm-paper", WARM_PAPER_ICON),
+            "warm-dusk" => ("warm-dusk", WARM_DUSK_ICON),
+            "dimmed-sage" => ("dimmed-sage", DIMMED_SAGE_ICON),
+            "obsidian" => ("obsidian", OBSIDIAN_ICON),
+            _ => ("light", LIGHT_ICON),
+        }
+    }
     /// 快速切换时，只刷新最后一次同步对应的主题。
     static SYNCS: AtomicU64 = AtomicU64::new(0);
     const APP_MODEL: GUID = GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3);
@@ -161,11 +181,11 @@ mod windows_shell {
         executable: &Path,
         cache: &Path,
         identifier: &str,
-        dark: bool,
+        theme: &str,
     ) -> Result<SyncReport, String> {
         let generation = SYNCS.fetch_add(1, Ordering::SeqCst) + 1;
         let _com = ComApartment::enter().map_err(|e| e.to_string())?;
-        let icon = export_icon(cache, dark).map_err(|e| e.to_string())?;
+        let icon = export_icon(cache, theme).map_err(|e| e.to_string())?;
         let mut report = SyncReport {
             generation,
             ..SyncReport::default()
@@ -276,17 +296,13 @@ mod windows_shell {
         refresh_taskbar(HWND(hwnd.0)).map_err(|e| e.to_string())
     }
 
-    fn export_icon(cache: &Path, dark: bool) -> std::io::Result<PathBuf> {
-        let bytes = if dark { DARK_ICON } else { LIGHT_ICON };
+    fn export_icon(cache: &Path, theme: &str) -> std::io::Result<PathBuf> {
+        let (name, bytes) = icon_asset(theme);
         let mut hash = DefaultHasher::new();
         bytes.hash(&mut hash);
-        let path = cache.join(format!(
-            "ferry-{}-{:016x}.ico",
-            if dark { "dark" } else { "light" },
-            hash.finish()
-        ));
+        let path = cache.join(format!("ferry-{name}-{:016x}.ico", hash.finish()));
         std::fs::create_dir_all(cache)?;
-        // 两种主题和每次设计修订使用不同路径，避免覆盖同一路径后 Windows 继续显示旧缓存。
+        // 每套主题和每次设计修订使用不同路径，避免覆盖同一路径后 Windows 继续显示旧缓存。
         if std::fs::read(&path).ok().as_deref() != Some(bytes) {
             std::fs::write(&path, bytes)?;
         }
@@ -859,12 +875,23 @@ mod windows_shell {
             let shortcut = dir.root.join("Desktop/renamed deploy tool.lnk");
             create_link(&shortcut, &exe);
             let cache = dir.root.join("cache");
-            let light = export_icon(&cache, false).unwrap();
-            let dark = export_icon(&cache, true).unwrap();
-            assert_ne!(light, dark);
+            let light = export_icon(&cache, "light").unwrap();
+            let dark = export_icon(&cache, "dark").unwrap();
+            let warm_paper = export_icon(&cache, "warm-paper").unwrap();
+            let warm_dusk = export_icon(&cache, "warm-dusk").unwrap();
+            let dimmed_sage = export_icon(&cache, "dimmed-sage").unwrap();
+            let obsidian = export_icon(&cache, "obsidian").unwrap();
+            let all_paths: HashSet<_> = [&light, &dark, &warm_paper, &warm_dusk, &dimmed_sage, &obsidian]
+                .into_iter()
+                .collect();
+            assert_eq!(all_paths.len(), 6);
             assert_eq!(std::fs::read(&light).unwrap(), LIGHT_ICON);
             assert_eq!(std::fs::read(&dark).unwrap(), DARK_ICON);
-            for icon in [&light, &dark, &light] {
+            assert_eq!(std::fs::read(&warm_paper).unwrap(), WARM_PAPER_ICON);
+            assert_eq!(std::fs::read(&warm_dusk).unwrap(), WARM_DUSK_ICON);
+            assert_eq!(std::fs::read(&dimmed_sage).unwrap(), DIMMED_SAGE_ICON);
+            assert_eq!(std::fs::read(&obsidian).unwrap(), OBSIDIAN_ICON);
+            for icon in [&light, &dark, &warm_dusk, &light] {
                 // 只检查：说要改，但文件不动
                 let before = std::fs::read(&shortcut).unwrap();
                 assert!(update_shortcut(&shortcut, &exec_id, icon, false)
@@ -904,7 +931,7 @@ mod windows_shell {
                     .unwrap()
                     .is_none());
             }
-            assert_eq!(export_icon(&cache, false).unwrap(), light);
+            assert_eq!(export_icon(&cache, "light").unwrap(), light);
         }
 
         #[test]
@@ -931,7 +958,7 @@ mod windows_shell {
             create_link(&foreign, &other_exe);
             let original = std::fs::read(&foreign).unwrap();
             std::fs::write(desktop.join("broken.lnk"), b"not a shell link").unwrap();
-            let icon = export_icon(&dir.root.join("cache"), true).unwrap();
+            let icon = export_icon(&dir.root.join("cache"), "dark").unwrap();
             let roots = [
                 (desktop, false),
                 (programs, true),
@@ -1000,7 +1027,7 @@ mod windows_shell {
             let desktop = dir.root.join("Desktop");
             let shortcut = desktop.join("Ferry.lnk");
             create_link(&shortcut, &exe);
-            let icon = export_icon(&dir.root.join("cache"), true).unwrap();
+            let icon = export_icon(&dir.root.join("cache"), "dark").unwrap();
 
             // 独占锁模拟 OneDrive / Explorer / SearchIndexer 在 STGM_READ 阶段占用快捷方式：
             // 必须返回 BUSY 错误并计入 busy，而不能静默当成无关快捷方式返回 Ok(None)。
@@ -1039,8 +1066,8 @@ mod windows_shell {
             let shortcut = dir.root.join("Desktop/Ferry.lnk");
             create_link(&shortcut, &exe);
             let cache = dir.root.join("cache");
-            let light = export_icon(&cache, false).unwrap();
-            let dark = export_icon(&cache, true).unwrap();
+            let light = export_icon(&cache, "light").unwrap();
+            let dark = export_icon(&cache, "dark").unwrap();
 
             // 只把 IconLocation 设成 dark，RelaunchIconResource 留在旧值 light：应判定为未对齐并修复。
             let link: IShellLinkW =
@@ -1129,8 +1156,8 @@ mod windows_shell {
             let dir = TestDirectory::new();
             let exe = dir.executable("current");
             let window = TestWindow::new(WINDOW_STYLE(0));
-            for dark in [false, true, false] {
-                let icon = export_icon(&dir.root.join("cache"), dark).unwrap();
+            for theme in ["light", "dark", "warm-paper", "warm-dusk", "dimmed-sage", "obsidian", "light"] {
+                let icon = export_icon(&dir.root.join("cache"), theme).unwrap();
                 update_window(window.0, &exe, &icon, "ferry.test.identity").unwrap();
                 refresh_taskbar(window.0).unwrap();
                 assert!(!unsafe { IsWindowVisible(window.0) }.as_bool());

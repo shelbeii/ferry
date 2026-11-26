@@ -1,11 +1,27 @@
-/* 样式表加载之前就有正确的底色（和 --el-bg-color-page 一样），html.dark 由 theme-init.js 先加上。
+/* 样式表加载之前就有正确的底色（和 --el-bg-color-page 一样），data-theme 与 html.dark 由 theme-init.js 先加上。
    不能写成 index.html 里的 <style>：桌面版会给它加 nonce，CSP 里有 nonce 后 'unsafe-inline' 失效，
    编辑器（CodeMirror）、终端运行时插入的样式都会被拦住。 */
 html {
-  background: #f4f5f8;
+  background: #f2f5fa;
   color-scheme: light;
 }
 html.dark {
-  background: #0a0a0a;
+  background: #0d1421;
+  color-scheme: dark;
+}
+html[data-theme="warm-paper"] {
+  background: #f4efe4;
+  color-scheme: light;
+}
+html.dark[data-theme="warm-dusk"] {
+  background: #13110f;
+  color-scheme: dark;
+}
+html.dark[data-theme="dimmed-sage"] {
+  background: #1b2326;
+  color-scheme: dark;
+}
+html.dark[data-theme="obsidian"] {
+  background: #050507;
   color-scheme: dark;
 }

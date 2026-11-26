@@ -10,6 +10,8 @@ import NotifyChannels from './NotifyChannels.vue'
 import DnsKeys from './DnsKeys.vue'
 import CliMcp from './CliMcp.vue'
 import { appSettings, applyTheme, dropTasks, loadSettings, saveSettings, settingsInfo, settingsRequest, startTask, tasks } from '../state'
+import { appIconPath } from '../appIcon'
+import { THEMES } from '../theme'
 import { appInfo, browserDataUsage, clearBrowserData, clearUiCache, isTauri, uiCacheUsage, openUrl, pickDir, pickFile, reveal } from '../platform'
 import { clearHistory } from '../browser/address'
 import { glass, GLASS_TRANSPARENCY_DEFAULT } from '../glass/runtime'
@@ -32,7 +34,7 @@ const sections = [
   { name: 'storage', label: '存储', group: '常规', description: '管理数据位置、磁盘占用和记录保留策略。', keywords: '目录 日志 清理 任务 浏览器 缓存 Cookie 界面缓存 临时文件' },
   { name: 'connect', label: '连接', group: '常规', description: '设置连接、上传和自动刷新行为。', keywords: 'SSH 超时 密钥 端口' },
   { name: 'secrets', label: '凭据', group: '常规', description: '查看和管理保存在本机系统凭据库中的密码与密钥。', keywords: '密码 key token' },
-  { name: 'ui', label: '界面', group: '常规', description: '调整主题、任务展示与通知体验。', keywords: '主题 深色 通知 液态玻璃 玻璃 动画 检查更新' },
+  { name: 'ui', label: '界面', group: '常规', description: '调整主题、任务展示与通知体验。', keywords: '主题 深色 浅色 暖纸 护眼 琥珀 雾岚 森绿 极夜 通知 液态玻璃 玻璃 动画 检查更新' },
   { name: 'build', label: '构建', group: '部署与运行', description: '为构建程序配置环境变量与工具路径。', keywords: 'JAVA_HOME PATH Maven' },
   { name: 'deploy', label: '部署', group: '部署与运行', description: '配置团队身份、部署默认行为与证书密钥。', keywords: '团队 DNS HTTPS' },
   { name: 'notify', label: '通知', group: '部署与运行', description: '将部署和回滚结果发送到团队使用的通知渠道。', keywords: '企业微信 钉钉 飞书 机器人' },
@@ -91,6 +93,7 @@ async function initialize() {
   loadUiCache()
   loadTaskUsage()
   loadMcpUsage()
+  loadMcpDownloadsUsage()
 }
 onMounted(initialize)
 
@@ -259,6 +262,44 @@ async function cleanMcpLog(all: boolean) {
     ElMessage.error((e as Error).message)
   } finally {
     mcpCleaning.value = false
+  }
+}
+
+// ---------------------------------------------------------------- MCP 下载的文件
+
+const mcpDownloadsUsage = ref<{ count: number; bytes: number }>()
+const mcpDownloadsCleaning = ref(false)
+
+async function loadMcpDownloadsUsage() {
+  try {
+    mcpDownloadsUsage.value = await call<{ count: number; bytes: number }>(['mcp-downloads', 'status'])
+  } catch {
+    mcpDownloadsUsage.value = undefined
+  }
+}
+
+async function cleanMcpDownloads(all: boolean) {
+  if (!form.value) return
+  try {
+    if (all) {
+      await ElMessageBox.confirm(`删除全部 ${mcpDownloadsUsage.value?.count ?? 0} 批通过 MCP 下载的文件？删除后不能恢复。`, '删除下载的文件', { type: 'warning' })
+    }
+  } catch {
+    return
+  }
+  mcpDownloadsCleaning.value = true
+  try {
+    const m = form.value.mcp
+    const args = all
+      ? ['mcp-downloads', 'clean', '--all']
+      : ['mcp-downloads', 'clean', '--days', String(m.downloadKeepDays ?? 30), '--max-mb', String(m.downloadMaxMB ?? 1024)]
+    const r = await call<{ removed: number; count: number; bytes: number }>(args)
+    mcpDownloadsUsage.value = r
+    ElMessage.success(r.removed ? `删除了 ${r.removed} 批已下载文件` : '没有要清理的已下载文件')
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    mcpDownloadsCleaning.value = false
   }
 }
 
@@ -542,7 +583,7 @@ async function copyAbout() {
 function resetForm() {
   // 响应式对象不能 structuredClone：转成普通对象再改
   const s = JSON.parse(JSON.stringify(appSettings.value)) as AppSettings
-  s.mcp ??= { allowChanges: false, targets: [], confirmIn: '', clientConfirmScope: '', clientConfirmFallback: '', forceDesktopOnDanger: true, logKeepDays: 30, logMaxMB: 20 } // 旧版本的设置里没有
+  s.mcp ??= { allowChanges: false, targets: [], confirmIn: '', clientConfirmScope: '', clientConfirmFallback: '', forceDesktopOnDanger: true, logKeepDays: 30, logMaxMB: 20, downloadKeepDays: 30, downloadMaxMB: 1024 } // 旧版本的设置里没有
   s.mcp.targets ??= []
   s.mcp.confirmIn ??= ''
   s.mcp.clientConfirmScope ??= ''
@@ -550,6 +591,8 @@ function resetForm() {
   s.mcp.forceDesktopOnDanger ??= true
   s.mcp.logKeepDays ||= 30
   s.mcp.logMaxMB ||= 20
+  s.mcp.downloadKeepDays ||= 30
+  s.mcp.downloadMaxMB ||= 1024
   s.notify ??= { channels: [] }
   s.notify.channels ??= []
   s.team ??= { name: '' }
@@ -841,6 +884,29 @@ async function pickKeyDir() {
               <span class="muted small">{{ mcpUsage ? `现有 ${mcpUsage.count} 条调用记录，占用 ${bytes(mcpUsage.bytes)}` : '' }}</span>
               <GlassButton size="small" :loading="mcpCleaning" @click="cleanMcpLog(false)">按上面的设置清理</GlassButton>
               <GlassButton size="small" tone="danger" :disabled="!mcpUsage?.count" @click="cleanMcpLog(true)">全部删除</GlassButton>
+            </div>
+          </el-form-item>
+        </el-form>
+
+        <h4 class="sub">MCP 下载的文件</h4>
+        <p class="muted small">
+          编程软件通过 MCP 的 files_download 从服务器下载到本机的文件，在数据目录的 downloads 里。
+          每次下载后自动按这里的规则清理旧文件；单批超过容量上限时会拒绝下载。
+        </p>
+        <el-form label-width="110px">
+          <el-form-item label="保留天数">
+            <el-input-number v-model="form.mcp.downloadKeepDays" :min="1" :max="3650" />
+            <span class="muted small ml">超过这么多天的下载目录自动删除</span>
+          </el-form-item>
+          <el-form-item label="最多占用">
+            <el-input-number v-model="form.mcp.downloadMaxMB" :min="50" :max="102400" :step="100" />
+            <span class="muted small ml">MB，超出时从最旧的下载删起</span>
+          </el-form-item>
+          <el-form-item>
+            <div class="usage">
+              <span class="muted small">{{ mcpDownloadsUsage ? `现有 ${mcpDownloadsUsage.count} 批下载，占用 ${bytes(mcpDownloadsUsage.bytes)}` : '' }}</span>
+              <GlassButton size="small" :loading="mcpDownloadsCleaning" @click="cleanMcpDownloads(false)">按上面的设置清理</GlassButton>
+              <GlassButton size="small" tone="danger" :disabled="!mcpDownloadsUsage?.count" @click="cleanMcpDownloads(true)">全部删除</GlassButton>
             </div>
           </el-form-item>
         </el-form>
@@ -1203,11 +1269,46 @@ async function pickKeyDir() {
       <el-tab-pane label="界面" name="ui" lazy>
         <el-form v-if="form" label-width="150px">
           <el-form-item label="主题">
-            <el-radio-group v-model="form.ui.theme">
-              <el-radio-button value="system">跟随系统</el-radio-button>
-              <el-radio-button value="light">浅色</el-radio-button>
-              <el-radio-button value="dark">深色</el-radio-button>
-            </el-radio-group>
+            <div class="theme-picker" role="radiogroup" aria-label="界面主题">
+              <button
+                type="button"
+                role="radio"
+                class="theme-card"
+                :class="{ active: form.ui.theme === 'system' }"
+                :aria-checked="form.ui.theme === 'system'"
+                @click="form.ui.theme = 'system'"
+              >
+                <span class="theme-system-badge" aria-hidden="true">
+                  <img :src="appIconPath('light')" alt="" class="half-light" />
+                  <img :src="appIconPath('dark')" alt="" class="half-dark" />
+                </span>
+                <span class="theme-meta">
+                  <span class="theme-name">跟随系统</span>
+                  <span class="theme-desc">按系统浅色 / 深色自动切换</span>
+                </span>
+              </button>
+              <button
+                v-for="item in THEMES"
+                :key="item.id"
+                type="button"
+                role="radio"
+                class="theme-card"
+                :class="{ active: form.ui.theme === item.id }"
+                :aria-checked="form.ui.theme === item.id"
+                @click="form.ui.theme = item.id"
+              >
+                <img class="theme-icon" :src="appIconPath(item.id)" alt="" aria-hidden="true" draggable="false" />
+                <span class="theme-meta">
+                  <span class="theme-name">{{ item.label }}</span>
+                  <span class="theme-desc">{{ item.summary }}</span>
+                </span>
+                <span class="theme-swatches" aria-hidden="true">
+                  <i :style="{ background: item.swatches.page }" />
+                  <i :style="{ background: item.swatches.surface }" />
+                  <i :style="{ background: item.swatches.primary }" />
+                </span>
+              </button>
+            </div>
           </el-form-item>
           <el-form-item label="液态玻璃">
             <div>
@@ -1507,5 +1608,88 @@ h4.sub {
 }
 .glass-slider .el-slider {
   flex: 1;
+}
+.theme-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+.theme-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 11px;
+  background: var(--el-fill-color-extra-light);
+  color: var(--el-text-color-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s, background-color 0.16s, box-shadow 0.16s;
+}
+.theme-card:hover {
+  border-color: var(--el-color-primary-light-3);
+}
+.theme-card.active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--el-color-primary) 26%, transparent);
+}
+.theme-icon,
+.theme-system-badge {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  overflow: hidden;
+  display: block;
+}
+.theme-system-badge {
+  position: relative;
+}
+.theme-system-badge img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.theme-system-badge .half-dark {
+  clip-path: polygon(50% 0, 100% 0, 100% 100%, 50% 100%);
+}
+.theme-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  line-height: 1.35;
+}
+.theme-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.theme-card.active .theme-name {
+  color: var(--el-color-primary);
+}
+.theme-desc {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.theme-swatches {
+  display: inline-flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.theme-swatches i {
+  width: 8px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid rgb(128 128 128 / .25);
+  display: block;
 }
 </style>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 一个服务器终端：xterm.js 显示，经 ferry serve 连到服务器上登录用户的 shell。
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -9,7 +9,8 @@ import '@xterm/xterm/css/xterm.css'
 import { FolderOpened, RefreshRight } from '@element-plus/icons-vue'
 import FilesDrawer from './FilesDrawer.vue'
 import { isSecretKind, latencyInfo, latencyTip, openTerminal, type FerryLine, type FerryResult, type TerminalProc } from '../ferry'
-import { secretRequest, trustRequest, trustedTick, type TermTab } from '../state'
+import { resolvedTheme, secretRequest, trustRequest, trustedTick, type TermTab } from '../state'
+import { themeDef } from '../theme'
 
 // noFiles：所在页面自己有「文件」按钮（连接页），状态栏里不再放
 const props = defineProps<{ tab: TermTab; active: boolean; noFiles?: boolean }>()
@@ -37,7 +38,16 @@ let paused = false
 const gray = (s: string) => `\x1b[90m${s.replace(/\r?\n/g, '\r\n')}\x1b[0m\r\n`
 const red = (s: string) => `\x1b[31m${s.replace(/\r?\n/g, '\r\n')}\x1b[0m\r\n`
 
+const termPalette = computed(() => themeDef(resolvedTheme.value).terminal)
+const termStyle = computed(() => ({
+  '--term-bg': termPalette.value.background,
+  '--term-status-bg': termPalette.value.statusBg,
+  '--term-status-border': termPalette.value.statusBorder,
+  '--term-status-text': termPalette.value.statusText,
+}))
+
 onMounted(() => {
+  const pal = termPalette.value
   term = new Terminal({
     allowProposedApi: true,
     cursorBlink: true,
@@ -45,7 +55,12 @@ onMounted(() => {
     lineHeight: 1.1,
     fontFamily: '"Cascadia Mono", Consolas, "Sarasa Mono SC", "Microsoft YaHei Mono", Menlo, Monaco, "PingFang SC", "Microsoft YaHei", monospace',
     scrollback: 5000,
-    theme: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' },
+    theme: {
+      background: pal.background,
+      foreground: pal.foreground,
+      cursor: pal.cursor,
+      selectionBackground: pal.selectionBackground,
+    },
   })
   fit = new FitAddon()
   term.loadAddon(fit)
@@ -94,6 +109,16 @@ onBeforeUnmount(() => {
   proc = undefined
   p?.close()
   term.dispose()
+})
+
+watch(termPalette, (pal) => {
+  if (!term) return
+  term.options.theme = {
+    background: pal.background,
+    foreground: pal.foreground,
+    cursor: pal.cursor,
+    selectionBackground: pal.selectionBackground,
+  }
 })
 
 watch(
@@ -289,7 +314,7 @@ defineExpose({ focus: () => term?.focus() })
 </script>
 
 <template>
-  <div class="term-view">
+  <div class="term-view" :style="termStyle">
     <div class="term-main">
       <div ref="box" class="term-box" @contextmenu.capture="onContextMenu" />
       <FilesDrawer v-if="!noFiles" v-model="tab.files" :config="tab.config" :target="tab.target" :title="tab.title" />
@@ -323,7 +348,7 @@ defineExpose({ focus: () => term?.focus() })
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: #1e1e1e;
+  background: var(--term-bg, #1e1e1e);
 }
 .term-main {
   flex: 1;
@@ -347,12 +372,12 @@ defineExpose({ focus: () => term?.focus() })
   height: 26px;
   padding: 0 10px;
   font-size: 12px;
-  color: #a0a0a0;
-  background: #252526;
-  border-top: 1px solid #333;
+  color: var(--term-status-text, #a0a0a0);
+  background: var(--term-status-bg, #252526);
+  border-top: 1px solid var(--term-status-border, #333);
 }
 .term-status .el-button {
-  color: #a0a0a0;
+  color: var(--term-status-text, #a0a0a0);
 }
 .led {
   width: 8px;

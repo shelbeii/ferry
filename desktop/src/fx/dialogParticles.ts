@@ -10,6 +10,7 @@ import { createEngine, type Box, type EffectSpec, type View } from './particleEn
 import type { FromWorker, ToWorker } from './particleWorker'
 import type { ToInk } from './inkWorker'
 import { contentShapes, type Shape } from './contentShapes'
+import { currentResolvedTheme, themeDef } from '../theme'
 
 let enabled = true
 
@@ -155,14 +156,9 @@ function pickPalette(): { colors: [number, number, number][]; maxAlpha: number }
     try { scratch = document.createElement('canvas').getContext('2d') } catch { scratch = null }
   }
   if (!scratch) return null
-  const css = getComputedStyle(document.documentElement)
-  const v = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback
-  const dark = document.documentElement.classList.contains('dark')
-  const names = dark
-    ? ['#e8efff', '#c9dafc', v('--el-color-primary-light-5', '#a0cfff'), '#d6d0ff']
-    : [v('--el-color-primary', '#409eff'), v('--el-color-primary-dark-2', '#337ecc'), '#4a72d4', '#7b62e6']
+  const { particles } = themeDef(currentResolvedTheme())
   const sc = scratch
-  return { colors: names.map(n => parseColor(sc, n)), maxAlpha: dark ? .5 : .78 }
+  return { colors: particles.colors.map(n => parseColor(sc, n)), maxAlpha: particles.maxAlpha }
 }
 
 // 窗口在布局里的位置：打开动画里窗口带着缩放，按布局尺寸换回来

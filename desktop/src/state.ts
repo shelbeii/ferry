@@ -10,6 +10,7 @@ import { commandTarget } from './commandContext'
 import { mergeRetries, queuedRequest } from './requestQueue'
 import type { SettingsSecretChange } from './settingsSecrets'
 import { syncAppIcon, syncFavicon, waitForAppIcon } from './appIcon'
+import { currentResolvedTheme, isDarkTheme, isThemeSetting, resolveTheme, type ResolvedTheme } from './theme'
 import type { CustomInstallDraft } from './customInstall'
 
 // ---------------------------------------------------------------- 设置
@@ -65,6 +66,8 @@ export function saveSettings(s: AppSettings, changes: SettingsSecretChange[] = [
 
 // ---------------------------------------------------------------- 主题
 
+export const resolvedTheme = ref<ResolvedTheme>(currentResolvedTheme())
+
 const SYSTEM_ICON_DEBOUNCE_MS = 500
 let media: MediaQueryList | undefined
 let themeRevision = 0
@@ -79,45 +82,51 @@ export function applyTheme(theme: string, options: ApplyThemeOptions = {}) {
   const current = ++themeRevision
   const preview = options.preview === true
   media ??= window.matchMedia('(prefers-color-scheme: dark)')
-  const setDom = (dark: boolean) => {
+  const setDom = (resolved: ResolvedTheme) => {
     if (current !== themeRevision) return false
+    const dark = isDarkTheme(resolved)
     const root = document.documentElement
-    if (root.classList.contains('dark') !== dark) {
-      root.classList.toggle('dark', dark)
-      themeChanged()
-    }
-    syncFavicon?.(dark)
+    const prevTheme = root.dataset?.theme ?? root.getAttribute?.('data-theme')
+    const changed = root.classList.contains('dark') !== dark || prevTheme !== resolved
+    root.classList.toggle('dark', dark)
+    if (root.dataset) root.dataset.theme = resolved
+    else root.setAttribute?.('data-theme', resolved)
+    resolvedTheme.value = resolved
+    if (changed) themeChanged()
+    syncFavicon?.(resolved)
     return true
   }
   media.onchange = theme === 'system'
     ? () => {
-        const dark = !!media?.matches
-        if (!setDom(dark) || preview) return
-        void syncAppIcon(dark, { debounceMs: SYSTEM_ICON_DEBOUNCE_MS })
+        const resolved: ResolvedTheme = media?.matches ? 'dark' : 'light'
+        if (!setDom(resolved) || preview) return
+        void syncAppIcon(resolved, { debounceMs: SYSTEM_ICON_DEBOUNCE_MS })
       }
     : null
-  const initialDark = theme === 'dark' || (theme === 'system' && media.matches)
-  setDom(initialDark)
-  // 固定深/浅色（或非 Tauri 预览页）直接同步外壳图标；
+  const initialResolved = resolveTheme(theme, !!media.matches)
+  const initialDark = isDarkTheme(initialResolved)
+  setDom(initialResolved)
+  // 固定主题（或非 Tauri 预览页）直接同步外壳图标；
   // Tauri 下的「跟随系统」等原生 window.theme() 权威结果回来后再同步一次，避免 WebView2 的 media.matches 滞后造成先错后改。
   if (!preview && (!isTauri || theme !== 'system')) {
-    void syncAppIcon(initialDark)
+    void syncAppIcon(initialResolved)
   }
-  // 窗口标题栏跟着 Ferry 的主题，不然会跟着 Windows 自己的深色 / 浅色设置走（浅色主题配深色标题栏）
+  // 窗口标题栏跟着 Ferry 的主题基座（浅色 / 深色），不然会跟着 Windows 自己的深色 / 浅色设置走
   if (isTauri) {
     nativeThemeUpdate = nativeThemeUpdate.then(async () => {
       if (current !== themeRevision) return
       const window = getCurrentWindow()
-      await window.setTheme(theme === 'light' || theme === 'dark' ? theme : null)
+      const nativeMode = theme === 'system' ? null : (initialDark ? 'dark' : 'light')
+      await window.setTheme(nativeMode)
       // WebView2 的媒体查询会异步收到新主题；返回系统模式时以原生窗口的解析结果为准。
       if (theme === 'system') {
-        const nativeDark = await window.theme() === 'dark'
-        if (setDom(nativeDark) && !preview) void syncAppIcon(nativeDark)
+        const nativeResolved: ResolvedTheme = await window.theme() === 'dark' ? 'dark' : 'light'
+        if (setDom(nativeResolved) && !preview) void syncAppIcon(nativeResolved)
       }
     }).catch(error => {
       console.warn('同步 Ferry 窗口主题失败', error)
       if (current === themeRevision && !preview && theme === 'system') {
-        void syncAppIcon(!!media?.matches)
+        void syncAppIcon(media?.matches ? 'dark' : 'light')
       }
     })
   }
@@ -125,14 +134,14 @@ export function applyTheme(theme: string, options: ApplyThemeOptions = {}) {
 
 /**
  * 启动时定主题；返回的 Promise 完成后就可以显示窗口（main.ts）。
- * 上次保存的主题记在本机（theme-init.js 已经按它切好深浅色）：照它换好标题栏和图标就行，不等后台的 ferry 读设置。
+ * 上次保存的主题记在本机（theme-init.js 已经按它切好主题）：照它换好标题栏和图标就行，不等后台的 ferry 读设置。
  * ferry 刚装好、刚开机时启动慢（实测冷启动近 3 秒），等它的话窗口要晚这么久才出来。
  * 没记过（第一次打开、清过界面缓存）才等正式设置，免得先按系统的深浅色显示、读到设置又变。
  * 设置照常读（和 App 的项目初始化共用这一次）；读到的主题和记着的一样时什么都不用再做。
  */
 export function startTheme(): Promise<void> {
   const cached = uiPref('theme')
-  const known = cached === 'light' || cached === 'dark' || cached === 'system'
+  const known = isThemeSetting(cached)
   if (known) applyTheme(cached)
   const settings = loadSettings().then(() => undefined, error => {
     console.warn('读取启动主题失败', error)

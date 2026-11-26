@@ -178,20 +178,34 @@ defineExpose({ el: root })
 .cg-regular { --cg-frost: 7px; --cg-sat: 1.6; --cg-bright: 1.05; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.5 * var(--cg-k, 1))), rgb(255 255 255 / calc(.32 * var(--cg-k, 1)))); }
 .cg-clear { --cg-frost: .5px; --cg-sat: 1.5; --cg-bright: 1.08; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.14 * var(--cg-k, 1))), rgb(255 255 255 / calc(.05 * var(--cg-k, 1)))); }
 /* 浮起的液滴：完全不磨砂、几乎不染色，只靠折射和放大，像一颗水珠 */
-.cg.cg-drop { --cg-frost: 0px; --cg-sat: 1.15; --cg-bright: 1.02; --cg-fill: radial-gradient(120% 90% at 50% 0%, rgb(255 255 255 / calc(.1 * var(--cg-k, 1))), transparent 60%); --cg-rim-hi: .95; --cg-rim-back: .55; --cg-rim-lo: .18; }
+.cg.cg-drop { --cg-frost: 0px; --cg-sat: 1.15; --cg-bright: 1.02; --cg-fill: radial-gradient(120% 90% at 50% 0%, rgb(255 255 255 / min(.16, calc(.1 * var(--cg-k, 1)))), transparent 60%); --cg-rim-hi: .95; --cg-rim-back: .55; --cg-rim-lo: .18; }
 .cg.cg-drop > .cg-rim > .cg-sheen { opacity: 1 !important; }
-/* 深色主题：边缘高光更亮、玻璃本身更通透（一层很淡的白光 + 一层薄薄的深色），背后的光晕颜色能透出来 */
-html.dark .cg { --cg-rim-hi: .82; --cg-rim-back: .34; --cg-rim-lo: .08; box-shadow: 0 12px 34px -12px rgb(0 0 0 / .6), 0 2px 6px -2px rgb(0 0 0 / .35), 0 0 0 .5px rgb(255 255 255 / .06); }
-html.dark .cg-regular { --cg-bright: .94; --cg-sat: 1.5; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.1 * var(--cg-k, 1))), rgb(255 255 255 / calc(.04 * var(--cg-k, 1)))), linear-gradient(rgb(16 22 36 / calc(.36 * var(--cg-k, 1))), rgb(16 22 36 / calc(.3 * var(--cg-k, 1)))); }
-html.dark .cg-clear { --cg-bright: 1.06; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.1 * var(--cg-k, 1))), rgb(255 255 255 / calc(.03 * var(--cg-k, 1)))); }
+/* 深色主题：暗色磨砂底随透明度（--cg-k，最大 4）加实；顶层的浅色反光必须封顶，避免低透明度时把深色玻璃洗成亮灰块 */
+html.dark .cg { --cg-rim-hi: .62; --cg-rim-back: .26; --cg-rim-lo: .06; box-shadow: 0 12px 34px -12px rgb(0 0 0 / .6), 0 2px 6px -2px rgb(0 0 0 / .35), 0 0 0 .5px rgb(255 255 255 / .06); }
+html.dark .cg-regular { --cg-bright: .94; --cg-sat: 1.5; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / min(.1, calc(.07 * var(--cg-k, 1)))), rgb(255 255 255 / min(.03, calc(.025 * var(--cg-k, 1))))), linear-gradient(rgb(20 28 43 / min(.92, calc(.46 * var(--cg-k, 1)))), rgb(15 22 36 / min(.88, calc(.38 * var(--cg-k, 1))))); }
+html.dark .cg-clear { --cg-bright: 1.06; --cg-fill: linear-gradient(180deg, rgb(255 255 255 / min(.12, calc(.08 * var(--cg-k, 1)))), rgb(255 255 255 / min(.04, calc(.025 * var(--cg-k, 1))))); }
+
+/* 四套主题的液态玻璃专属着色 */
+html[data-theme="warm-paper"] .cg { box-shadow: 0 10px 28px -12px rgb(68 52 32 / .22), 0 2px 6px -2px rgb(68 52 32 / .09), 0 0 0 .5px rgb(105 84 54 / .12); }
+html[data-theme="warm-paper"] .cg-regular { --cg-fill: linear-gradient(180deg, rgb(255 252 245 / min(.95, calc(.58 * var(--cg-k, 1)))), rgb(248 242 229 / min(.9, calc(.38 * var(--cg-k, 1))))); }
+html[data-theme="warm-paper"] .cg-clear { --cg-fill: linear-gradient(180deg, rgb(255 253 248 / min(.72, calc(.2 * var(--cg-k, 1)))), rgb(250 244 232 / min(.5, calc(.08 * var(--cg-k, 1))))); }
+html.dark[data-theme="warm-dusk"] .cg { --cg-rim-hi: .56; --cg-rim-back: .22; box-shadow: 0 12px 34px -12px rgb(0 0 0 / .68), 0 2px 6px -2px rgb(0 0 0 / .4), 0 0 0 .5px rgb(255 224 186 / .08); }
+html.dark[data-theme="warm-dusk"] .cg-regular { --cg-fill: linear-gradient(180deg, rgb(255 232 200 / min(.09, calc(.065 * var(--cg-k, 1)))), rgb(255 220 180 / min(.025, calc(.02 * var(--cg-k, 1))))), linear-gradient(rgb(34 28 23 / min(.93, calc(.5 * var(--cg-k, 1)))), rgb(24 19 16 / min(.9, calc(.42 * var(--cg-k, 1))))); }
+html.dark[data-theme="warm-dusk"] .cg-clear { --cg-fill: linear-gradient(180deg, rgb(255 232 200 / min(.11, calc(.075 * var(--cg-k, 1)))), rgb(255 224 185 / min(.035, calc(.025 * var(--cg-k, 1))))); }
+html.dark[data-theme="dimmed-sage"] .cg { --cg-rim-hi: .56; --cg-rim-back: .22; box-shadow: 0 12px 32px -12px rgb(6 12 14 / .55), 0 2px 6px -2px rgb(6 12 14 / .32), 0 0 0 .5px rgb(195 235 224 / .08); }
+html.dark[data-theme="dimmed-sage"] .cg-regular { --cg-fill: linear-gradient(180deg, rgb(215 245 236 / min(.09, calc(.065 * var(--cg-k, 1)))), rgb(190 230 220 / min(.025, calc(.02 * var(--cg-k, 1))))), linear-gradient(rgb(37 49 54 / min(.93, calc(.5 * var(--cg-k, 1)))), rgb(28 38 42 / min(.9, calc(.42 * var(--cg-k, 1))))); }
+html.dark[data-theme="dimmed-sage"] .cg-clear { --cg-fill: linear-gradient(180deg, rgb(215 245 236 / min(.11, calc(.075 * var(--cg-k, 1)))), rgb(190 230 220 / min(.035, calc(.025 * var(--cg-k, 1))))); }
+html.dark[data-theme="obsidian"] .cg { --cg-rim-hi: .52; --cg-rim-back: .2; --cg-rim-lo: .05; box-shadow: 0 14px 38px -10px rgb(0 0 0 / .85), 0 2px 8px -2px rgb(0 0 0 / .6), 0 0 0 .5px rgb(226 240 255 / .09); }
+html.dark[data-theme="obsidian"] .cg-regular { --cg-fill: linear-gradient(180deg, rgb(255 255 255 / min(.08, calc(.06 * var(--cg-k, 1)))), rgb(255 255 255 / min(.02, calc(.018 * var(--cg-k, 1))))), linear-gradient(rgb(18 20 27 / min(.95, calc(.56 * var(--cg-k, 1)))), rgb(10 12 16 / min(.92, calc(.48 * var(--cg-k, 1))))); }
+html.dark[data-theme="obsidian"] .cg-clear { --cg-fill: linear-gradient(180deg, rgb(255 255 255 / min(.1, calc(.07 * var(--cg-k, 1)))), rgb(255 255 255 / min(.03, calc(.02 * var(--cg-k, 1))))); }
 
 /* 自适应：浅色主题里压在深色内容上，或深色主题里压在浅色内容上，玻璃和文字一起反过来 */
 html:not(.dark) .cg[data-tone="dark"] {
   --el-text-color-primary: #fff; --el-text-color-regular: rgb(255 255 255 / .88); --el-text-color-secondary: rgb(255 255 255 / .68);
   --el-color-primary: #c7c4ff; --cg-rim-hi: .76; --cg-rim-back: .26; --cg-rim-lo: .09;
 }
-html:not(.dark) .cg-regular[data-tone="dark"] { --cg-bright: .82; --cg-fill: linear-gradient(180deg, rgb(30 32 44 / calc(.34 * var(--cg-k, 1))), rgb(20 22 30 / calc(.26 * var(--cg-k, 1)))); }
-html:not(.dark) .cg-clear[data-tone="dark"] { --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.08 * var(--cg-k, 1))), rgb(255 255 255 / calc(.02 * var(--cg-k, 1)))); }
+html:not(.dark) .cg-regular[data-tone="dark"] { --cg-bright: .82; --cg-fill: linear-gradient(180deg, rgb(30 32 44 / min(.92, calc(.34 * var(--cg-k, 1)))), rgb(20 22 30 / min(.88, calc(.26 * var(--cg-k, 1))))); }
+html:not(.dark) .cg-clear[data-tone="dark"] { --cg-fill: linear-gradient(180deg, rgb(255 255 255 / min(.12, calc(.08 * var(--cg-k, 1)))), rgb(255 255 255 / min(.03, calc(.02 * var(--cg-k, 1))))); }
 html.dark .cg[data-tone="light"] {
   --el-text-color-primary: #111827; --el-text-color-regular: rgb(17 24 39 / .85); --el-text-color-secondary: rgb(17 24 39 / .6);
   --el-color-primary: #4f46e5;
@@ -216,7 +230,11 @@ html.dark .cg-clear[data-tone="light"] { --cg-fill: linear-gradient(180deg, rgb(
   --cg-fill: linear-gradient(180deg, rgb(255 255 255 / calc(.34 * var(--cg-k, 1))), rgb(255 255 255 / calc(.22 * var(--cg-k, 1))));
   box-shadow: none;
 }
-html.dark .cg.cg-strip { --cg-fill: linear-gradient(180deg, rgb(24 30 44 / calc(.5 * var(--cg-k, 1))), rgb(20 26 38 / calc(.4 * var(--cg-k, 1)))); box-shadow: none; }
+html.dark .cg.cg-strip { --cg-rim-hi: .34; --cg-rim-back: .14; --cg-fill: linear-gradient(180deg, rgb(24 30 44 / min(.92, calc(.5 * var(--cg-k, 1)))), rgb(18 24 36 / min(.88, calc(.4 * var(--cg-k, 1))))); box-shadow: none; }
+html[data-theme="warm-paper"] .cg.cg-strip { --cg-fill: linear-gradient(180deg, rgb(255 251 243 / min(.92, calc(.44 * var(--cg-k, 1)))), rgb(248 242 229 / min(.88, calc(.3 * var(--cg-k, 1))))); box-shadow: none; }
+html.dark[data-theme="warm-dusk"] .cg.cg-strip { --cg-rim-hi: .32; --cg-rim-back: .12; --cg-fill: linear-gradient(180deg, rgb(34 28 23 / min(.92, calc(.54 * var(--cg-k, 1)))), rgb(25 20 16 / min(.88, calc(.44 * var(--cg-k, 1))))); box-shadow: none; }
+html.dark[data-theme="dimmed-sage"] .cg.cg-strip { --cg-rim-hi: .32; --cg-rim-back: .12; --cg-fill: linear-gradient(180deg, rgb(37 49 54 / min(.92, calc(.54 * var(--cg-k, 1)))), rgb(29 39 43 / min(.88, calc(.44 * var(--cg-k, 1))))); box-shadow: none; }
+html.dark[data-theme="obsidian"] .cg.cg-strip { --cg-rim-hi: .28; --cg-rim-back: .1; --cg-fill: linear-gradient(180deg, rgb(16 18 24 / min(.94, calc(.58 * var(--cg-k, 1)))), rgb(10 11 16 / min(.9, calc(.48 * var(--cg-k, 1))))); box-shadow: none; }
 /* 拖动窗口改大小期间不做折射、只留磨砂（见 runtime.ts 的 viewport） */
 html.cg-resizing .cg-optic {
   -webkit-backdrop-filter: blur(var(--cg-blur)) saturate(var(--cg-sat)) brightness(var(--cg-bright));
@@ -233,10 +251,22 @@ html.cg-resizing .cg-optic {
 }
 html.dark .cg-rim {
   box-shadow:
-    inset 1.5px 2px 1px -1.5px rgb(255 255 255 / .35),
-    inset -1px -1.5px 1px -1px rgb(255 255 255 / .14),
-    inset 0 0 12px 1px rgb(255 255 255 / .04),
+    inset 1.5px 2px 1px -1.5px rgb(255 255 255 / .28),
+    inset -1px -1.5px 1px -1px rgb(255 255 255 / .11),
+    inset 0 0 12px 1px rgb(255 255 255 / .03),
     inset 0 -8px 16px -12px rgb(0 0 0 / .4);
+}
+html.dark[data-theme="obsidian"] .cg-rim {
+  box-shadow:
+    inset 1.5px 2px 1px -1.5px rgb(226 242 255 / .2),
+    inset -1px -1.5px 1px -1px rgb(226 242 255 / .08),
+    inset 0 0 12px 1px rgb(226 242 255 / .02),
+    inset 0 -8px 16px -12px rgb(0 0 0 / .5);
+}
+html.dark .cg.cg-strip > .cg-rim {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .1),
+    inset 0 -1px 0 rgb(0 0 0 / .28);
 }
 /* 外沿的镜面高光：朝向光源（指针）的一侧最亮，对侧有一道较弱的反光。
    .cg-sheen 是 1px 的圆角环（遮罩出来），里面的 .cg-beam 是一块以玻璃中心为圆心的锥形渐变，

@@ -2,19 +2,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import 'element-plus'
 import type { AppSettings } from './ferry'
 
-const { rpc, setTheme, nativeTheme, syncIcon, syncFavicon, waitIcon } = vi.hoisted(() => ({
-  rpc: vi.fn(), setTheme: vi.fn(), nativeTheme: vi.fn(), syncIcon: vi.fn(), syncFavicon: vi.fn(), waitIcon: vi.fn(),
+const { rpc, setTheme, nativeTheme, syncIcon, syncFavicon, waitIcon, glassThemeChanged } = vi.hoisted(() => ({
+  rpc: vi.fn(),
+  setTheme: vi.fn(),
+  nativeTheme: vi.fn(),
+  syncIcon: vi.fn(),
+  syncFavicon: vi.fn(),
+  waitIcon: vi.fn(),
+  glassThemeChanged: vi.fn(),
 }))
 vi.mock('./ferry', async original => ({ ...await original<typeof import('./ferry')>(), call: rpc }))
 vi.mock('./platform', () => ({ isTauri: true, storeGet: vi.fn() }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ setTheme, theme: nativeTheme }) }))
 vi.mock('./appIcon', () => ({ syncAppIcon: syncIcon, syncFavicon, waitForAppIcon: waitIcon }))
 vi.mock('./glass/runtime', () => ({
-  glass: { enabled: true, transparency: 90 }, GLASS_TRANSPARENCY_DEFAULT: 90, themeChanged: vi.fn(),
+  glass: { enabled: true, transparency: 90 }, GLASS_TRANSPARENCY_DEFAULT: 90, themeChanged: glassThemeChanged,
 }))
 
 let media: { matches: boolean; onchange: (() => void) | null }
 let dark: boolean
+let dataset: Record<string, string>
 let cache: Map<string, string>
 beforeEach(() => {
   vi.resetModules()
@@ -24,13 +31,21 @@ beforeEach(() => {
   syncIcon.mockReset().mockResolvedValue(undefined)
   syncFavicon.mockReset()
   waitIcon.mockReset().mockResolvedValue(undefined)
+  glassThemeChanged.mockReset()
   dark = false
+  dataset = {}
   cache = new Map()
   media = { matches: false, onchange: null }
   vi.stubGlobal('window', { matchMedia: () => media })
-  vi.stubGlobal('document', { documentElement: { classList: {
-    contains: () => dark, toggle: (_name: string, value: boolean) => { dark = value },
-  } } })
+  vi.stubGlobal('document', {
+    documentElement: {
+      dataset,
+      classList: {
+        contains: () => dark,
+        toggle: (_name: string, value: boolean) => { dark = value },
+      },
+    },
+  })
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => cache.get(key), setItem: (key: string, value: string) => cache.set(key, value),
   })
@@ -51,28 +66,33 @@ describe('主题初始化与系统跟随', () => {
     applyTheme('dark')
     await waitForTheme()
     expect(dark).toBe(true)
+    expect(dataset.theme).toBe('dark')
     expect(cache.get('ferry.theme')).toBe('light')
     applyTheme('light') // 取消预览。
     await waitForTheme()
     expect(dark).toBe(false)
-    expect(syncIcon).toHaveBeenLastCalledWith(false)
+    expect(dataset.theme).toBe('light')
+    expect(syncIcon).toHaveBeenLastCalledWith('light')
   })
 
   it('记着上次的主题时，不等后台读完设置就可以显示窗口', async () => {
-    cache.set('ferry.theme', 'dark')
+    cache.set('ferry.theme', 'warm-dusk')
     let finish!: (value: unknown) => void
     rpc.mockImplementation(() => new Promise(resolve => { finish = resolve }))
-    const { startTheme, waitForTheme } = await import('./state')
+    const { startTheme, waitForTheme, resolvedTheme } = await import('./state')
     await startTheme()
     expect(dark).toBe(true)
+    expect(dataset.theme).toBe('warm-dusk')
+    expect(resolvedTheme.value).toBe('warm-dusk')
     expect(setTheme).toHaveBeenLastCalledWith('dark')
-    expect(syncIcon).toHaveBeenLastCalledWith(true)
+    expect(syncIcon).toHaveBeenLastCalledWith('warm-dusk')
     // 设置晚到、主题没变：界面不变
-    finish({ settings: { ui: { theme: 'dark' } } })
+    finish({ settings: { ui: { theme: 'warm-dusk' } } })
     await vi.waitFor(() => expect(syncIcon).toHaveBeenCalledTimes(2))
     await waitForTheme()
     expect(dark).toBe(true)
-    expect(syncIcon).toHaveBeenLastCalledWith(true)
+    expect(dataset.theme).toBe('warm-dusk')
+    expect(syncIcon).toHaveBeenLastCalledWith('warm-dusk')
   })
 
   it('没记过主题时等正式设置，读不到就跟随系统', async () => {
@@ -109,12 +129,14 @@ describe('主题初始化与系统跟随', () => {
     await waitForTheme()
     expect(setTheme).toHaveBeenCalledWith(null)
     expect(dark).toBe(true)
+    expect(dataset.theme).toBe('dark')
     // media.matches 初始为 false，但原生解析结果为 dark：不能先按 false 误触发一次外壳图标同步。
-    expect(syncIcon).toHaveBeenCalledExactlyOnceWith(true)
+    expect(syncIcon).toHaveBeenCalledExactlyOnceWith('dark')
     media.matches = false
     media.onchange!()
     expect(dark).toBe(false)
-    expect(syncIcon).toHaveBeenLastCalledWith(false, { debounceMs: 500 })
+    expect(dataset.theme).toBe('light')
+    expect(syncIcon).toHaveBeenLastCalledWith('light', { debounceMs: 500 })
     applyTheme('dark')
     await waitForTheme()
     expect(media.onchange).toBeNull()
@@ -123,23 +145,61 @@ describe('主题初始化与系统跟随', () => {
 
   it('设置页预览只切换界面、favicon 与标题栏，不触发桌面和任务栏图标同步', async () => {
     const { applyTheme, waitForTheme } = await import('./state')
-    applyTheme('dark', { preview: true })
+    applyTheme('obsidian', { preview: true })
     await waitForTheme()
     expect(dark).toBe(true)
+    expect(dataset.theme).toBe('obsidian')
     expect(setTheme).toHaveBeenLastCalledWith('dark')
-    expect(syncFavicon).toHaveBeenLastCalledWith(true)
+    expect(syncFavicon).toHaveBeenLastCalledWith('obsidian')
     expect(syncIcon).not.toHaveBeenCalled()
 
     nativeTheme.mockResolvedValue('light')
     applyTheme('system', { preview: true })
     await waitForTheme()
     expect(dark).toBe(false)
+    expect(dataset.theme).toBe('light')
     expect(setTheme).toHaveBeenLastCalledWith(null)
     media.matches = true
     media.onchange!()
     expect(dark).toBe(true)
-    expect(syncFavicon).toHaveBeenLastCalledWith(true)
+    expect(dataset.theme).toBe('dark')
+    expect(syncFavicon).toHaveBeenLastCalledWith('dark')
     expect(syncIcon).not.toHaveBeenCalled()
+  })
+
+  it('四套新主题按各自明暗基座同步标题栏、图标，并在同基座切换时通知玻璃重测明暗', async () => {
+    const { applyTheme, waitForTheme, resolvedTheme } = await import('./state')
+    applyTheme('warm-paper')
+    await waitForTheme()
+    expect(dark).toBe(false)
+    expect(dataset.theme).toBe('warm-paper')
+    expect(resolvedTheme.value).toBe('warm-paper')
+    expect(setTheme).toHaveBeenLastCalledWith('light')
+    expect(syncIcon).toHaveBeenLastCalledWith('warm-paper')
+
+    glassThemeChanged.mockClear()
+    applyTheme('warm-dusk')
+    await waitForTheme()
+    expect(dark).toBe(true)
+    expect(dataset.theme).toBe('warm-dusk')
+    expect(setTheme).toHaveBeenLastCalledWith('dark')
+    expect(syncIcon).toHaveBeenLastCalledWith('warm-dusk')
+    expect(glassThemeChanged).toHaveBeenCalledTimes(1)
+
+    // 同为深色基座切换：warm-dusk -> dimmed-sage -> obsidian 也应通知液态玻璃刷新明暗
+    applyTheme('dimmed-sage')
+    await waitForTheme()
+    expect(dark).toBe(true)
+    expect(dataset.theme).toBe('dimmed-sage')
+    expect(syncIcon).toHaveBeenLastCalledWith('dimmed-sage')
+    expect(glassThemeChanged).toHaveBeenCalledTimes(2)
+
+    applyTheme('obsidian')
+    await waitForTheme()
+    expect(dark).toBe(true)
+    expect(dataset.theme).toBe('obsidian')
+    expect(syncIcon).toHaveBeenLastCalledWith('obsidian')
+    expect(glassThemeChanged).toHaveBeenCalledTimes(3)
   })
 
   it('过期的原生系统主题查询不会覆盖后选的固定主题', async () => {
@@ -148,12 +208,13 @@ describe('主题初始化与系统跟随', () => {
     const { applyTheme, waitForTheme } = await import('./state')
     applyTheme('system')
     await vi.waitFor(() => expect(nativeTheme).toHaveBeenCalledOnce())
-    applyTheme('light')
+    applyTheme('warm-paper')
     finish('dark')
     await waitForTheme()
     expect(dark).toBe(false)
+    expect(dataset.theme).toBe('warm-paper')
     expect(setTheme).toHaveBeenLastCalledWith('light')
-    expect(syncIcon).toHaveBeenLastCalledWith(false)
+    expect(syncIcon).toHaveBeenLastCalledWith('warm-paper')
   })
 
   it('窗口显示的等待条件包含原生主题和图标完成', async () => {
