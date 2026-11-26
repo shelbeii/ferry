@@ -211,6 +211,14 @@ func (a *Agent) dispatch(cmd string) int {
 		return a.fwconfirm()
 	case "fwdisable":
 		return a.fwdisable()
+	case "fwinstall":
+		return a.fwinstall()
+	case "fwuninstall":
+		return a.fwuninstall()
+	case "fwauth-challenge":
+		return a.fwauthChallenge()
+	case "fwauth-issue":
+		return a.fwauthIssue()
 	case "monitor":
 		return a.monitor()
 	case "backup":

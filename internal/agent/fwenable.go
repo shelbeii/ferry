@@ -94,44 +94,61 @@ func (a *Agent) fwenable() int {
 		return a.portDone(sc)
 	}
 	if !st.Enable {
-		return a.result(proto.CodeFailed, "服务器上没有装 firewalld 或 ufw：Ferry 不替你装防火墙", nil)
+		return a.result(proto.CodeFailed, "服务器上没有装 firewalld 或 ufw：请先安装防火墙", nil)
 	}
+	return a.enableFirewall(sc, st)
+}
+
+// prepareEnablePorts 校验要放行的端口、收集 SSH 端口并检查 Docker 重启要求（不改动服务器）。
+func (a *Agent) prepareEnablePorts(sc *fwScan, kind string, dockerActive bool) (list, ssh []string, docker bool, code int, msg string) {
 	allow := map[string]bool{}
 	for _, p := range a.req.Allow {
 		m := rePortProto.FindStringSubmatch(p)
 		if m == nil {
-			return a.result(proto.CodeBadInput, "端口无效："+p+"（写 8080/tcp 或 53/udp）", nil)
+			return nil, nil, false, proto.CodeBadInput, "端口无效：" + p + "（写 8080/tcp 或 53/udp）"
 		}
 		if n, _ := strconv.Atoi(m[1]); n > 65535 {
-			return a.result(proto.CodeBadInput, "端口无效："+p, nil)
+			return nil, nil, false, proto.CodeBadInput, "端口无效：" + p
 		}
 		allow[p] = true
 	}
-	var ssh []string
 	for port := range sc.ssh {
 		ssh = append(ssh, strconv.Itoa(port)+"/tcp")
 	}
 	for _, port := range sc.keep {
-		ssh = append(ssh, strconv.Itoa(port)+"/tcp")
+		p := strconv.Itoa(port) + "/tcp"
+		if !contains(ssh, p) {
+			ssh = append(ssh, p)
+		}
 	}
 	if len(ssh) == 0 {
-		return a.result(proto.CodeFailed, "找不到 SSH 端口：不敢打开防火墙", nil)
+		return nil, nil, false, proto.CodeFailed, "找不到 SSH 端口：不敢打开防火墙"
 	}
+	sort.Strings(ssh)
 	for _, p := range ssh {
 		allow[p] = true
 	}
-	list := make([]string, 0, len(allow))
+	list = make([]string, 0, len(allow))
 	for p := range allow {
 		list = append(list, p)
 	}
 	sort.Slice(list, func(i, j int) bool {
-		a, _ := strconv.Atoi(strings.Split(list[i], "/")[0])
-		b, _ := strconv.Atoi(strings.Split(list[j], "/")[0])
-		return a < b || (a == b && list[i] < list[j])
+		ai, _ := strconv.Atoi(strings.Split(list[i], "/")[0])
+		bi, _ := strconv.Atoi(strings.Split(list[j], "/")[0])
+		return ai < bi || (ai == bi && list[i] < list[j])
 	})
-	docker := st.Kind == "firewalld" && st.Docker
+	docker = kind == "firewalld" && dockerActive
 	if docker && !a.req.RestartDocker {
-		return a.result(proto.CodeFailed, "Docker 正在运行：打开 firewalld 后容器的端口映射可能失效，要同时重启 Docker（容器会重启一次）", nil)
+		return nil, nil, false, proto.CodeFailed, "Docker 正在运行：打开 firewalld 后容器的端口映射可能失效，要同时重启 Docker（容器会重启一次）"
+	}
+	return list, ssh, docker, proto.CodeOK, ""
+}
+
+// enableFirewall 按安全流程打开已安装但未运行的 firewalld / ufw（fwenable 和 fwinstall --enable 共用）。
+func (a *Agent) enableFirewall(sc *fwScan, st *fwState) int {
+	list, ssh, docker, code, msg := a.prepareEnablePorts(sc, st.Kind, st.Docker)
+	if code != proto.CodeOK {
+		return a.result(code, msg, nil)
 	}
 
 	run := func(cmd string) error {

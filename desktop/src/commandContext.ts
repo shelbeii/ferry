@@ -1,7 +1,7 @@
 const direct = new Set(['deploy', 'secrets', 'start', 'stop', 'restart', 'rollback', 'status', 'preflight', 'changes', 'app-info', 'app-runtimes', 'server-info', 'logs', 'backup', 'monitor', 'keygen', 'trust', 'hostkey', 'ai-exec'])
 const softwareActions = new Set(['install', 'start', 'stop', 'restart', 'remove', 'restore', 'upgrade', 'backup', 'logs', 'password'])
 const softwareLocal = new Set(['templates', 'template', 'latest', 'lib'])
-const portActions = new Set(['open', 'close', 'enable', 'disable', 'check'])
+const portActions = new Set(['open', 'close', 'enable', 'disable', 'check', 'install', 'uninstall', 'uninstall-auth', 'uninstall-challenge'])
 
 /** 桌面版发出的命令所操作的服务器，供任务归属、认证重试和 AI 排查共同使用。 */
 export function commandTarget(args: string[]): string | undefined {

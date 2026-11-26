@@ -376,6 +376,7 @@ func shellContext(parent context.Context, cmd string, timeout time.Duration) (st
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	c.Env = shellEnvWithSbin(os.Environ())
 	out := &cappedBuffer{max: shellOutputMax}
 	c.Stdout, c.Stderr = out, out
 	// 超时时连它启动的子进程一起杀掉；命令结束后，留在后台的子进程还占着输出也最多再等 5 秒，不会一直卡住
@@ -392,6 +393,35 @@ func shellContext(parent context.Context, cmd string, timeout time.Duration) (st
 		err = nil // 命令本身成功结束了，只是后台还有进程开着输出
 	}
 	return out.String(), err
+}
+
+// shellEnvWithSbin 确保非登录 SSH / sudo 环境下也能找到位于 /usr/sbin、/sbin 的系统命令（如 ufw、iptables、nft）。
+func shellEnvWithSbin(env []string) []string {
+	extra := []string{"/usr/local/sbin", "/usr/sbin", "/sbin"}
+	out := make([]string, 0, len(env)+1)
+	found := false
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			found = true
+			parts := strings.Split(v, ":")
+			seen := map[string]bool{}
+			for _, p := range parts {
+				seen[p] = true
+			}
+			for _, d := range extra {
+				if !seen[d] {
+					parts = append(parts, d)
+				}
+			}
+			out = append(out, "PATH="+strings.Join(parts, ":"))
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !found {
+		out = append(out, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	}
+	return out
 }
 
 // cappedBuffer 只留最后 max 字节的输出，前面省略的在开头注明。

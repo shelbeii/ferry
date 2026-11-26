@@ -121,8 +121,9 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 	var names map[string]string
 	var dockerNote string
 	var dockerActive bool
-	// 读防火墙（要起 firewall-cmd，最慢）、读监听端口/Docker、查 docker 服务状态同时做：三边互不相干
-	eachParallel(3, 3, func(i int) {
+	var invKV map[string]string
+	// 读防火墙（要起 firewall-cmd，最慢）、读监听端口/Docker、查 docker 服务状态、探测防火墙安装清单同时做：互不相干
+	eachParallel(4, 4, func(i int) {
 		switch i {
 		case 0:
 			st = sc.firewallState()
@@ -132,6 +133,10 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 		case 2:
 			out, _ := sc.run("systemctl is-active docker 2>/dev/null", 10*time.Second)
 			dockerActive = strings.TrimSpace(out) == "active"
+		case 3:
+			if out, err := sc.run(fwInventoryProbeCmd, 15*time.Second); err == nil {
+				invKV = parseKVOutput(out)
+			}
 		}
 	})
 	rep.Firewall = st.Firewall
@@ -158,7 +163,7 @@ func (sc *fwScan) report() (*proto.PortReport, *fwState) {
 			add(r.lo, pr)
 		}
 	}
-	return sc.finish(rep, st, byKey, dockerActive)
+	return sc.finish(rep, st, byKey, dockerActive, invKV)
 }
 
 // addPort 端口 / 协议对应的那一项，没有时加上。
@@ -262,7 +267,7 @@ func (sc *fwScan) ssListen() []ssListenEntry {
 }
 
 // finish 给每个端口标上防火墙的状态，排好序。
-func (sc *fwScan) finish(rep *proto.PortReport, st *fwState, byKey map[string]*proto.PortInfo, dockerActive bool) (*proto.PortReport, *fwState) {
+func (sc *fwScan) finish(rep *proto.PortReport, st *fwState, byKey map[string]*proto.PortInfo, dockerActive bool, invKV map[string]string) (*proto.PortReport, *fwState) {
 	var ifaces map[string]string
 	if sc.ifaces != nil {
 		ifaces = sc.ifaces()
@@ -290,11 +295,12 @@ func (sc *fwScan) finish(rep *proto.PortReport, st *fwState, byKey map[string]*p
 	if os.Geteuid() != 0 && sc.proc == "/proc" {
 		rep.Notes = append(rep.Notes, "agent 没有以 root 运行，其他用户的进程可能看不到")
 	}
-	// 复制一份再填 Disable / Docker，避免并发读 fwCache 时改写共享缓存里的状态
+	// 复制一份再填 Disable / Docker / Installed，避免并发读 fwCache 时改写共享缓存里的状态
 	cp := *st
 	st = &cp
 	st.Disable = st.Active && (st.Kind == "firewalld" || st.Kind == "ufw")
-	if st.Enable || st.Disable {
+	sc.applyFirewallInventory(st, invKV)
+	if st.Enable || st.Disable || st.Kind == "" || len(st.Installed) > 0 {
 		st.Docker = dockerActive
 	}
 	rep.Firewall = st.Firewall

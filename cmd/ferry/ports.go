@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -21,10 +22,15 @@ var portUsage = errors.New(`用法：
   ferry port enable <目标> [--allow 8080,443/tcp] [--restart-docker]
                                              打开装了没开的防火墙：先放行 SSH 端口和 --allow 的端口；
                                              打开后用新的连接试 SSH，连不上时 3 分钟后自动关掉、恢复原样
-  ferry port disable <目标> [--restart-docker]  关闭正在运行的防火墙（开机也不再启动）；放行规则留着，再打开时照旧`)
+  ferry port disable <目标> [--restart-docker]  关闭正在运行的防火墙（开机也不再启动）；放行规则留着，再打开时照旧
+  ferry port install <目标> <类型> [--enable] [--allow 80,443/tcp] [--restart-docker] [--network auto|local|server] [--allow-changes]
+                                             安装防火墙（类型：firewalld | ufw | nftables | iptables）；
+                                             默认仅安装不启用；加上 --enable 时安装后按防锁死流程立即打开（仅 firewalld / ufw）
+  ferry port uninstall <目标> <类型> [--purge] [--restart-docker]
+                                             卸载防火墙（必须实时身份认证后方可卸载）；--purge 同时清除配置文件`)
 
-// portCmd ferry port <目标> | open | close | check | enable | disable。
-func portCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(error) int) int {
+// portCmd ferry port <目标> | open | close | check | enable | disable | install | uninstall | uninstall-challenge | uninstall-auth。
+func portCmd(c *cli, cio *cliIO, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(error) int) int {
 	ok := func(data any) int { return ok0(js, data) }
 	if len(c.pos) == 0 {
 		return fail(portUsage)
@@ -34,15 +40,9 @@ func portCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(e
 		if len(c.pos) < 2 {
 			return fail(portUsage)
 		}
-		var allow []string
-		if v := c.flags["allow"]; v != "" {
-			for _, s := range strings.Split(v, ",") {
-				port, pr, err := parsePortArg(s)
-				if err != nil {
-					return fail(err)
-				}
-				allow = append(allow, fmt.Sprintf("%d/%s", port, pr))
-			}
+		allow, err := parseAllowFlag(c.flags["allow"])
+		if err != nil {
+			return fail(err)
 		}
 		rep, err := e.FirewallEnable(c.pos[1], allow, c.has("restart-docker"))
 		if err != nil {
@@ -66,6 +66,111 @@ func portCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(e
 			return ok(rep)
 		}
 		con.OK("防火墙已关闭：所有端口都不拦")
+		return 0
+
+	case "install":
+		if len(c.pos) < 3 {
+			return fail(portUsage)
+		}
+		allow, err := parseAllowFlag(c.flags["allow"])
+		if err != nil {
+			return fail(err)
+		}
+		rep, err := e.FirewallInstall(c.pos[1], engine.FirewallInstallOptions{
+			Kind:          c.pos[2],
+			Enable:        c.has("enable"),
+			Allow:         allow,
+			RestartDocker: c.has("restart-docker"),
+			Network:       c.flags["network"],
+			AllowChanges:  c.has("allow-changes"),
+		})
+		if err != nil {
+			return fail(err)
+		}
+		if js != nil {
+			return ok(rep)
+		}
+		if c.has("enable") {
+			con.OK("防火墙已安装并打开（%s）", c.pos[2])
+		} else {
+			con.OK("防火墙已安装（%s，尚未启用）", c.pos[2])
+		}
+		return 0
+
+	case "uninstall-challenge":
+		if len(c.pos) < 3 {
+			return fail(portUsage)
+		}
+		ch, err := e.FirewallUninstallChallenge(c.pos[1], c.pos[2])
+		if err != nil {
+			return fail(err)
+		}
+		if js != nil {
+			return ok(ch)
+		}
+		con.Info("一次性认证码（%s）：%s（3 分钟内有效）", ch.Kind, ch.Code)
+		return 0
+
+	case "uninstall-auth":
+		if len(c.pos) < 3 {
+			return fail(portUsage)
+		}
+		secretVal := cio.getenv("FERRY_FW_AUTH_SECRET")
+		if secretVal == "" && js == nil {
+			auth, err := e.FirewallUninstallAuthInfo(c.pos[1])
+			if err != nil {
+				return fail(err)
+			}
+			v, okSec := con.Secret(auth.Prompt + "：")
+			if !okSec {
+				return fail(engine.ErrCanceled)
+			}
+			secretVal = v
+		}
+		ticket, err := e.FirewallUninstallAuth(c.pos[1], engine.FirewallAuthOptions{
+			Kind:        c.pos[2],
+			Method:      c.flags["method"],
+			Secret:      secretVal,
+			ChallengeID: c.flags["challenge-id"],
+		})
+		if err != nil {
+			return fail(err)
+		}
+		if js != nil {
+			return ok(ticket)
+		}
+		con.OK("身份认证已通过（%s），令牌 2 分钟内有效", ticket.Method)
+		return 0
+
+	case "uninstall":
+		if len(c.pos) < 3 {
+			return fail(portUsage)
+		}
+		target, kind := c.pos[1], c.pos[2]
+		token := strings.TrimSpace(cio.getenv("FERRY_FW_UNINSTALL_TOKEN"))
+		if token == "" {
+			if js != nil {
+				return fail(&engine.FirewallAuthError{Msg: "卸载防火墙前必须先通过身份认证（缺少 FERRY_FW_UNINSTALL_TOKEN）"})
+			}
+			t, err := cliFirewallUninstallAuth(e, con, target, kind, c.flags["method"])
+			if err != nil {
+				return fail(err)
+			}
+			token = t
+		}
+		rep, err := e.FirewallUninstall(target, engine.FirewallUninstallOptions{
+			Kind:          kind,
+			Purge:         c.has("purge"),
+			RestartDocker: c.has("restart-docker"),
+			Token:         token,
+		})
+		if err != nil {
+			return fail(err)
+		}
+		if js != nil {
+			return ok(rep)
+		}
+		con.OK("防火墙已卸载（%s）", kind)
 		return 0
 
 	case "open", "close":
@@ -141,6 +246,69 @@ func portCmd(c *cli, e *engine.Engine, js *ui.JSON, con *ui.Console, fail func(e
 	}
 	printPorts(con, rep)
 	return 0
+}
+
+func parseAllowFlag(v string) ([]string, error) {
+	if v == "" {
+		return nil, nil
+	}
+	var allow []string
+	for _, s := range strings.Split(v, ",") {
+		port, pr, err := parsePortArg(s)
+		if err != nil {
+			return nil, err
+		}
+		allow = append(allow, fmt.Sprintf("%d/%s", port, pr))
+	}
+	return allow, nil
+}
+
+// cliFirewallUninstallAuth 命令行交互式卸载认证：支持 sudo/SSH/私钥密码及免密密钥挑战码。
+func cliFirewallUninstallAuth(e *engine.Engine, con *ui.Console, target, kind, methodOverride string) (string, error) {
+	auth, err := e.FirewallUninstallAuthInfo(target)
+	if err != nil {
+		return "", err
+	}
+	method := auth.Method
+	if methodOverride == "ssh-password" && auth.CanPasswordFallback {
+		method = "ssh-password"
+	}
+	con.Warn("卸载 %s 的防火墙（%s）需要实时身份认证", target, kind)
+	var secretVal, challengeID string
+	if method == "ssh-key-challenge" {
+		ch, err := e.FirewallUninstallChallenge(target, kind)
+		if err != nil {
+			return "", err
+		}
+		challengeID = ch.ID
+		con.Info("服务端一次性认证码：%s（3 分钟内有效）", ch.Code)
+		fmt.Fprint(os.Stderr, "请输入上面的认证码以确认卸载：")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && strings.TrimSpace(line) == "" {
+			return "", engine.ErrCanceled
+		}
+		secretVal = strings.TrimSpace(line)
+	} else {
+		prompt := auth.Prompt
+		if method == "ssh-password" && auth.Method != "ssh-password" {
+			prompt = fmt.Sprintf("请输入 %s@%s:%d 的 SSH 登录密码以验证身份", auth.User, auth.Host, auth.Port)
+		}
+		v, ok := con.Secret(prompt + "：")
+		if !ok {
+			return "", engine.ErrCanceled
+		}
+		secretVal = v
+	}
+	ticket, err := e.FirewallUninstallAuth(target, engine.FirewallAuthOptions{
+		Kind:        kind,
+		Method:      method,
+		Secret:      secretVal,
+		ChallengeID: challengeID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return ticket.Token, nil
 }
 
 // localOnly 只监听本机（127.0.0.1、[::1]）。

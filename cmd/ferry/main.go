@@ -133,6 +133,8 @@ const usage = `ferry —— 后端 / 前端部署工具
   port     check <目标> <端口>… [--timeout 3]   从本机连服务器的端口，看能不能连上
   port     enable <目标> [--allow 8080,443/tcp] [--restart-docker]   打开装了没开的防火墙（先放行 SSH 端口，连不上自动恢复）
   port     disable <目标> [--restart-docker]   关闭正在运行的防火墙（开机不再启动，规则留着）
+  port     install <目标> <类型> [--enable] [--allow 80,443/tcp] [--restart-docker] [--network auto|local|server]   安装防火墙（firewalld / ufw / nftables / iptables）
+  port     uninstall <目标> <类型> [--purge] [--restart-docker]   卸载防火墙（需实时身份认证后方可卸载）
   forward  <目标> <端口> [--host 地址 | --container 名字]   这台电脑上开一个端口（127.0.0.1），经 SSH 转到服务器那边，
                                 服务器不用放行端口（打开控制台、管理面板用）；forward list | close [本机端口] | probe <目标> <端口>…
   who      <目标>               服务器上连着的 SSH：登录用户、来源 IP、连上的时间、在干什么
@@ -196,7 +198,7 @@ var valueFlags = map[string]bool{"pid": true, "c": true, "config": true, "to": t
 	"version": true, "channel": true, "component": true, "name": true, "dir": true, "port": true, "console-port": true, "memory": true, "grep": true, "context": true, "line": true, "unit": true, "container": true, "host": true, "vhost": true,
 	"variant": true, "package": true, "user": true, "java-dir": true, "in": true, "set": true, "cols": true, "rows": true, "kill": true, "conv": true, "scope": true, "mode": true, "decide": true, "approval": true, "days": true, "max-mb": true, "keep": true, "target": true, "network": true, "model": true, "effort": true, "rewind": true, "out": true, "create-user": true, "note": true, "timeout": true, "allow": true, "id": true, "notify": true, "interval": true, "disk": true, "cert-days": true, "mem": true, "load": true, "ping": true, "keep-files": true, "query": true,
 	"batch": true, "canary": true, "observe": true, "on-failure": true, "kind": true, "actor": true, "project": true, "action": true, "snapshot": true, "app": true,
-	"conf": true, "owner": true}
+	"conf": true, "owner": true, "method": true, "challenge-id": true}
 
 // repeatFlags 可以写几次的选项：值按行连起来
 var repeatFlags = map[string]bool{"conf": true}
@@ -215,7 +217,7 @@ var boolFlags = map[string]bool{
 	"no-rollback": true, "accept-new-host-key": true, "units": true, "h": true, "help": true, "f": true, "follow": true, "file": true, "write": true, "move": true, "from-env": true, "runs": true, "dry-run": true, "check": true, "keep-perms": true,
 	"public": true, "purge": true, "overwrite": true, "lower-case-tables": true, "main-log": true, "latest": true, "case": true, "all-files": true, "grep-all": true, "all": true, "keep-choice": true, "interrupt": true, "changes": true, "restart-docker": true,
 	"local": true, "fix-parents": true, "allow-changes": true, "major": true, "password": true, "default-key": true, "loaded-mark": true, "background": true, "sign": true, "force": true,
-	"ai": true, "restart": true, "tls": true, "page": true, "facets": true, "all-targets": true, "no-restart": true,
+	"ai": true, "restart": true, "tls": true, "page": true, "facets": true, "all-targets": true, "no-restart": true, "enable": true, "block": true,
 }
 
 func parseArgs(argv []string) (*cli, error) {
@@ -434,7 +436,7 @@ func run(argv []string, cio *cliIO) int {
 		return aiImageCmd(c, cio, js, fail)
 	case cmd == "ai-history":
 		return aiHistoryCmd(c, cio, js, st, fail)
-	case cmd == "mcp-approvals" || cmd == "mcp-decide":
+	case cmd == "mcp-approvals" || cmd == "mcp-decide" || cmd == "mcp-sessions" || cmd == "mcp-unblock":
 		return mcpApprovalsCmd(cmd, c, cio, js, fail)
 	case cmd == "mcp-log":
 		return mcpLogCmd(c, cio, js, st, fail)
@@ -977,7 +979,7 @@ func run(argv []string, cio *cliIO) int {
 		return softwareCmd(c, cio, e, js, con, fail)
 
 	case "port":
-		return portCmd(c, e, js, con, fail)
+		return portCmd(c, cio, e, js, con, fail)
 
 	case "forward":
 		return forwardCmd(c, cio, e, js, con, fail)

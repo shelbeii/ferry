@@ -52,6 +52,7 @@ var AuditKinds = map[string]string{
 	"software-install": "安装软件", "software-remove": "卸载软件", "software-upgrade": "升级软件", "software-restore": "恢复软件",
 	"software-control": "启停软件", "software-config": "改软件配置",
 	"port": "放行 / 关闭端口", "firewall-on": "打开防火墙", "firewall-off": "关闭防火墙",
+	"firewall-install": "安装防火墙", "firewall-uninstall": "卸载防火墙",
 	"monitor-on": "打开告警", "monitor-off": "关闭告警",
 	"backup-on": "打开数据备份", "backup-off": "关闭数据备份", "backup-run": "现在备份", "backup-restore": "恢复备份",
 	"backup-fetch": "取回异地备份", "backup-delete": "删除备份",
@@ -161,6 +162,21 @@ func AuditOf(cmd string, q *Request) (kind, object, detail string, ok bool) {
 		return "firewall-on", "", "放行 " + strings.Join(q.Allow, " "), true
 	case "fwdisable":
 		return "firewall-off", "", "", true
+	case "fwinstall":
+		d := "仅安装"
+		if q.FirewallEnable {
+			d = "安装并启用"
+			if len(q.Allow) > 0 {
+				d += "，放行 " + strings.Join(q.Allow, " ")
+			}
+		}
+		return "firewall-install", q.FirewallKind, d, true
+	case "fwuninstall":
+		d := "保留配置"
+		if q.Purge {
+			d = "同时清除配置"
+		}
+		return "firewall-uninstall", q.FirewallKind, d, true
 	case "monitor":
 		if m := q.Monitor; m != nil && (m.Action == "on" || m.Action == "off") {
 			return "monitor-" + m.Action, m.Project + "/" + m.Target, "", true

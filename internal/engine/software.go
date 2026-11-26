@@ -1292,12 +1292,33 @@ func (e *Engine) softwareNetwork(s *session, plan *proto.SoftwarePlan, mode stri
 	if mode == "server" || (plan.System == nil && !(mode == "local" && steps)) {
 		return nil, nil
 	}
+	p, proxyURL, noProxy, err := e.packageNetwork(s, mode)
+	if err != nil || p == nil {
+		return nil, err
+	}
+	plan.Proxy, plan.NoProxy = proxyURL, noProxy
+	return p, nil
+}
+
+// packageNetwork 为服务器软件包管理器（dnf / yum / apt-get）探测下载路线并按需开启经本机代理。
+// 返回的代理用完需调用 closeNetProxy；走服务器直连时返回 nil。
+func (e *Engine) packageNetwork(s *session, mode string) (*netProxy, string, []string, error) {
+	switch mode {
+	case "", "auto":
+		mode = "auto"
+	case "local", "server":
+	default:
+		return nil, "", nil, fmt.Errorf("下载方式只能是 auto、local、server（当前 %q）", mode)
+	}
+	if mode == "server" {
+		return nil, "", nil, nil
+	}
 	e.Rep.Step("检查服务器的软件源和下载路线")
 	var direct []string
 	if mode == "auto" {
 		var rp proto.RepoProbe
 		if err := s.callData("repoprobe", &proto.Request{}, &rp); err != nil {
-			return nil, err
+			return nil, "", nil, err
 		}
 		var bad []string
 		for _, h := range rp.Hosts {
@@ -1309,7 +1330,7 @@ func (e *Engine) softwareNetwork(s *session, plan *proto.SoftwarePlan, mode stri
 		}
 		if len(rp.Hosts) > 0 && len(bad) == 0 {
 			e.Rep.Info("服务器自己连得上软件源（%s），用服务器的网络下载", strings.Join(direct, "、"))
-			return nil, nil
+			return nil, "", nil, nil
 		}
 		if len(bad) > 0 {
 			e.Rep.Info("服务器连不上软件源 %s：这些经这台电脑下载", strings.Join(bad, "、"))
@@ -1317,14 +1338,13 @@ func (e *Engine) softwareNetwork(s *session, plan *proto.SoftwarePlan, mode stri
 			e.Rep.Info("服务器上没找到软件源的地址：下载经这台电脑")
 		}
 	} else {
-		e.Rep.Info("下载经这台电脑（服务器的软件包管理器、安装步骤通过 SSH 用这台电脑的网络）")
+		e.Rep.Info("下载经这台电脑（服务器的软件包管理器通过 SSH 用这台电脑的网络）")
 	}
 	p, err := startNetProxy(s.c)
 	if err != nil {
-		return nil, err
+		return nil, "", nil, err
 	}
-	plan.Proxy, plan.NoProxy = p.URL, direct
-	return p, nil
+	return p, p.URL, direct, nil
 }
 
 // closeNetProxy 关掉代理，说明经这台电脑下载了多少、这台电脑也连不上哪些地址。

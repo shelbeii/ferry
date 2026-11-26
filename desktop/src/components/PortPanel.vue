@@ -11,9 +11,10 @@ const probes = reactive<Record<string, Record<number, PortProbe | 'running'>>>({
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CopyDocument, Key, Refresh } from '@element-plus/icons-vue'
-import { call, FerryError, type PortInfo } from '../ferry'
+import { CopyDocument, Key, Lock, Plus, Refresh } from '@element-plus/icons-vue'
+import { call, FerryError, type FirewallChallenge, type FirewallKind, type FirewallTicket, type PortInfo } from '../ferry'
 import { secretRequest, startTask, trustRequest, trustedTick } from '../state'
+import { authMethodMeta, blockingInstalledFirewall, canInstallFirewall, defaultFirewallKind, firewallKindLabel, firewallOptions, uninstallableFirewalls } from '../firewallManage'
 import LoadingBlock from './LoadingBlock.vue'
 import GlassPane from './glass/GlassPane.vue'
 import { glass } from '../glass/runtime'
@@ -281,7 +282,6 @@ function doEnable() {
 
 const disableOpen = ref(false)
 const disableDocker = ref(true)
-watch(key, () => { enableOpen.value = disableOpen.value = false })
 /** 现在防火墙拦着、关掉后外部能连上的端口 */
 const unblocked = computed(() => ports.value.filter((p) => reach(p) === 'blocked' || reach(p) === 'partial'))
 /** Ferry 在 DOCKER-USER 里拦着的：关防火墙不影响 */
@@ -303,6 +303,260 @@ function doDisable() {
     delete probes[k]
   })
 }
+
+// ---------------------------------------------------------------- 安装防火墙（支持多种类型）
+
+const installedFws = computed(() => fw.value?.installed ?? [])
+const hasInstalledFw = computed(() => installedFws.value.length > 0 || !!fw.value?.kind)
+const uninstallable = computed(() => uninstallableFirewalls(fw.value))
+const blockingFw = computed(() => blockingInstalledFirewall(fw.value))
+const canInstall = computed(() => canInstallFirewall(fw.value))
+const hasPkgMgr = computed(() => !!fw.value?.pkgMgr)
+const nonUninstallableWhy = computed(() => installedFws.value.find((i) => !i.uninstall && i.why)?.why ?? '')
+
+const installOpen = ref(false)
+const installKind = ref<FirewallKind>('firewalld')
+const installNetwork = ref<'auto' | 'server' | 'local'>('auto')
+const installEnable = ref(false)
+const installSel = ref<string[]>([])
+const installExtra = ref('')
+const installDocker = ref(true)
+
+const installOpts = computed(() => firewallOptions(fw.value?.pkgMgr))
+const selectedInstallOpt = computed(() => installOpts.value.find((o) => o.kind === installKind.value))
+const isKindInstalled = (kind: string) => installedFws.value.some((i) => i.kind === kind)
+const installExtraTokens = computed(() => installExtra.value.split(/[\s,，、]+/).filter(Boolean))
+const installExtraList = computed(() =>
+  installExtraTokens.value
+    .filter((t) => /^\d{1,5}(\/(tcp|udp))?$/.test(t) && +t.split('/')[0] >= 1 && +t.split('/')[0] <= 65535)
+    .map((t) => (t.includes('/') ? t : t + '/tcp')),
+)
+const installExtraBad = computed(() => installExtraTokens.value.filter((t) => !installExtraList.value.includes(t.includes('/') ? t : t + '/tcp')))
+const installNeedDocker = computed(() => installEnable.value && !!fw.value?.docker && installKind.value === 'firewalld')
+const canSubmitInstall = computed(() => {
+  if (!canInstall.value || !selectedInstallOpt.value || isKindInstalled(installKind.value)) return false
+  if (installEnable.value && selectedInstallOpt.value.canEnable) {
+    if (installExtraBad.value.length > 0) return false
+    if (installNeedDocker.value && !installDocker.value) return false
+  }
+  return true
+})
+
+function switchFromInstallToUninstall(kind: string) {
+  installOpen.value = false
+  openUninstall(kind)
+}
+
+function pickInstallKind(kind: FirewallKind) {
+  if (isKindInstalled(kind)) return
+  installKind.value = kind
+  if (kind !== 'firewalld' && kind !== 'ufw') installEnable.value = false
+}
+
+function openInstall() {
+  const def = defaultFirewallKind(fw.value?.pkgMgr)
+  const firstAvail = !isKindInstalled(def) ? def : (installOpts.value.find((o) => !isKindInstalled(o.kind))?.kind ?? def)
+  installKind.value = firstAvail
+  installNetwork.value = 'auto'
+  installEnable.value = false
+  installSel.value = candidates.value.filter((p) => !props.risky?.[p.port]).map(pkey)
+  installExtra.value = ''
+  installDocker.value = true
+  installOpen.value = true
+}
+
+function doInstall() {
+  if (!canSubmitInstall.value) return
+  const kind = installKind.value
+  const enable = installEnable.value && !!selectedInstallOpt.value?.canEnable
+  const args = ['port', 'install', props.target, kind, '-y', '-c', props.config]
+  if (installNetwork.value !== 'auto') args.push('--network', installNetwork.value)
+  if (enable) {
+    args.push('--enable')
+    const allow = [...new Set([...installSel.value, ...installExtraList.value])]
+    if (allow.length) args.push('--allow', allow.join(','))
+    if (installNeedDocker.value && installDocker.value) args.push('--restart-docker')
+  }
+  const k = key.value
+  const current = captureContext()
+  installOpen.value = false
+  const title = enable ? `在 ${props.target} 安装并打开防火墙（${kind}）` : `在 ${props.target} 安装防火墙（${kind}）`
+  startTask(title, args, (t) => {
+    if (t.status === 'ok' && t.data) {
+      cache[k] = t.data as PortReport
+      ElMessage.success(enable ? `防火墙 ${kind} 已安装并打开` : `防火墙 ${kind} 已安装`)
+    } else if (current()) {
+      load()
+    }
+    delete probes[k]
+  })
+}
+
+// ---------------------------------------------------------------- 卸载防火墙（需实时身份认证）
+
+const uninstallOpen = ref(false)
+const uninstallKind = ref<string>('')
+const uninstallPurge = ref(false)
+const uninstallDocker = ref(true)
+const uninstallSecret = ref('')
+const uninstallConfirmText = ref('')
+const uninstallUsePassword = ref(false)
+const uninstallChallenge = ref<FirewallChallenge | null>(null)
+const uninstallChallengeLoading = ref(false)
+const uninstallChallengeError = ref('')
+const uninstallAuthError = ref('')
+const uninstallAuthenticating = ref(false)
+
+const selectedUninstallItem = computed(() => uninstallable.value.find((i) => i.kind === uninstallKind.value))
+const uninstallNeedDocker = computed(() => !!fw.value?.docker && uninstallKind.value === 'firewalld' && !!selectedUninstallItem.value?.active)
+const uninstallAuthMeta = computed(() => authMethodMeta(fw.value?.uninstallAuth, uninstallUsePassword.value))
+const needProductionConfirm = computed(() => !!fw.value?.uninstallAuth?.production)
+const canSubmitUninstall = computed(() => {
+  if (!selectedUninstallItem.value || uninstallAuthenticating.value) return false
+  if (uninstallNeedDocker.value && !uninstallDocker.value) return false
+  if (uninstallAuthMeta.value.isChallenge && (!uninstallChallenge.value || uninstallChallengeLoading.value)) return false
+  if (!uninstallSecret.value.trim()) return false
+  if (needProductionConfirm.value && uninstallConfirmText.value.trim() !== uninstallKind.value) return false
+  return true
+})
+
+async function fetchUninstallChallenge(kind = uninstallKind.value) {
+  if (!kind) return
+  const current = captureContext()
+  const target = props.target, config = props.config
+  uninstallChallengeLoading.value = true
+  uninstallChallengeError.value = ''
+  uninstallChallenge.value = null
+  try {
+    const ch = await call<FirewallChallenge>(['port', 'uninstall-challenge', target, kind, '-c', config])
+    if (!current() || !uninstallOpen.value || uninstallKind.value !== kind) return
+    uninstallChallenge.value = ch
+  } catch (e) {
+    if (!current() || !uninstallOpen.value) return
+    uninstallChallengeError.value = (e as Error).message
+  } finally {
+    if (current()) uninstallChallengeLoading.value = false
+  }
+}
+
+function openUninstall(preferredKind?: string) {
+  const list = uninstallable.value
+  if (!list.length) return
+  const pick = (preferredKind && list.find((i) => i.kind === preferredKind)?.kind)
+    || (fw.value?.kind && list.find((i) => i.kind === fw.value?.kind)?.kind)
+    || list[0].kind
+  uninstallKind.value = pick
+  uninstallPurge.value = false
+  uninstallDocker.value = true
+  uninstallSecret.value = ''
+  uninstallConfirmText.value = ''
+  uninstallUsePassword.value = false
+  uninstallAuthError.value = ''
+  uninstallChallenge.value = null
+  uninstallChallengeError.value = ''
+  uninstallOpen.value = true
+  if (uninstallAuthMeta.value.isChallenge) {
+    void fetchUninstallChallenge(pick)
+  }
+}
+
+function closeUninstall() {
+  if (uninstallAuthenticating.value) return
+  uninstallOpen.value = false
+  uninstallSecret.value = ''
+  uninstallConfirmText.value = ''
+  uninstallAuthError.value = ''
+  uninstallChallenge.value = null
+  uninstallChallengeError.value = ''
+}
+
+function toggleUninstallAuthFallback() {
+  uninstallUsePassword.value = !uninstallUsePassword.value
+  uninstallSecret.value = ''
+  uninstallAuthError.value = ''
+  if (uninstallAuthMeta.value.isChallenge && !uninstallChallenge.value && !uninstallChallengeLoading.value) {
+    void fetchUninstallChallenge(uninstallKind.value)
+  }
+}
+
+watch(uninstallKind, (next, prev) => {
+  if (!uninstallOpen.value || !next || next === prev) return
+  uninstallAuthError.value = ''
+  uninstallConfirmText.value = ''
+  if (uninstallAuthMeta.value.isChallenge) {
+    uninstallSecret.value = ''
+    void fetchUninstallChallenge(next)
+  }
+})
+
+async function doUninstall() {
+  if (!canSubmitUninstall.value) return
+  const current = captureContext()
+  const target = props.target, config = props.config, k = key.value
+  const kind = uninstallKind.value
+  const purge = uninstallPurge.value
+  const restartDocker = uninstallNeedDocker.value && uninstallDocker.value
+  const meta = uninstallAuthMeta.value
+  const secretValue = uninstallSecret.value
+  const challengeId = uninstallChallenge.value?.id ?? ''
+
+  uninstallAuthenticating.value = true
+  uninstallAuthError.value = ''
+  try {
+    const authArgs = ['port', 'uninstall-auth', target, kind, '-c', config]
+    if (uninstallUsePassword.value && fw.value?.uninstallAuth?.canPasswordFallback) {
+      authArgs.push('--method', 'ssh-password')
+    }
+    if (meta.isChallenge && challengeId) {
+      authArgs.push('--challenge-id', challengeId)
+    }
+    const ticket = await call<FirewallTicket>(authArgs, { FERRY_FW_AUTH_SECRET: secretValue })
+    if (!current()) return
+    // 认证通过：立刻清空输入密码并关闭认证框，用服务端签发的一次性令牌发起卸载任务
+    uninstallSecret.value = ''
+    uninstallConfirmText.value = ''
+    uninstallChallenge.value = null
+    uninstallOpen.value = false
+
+    const args = ['port', 'uninstall', target, kind, '-y', '-c', config]
+    if (purge) args.push('--purge')
+    if (restartDocker) args.push('--restart-docker')
+    startTask(
+      `卸载 ${target} 的防火墙（${kind}）`,
+      args,
+      (t) => {
+        if (t.status === 'ok' && t.data) {
+          cache[k] = t.data as PortReport
+          ElMessage.success(`已卸载防火墙 ${kind}`)
+        } else if (current()) {
+          load()
+        }
+        delete probes[k]
+      },
+      { FERRY_FW_UNINSTALL_TOKEN: ticket.token },
+    )
+  } catch (e) {
+    if (!current()) return
+    uninstallAuthError.value = (e as Error).message
+    uninstallSecret.value = ''
+    if (meta.isChallenge && /过期|作废|不存在|不匹配/.test(uninstallAuthError.value)) {
+      void fetchUninstallChallenge(kind)
+    }
+  } finally {
+    if (current()) uninstallAuthenticating.value = false
+  }
+}
+
+watch(key, () => {
+  enableOpen.value = false
+  disableOpen.value = false
+  installOpen.value = false
+  uninstallOpen.value = false
+  uninstallSecret.value = ''
+  uninstallConfirmText.value = ''
+  uninstallAuthError.value = ''
+  uninstallChallenge.value = null
+})
 
 // ---------------------------------------------------------------- 改映射（只映射到本机）
 
@@ -455,11 +709,21 @@ const fwName = computed(() => {
       <template v-if="report && fw">
         <el-button v-if="fw.enable && !fw.active" type="primary" plain @click="openEnable">打开防火墙</el-button>
         <el-button v-if="fw.disable && fw.active" plain @click="openDisable">关闭防火墙</el-button>
+        <el-button v-if="hasPkgMgr" :type="canInstall ? 'primary' : 'default'" plain :icon="Plus" @click="openInstall">安装防火墙</el-button>
+        <el-tooltip v-else :show-after="HOVER_DELAY" content="服务器未检测到 dnf / yum / apt-get，不支持自动安装防火墙" placement="bottom">
+          <el-button plain disabled :icon="Plus">安装防火墙</el-button>
+        </el-tooltip>
+        <el-tooltip v-if="uninstallable.length" :show-after="HOVER_DELAY" content="需通过实时身份认证后方可卸载防火墙" placement="bottom">
+          <el-button type="danger" plain :icon="Lock" @click="openUninstall()">卸载防火墙</el-button>
+        </el-tooltip>
+        <el-tooltip v-else-if="nonUninstallableWhy" :show-after="HOVER_DELAY" :content="nonUninstallableWhy" placement="bottom">
+          <el-button plain disabled :icon="Lock">卸载防火墙</el-button>
+        </el-tooltip>
       </template>
       <el-tooltip :show-after="HOVER_DELAY" content="只重新读这一页的端口" placement="bottom"><el-button :icon="Refresh" :loading="loading || refreshing" circle aria-label="刷新端口" @click="refresh()" /></el-tooltip>
       <span class="spacer" />
       <template v-if="report && fw">
-        <span class="fw-state" :class="fw.active ? 'on' : 'off'"><span class="dot" />{{ fw.active ? '防火墙在运行' : '防火墙没开' }}</span>
+        <span class="fw-state" :class="fw.active ? 'on' : 'off'"><span class="dot" />{{ fw.active ? '防火墙在运行' : hasInstalledFw ? '防火墙没开' : '未安装防火墙' }}</span>
         <el-tooltip :show-after="HOVER_DELAY" :disabled="!fw.rules?.length" placement="bottom">
           <template #content>放行的规则：<br /><span v-for="r in fw.rules" :key="r" class="mono">{{ r }}<br /></span></template>
           <span class="fw-name" :title="fwName">{{ fwName }}</span>
@@ -486,7 +750,15 @@ const fwName = computed(() => {
     />
     <template v-else-if="report && fw">
       <div v-if="fw.why || report.notes?.length" class="fw-notes">
-        <span v-if="fw.why" class="fw-why">{{ fw.why }}</span>
+        <div v-if="fw.why" class="fw-notice-row">
+          <span class="fw-why">{{ fw.why }}</span>
+          <span class="fw-notice-actions">
+            <el-button v-if="hasPkgMgr" :type="canInstall ? 'primary' : 'default'" size="small" plain :icon="Plus" @click="openInstall">安装防火墙</el-button>
+            <span v-else-if="!hasInstalledFw" class="muted small">当前系统无 dnf / yum / apt-get，不支持自动安装</span>
+            <el-button v-if="fw.enable && !fw.active" type="primary" size="small" link @click="openEnable">打开防火墙</el-button>
+            <el-button v-if="uninstallable.length" type="danger" size="small" link :icon="Lock" @click="openUninstall()">卸载防火墙</el-button>
+          </span>
+        </div>
         <span v-for="n in report.notes ?? []" :key="n" class="fw-why">{{ n }}</span>
       </div>
 
@@ -618,6 +890,227 @@ const fwName = computed(() => {
       </template>
     </el-dialog>
 
+    <el-dialog v-if="installOpen && fw" :model-value="true" append-to-body :title="`在 ${target} 上安装防火墙`" width="680px" @close="installOpen = false">
+      <el-alert v-if="blockingFw" type="warning" :closable="false" show-icon class="fw-conflict-alert">
+        <template #title>
+          服务器上已安装 {{ firewallKindLabel(blockingFw.kind) }}（{{ blockingFw.active ? '运行中' : '未启用' }}）
+        </template>
+        <div class="fw-conflict-body">
+          <span>为避免多套防火墙规则冲突，安装其他类型前请先卸载当前防火墙。</span>
+          <el-button
+            v-if="blockingFw.uninstall"
+            type="danger"
+            size="small"
+            plain
+            :icon="Lock"
+            @click="switchFromInstallToUninstall(blockingFw.kind)"
+          >
+            先卸载 {{ blockingFw.kind }}（需认证）
+          </el-button>
+          <span v-else-if="blockingFw.why" class="muted small">{{ blockingFw.why }}</span>
+        </div>
+      </el-alert>
+      <div class="fw-dlg-head">
+        <span>选择要安装的防火墙类型</span>
+        <el-tag v-if="fw.pkgMgr" size="small" type="info" class="mono">包管理器：{{ fw.pkgMgr }}</el-tag>
+      </div>
+      <div class="fw-cards" role="radiogroup" aria-label="防火墙类型">
+        <button
+          v-for="opt in installOpts"
+          :key="opt.kind"
+          type="button"
+          class="fw-card"
+          :class="{ selected: installKind === opt.kind, disabled: isKindInstalled(opt.kind) }"
+          :disabled="isKindInstalled(opt.kind)"
+          role="radio"
+          :aria-checked="installKind === opt.kind"
+          @click="pickInstallKind(opt.kind)"
+        >
+          <div class="fw-card-top">
+            <span class="fw-card-name mono">{{ opt.name }}</span>
+            <span class="fw-card-tags">
+              <el-tag v-if="isKindInstalled(opt.kind)" size="small" type="warning">已安装</el-tag>
+              <el-tag v-else-if="opt.recommended" size="small" type="success">推荐</el-tag>
+              <el-tag size="small" :type="opt.manageable ? 'primary' : 'info'">{{ opt.manageable ? '支持界面管理' : '仅查看状态' }}</el-tag>
+            </span>
+          </div>
+          <div class="fw-card-tagline">{{ opt.tagline }}</div>
+          <div class="fw-card-desc">{{ opt.desc }}</div>
+          <div class="fw-card-foot mono">{{ opt.pkgHint }}</div>
+          <div v-if="opt.note" class="fw-card-note">{{ opt.note }}</div>
+        </button>
+      </div>
+
+      <div class="en-sec">软件包下载路线：</div>
+      <el-radio-group v-model="installNetwork" size="small">
+        <el-radio-button value="auto">自动（服务器连不上源时经本机）</el-radio-button>
+        <el-radio-button value="server">服务器自己下载</el-radio-button>
+        <el-radio-button value="local">经这台电脑下载</el-radio-button>
+      </el-radio-group>
+
+      <template v-if="selectedInstallOpt?.canEnable">
+        <div class="fw-enable-opt">
+          <el-checkbox v-model="installEnable">安装完成后立即打开防火墙</el-checkbox>
+          <p v-if="!installEnable" class="muted small fw-sub-tip">
+            默认仅安装软件包、不启用防火墙，不会拦截现有端口或影响 SSH 连接。安装完成后可随时点「打开防火墙」配置放行规则。
+          </p>
+        </div>
+        <div v-if="installEnable" class="fw-enable-box">
+          <div class="en-sec" style="margin-top: 0">一定放行（SSH，Ferry 用它连服务器）：<span class="mono">{{ sshList }}</span></div>
+          <div class="en-sec">现在对外开放的端口，勾上的继续放行：</div>
+          <el-checkbox-group v-if="candidates.length" v-model="installSel" class="en-list">
+            <el-checkbox v-for="p in candidates" :key="pkey(p)" :value="pkey(p)">
+              <span class="mono">{{ pkey(p) }}</span>
+              <span class="sub">{{ who(p).name || '—' }}</span>
+              <el-tooltip v-if="risky?.[p.port]" :show-after="HOVER_DELAY" :content="risky[p.port]" placement="top">
+                <el-tag size="small" type="warning" class="ml">不宜对外</el-tag>
+              </el-tooltip>
+            </el-checkbox>
+          </el-checkbox-group>
+          <p v-else class="muted small">除了 SSH，现在没有别的端口对外开放。</p>
+          <div class="en-sec">其他要放行的端口（可以不填）：</div>
+          <el-input v-model="installExtra" placeholder="如 51820/udp, 9000" />
+          <p v-if="installExtraBad.length" class="bad-text">看不懂：{{ installExtraBad.join(' ') }}（写 9000、9000/tcp 或 53/udp）</p>
+          <el-alert v-if="installNeedDocker" type="warning" :closable="false" show-icon class="en-docker">
+            <template #title>Docker 正在运行</template>
+            firewalld 打开时会动 Docker 的网络规则，容器的端口映射可能失效，要重启 Docker 才能恢复。
+            <div><el-checkbox v-model="installDocker">打开后重启 Docker（所有容器会重启一次）</el-checkbox></div>
+          </el-alert>
+          <p class="muted small" style="margin: 8px 0 0">安全保护：打开后 Ferry 马上用新的连接试一次 SSH；连不上的话，3 分钟后服务器会自动关掉防火墙，恢复原样。</p>
+        </div>
+      </template>
+      <p v-else class="muted small fw-sub-tip" style="margin-top: 12px">
+        安装 {{ installKind }} 后默认保持未启用状态，避免未审核规则意外阻断 SSH；安装完成后请在终端配置规则并按需启用。
+      </p>
+
+      <template #footer>
+        <el-button @click="installOpen = false">取消</el-button>
+        <el-button type="primary" :disabled="!canSubmitInstall" @click="doInstall">
+          {{ installEnable && selectedInstallOpt?.canEnable ? `安装并打开 ${installKind}` : `安装 ${installKind}` }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-if="uninstallOpen && fw"
+      :model-value="true"
+      append-to-body
+      :title="`卸载 ${target} 的防火墙`"
+      width="620px"
+      :close-on-click-modal="!uninstallAuthenticating"
+      :close-on-press-escape="!uninstallAuthenticating"
+      :before-close="(done: () => void) => { if (!uninstallAuthenticating) { closeUninstall(); done() } }"
+      @close="closeUninstall"
+    >
+      <div v-if="uninstallable.length > 1" class="fw-uninstall-pick">
+        <div class="en-sec" style="margin-top: 0">选择要卸载的防火墙：</div>
+        <el-radio-group v-model="uninstallKind">
+          <el-radio v-for="item in uninstallable" :key="item.kind" :value="item.kind">
+            <span class="mono">{{ firewallKindLabel(item.kind) }}</span>
+            <el-tag size="small" :type="item.active ? 'success' : 'info'" class="ml">{{ item.active ? '运行中' : '未启用' }}</el-tag>
+          </el-radio>
+        </el-radio-group>
+      </div>
+      <div v-else-if="selectedUninstallItem" class="fw-uninstall-target">
+        <span>目标防火墙：<b class="mono">{{ firewallKindLabel(selectedUninstallItem.kind) }}</b></span>
+        <el-tag size="small" :type="selectedUninstallItem.active ? 'success' : 'info'" class="ml">{{ selectedUninstallItem.active ? '运行中' : '未启用' }}</el-tag>
+      </div>
+
+      <el-alert type="warning" :closable="false" show-icon class="en-docker">
+        <template #title>卸载防火墙属于高危操作，需要实时身份认证</template>
+        <template v-if="selectedUninstallItem?.active">
+          卸载前会先停止并禁用防火墙服务，随后从系统中移除软件包；所有对外监听的端口将不再受此防火墙保护。
+        </template>
+        <template v-else>
+          将从系统中移除 {{ uninstallKind }} 软件包；卸载前会自动检查依赖，避免误删其他服务。
+        </template>
+      </el-alert>
+
+      <template v-if="selectedUninstallItem?.active">
+        <div class="en-sec">现在被防火墙拦着、卸载后外部能连上的端口：</div>
+        <div v-if="unblocked.length" class="en-list">
+          <div v-for="p in unblocked" :key="pkey(p)">
+            <span class="mono">{{ pkey(p) }}</span>
+            <span class="sub">{{ who(p).name || '—' }}</span>
+            <el-tag v-if="reach(p) === 'partial'" size="small" type="info" class="ml">现在只放行部分来源</el-tag>
+            <el-tooltip v-if="risky?.[p.port]" :show-after="HOVER_DELAY" :content="risky[p.port]" placement="top">
+              <el-tag size="small" type="warning" class="ml">不宜对外</el-tag>
+            </el-tooltip>
+          </div>
+        </div>
+        <p v-else class="muted small">没有：现在对外监听的端口防火墙都放行了。</p>
+      </template>
+
+      <el-alert v-if="uninstallNeedDocker" type="warning" :closable="false" show-icon class="en-docker">
+        <template #title>Docker 正在运行</template>
+        卸载运行中的 firewalld 时可能清掉 Docker 的网络规则，容器的端口映射会失效，要重启 Docker 才能恢复。
+        <div><el-checkbox v-model="uninstallDocker">卸载后重启 Docker（所有容器会重启一次）</el-checkbox></div>
+      </el-alert>
+
+      <div class="fw-purge-row">
+        <el-checkbox v-model="uninstallPurge">同时清除防火墙配置文件（原有放行规则和自定义配置将一并删除，不可恢复）</el-checkbox>
+      </div>
+
+      <div class="fw-auth-box">
+        <div class="fw-auth-head">
+          <span class="fw-auth-title">
+            <el-icon><Lock /></el-icon>
+            <span>卸载身份认证</span>
+            <el-tag size="small" type="warning" effect="plain">{{ uninstallAuthMeta.badge }}</el-tag>
+          </span>
+          <el-button v-if="fw.uninstallAuth?.canPasswordFallback" link type="primary" size="small" :disabled="uninstallAuthenticating" @click="toggleUninstallAuthFallback">
+            {{ uninstallUsePassword ? '切回一次性认证码' : '改用 SSH 密码认证' }}
+          </el-button>
+        </div>
+        <p class="muted small fw-auth-desc">{{ uninstallAuthMeta.description }}</p>
+
+        <template v-if="uninstallAuthMeta.isChallenge">
+          <div class="fw-challenge-row">
+            <span class="muted small">服务端一次性认证码：</span>
+            <span v-if="uninstallChallengeLoading" class="muted small">正在获取…</span>
+            <span v-else-if="uninstallChallenge" class="fw-challenge-code mono">{{ uninstallChallenge.code }}</span>
+            <span v-else class="bad-text">{{ uninstallChallengeError || '未获取到认证码' }}</span>
+            <el-button link type="primary" size="small" :disabled="uninstallChallengeLoading || uninstallAuthenticating" @click="fetchUninstallChallenge()">
+              重新获取
+            </el-button>
+          </div>
+          <el-input
+            v-model="uninstallSecret"
+            class="mono"
+            :placeholder="uninstallAuthMeta.placeholder"
+            :disabled="uninstallAuthenticating || !uninstallChallenge"
+            autocomplete="off"
+            @keyup.enter="doUninstall"
+          />
+        </template>
+        <template v-else>
+          <el-input
+            v-model="uninstallSecret"
+            type="password"
+            show-password
+            :placeholder="uninstallAuthMeta.placeholder"
+            :disabled="uninstallAuthenticating"
+            autocomplete="off"
+            @keyup.enter="doUninstall"
+          />
+        </template>
+
+        <div v-if="needProductionConfirm" class="fw-prod-confirm">
+          <div class="small">此目标标记为<b>生产服务器</b>，请输入 <span class="mono">{{ uninstallKind }}</span> 以二次确认：</div>
+          <el-input v-model="uninstallConfirmText" class="mono" :placeholder="`输入 ${uninstallKind}`" :disabled="uninstallAuthenticating" @keyup.enter="doUninstall" />
+        </div>
+
+        <el-alert v-if="uninstallAuthError" type="error" :title="uninstallAuthError" :closable="false" show-icon class="fw-auth-err" />
+      </div>
+
+      <template #footer>
+        <el-button :disabled="uninstallAuthenticating" @click="closeUninstall">取消</el-button>
+        <el-button type="danger" :loading="uninstallAuthenticating" :disabled="!canSubmitUninstall" @click="doUninstall">
+          {{ uninstallAuthenticating ? '正在认证…' : `认证并卸载 ${uninstallKind}` }}
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-if="remap" :model-value="true" append-to-body :title="`把容器 ${remap.container} 的 ${remap.port} 改成只映射到本机`" width="600px" @close="remap = null">
       <p>
         现在是 <span class="mono">{{ remapSpec.from }}</span>，监听所有地址，其他机器都能连。改成
@@ -712,7 +1205,196 @@ const fwName = computed(() => {
 .fw-line > .port-search { flex: 0 1 320px; min-width: 120px; }
 .fw-line > .spacer { flex-shrink: 1; min-width: 0; }
 .fw-line .el-button + .el-button { margin-left: 0; }
-.fw-notes { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 13px; }
+.fw-notes { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.fw-notice-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 12px;
+  border-radius: var(--ferry-card-radius);
+  border: 1px solid var(--el-color-warning-light-7);
+  background: var(--el-color-warning-light-9);
+}
+.fw-conflict-alert {
+  margin-bottom: 12px;
+}
+.fw-conflict-body {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 4px;
+}
+.fw-notice-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.fw-dlg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-weight: 500;
+}
+.fw-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.fw-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--el-border-color-light);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-primary);
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+.fw-card:hover:not(:disabled) {
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-fill-color-lighter);
+}
+.fw-card.selected {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset;
+}
+.fw-card.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.fw-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.fw-card-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.fw-card-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.fw-card-tagline {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--el-text-color-regular);
+}
+.fw-card-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+.fw-card-foot {
+  margin-top: auto;
+  padding-top: 4px;
+  font-size: 11.5px;
+  color: var(--el-text-color-secondary);
+}
+.fw-card-note {
+  font-size: 11.5px;
+  color: var(--el-color-warning-dark-2);
+}
+.fw-enable-opt {
+  margin-top: 12px;
+}
+.fw-sub-tip {
+  margin: 4px 0 0;
+  line-height: 1.5;
+}
+.fw-enable-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-lighter);
+}
+.fw-uninstall-pick,
+.fw-uninstall-target {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.fw-uninstall-pick {
+  flex-direction: column;
+  align-items: flex-start;
+}
+.fw-purge-row {
+  margin: 10px 0;
+}
+.fw-auth-box {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--el-color-danger-light-7);
+  background: var(--el-fill-color-lighter);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fw-auth-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.fw-auth-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.fw-auth-desc {
+  margin: 0;
+  line-height: 1.5;
+}
+.fw-challenge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.fw-challenge-code {
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--el-bg-color);
+  border: 1px dashed var(--el-color-primary);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--el-color-primary);
+  user-select: all;
+}
+.fw-prod-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.fw-auth-err {
+  margin-top: 2px;
+}
+@media (max-width: 640px) {
+  .fw-cards {
+    grid-template-columns: 1fr;
+  }
+}
 @container workspace (max-width: 700px) { .hint-sg { display: none; } }
 .fw-name {
   flex: 0 1 auto;

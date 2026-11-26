@@ -15,8 +15,19 @@ describe('任务与认证的目标解析', () => {
     expect(commandTarget(['software', 'runtime', 'install', 'prod', 'node', '--channel', '24'])).toBe('prod')
     expect(commandTarget(['software', 'jdk', '-c', 'ferry.yaml'])).toBe('jdk')
   })
-  it('覆盖多目标、端口测试、会话、备份、文件与免密配置', () => {
-    for (const args of [['deploy', '41,162', 'api'], ['port', 'check', '41', '8080'], ['who', 'kick', '41', '123'], ['backup', '41', 'restore'], ['files', 'ls', '41', '/'], ['keygen', '41']]) expect(commandTarget(args)).toBe('41')
+  it('覆盖多目标、端口测试、防火墙安装卸载认证、会话、备份、文件与免密配置', () => {
+    for (const args of [
+      ['deploy', '41,162', 'api'],
+      ['port', 'check', '41', '8080'],
+      ['port', 'install', '41', 'firewalld', '--enable'],
+      ['port', 'uninstall', '41', 'firewalld', '--purge'],
+      ['port', 'uninstall-auth', '41', 'firewalld'],
+      ['port', 'uninstall-challenge', '41', 'firewalld'],
+      ['who', 'kick', '41', '123'],
+      ['backup', '41', 'restore'],
+      ['files', 'ls', '41', '/'],
+      ['keygen', '41'],
+    ]) expect(commandTarget(args)).toBe('41')
     expect(commandTarget(['software', '41', '-c', 'ferry.yaml'])).toBe('41')
   })
   it.each([['runtime', 'list'], ['software', 'latest', 'nginx'], ['software', 'lib', 'import', 'nginx.tar'], ['software', 'template', 'save'], ['settings'], ['status', '-c', 'ferry.yaml']])('本地命令不产生虚构服务器 %j', (...args) => {

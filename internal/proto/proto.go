@@ -148,6 +148,16 @@ type Request struct {
 	// fwenable：打开防火墙前先放行这些端口（8080/tcp……；SSH 端口 agent 自己加上）；RestartDocker 打开（fwdisable：关闭）后重启 Docker
 	Allow         []string `json:"allow,omitempty"`
 	RestartDocker bool     `json:"restartDocker,omitempty"`
+	// fwinstall / fwuninstall / fwauth-*：防火墙安装、卸载与卸载认证
+	FirewallKind          string   `json:"firewallKind,omitempty"`          // firewalld | ufw | nftables | iptables
+	FirewallEnable        bool     `json:"firewallEnable,omitempty"`        // fwinstall：安装完成后立即启用（firewalld / ufw）
+	FirewallProxy         string   `json:"firewallProxy,omitempty"`         // fwinstall：经本机代理下载时的代理地址
+	FirewallNoProxy       []string `json:"firewallNoProxy,omitempty"`       // fwinstall：服务器直连的软件源主机
+	FirewallAllowChg      bool     `json:"firewallAllowChg,omitempty"`      // fwinstall：允许顺带改动已装的系统包
+	FirewallToken         string   `json:"firewallToken,omitempty"`         // fwuninstall：认证通过后服务端签发的一次性令牌
+	FirewallAuthMethod    string   `json:"firewallAuthMethod,omitempty"`    // fwauth-issue：认证方式（sudo-password | ssh-password | key-passphrase | ssh-key-challenge）
+	FirewallChallengeID   string   `json:"firewallChallengeId,omitempty"`   // fwauth-issue：免密密钥认证时的挑战 ID
+	FirewallChallengeCode string   `json:"firewallChallengeCode,omitempty"` // fwauth-issue：免密密钥认证时用户输入的挑战码
 
 	// audit：Audit 不为空时追加这一条审计记录；否则按 AuditQuery 读（见 audit.go）
 	Audit      *AuditEntry `json:"audit,omitempty"`
@@ -1431,6 +1441,49 @@ type Firewall struct {
 	Disable bool `json:"disable,omitempty"`
 	// Docker 服务器上的 Docker 正在运行（打开、关闭 firewalld 后要重启它，容器的端口映射才正常）
 	Docker bool `json:"docker,omitempty"`
+	// PkgMgr 服务器软件包管理器（dnf | yum | apt-get）；空 = 不支持自动安装 / 卸载防火墙
+	PkgMgr string `json:"pkgMgr,omitempty"`
+	// Installed 服务器上已安装的防火墙列表（用于显示、冲突检查与卸载）
+	Installed []FirewallItem `json:"installed,omitempty"`
+	// UninstallAuth 卸载防火墙所需的认证方式（由本机引擎按目标认证配置填充）
+	UninstallAuth *FirewallAuth `json:"uninstallAuth,omitempty"`
+}
+
+// FirewallItem 服务器上已安装的一种防火墙。
+type FirewallItem struct {
+	Kind      string `json:"kind"`                // firewalld | ufw | nftables | iptables
+	Active    bool   `json:"active"`              // 是否正在运行或拦截流量
+	Manage    bool   `json:"manage,omitempty"`    // Ferry 能否图形化管理端口
+	Uninstall bool   `json:"uninstall,omitempty"` // 能否通过 Ferry 卸载
+	Why       string `json:"why,omitempty"`       // 不能卸载时的原因
+}
+
+// FirewallAuth 卸载防火墙前的身份认证要求。
+type FirewallAuth struct {
+	// Method 认证方式：sudo-password | ssh-password | key-passphrase | ssh-key-challenge
+	Method              string `json:"method"`
+	Prompt              string `json:"prompt"`
+	User                string `json:"user,omitempty"`
+	Host                string `json:"host,omitempty"`
+	Port                int    `json:"port,omitempty"`
+	Production          bool   `json:"production,omitempty"`
+	CanPasswordFallback bool   `json:"canPasswordFallback,omitempty"`
+}
+
+// FirewallChallenge 免密 SSH 密钥目标卸载防火墙时服务端签发的一次性认证挑战。
+type FirewallChallenge struct {
+	ID        string    `json:"id"`
+	Code      string    `json:"code"`
+	Kind      string    `json:"kind"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// FirewallTicket 卸载认证通过后服务端签发的一次性卸载凭证。
+type FirewallTicket struct {
+	Token     string    `json:"token"`
+	Kind      string    `json:"kind"`
+	Method    string    `json:"method"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 // PortInfo 一个端口：有程序在监听的，或防火墙放行了的。
