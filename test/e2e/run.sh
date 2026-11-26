@@ -157,7 +157,10 @@ fi
 ssh-keygen -q -t ed25519 -N "" -f "$OUT/id_test" || die "ssh-keygen 失败"
 
 step "启动容器"
-docker build -q -t "$IMAGE" "$E2E" >/dev/null || die "构建镜像失败"
+if ! docker build -q -t "$IMAGE" "$E2E" >/dev/null; then
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || die "构建镜像失败"
+  echo "  ! docker build 失败，改用本机已有的 $IMAGE 镜像"
+fi
 for spec in a:2222 b:2223; do
   n=${spec%%:*} port=${spec#*:}
   [[ $focused == 1 ]] && port=
@@ -790,6 +793,56 @@ up_reviewed() {
 }
 t "ai-exec files_upload：上传" ok "已上传" -- up_reviewed
 t "上传后的内容" ok "upload-check" -- dx a 'cat /tmp/upload-src.txt'
+
+# 在编程软件里确认（桌面端未打开时，允许客户端确认的操作离线直接执行，必须桌面端的明确提示）
+mcp_settings_bak=""
+if [[ -f "$OUT/home/settings.json" ]]; then
+  mcp_settings_bak=$(cat "$OUT/home/settings.json")
+fi
+cat > "$OUT/home/settings.json" <<'EOF'
+{
+  "mcp": {
+    "allowChanges": true,
+    "confirmIn": "client",
+    "clientConfirmScope": "",
+    "clientConfirmFallback": "two_step",
+    "forceDesktopOnDanger": true
+  }
+}
+EOF
+t "MCP 客户端两段式确认（桌面端未打开）：重启 hk" ok '"state": "完成"' -- env MCPCALL_TWO_STEP=1 FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" app_control '{"target":"e2e-a","action":"restart","apps":["hk"],"reason":"e2e-two-step"}'
+t "客户端两段式确认后 hk 正常运行" ok "UP" -- health a 18086
+t "服务器端审计记录标注两段式确认来源" ok "编程软件两段式确认" -- MC audit_log '{"target":"e2e-a","limit":5}'
+t "standard 范围下 L1 写文件仍要求打开 Ferry 桌面版" fail "常规运维" -- env MCPCALL_TWO_STEP=1 FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-std-block.conf","content":"x\n","reason":"e2e"}'
+
+cat > "$OUT/home/settings.json" <<'EOF'
+{
+  "mcp": {
+    "allowChanges": true,
+    "confirmIn": "client",
+    "clientConfirmScope": "all",
+    "clientConfirmFallback": "two_step",
+    "forceDesktopOnDanger": true
+  }
+}
+EOF
+dx a 'printf "before\n" > /tmp/e2e-mcp-elicit.conf'
+t "MCP 表单确认（旧协议 2025-11-25 离线执行）：写文件" ok '"state": "完成"' -- env MCPCALL_ELICIT=approve MCPCALL_ELICIT_DELAY_MS=1600 MCPCALL_PROTOCOL=2025-11-25 FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-elicit.conf","content":"after-elicit\n","reason":"e2e-elicit"}'
+t "MCP 表单写文件已生效且保留原文件备份" ok "after-elicit before" -- dx a 'echo $(cat /tmp/e2e-mcp-elicit.conf) $(cat /tmp/e2e-mcp-elicit.conf.ferry-bak-*)'
+t "MCP 表单拒绝：不修改服务器文件" fail "拒绝或取消" -- env MCPCALL_ELICIT=decline MCPCALL_ELICIT_DELAY_MS=1600 MCPCALL_PROTOCOL=2025-11-25 FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-elicit.conf","content":"should-not-write\n","reason":"e2e-decline"}'
+t "MCP 表单拒绝后原文件未变" ok "after-elicit" -- dx a 'cat /tmp/e2e-mcp-elicit.conf'
+t "高危命令命中兜底：桌面端未打开时必须拒绝并提示打开 Ferry" fail "高危" -- env MCPCALL_ELICIT=approve MCPCALL_ELICIT_DELAY_MS=1600 FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" run_change_command '{"target":"e2e-a","command":"rm -rf /tmp/e2e-never-touch","reason":"e2e-danger"}'
+t "MCP Apps 交互卡片确认（离线执行）：执行改动命令" ok '"state":"done"' -- env MCPCALL_APP=approve FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" run_change_command '{"target":"e2e-a","command":"echo mcp-app-e2e-ok > /tmp/e2e-mcp-app.txt && cat /tmp/e2e-mcp-app.txt","reason":"e2e-mcp-app"}'
+t "MCP Apps 卡片执行的命令已落盘" ok "mcp-app-e2e-ok" -- dx a 'cat /tmp/e2e-mcp-app.txt'
+t "离线执行已写入桌面端任务历史（taskhist）" ok "离线执行" -- bash -c "cat \"$OUT/home/tasks\"/mcp-*.json"
+t "MCP Apps 卡片带理由拒绝" ok "先别改这个文件" -- env MCPCALL_APP=reject MCPCALL_APP_REASON="先别改这个文件" FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" write_file '{"target":"e2e-a","path":"/tmp/e2e-mcp-reject-reason.conf","content":"token=sk-ant-api03-E2ESecretTokenShouldBeRedacted12345\n","reason":"e2e-reject-reason"}'
+t "MCP 调用日志 calls.jsonl 已对入参敏感信息脱敏" ok "REDACTED_OK" -- bash -c "grep -q 'E2ESecretTokenShouldBeRedacted' \"$OUT/home/mcp/calls.jsonl\" && echo LEAKED || echo REDACTED_OK"
+t "MCP Apps 卡片下密码输入（ask_secret）仍强制需要 Ferry 桌面端" fail "Ferry 桌面版" -- env MCPCALL_APP=approve FERRY_HOME="$OUT/home" "$OUT/mcpcall$(go env GOEXE)" "$FERRY" "$E2E" ask_secret '{"target":"e2e-a","fields":[{"name":"e2e_pw","label":"测试密码"}],"purpose":"e2e"}'
+if [[ -n "$mcp_settings_bak" ]]; then
+  printf '%s\n' "$mcp_settings_bak" > "$OUT/home/settings.json"
+else
+  rm -f "$OUT/home/settings.json"
+fi
 t "调用记在 mcp/calls.jsonl" ok "backup_status" -- cat "$OUT/home/mcp/calls.jsonl"
 
 step "更多应用类型：Python、Node 服务端（上传目录，依赖在服务器上装）"
@@ -1236,6 +1289,25 @@ t "部署复用连接，多路上传的额外连接用完即关" ok "4 路并行
 list=$(srun pool)  # 不能放进管道：管道里的子 shell 拿不到 coproc 的文件描述符
 n=$(grep -o '127.0.0.1:2222' <<<"$list" | wc -l)
 has "部署后连接池里仍只有一条到 e2e-a 的连接" "=1=" "=$n="
+
+# 同一个 ferry serve 连接池里同时连着项目目标与独立连接时，who 能识别另一条属于本机 Ferry（跨 NAT 也能靠常驻 agent PID 命中）
+POOL_CONNS="$OUT/pool-connections.yaml"
+cat > "$POOL_CONNS" <<'EOF'
+version: 1
+kind: connections
+targets:
+  conn-e2e-a:
+    title: 独立连接A
+    host: 127.0.0.1
+    port: 2222
+    user: root
+    auth: key
+    identityFile: id_test
+EOF
+pw=$(srun who conn-e2e-a -c "$POOL_CONNS")
+has "独立连接视角：当前连接标为 self" '"origin":"self","originLabel":"当前连接"' "$pw"
+has "独立连接视角：识别同池项目连接为 ferry-pool" '"origin":"ferry-pool","originLabel":"本机 Ferry（项目：e2e）"' "$pw"
+t "断开测试用的独立连接" ok '"disconnected":true' -- srun disconnect conn-e2e-a -c "$POOL_CONNS"
 
 step "常驻连接：断线重连、配置变化、手动断开、空闲断开"
 dx a "pkill -f '^sshd(-session)?: root' || true"
@@ -1755,7 +1827,10 @@ dx a 'rm -rf /opt/ferry-software /tmp/mysqlpkg /tmp/mysql-init-seen.sql'
 
 step "离线 DEB 系统包：真实的 apt（Ubuntu 目标）"
 UB_IMAGE=ferry-e2e:ubuntu2204
-docker build -q -t "$UB_IMAGE" -f "$E2E/Dockerfile.ubuntu" "$E2E" >/dev/null || die "构建 Ubuntu 镜像失败"
+if ! docker build -q -t "$UB_IMAGE" -f "$E2E/Dockerfile.ubuntu" "$E2E" >/dev/null; then
+  docker image inspect "$UB_IMAGE" >/dev/null 2>&1 || die "构建 Ubuntu 镜像失败"
+  echo "  ! docker build 失败，改用本机已有的 $UB_IMAGE 镜像"
+fi
 docker rm -f "$containerPrefix-u" >/dev/null 2>&1
 docker run -d --name "$containerPrefix-u" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
   -p "127.0.0.1:2224:22" "$UB_IMAGE" >/dev/null || die "启动容器 u 失败"
@@ -2188,7 +2263,7 @@ t "已经关着：不用再关" ok "已经是关着的" -- F port disable e2e-a 
 dx a 'systemctl disable --now firewalld >/dev/null 2>&1; systemctl stop docker; rm -f /etc/systemd/system/firewalld.service /etc/systemd/system/docker.service /usr/local/bin/firewall-cmd /usr/local/bin/firewall-offline-cmd /tmp/docker-starts; rm -rf /var/lib/fakefw; systemctl daemon-reload'
 docker cp "$E2E/fakeufw.sh" ferry-e2e-a:/usr/local/bin/ufw >/dev/null
 dx a 'chmod 755 /usr/local/bin/ufw; rm -rf /var/lib/fakeufw; mkdir -p /var/lib/fakeufw; touch /var/lib/fakeufw/inactive'
-t "ufw 没启用：Ferry 能打开" ok '"kind":"ufw","active":false,"manage":false,"why":"ufw 装了但没有启用：所有端口都不拦","enable":true}' -- F port e2e-a --json
+t "ufw 没启用：Ferry 能打开" ok '"kind":"ufw","active":false,"manage":false,"why":"ufw 装了但没有启用：所有端口都不拦","enable":true' -- F port e2e-a --json
 t "ufw：打开" ok "防火墙已打开（ufw）" -- F port enable e2e-a --allow 16500 -y
 t "ufw：先放行了 SSH 端口" ok "allow 22/tcp" -- dx a 'cat /var/lib/fakeufw/rules'
 t "ufw 已启用" ok "Status: active" -- dx a 'ufw status'
@@ -2202,25 +2277,129 @@ t "内部网卡" ok '"iface":"virbr9","internal":true' -- F port e2e-a --json
 t "表格里写明网卡" ok "192.168.199.1（virbr9）" -- F port e2e-a
 dx a 'kill $(cat /run/sshd-e2e.pid); ip link del virbr9; true'
 
+step "安装与认证卸载防火墙（firewalld / 冲突保护 / 挑战码与单次令牌）"
+docker cp "$E2E/fakefirewalld.sh" ferry-e2e-a:/tmp/e2e-fakefirewalld.sh >/dev/null
+dx a 'rm -rf /var/lib/fakefw /var/lib/fakefw-pkg; mkdir -p /var/lib/fakefw-pkg
+cat > /usr/local/bin/rpm <<"EOS"
+#!/bin/sh
+if [ "$1" = "-q" ]; then
+  pkg=""
+  for a in "$@"; do
+    case "$a" in -*) ;; *) pkg="$a" ;; esac
+  done
+  case "$pkg" in
+    firewalld|ufw|nftables|iptables-services)
+      [ -f "/var/lib/fakefw-pkg/$pkg" ] && exit 0 || exit 1 ;;
+  esac
+fi
+exec /usr/bin/rpm "$@"
+EOS
+cat > /usr/local/bin/dnf <<"EOS"
+#!/bin/sh
+cmd="$1"; shift
+assumeno=0; pkg=""
+for a in "$@"; do
+  case "$a" in
+    --assumeno) assumeno=1 ;;
+    -*) ;;
+    *) pkg="$a" ;;
+  esac
+done
+if [ "$cmd" = "install" ]; then
+  if [ "$assumeno" = 1 ]; then
+    printf "Dependencies resolved.\nInstalling:\n %s noarch 1.0 baseos 1 M\n\nTransaction Summary\nInstall 1 Package\nOperation aborted.\n" "$pkg"
+    exit 1
+  fi
+  touch "/var/lib/fakefw-pkg/$pkg"
+  if [ "$pkg" = "firewalld" ]; then
+    cp /tmp/e2e-fakefirewalld.sh /usr/local/bin/firewall-cmd
+    chmod 755 /usr/local/bin/firewall-cmd
+    ln -sf /usr/local/bin/firewall-cmd /usr/local/bin/firewall-offline-cmd
+    mkdir -p /var/lib/fakefw && echo stopped > /var/lib/fakefw/state
+  fi
+  echo "Installed: $pkg"
+  exit 0
+fi
+if [ "$cmd" = "remove" ]; then
+  if [ "$assumeno" = 1 ]; then
+    printf "Dependencies resolved.\nRemoving:\n %s noarch 1.0 @baseos 1 M\n\nTransaction Summary\nRemove 1 Package\nOperation aborted.\n" "$pkg"
+    exit 1
+  fi
+  rm -f "/var/lib/fakefw-pkg/$pkg"
+  if [ "$pkg" = "firewalld" ]; then
+    rm -f /usr/local/bin/firewall-cmd /usr/local/bin/firewall-offline-cmd
+    rm -rf /var/lib/fakefw
+  fi
+  echo "Removed: $pkg"
+  exit 0
+fi
+exec /usr/bin/dnf "$cmd" "$@"
+EOS
+chmod 755 /usr/local/bin/rpm /usr/local/bin/dnf'
+pr=$(F port e2e-a --json 2>&1)
+has "没装防火墙时探测到包管理器与卸载认证方式" '"pkgMgr":"dnf"' "$pr"
+has "免密密钥目标使用 ssh-key-challenge 认证" '"method":"ssh-key-challenge"' "$pr"
+t "安装 firewalld（默认仅安装不启用）" ok "防火墙已安装（firewalld，尚未启用）" -- F port install e2e-a firewalld -y --network server
+pr=$(F port e2e-a --json 2>&1)
+has "安装后状态准确同步为已安装、未运行且可卸载" '"kind":"firewalld","active":false,"manage":false' "$pr"
+has "已安装列表标明可卸载" '"kind":"firewalld","active":false,"uninstall":true' "$pr"
+t "已安装 firewalld 时禁止冲突安装 ufw" fail "冲突" -- F port install e2e-a ufw -y --network server
+t "未认证直接卸载必须拒绝" fail "fw-auth-failed" -- F port uninstall e2e-a firewalld --json
+withfwauth() { FERRY_FW_AUTH_SECRET=$1 "${@:2}"; }
+withfwtok() { FERRY_FW_UNINSTALL_TOKEN=$1 "${@:2}"; }
+ch=$(F port uninstall-challenge e2e-a firewalld --json 2>&1)
+cid=$(echo "$ch" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | tail -n 1)
+ccode=$(echo "$ch" | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | tail -n 1)
+has "获取卸载一次性认证挑战码" '"kind":"firewalld"' "$ch"
+t "错误认证码认证失败" fail "fw-auth-failed" -- withfwauth "WRONG1" F port uninstall-auth e2e-a firewalld --challenge-id "$cid" --json
+tk=$(withfwauth "$ccode" F port uninstall-auth e2e-a firewalld --challenge-id "$cid" --json 2>&1)
+ftok=$(echo "$tk" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | tail -n 1)
+has "正确认证码签发单次卸载令牌" '"method":"ssh-key-challenge"' "$tk"
+t "凭有效令牌卸载 firewalld" ok '"ok":true' -- withfwtok "$ftok" F port uninstall e2e-a firewalld --purge --json
+t "单次令牌已核销，重放必须失败" fail "fw-auth-failed" -- withfwtok "$ftok" F port uninstall e2e-a firewalld --json
+pr=$(F port e2e-a --json 2>&1)
+has "卸载后恢复为没有防火墙状态" '"why":"服务器上没有防火墙（firewalld 或 ufw）：所有端口都不拦"' "$pr"
+dx a 'rm -rf /usr/local/bin/rpm /usr/local/bin/dnf /usr/local/bin/firewall-cmd /usr/local/bin/firewall-offline-cmd /tmp/e2e-fakefirewalld.sh /var/lib/fakefw /var/lib/fakefw-pkg'
+
 step "登录用户：查看、断开 SSH 连接（ferry who）"
 SSHO=(-i "$OUT/id_test" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -p 2223)
 # 没有 sudo 的普通用户（只能断开自己的连接）
 dx b 'id plain >/dev/null 2>&1 || useradd -m plain; mkdir -p /home/plain/.ssh; cp /root/.ssh/authorized_keys /home/plain/.ssh/; chown -R plain: /home/plain/.ssh; chmod 700 /home/plain/.ssh'
+# 额外准备一把带清晰备注的公钥，验证认证方式、公钥指纹备注、活跃端口转发与来源归属区分
+rm -f "$OUT/id_alice" "$OUT/id_alice.pub"
+ssh-keygen -q -t ed25519 -N "" -C "alice@workstation" -f "$OUT/id_alice" || die "ssh-keygen alice 失败"
+docker exec -i "$containerPrefix-b" sh -c 'cat >> /home/deployer/.ssh/authorized_keys' < "$OUT/id_alice.pub"
 ssh "${SSHO[@]}" -tt deployer@127.0.0.1 'sleep 120' >/dev/null 2>&1 < /dev/null &
 SSH1=$!
 ssh "${SSHO[@]}" deployer@127.0.0.1 'sleep 121' >/dev/null 2>&1 < /dev/null &
 SSH2=$!
 ssh "${SSHO[@]}" plain@127.0.0.1 'sleep 122' >/dev/null 2>&1 < /dev/null &
 SSH3=$!
-sleep 3
+ssh "${SSHO[@]}" -N -L 127.0.0.1:19876:127.0.0.1:22 deployer@127.0.0.1 >/dev/null 2>&1 < /dev/null &
+SSH_FWD=$!
+sleep 2
+ssh -i "$OUT/id_alice" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -p 19876 deployer@127.0.0.1 'sleep 123' >/dev/null 2>&1 < /dev/null &
+SSH_ALICE=$!
+sleep 2
 w=$(F who e2e-b --json 2>&1)
 has "能 sudo：看得到全部" '"priv":"sudo","me":"deployer"' "$w"
 has "终端的连接：终端、在跑的命令" '"ttys":["pts/' "$w"
 has "终端的连接是 terminal" '"cmds":["sleep 120"],"kind":"terminal"' "$w"
 has "执行命令的连接" '"idle":-1,"cmds":["sleep 121"],"kind":"exec"' "$w"
 has "本机 Ferry 自己的连接标出来、不能断开" '"self":true,"kick":false' "$w"
+has "本机连接归属标为当前连接" '"origin":"self","originLabel":"当前连接"' "$w"
+has "报告包含本机来源 IP" '"selfFrom":' "$w"
 has "来源 IP 和端口" '"fromPort":' "$w"
-t "表格输出" ok "sleep 121" -- F who e2e-b
+has "识别公钥认证与指纹" '"authMethod":"publickey","authKey":"SHA256:' "$w"
+has "反查 authorized_keys 公钥备注" '"authKeyComment":"alice@workstation"' "$w"
+has "识别其他 IP 来源归属" '"origin":"remote","originLabel":"其他 IP"' "$w"
+has "识别活跃端口转发目标" '"forwards":["127.0.0.1:22"]' "$w"
+tbl=$(F who e2e-b 2>&1)
+has "表格输出含命令" "sleep 121" "$tbl"
+has "表格输出含归属与公钥备注" "公钥 (alice@workstation)" "$tbl"
+has "表格输出含端口转发" "转发→127.0.0.1:22" "$tbl"
+kill "$SSH_ALICE" "$SSH_FWD" 2>/dev/null
+wait "$SSH_ALICE" "$SSH_FWD" 2>/dev/null || true
 pid=$(echo "$w" | sed -n 's/.*"pid":\([0-9]*\),[^{}]*"sleep 121".*/\1/p')
 t "断开执行命令的连接" ok '"ok":true' -- F who kick e2e-b "$pid" -y --json
 gone() { for _ in 1 2 3 4 5; do kill -0 "$1" 2>/dev/null || return 0; sleep 1; done; return 1; }
