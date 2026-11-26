@@ -27,10 +27,12 @@ describe('任务与认证的目标解析', () => {
       ['backup', '41', 'restore'],
       ['files', 'ls', '41', '/'],
       ['keygen', '41'],
+      ['mcp-exec', '41', '-c', 'ferry.yaml'],
+      ['mcp-exec', '41,162', '-c', 'ferry.yaml'],
     ]) expect(commandTarget(args)).toBe('41')
     expect(commandTarget(['software', '41', '-c', 'ferry.yaml'])).toBe('41')
   })
-  it.each([['runtime', 'list'], ['software', 'latest', 'nginx'], ['software', 'lib', 'import', 'nginx.tar'], ['software', 'template', 'save'], ['settings'], ['status', '-c', 'ferry.yaml']])('本地命令不产生虚构服务器 %j', (...args) => {
+  it.each([['runtime', 'list'], ['software', 'latest', 'nginx'], ['software', 'lib', 'import', 'nginx.tar'], ['software', 'template', 'save'], ['settings'], ['status', '-c', 'ferry.yaml'], ['mcp-exec'], ['mcp-exec', '-c', 'ferry.yaml']])('本地命令不产生虚构服务器 %j', (...args) => {
     expect(commandTarget(args)).toBeUndefined()
   })
 })

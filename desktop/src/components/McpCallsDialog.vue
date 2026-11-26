@@ -121,6 +121,7 @@ const channelBadge = (c: CallEntry) => {
   if (ch === 'elicitation') return 'MCP 表单'
   if (ch === 'two-step') return '两段式'
   if (ch === 'desktop') return '桌面弹窗'
+  if (!ch && c.decision && c.tool.endsWith(RESULT_TOOL)) return '桌面弹窗'
   return ''
 }
 
@@ -139,16 +140,26 @@ function resultText(c: CallEntry) {
 const range = ref<[Date, Date] | null>(null)
 const client = ref('')
 const tools = ref<string[]>([])
+const channel = ref('')
 const result = ref<'' | 'ok' | 'fail'>('')
 const changes = ref(false)
+const groupByOp = ref(false)
 const keyword = ref('')
 
-const filtered = computed(() => !!(range.value || client.value || tools.value.length || result.value || changes.value || keyword.value.trim()))
+const CHANNEL_OPTIONS = [
+  { value: 'desktop', label: '桌面弹窗' },
+  { value: 'mcp-app', label: 'MCP 卡片' },
+  { value: 'elicitation', label: 'MCP 表单' },
+  { value: 'two-step', label: '两段式' },
+]
+
+const filtered = computed(() => !!(range.value || client.value || tools.value.length || channel.value || result.value || changes.value || keyword.value.trim()))
 
 function resetFilters() {
   range.value = null
   client.value = ''
   tools.value = []
+  channel.value = ''
   result.value = ''
   changes.value = false
   keyword.value = ''
@@ -164,6 +175,13 @@ const shortcuts = [
 
 // ---------------------------------------------------------------- 列表
 
+interface DisplayRow extends CallEntry {
+  _key: string
+  _isGroup?: boolean
+  _stepCount?: number
+  children?: DisplayRow[]
+}
+
 const rows = ref<CallEntry[]>([])
 const total = ref(0)
 const allCount = ref(0)
@@ -174,11 +192,66 @@ const error = ref('')
 const page = ref(1)
 const pageSize = ref(50)
 
+const displayRows = computed<DisplayRow[]>(() => {
+  const flat: DisplayRow[] = rows.value.map((r, i) => ({ ...r, _key: `r-${i}-${r.time}-${r.tool}` }))
+  if (!groupByOp.value) return flat
+
+  const byOp = new Map<string, CallEntry[]>()
+  for (const r of rows.value) {
+    if (!r.op) continue
+    const list = byOp.get(r.op) ?? []
+    list.push(r)
+    byOp.set(r.op, list)
+  }
+
+  const out: DisplayRow[] = []
+  const emitted = new Set<string>()
+  for (let i = 0; i < rows.value.length; i++) {
+    const r = rows.value[i]
+    if (!r.op) {
+      out.push({ ...r, _key: `r-${i}-${r.time}-${r.tool}` })
+      continue
+    }
+    const list = byOp.get(r.op) ?? []
+    if (list.length < 2) {
+      out.push({ ...r, _key: `r-${i}-${r.time}-${r.tool}` })
+      continue
+    }
+    if (emitted.has(r.op)) continue
+    emitted.add(r.op)
+    // list 本身是新的在前：最新（通常是结果）作汇总行，展开后按时间正序显示每一步（请求 → 确认 → 结果）
+    const latest = list[0]
+    const resultRow = list.find((x) => x.tool.endsWith(RESULT_TOOL)) ?? latest
+    const requestRow = [...list].reverse().find((x) => !x.tool.endsWith(RESULT_TOOL) && !x.tool.endsWith(CLIENT_CONFIRM_TOOL)) ?? latest
+    const mergedArgs: Record<string, unknown> = { ...(requestRow.args ?? {}), ...(resultRow.args ?? {}) }
+    if (!mergedArgs.channel) {
+      const chRow = list.find((x) => typeof x.args?.channel === 'string' && x.args.channel)
+      if (chRow?.args?.channel) mergedArgs.channel = chRow.args.channel
+    }
+    const orderedChildren: DisplayRow[] = [...list].reverse().map((c, idx) => ({
+      ...c,
+      _key: `op-${r.op}-c-${idx}-${c.time}-${c.tool}`,
+    }))
+    out.push({
+      ...resultRow,
+      client: resultRow.client || requestRow.client,
+      tool: requestRow.tool,
+      args: mergedArgs,
+      _key: `op-${r.op}`,
+      _isGroup: true,
+      _stepCount: list.length,
+      children: orderedChildren,
+    })
+  }
+  return out
+})
+
 function args(): string[] {
   const a = ['mcp-log', '--offset', String((page.value - 1) * pageSize.value), '--limit', String(pageSize.value)]
   if (range.value) a.push('--since', range.value[0].toISOString(), '--until', range.value[1].toISOString())
   if (client.value) a.push('--client', client.value)
   if (tools.value.length) a.push('--tool', tools.value.join(','))
+  if (channel.value) a.push('--channel', channel.value)
   if (result.value) a.push('--result', result.value)
   if (changes.value) a.push('--changes')
   if (keyword.value.trim()) a.push('--q', keyword.value.trim())
@@ -217,7 +290,7 @@ onMounted(load)
 // 筛选条件变了回到第一页；关键字停下输入再查
 let timer: ReturnType<typeof setTimeout> | undefined
 onBeforeUnmount(() => { seq++; clearTimeout(timer) })
-watch([range, client, tools, result, changes], () => (page.value === 1 ? load() : (page.value = 1)), { deep: true })
+watch([range, client, tools, channel, result, changes], () => (page.value === 1 ? load() : (page.value = 1)), { deep: true })
 watch(keyword, () => {
   clearTimeout(timer)
   timer = setTimeout(() => (page.value === 1 ? load() : (page.value = 1)), 300)
@@ -256,12 +329,16 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
       <el-select v-model="tools" size="small" multiple collapse-tags collapse-tags-tooltip clearable placeholder="全部操作" class="tools">
         <el-option v-for="t in toolOptions" :key="t" :value="t" :label="toolName(t)" />
       </el-select>
+      <el-select v-model="channel" size="small" clearable placeholder="全部确认渠道" class="channel">
+        <el-option v-for="o in CHANNEL_OPTIONS" :key="o.value" :value="o.value" :label="o.label" />
+      </el-select>
       <el-radio-group v-model="result" size="small">
         <el-radio-button value="">全部</el-radio-button>
         <el-radio-button value="ok">成功</el-radio-button>
         <el-radio-button value="fail">失败</el-radio-button>
       </el-radio-group>
       <el-checkbox v-model="changes" size="small">只看改动服务器的</el-checkbox>
+      <el-checkbox v-model="groupByOp" size="small">按改动聚合</el-checkbox>
       <el-input v-model="keyword" size="small" clearable placeholder="搜索项目、服务器、应用、命令、错误…" class="keyword" />
       <GlassButton size="small" :disabled="!filtered" @click="resetFilters">清空筛选</GlassButton>
       <span class="spacer" />
@@ -270,7 +347,9 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="mb" />
     <el-table
       v-loading="loading"
-      :data="rows"
+      :data="displayRows"
+      row-key="_key"
+      :tree-props="{ children: 'children' }"
       size="small"
       border
       height="clamp(160px, calc(100dvh - 300px), 62vh)"
@@ -281,7 +360,7 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
           <div class="detail">
             <div v-if="row.op" class="muted small">
               改动 ID：<el-button link type="primary" size="small" class="mono op-link" @click="filterByOp(row.op)">{{ row.op }}</el-button>
-              <span class="muted">（点击筛选此次改动的完整链路）</span>
+              <span class="muted">（点击筛选此次改动的完整链路<template v-if="row._isGroup">；点时间列左侧箭头展开 {{ row._stepCount }} 步明细</template>）</span>
             </div>
             <div v-if="row.decision" class="muted small">确认：{{ row.decision }}</div>
             <div v-if="row.error" class="fail small">错误：{{ row.error }}</div>
@@ -290,16 +369,17 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="时间" width="160">
+      <el-table-column label="时间" width="185">
         <template #default="{ row }">{{ time(row.time) }}</template>
       </el-table-column>
       <el-table-column label="编程软件" width="170" show-overflow-tooltip>
         <template #default="{ row }">{{ row.client || '-' }}</template>
       </el-table-column>
-      <el-table-column label="做了什么" width="150">
+      <el-table-column label="做了什么" width="190">
         <template #default="{ row }">
           <div class="tool-cell">
             <span>{{ toolLabel(row) }}</span>
+            <el-tag v-if="row._isGroup" size="small" type="primary" effect="plain" disable-transitions>{{ row._stepCount }} 步</el-tag>
             <el-tag v-if="channelBadge(row)" size="small" type="info" effect="plain" disable-transitions>{{ channelBadge(row) }}</el-tag>
           </div>
         </template>
@@ -354,6 +434,9 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
 }
 .filters .tools {
   width: 190px;
+}
+.filters .channel {
+  width: 135px;
 }
 .filters .keyword {
   width: 240px;

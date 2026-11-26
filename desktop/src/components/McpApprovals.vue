@@ -339,7 +339,23 @@ async function fill(values: SecretValue[]) {
   queue.value = queue.value.filter((x) => x.id !== r.id)
 }
 
-/** 按请求里的操作、目标、应用拼命令，当作普通任务执行；进展和结果交回编程软件。 */
+/** 构造 ferry mcp-exec 的命令参数（保留目标与 -c 供任务面板归属和认证重试使用）与请求载荷。 */
+function mcpExecArgs(r: McpRequest): string[] {
+  const targetArg = r.targets?.length ? r.targets.join(',') : r.target
+  return ['mcp-exec', ...(targetArg ? [targetArg] : []), ...(r.config ? ['-c', r.config] : [])]
+}
+
+function mcpExecEnv(r: McpRequest): Record<string, string> {
+  // 去掉仅用于界面展示的大字段和流事件标记字段，只传执行所需请求体
+  const { detail: _d, content: _c, kind: _k, ...payload } = r as McpRequest & { kind?: string }
+  return {
+    FERRY_VIA: viaOf(r),
+    FERRY_MCP_REQ: JSON.stringify(payload),
+    ...(r.action === 'install' ? { FERRY_TASK_ID: r.id } : {}),
+  }
+}
+
+/** 经统一的 ferry mcp-exec 执行已确认的改动（与离线直接执行共用同一套 Go 执行器）；进展和结果交回编程软件。 */
 function execute(r: McpRequest) {
   if (r.action === 'create') {
     createProject(r)
@@ -349,82 +365,27 @@ function execute(r: McpRequest) {
     editConfig(r)
     return
   }
+  let title: string
   if (isDB(r)) {
-    const title = `${titleOf(r)}（${clientOf(r)} 请求）`
-    const args = ['db', 'ai-exec', r.db ?? '', r.database ?? '']
-    const task: Task = startTask(title, args, (t) => finish(r, t), {
-      FERRY_VIA: viaOf(r),
-      FERRY_DB_REQ: JSON.stringify({ stmts: r.stmts ?? [], dbCheck: r.dbCheck }),
-    })
-    runningTasks.set(r.id, task)
-    watchProgress(r, task)
-    return
+    title = `${titleOf(r)}（${clientOf(r)} 请求）`
+  } else if (isAI(r)) {
+    title = `${titleOf(r)} ${r.target}（${clientOf(r)} 请求）`
+  } else {
+    const apps = r.apps ?? []
+    const what = r.action.startsWith('sw-')
+      ? (r.software ?? '')
+      : r.action.startsWith('port-')
+        ? (r.port ?? '')
+        : r.action === 'fw-enable'
+          ? `放行 ${r.allow?.length ? r.allow.join('、') : 'SSH 端口'}`
+          : r.action === 'ssh-kick'
+            ? `PID ${(r.pids ?? []).join('、')}`
+            : r.action === 'backup-run'
+              ? r.backup || '全部'
+              : apps.join('、')
+    title = `${VERBS[r.action]} ${r.target}：${what}（${clientOf(r)} 请求）`
   }
-  if (isAI(r)) {
-    const title = `${titleOf(r)} ${r.target}（${clientOf(r)} 请求）`
-    const args = ['ai-exec', r.target, r.tool ?? '', '-c', r.config, '--scope', scopeOf(r)]
-    const task: Task = startTask(title, args, (t) => finish(r, t), {
-      FERRY_VIA: viaOf(r),
-      FERRY_AI_INPUT: JSON.stringify(r.input ?? {}),
-      FERRY_AI_STATE: r.aiState ?? '',
-      FERRY_AI_SCOPE: r.aiScope ?? '',
-      ...(r.action === 'install' ? { FERRY_TASK_ID: r.id } : {}),
-    })
-    runningTasks.set(r.id, task)
-    watchProgress(r, task)
-    return
-  }
-  const apps = r.apps ?? []
-  let args: string[]
-  switch (r.action) {
-    case 'sw-start':
-    case 'sw-stop':
-    case 'sw-restart':
-      args = ['software', r.action.slice(3), r.target, r.software ?? '', '-c', r.config]
-      break
-    case 'port-open':
-    case 'port-close':
-      args = ['port', r.action.slice(5), r.target, r.port ?? '', '-c', r.config, '--yes']
-      break
-    case 'fw-enable':
-      args = ['port', 'enable', r.target, ...(r.allow?.length ? ['--allow', r.allow.join(',')] : []), ...(r.restartDocker ? ['--restart-docker'] : []), '-c', r.config, '--yes']
-      break
-    case 'ssh-kick':
-      args = ['who', 'kick', r.target, ...(r.pids ?? []).map(String), '-c', r.config, '--yes']
-      break
-    case 'backup-run':
-      args = ['backup', r.target, 'run', ...(r.backup ? [r.backup] : []), '-c', r.config]
-      break
-    case 'deploy':
-      args = ['deploy', (r.targets?.length ? r.targets : [r.target]).join(','), apps.join(','), '-c', r.config, '--yes', ...(r.skipBuild ? ['--skip-build'] : [])]
-      if (r.full) args.push('--full')
-      if (r.noRollback) args.push('--no-rollback')
-      if (r.keepPerms) args.push('--keep-perms')
-      if (r.keep && Object.keys(r.keep).length) args.push('--keep-files', JSON.stringify(r.keep))
-      if (r.batch) args.push('--batch', String(r.batch))
-      if (r.canary !== undefined && r.canary !== null) args.push('--canary', String(r.canary))
-      if (r.observeSec) args.push('--observe', `${r.observeSec}s`)
-      if (r.onFailure) args.push('--on-failure', r.onFailure)
-      break
-    case 'rollback':
-      args = ['rollback', r.target, apps[0], '-c', r.config, '--yes', ...(r.to ? ['--to', r.to] : [])]
-      break
-    default:
-      args = [r.action, r.target, apps.join(','), '-c', r.config, '--yes']
-  }
-  const what = r.action.startsWith('sw-')
-    ? (r.software ?? '')
-    : r.action.startsWith('port-')
-      ? (r.port ?? '')
-      : r.action === 'fw-enable'
-        ? `放行 ${r.allow?.length ? r.allow.join('、') : 'SSH 端口'}`
-        : r.action === 'ssh-kick'
-          ? `PID ${(r.pids ?? []).join('、')}`
-          : r.action === 'backup-run'
-            ? r.backup || '全部'
-            : apps.join('、')
-  const title = `${VERBS[r.action]} ${r.target}：${what}（${clientOf(r)} 请求）`
-  const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: viaOf(r) })
+  const task: Task = startTask(title, mcpExecArgs(r), (t) => finish(r, t), mcpExecEnv(r))
   runningTasks.set(r.id, task)
   watchProgress(r, task)
 }
@@ -445,14 +406,14 @@ function watchProgress(r: McpRequest, task: Task) {
   watchers.set(task.id, stopWatch)
 }
 
-/** 新建项目：按向导的内容生成 ferry.yaml（不覆盖已有文件），加进项目列表。 */
+/** 新建项目：经统一的 ferry mcp-exec 生成 ferry.yaml（不覆盖已有文件），并加进桌面端项目列表。 */
 async function createProject(r: McpRequest) {
   const outcome: { ok: boolean; error?: string; data?: unknown } = { ok: false }
   try {
-    const res = await call<{ path: string }>(['create', '-c', r.config], { FERRY_CREATE_VALUE: JSON.stringify(r.spec) })
+    const res = await call<{ path: string; project?: string; note?: string }>(mcpExecArgs(r), mcpExecEnv(r))
     await addProject({ path: r.config, name: r.project })
     outcome.ok = true
-    outcome.data = { path: res.path, project: r.project, note: '已加进 Ferry 的项目列表；新服务器第一次连接前要在 Ferry 里核对主机公钥' }
+    outcome.data = { path: res.path, project: r.project, note: res.note || '已加进 Ferry 的项目列表；新服务器第一次连接前要在 Ferry 里核对主机公钥' }
     ElMessage.success(`已新建项目 ${r.project}（${clientOf(r)} 请求）`)
   } catch (e) {
     outcome.error = (e as Error).message
@@ -461,11 +422,11 @@ async function createProject(r: McpRequest) {
   call(['mcp-decide', r.id, 'done'], { FERRY_MCP_OUTCOME: JSON.stringify(outcome) }).catch(() => {})
 }
 
-/** 改项目配置 / 本机设置：按确认时算好的修改写入（文件在确认后又被改过就不写）。 */
+/** 改项目配置 / 本机设置：经统一的 ferry mcp-exec 按确认时算好的修改写入（文件在确认后又被改过就不写）。 */
 async function editConfig(r: McpRequest) {
   const outcome: { ok: boolean; error?: string; data?: unknown } = { ok: false }
   try {
-    outcome.data = await call(['config-edit', '-c', r.config], { FERRY_CONFIG_EDIT: JSON.stringify(r.input ?? {}) })
+    outcome.data = await call(mcpExecArgs(r), mcpExecEnv(r))
     outcome.ok = true
     noteConfigWritten(r.config)
     ElMessage.success(`已${cfgLocal(r) ? '改好本机设置' : '改好项目配置'}（${clientOf(r)} 请求）：下次部署时生效`)
@@ -533,7 +494,7 @@ const actionType = (a: string) =>
       <div class="headline">
         <el-tag :type="actionType(shown.action)" disable-transitions>{{ titleOf(shown) }}</el-tag>
         <el-tag v-if="shown.danger" type="danger" effect="dark" disable-transitions>危险：{{ shown.danger }}</el-tag>
-        <span class="muted small">来自 {{ clientOf(shown) }}</span>
+        <span class="muted small from">来自 {{ clientOf(shown) }}</span>
       </div>
       <el-descriptions :column="1" border size="small" label-width="80px">
         <el-descriptions-item v-if="isDB(shown)" label="数据库">
@@ -601,9 +562,32 @@ const actionType = (a: string) =>
 <style scoped>
 .headline {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 6px 10px;
   margin-bottom: 12px;
+}
+.headline :deep(.el-tag) {
+  max-width: 100%;
+  height: auto;
+  min-height: 24px;
+  padding-block: 3px;
+  white-space: normal;
+  line-height: 1.4;
+}
+.headline :deep(.el-tag__content) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.headline .from {
+  flex-shrink: 0;
+  max-width: 100%;
+}
+:deep(.el-descriptions__table) {
+  table-layout: fixed;
+}
+:deep(.el-descriptions__content) {
+  overflow-wrap: anywhere;
 }
 .small {
   font-size: 12px;
