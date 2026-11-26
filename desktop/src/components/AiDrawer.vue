@@ -966,7 +966,7 @@ function copy(text: string) {
                 :disabled="running"
                 aria-label="允许读取并发送排查明细"
               />
-              <el-popover placement="bottom-start" :width="365" trigger="click" :hide-after="0" transition="ai-access-popper" popper-class="ai-access-popper">
+              <el-popover placement="bottom-start" :width="365" trigger="click" :hide-after="0" popper-class="ai-access-popper">
                 <template #reference>
                   <button type="button" class="ai-info-button" aria-label="查看排查明细的范围和限制">
                     <el-icon aria-hidden="true"><InfoFilled /></el-icon>
@@ -986,7 +986,7 @@ function copy(text: string) {
                 </div>
               </el-popover>
             </div>
-            <el-popover v-if="!plain" placement="bottom-start" :width="344" trigger="click" :hide-after="0" transition="ai-access-popper" popper-class="cg-menu-popover ai-access-popper">
+            <el-popover v-if="!plain" placement="bottom-start" :width="344" trigger="click" :hide-after="0" transition="el-zoom-in-top" popper-class="cg-menu-popover ai-access-popper">
               <template #reference>
                 <GlassButton size="small" aria-label="自动确认设置">
                   <span class="ai-auto-label">自动确认{{ autoConfirmAvailable && autoConfirm.length ? ` · ${autoConfirm.length}` : '' }}<el-icon><ArrowDown /></el-icon></span>
@@ -1003,7 +1003,7 @@ function copy(text: string) {
               </div>
             </el-popover>
           </div>
-          <el-popover placement="bottom-end" :width="365" trigger="click" :hide-after="0" transition="ai-access-popper" popper-class="ai-access-popper">
+          <el-popover placement="bottom-end" :width="365" trigger="click" :hide-after="0" popper-class="ai-access-popper">
             <template #reference>
               <button type="button" class="ai-disclosure" :aria-label="`查看会发送哪些数据，当前模型 ${curModel?.name || '所选模型服务'}`">
                 <span>发送给 {{ curModel?.name || '所选模型服务' }}</span>
@@ -1251,11 +1251,6 @@ function copy(text: string) {
 .ai-history-popper.el-popper, .ai-access-popper.el-popper {
   box-sizing: border-box;
   max-width: calc(100vw - 24px);
-}
-.ai-access-popper-leave-active { visibility: hidden; pointer-events: none; }
-@media (prefers-reduced-motion: no-preference) {
-  .ai-access-popper-enter-active { animation: ai-access-popper-in .12s ease-out; }
-  @keyframes ai-access-popper-in { from { opacity: 0; } }
 }
 /* 液态玻璃：标题栏、提示条、输入框浮在对话上，对话占满整个抽屉、从它们下面滚过（比下面 scoped 的规则多一个类，才能盖过它们） */
 .ai-drawer.ai-glass .el-drawer__header { position: absolute; top: 0; left: 0; right: 0; z-index: 3; border-bottom: 0; }
