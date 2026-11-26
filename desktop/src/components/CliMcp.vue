@@ -2,8 +2,8 @@
 // 设置 → 命令行与 MCP：把 ferry 加进 PATH（Windows），以及编程软件接入 Ferry MCP 服务的配置。
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CopyDocument, Document, Tools } from '@element-plus/icons-vue'
-import { call, type Inspect } from '../ferry'
+import { CopyDocument, Document, Refresh, Tools } from '@element-plus/icons-vue'
+import { call, time, type Inspect } from '../ferry'
 import { projects } from '../state'
 import McpCallsDialog from './McpCallsDialog.vue'
 import McpToolsDialog from './McpToolsDialog.vue'
@@ -11,8 +11,50 @@ import GlassButton from './glass/GlassButton.vue'
 import GlassSwitch from './glass/GlassSwitch.vue'
 import GlassToggle from './glass/GlassToggle.vue'
 
-const props = defineProps<{ dataDir?: string; mcp: { allowChanges: boolean; targets: string[] | null; confirmIn?: string } }>()
+const props = defineProps<{
+  dataDir?: string
+  mcp: {
+    allowChanges: boolean
+    targets: string[] | null
+    confirmIn?: string
+    clientConfirmScope?: string
+    clientConfirmFallback?: string
+    forceDesktopOnDanger?: boolean
+  }
+}>()
 const emit = defineEmits<{ goto: [tab: string] }>()
+
+// 改动在哪里确认：'' = 在 Ferry 桌面端弹窗 | 'client' = 优先在编程软件里确认
+const confirmIn = computed({
+  get: () => (props.mcp.confirmIn === 'client' ? 'client' : ''),
+  set: (v: string) => {
+    props.mcp.confirmIn = v === 'client' ? 'client' : ''
+  },
+})
+
+// 允许在编程软件确认的范围：'' = 仅常规运维 | 'all' = 全部允许的改动
+const clientScope = computed({
+  get: () => (props.mcp.clientConfirmScope === 'all' ? 'all' : ''),
+  set: (v: string) => {
+    props.mcp.clientConfirmScope = v === 'all' ? 'all' : ''
+  },
+})
+
+// 编程软件不支持卡片和表单确认时的降级策略：'' = 自动切回 Ferry 桌面端 | 'two_step' = 两段式 confirm_change
+const clientFallback = computed({
+  get: () => (props.mcp.clientConfirmFallback === 'two_step' ? 'two_step' : ''),
+  set: (v: string) => {
+    props.mcp.clientConfirmFallback = v === 'two_step' ? 'two_step' : ''
+  },
+})
+
+// 命中高危标记时强制回退 Ferry 桌面端（默认开启）
+const forceDesktopOnDanger = computed({
+  get: () => props.mcp.forceDesktopOnDanger !== false,
+  set: (v: boolean) => {
+    props.mcp.forceDesktopOnDanger = v
+  },
+})
 
 // ---------------------------------------------------------------- 允许改动的目标
 
@@ -166,6 +208,74 @@ const tools = computed(() => {
 })
 const current = computed(() => tools.value.find((t) => t.id === tool.value)!)
 
+// ---------------------------------------------------------------- 已接入会话与诊断
+
+interface McpSession {
+  session: string
+  pid?: number
+  dir?: string
+  client?: string
+  protocolVersion?: string
+  channel?: string
+  capabilities?: string[]
+  lastSeen?: string
+  blocked?: boolean
+}
+
+const sessions = ref<McpSession[]>([])
+const loadingSessions = ref(false)
+
+/** 按当前设置与客户端能力实时推算该会话实际会走的确认渠道，避免修改设置后仍显示连接时的旧标签。 */
+function effectiveChannel(s: McpSession): string {
+  const caps = s.capabilities ?? []
+  if (caps.length === 0) return s.channel || 'desktop'
+  if (confirmIn.value !== 'client') return 'desktop'
+  if (caps.includes('mcp-app')) return 'mcp-app'
+  if (caps.includes('elicitation')) return 'elicitation'
+  if (clientFallback.value === 'two_step') return 'two-step'
+  return 'desktop'
+}
+
+const sessionChannelLabel = (ch?: string) =>
+  ch === 'mcp-app'
+    ? 'MCP 卡片'
+    : ch === 'elicitation'
+      ? 'MCP 表单'
+      : ch === 'two-step'
+        ? '两段式确认'
+        : 'Ferry 桌面弹窗'
+
+const shortDir = (dir?: string) => {
+  if (!dir) return ''
+  const parts = dir.replace(/[\\/]+$/, '').split(/[\\/]/)
+  return parts[parts.length - 1] || dir
+}
+
+const capLabel = (c: string) =>
+  ({ 'mcp-app': 'MCP 卡片', elicitation: 'MCP 表单', mrtr: 'MRTR', roots: '工作区 Roots' })[c] ?? c
+
+async function loadSessions() {
+  loadingSessions.value = true
+  try {
+    const r = await call<{ sessions: McpSession[] }>(['mcp-sessions'])
+    sessions.value = r.sessions ?? []
+  } catch {
+    sessions.value = []
+  } finally {
+    loadingSessions.value = false
+  }
+}
+
+async function unblockSession(session: string) {
+  try {
+    await call(['mcp-unblock', session])
+    ElMessage.success('已解除该连接的拉黑限制')
+    await loadSessions()
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
 // ---------------------------------------------------------------- 调用记录（点按钮在单独的窗口里看）
 
 const showCalls = ref(false)
@@ -179,7 +289,10 @@ async function loadCallCount() {
     callCount.value = undefined
   }
 }
-onMounted(loadCallCount)
+onMounted(() => {
+  loadCallCount()
+  loadSessions()
+})
 </script>
 
 <template>
@@ -216,12 +329,47 @@ onMounted(loadCallCount)
     </div>
     <p class="muted small">
       打开后，编程软件可以请求部署、启停、回滚、启停软件、放行 / 关闭端口、打开防火墙、断开 SSH 连接，以及和 AI 助手一样执行改动服务器的命令、写文件（显示差异、自动备份）、用模板装软件、保存软件模板，
-      但每次都要你确认，你同意了才做，由 Ferry 执行（任务面板里能看到、能停止）；5 分钟没确认自动拒绝，Ferry 没打开时一律不做。
+      但每次都要你确认，你同意了才做；Ferry 桌面端开着时由桌面端执行（任务面板里能看到、能停止），5 分钟没确认自动拒绝。
       要用到密码时，Ferry 弹出输入框让你填，编程软件只拿到代号，看不到内容。
       生产服务器（配置里 <span class="mono">production: true</span>）和设了 <span class="mono">aiChanges: false</span> 的服务器始终不允许。改完点「保存」生效。
     </p>
     <div v-if="props.mcp.allowChanges" class="scope">
-      <p class="muted small">每次改动都在 Ferry 桌面端单独确认。</p>
+      <div class="confirm-in">
+        <span class="small">在哪里确认：</span>
+        <el-radio-group v-model="confirmIn" size="small">
+          <el-radio value="">在 Ferry 桌面端弹窗</el-radio>
+          <el-radio value="client">优先在编程软件里确认</el-radio>
+        </el-radio-group>
+      </div>
+      <div v-if="confirmIn === 'client'" class="client-confirm-box">
+        <div class="confirm-in">
+          <span class="small">客户端确认范围：</span>
+          <el-radio-group v-model="clientScope" size="small">
+            <el-radio value="">仅常规运维（部署、启停、回滚、启停软件、定时任务、备份）</el-radio>
+            <el-radio value="all">全部允许的改动（含命令、写文件、改配置、改数据库等）</el-radio>
+          </el-radio-group>
+        </div>
+        <div class="confirm-in">
+          <GlassToggle v-model="forceDesktopOnDanger">
+            检测到高危操作（危险命令、无 WHERE 删改、改构建 / 钩子命令等）时，仍在 Ferry 桌面端确认
+          </GlassToggle>
+        </div>
+        <div class="confirm-in">
+          <span class="small">不支持卡片 / 表单时：</span>
+          <el-radio-group v-model="clientFallback" size="small">
+            <el-radio value="">自动切回 Ferry 桌面端确认（推荐）</el-radio>
+            <el-radio value="two_step">两段式确认（先返回预览，再在编程软件点击允许 confirm_change）</el-radio>
+          </el-radio-group>
+        </div>
+        <p class="muted small confirm-hint">
+          优先使用编程软件的 MCP 交互卡片（支持 diff 高亮与实时进度），其次使用 MCP 表单（Elicitation）；若软件秒回未展示确认框，会自动回退保护。
+          Ferry 桌面端开着时会在后台静默进任务面板执行（不抢焦点、可随时停止）；桌面端未打开时，只有必须在桌面端确认或执行的操作（填密码、高危拦截、多台灰度暂停部署等）才提示先打开 Ferry，可在编程软件里确认的改动会直接执行并记入审计。
+          提示：在 Cursor / Claude Code / VS Code 里可以把 Ferry 改动工具设为允许调用，只保留 Ferry 的确认卡片或表单，避免点两次。
+        </p>
+        <p v-if="clientFallback === 'two_step'" class="warn small confirm-hint">
+          注意：两段式确认依赖编程软件自身的工具确认栏（对 <span class="mono">confirm_change</span> 弹窗询问）；如果你在编程软件里开启了全自动放行 / YOLO（如跳过权限），确认会被自动通过，请仅在受信任的开发环境使用。
+        </p>
+      </div>
       <el-radio-group v-model="scope" size="small">
         <el-radio value="all">全部非生产服务器</el-radio>
         <el-radio value="selected">只允许下面打开的服务器</el-radio>
@@ -258,6 +406,31 @@ onMounted(loadCallCount)
       配置里用的是 ferry 程序的完整路径，不加入 PATH 也能用。Ferry 升级后路径不变，不用重新配置；换了安装位置要改一下。
       编程软件在项目目录里打开时，默认查看这个目录的 ferry.yaml；也可以直接说项目名（Ferry 项目列表里的名称）。
     </p>
+    <div class="section-head">
+      <h4>已接入会话与诊断</h4>
+      <GlassButton size="small" :icon="Refresh" :loading="loadingSessions" @click="loadSessions">刷新</GlassButton>
+    </div>
+    <div v-if="!sessions.length" class="muted small">
+      当前还没有接入桌面端的编程软件会话（编程软件连接 Ferry MCP 后会自动显示协商的协议版本、确认渠道与能力）。
+    </div>
+    <div v-else class="sessions-list">
+      <div v-for="s in sessions" :key="s.session" class="session-row">
+        <div class="session-main">
+          <span class="session-client">{{ s.client || '编程软件' }}</span>
+          <el-tag v-if="s.blocked" size="small" type="danger" effect="dark" disable-transitions>已拉黑</el-tag>
+          <el-tag size="small" type="info" disable-transitions>{{ sessionChannelLabel(effectiveChannel(s)) }}</el-tag>
+          <el-tag v-if="s.protocolVersion" size="small" type="info" effect="plain" disable-transitions>{{ s.protocolVersion }}</el-tag>
+          <el-tag v-for="c in s.capabilities ?? []" :key="c" size="small" type="success" effect="plain" disable-transitions>{{ capLabel(c) }}</el-tag>
+        </div>
+        <div class="session-meta muted small">
+          <span v-if="s.dir" class="mono" :title="s.dir">{{ shortDir(s.dir) }}</span>
+          <span v-if="s.pid" class="mono">PID {{ s.pid }}</span>
+          <span class="mono">{{ s.session.slice(0, 8) }}</span>
+          <span v-if="s.lastSeen">最近活跃 {{ time(s.lastSeen) }}</span>
+          <GlassButton v-if="s.blocked" size="small" tone="primary" @click="unblockSession(s.session)">解除拉黑</GlassButton>
+        </div>
+      </div>
+    </div>
     <h4>调用记录</h4>
     <p class="muted small">
       编程软件每次调用 Ferry 的工具、参数、结果，以及改动是否同意，都记在本机。
@@ -312,9 +485,21 @@ h4.first {
 }
 .confirm-in {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+}
+.client-confirm-box {
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+}
+.confirm-hint {
+  margin: 4px 0 0;
+  line-height: 1.55;
 }
 .targets {
   margin-top: 6px;
@@ -356,5 +541,43 @@ h4.first {
   position: absolute;
   top: 8px;
   right: 8px;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 14px;
+}
+.section-head h4 {
+  margin: 0;
+}
+.sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.session-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+}
+.session-main,
+.session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.session-client {
+  font-weight: 600;
+  font-size: 12.5px;
 }
 </style>

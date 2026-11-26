@@ -542,8 +542,12 @@ async function copyAbout() {
 function resetForm() {
   // 响应式对象不能 structuredClone：转成普通对象再改
   const s = JSON.parse(JSON.stringify(appSettings.value)) as AppSettings
-  s.mcp ??= { allowChanges: false, targets: [], logKeepDays: 30, logMaxMB: 20 } // 旧版本的设置里没有
+  s.mcp ??= { allowChanges: false, targets: [], confirmIn: '', clientConfirmScope: '', clientConfirmFallback: '', forceDesktopOnDanger: true, logKeepDays: 30, logMaxMB: 20 } // 旧版本的设置里没有
   s.mcp.targets ??= []
+  s.mcp.confirmIn ??= ''
+  s.mcp.clientConfirmScope ??= ''
+  s.mcp.clientConfirmFallback ??= ''
+  s.mcp.forceDesktopOnDanger ??= true
   s.mcp.logKeepDays ||= 30
   s.mcp.logMaxMB ||= 20
   s.notify ??= { channels: [] }
@@ -563,11 +567,13 @@ async function loadSecrets() {
   }
 }
 
-// 选主题立即生效；没保存就关掉时回到原来的（保存后 appSettings 已经是新的）
+let themeSaved = false
+
+// 选主题立即预览界面和标题栏，但不改桌面/任务栏快捷方式；点保存后再统一同步外壳图标，取消时回到原主题。
 watch(
   () => form.value?.ui.theme,
   (t, old) => {
-    if (t && old) applyTheme(t)
+    if (t && old) applyTheme(t, { preview: true })
   },
 )
 // 液态玻璃也一样：打开、关掉马上看到效果，没保存就关掉时恢复
@@ -591,7 +597,7 @@ watch(
   },
 )
 function restoreTheme() {
-  if (!appSettings.value) return
+  if (themeSaved || !appSettings.value) return
   applyTheme(appSettings.value.ui.theme)
   glass.enabled = appSettings.value.ui.glass !== false
   glass.transparency = appSettings.value.ui.glassTransparency ?? GLASS_TRANSPARENCY_DEFAULT
@@ -616,6 +622,7 @@ async function save() {
       ...(dnsKeys.value?.getSecretChanges() ?? []),
     ]
     await saveSettings(s, changes)
+    themeSaved = true
     aiModels.value?.acceptSecretChanges()
     notifyChannels.value?.acceptSecretChanges()
     dnsKeys.value?.acceptSecretChanges()

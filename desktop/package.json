@@ -1,10 +1,11 @@
 {
   "name": "ferry-desktop",
   "private": true,
-  "version": "0.18.9",
+  "version": "0.19.5",
   "type": "module",
   "scripts": {
     "sidecar": "node scripts/build-sidecar.mjs",
+    "mcp-app": "node scripts/build-mcp-app.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "dev:prepare": "npm run sidecar && npm run dev",
@@ -41,6 +42,7 @@
     "yaml": "^2.9.1"
   },
   "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.4",
     "@tauri-apps/cli": "^2.12.3",
     "@types/markdown-it": "^14.2.0",
     "@vitejs/plugin-vue": "^6.0.10",

@@ -6,7 +6,7 @@
 // 这里还记着（只在这次打开 Ferry 期间）：
 //   - 拒绝过的：同一个请求 2 分钟内再来直接拒绝；选了「这次连接不再接受」的，这次连接的请求都直接拒绝
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElNotification } from 'element-plus'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
 import { call, ferry, type FerryLine, type Running } from '../ferry'
 import { isTauri } from '../platform'
@@ -62,6 +62,10 @@ interface McpRequest {
   aiScope?: string
   /** secret：让用户填的项（值只交给 Ferry，编程软件只拿到代号） */
   fields?: SecretField[]
+  /** 用户已经在编程软件里确认了（由桌面端 Hub 验完预检令牌后置位）：不再弹窗、不抢焦点，静默进任务面板执行 */
+  clientConfirmed?: boolean
+  confirmChannel?: string
+  confirmNote?: string
   detail?: string[]
   reason?: string
   /** db-exec：在数据库连接 db（dbName 是名称）的库 database 里执行 stmts；经服务器连时 target 是那台服务器 */
@@ -69,6 +73,8 @@ interface McpRequest {
   dbName?: string
   dbKind?: string
   dbCheck?: string
+  dbEstimate?: string
+  dbEstimateMax?: number
   database?: string
   stmts?: string[]
 }
@@ -128,6 +134,10 @@ watch(current, (r) => {
 const estimate = ref<{ id: string; text: string; max: number; error?: string; busy?: boolean } | null>(null)
 async function estimateRows(r: McpRequest) {
   estimate.value = null
+  if (r.dbEstimate) {
+    estimate.value = { id: r.id, text: r.dbEstimate, max: r.dbEstimateMax ?? 0 }
+    return
+  }
   if (!['mysql', 'postgres'].includes(r.dbKind ?? '') || !r.db || !(r.stmts ?? []).some((x) => /\b(UPDATE|DELETE)\b/i.test(x))) return
   estimate.value = { id: r.id, text: '', max: 0, busy: true }
   try {
@@ -151,9 +161,30 @@ const left = computed(() => {
 const rejected = new Map<string, number>() // 拒绝的时间
 const blocked = new Set<string>() // 不再接受请求的连接
 const watchers = new Map<number, () => void>() // 执行中的任务：步骤变了就报给编程软件
+const runningTasks = new Map<string, Task>() // MCP 请求 ID → 运行中的桌面任务（支持从 MCP 侧停止）
 const keyOf = (r: McpRequest) =>
-  [r.session, r.config, r.target, r.action, (r.apps ?? []).join(','), r.software, r.port, (r.allow ?? []).join(','), (r.pids ?? []).join(','), r.backup, String(r.input?.app ?? r.input?.file ?? '')].join('|')
+  [
+    r.session,
+    r.config,
+    r.target,
+    r.action,
+    (r.apps ?? []).join(','),
+    r.software,
+    r.port,
+    (r.allow ?? []).join(','),
+    (r.pids ?? []).join(','),
+    r.backup,
+    r.db,
+    r.database,
+    (r.stmts ?? []).join('\n'),
+    r.tool,
+    r.input ? JSON.stringify(r.input) : '',
+    r.spec ? JSON.stringify(r.spec) : '',
+  ].join('|')
 const clientOf = (r: McpRequest) => r.client || '编程软件'
+const channelLabel = (ch?: string) =>
+  ch === 'mcp-app' ? '编程软件卡片确认' : ch === 'elicitation' ? '编程软件表单确认' : ch === 'two-step' ? '编程软件两段式确认' : '客户端确认'
+const viaOf = (r: McpRequest) => (r.clientConfirmed ? `${clientOf(r)} · MCP（${channelLabel(r.confirmChannel)}）` : `${clientOf(r)} · MCP`)
 const titleOf = (r: McpRequest) => {
   if (isDB(r)) return `${VERBS[r.action]} ${r.dbName ?? ''}（${r.stmts?.length ?? 0} 条${r.dbKind === 'redis' ? '命令' : r.dbKind === 'mongodb' ? '操作' : '语句'}）`
   if (r.action === 'create') return `新建项目 ${r.project}`
@@ -184,6 +215,13 @@ function subscribe() {
     const line = l as unknown as Record<string, unknown>
     if (l.kind === 'mcp-request') arrive(line as unknown as McpRequest)
     else if (l.kind === 'mcp-gone') queue.value = queue.value.filter((r) => r.id !== line.id)
+    else if (l.kind === 'mcp-cancel') {
+      const id = String(line.id ?? '')
+      runningTasks.get(id)?.kill?.()
+    } else if (l.kind === 'mcp-unblock') {
+      const sess = String(line.session ?? '')
+      if (sess) blocked.delete(sess)
+    }
   })
   running.done.then(() => {
     queue.value = []
@@ -197,8 +235,26 @@ async function arrive(r: McpRequest) {
     await reply(r, false, `用户已拒绝 ${clientOf(r)} 这次连接的所有改动请求`)
     return
   }
+  if (r.clientConfirmed) {
+    // 用户已经在编程软件里确认，且桌面端 Hub 已验完一次性预检令牌：不弹窗、不抢焦点，直接静默进任务面板执行
+    const note = r.confirmNote || `用户已在 ${clientOf(r)} 里确认（${channelLabel(r.confirmChannel)}）`
+    if (await reply(r, true, note)) {
+      execute(r)
+      ElNotification({
+        type: 'info',
+        title: `${clientOf(r)} 请求的操作开始执行`,
+        message: `${titleOf(r)}${r.target ? '（' + r.target + '）' : ''}：已在编程软件里确认，可在任务面板查看或停止`,
+        duration: 5000,
+      })
+    }
+    return
+  }
+  const nowMs = Date.now()
+  for (const [k, ts] of rejected) {
+    if (nowMs - ts >= REJECT_REPEAT_MS) rejected.delete(k)
+  }
   const last = rejected.get(keyOf(r))
-  if (last && Date.now() - last < REJECT_REPEAT_MS) {
+  if (last && nowMs - last < REJECT_REPEAT_MS) {
     await reply(r, false, '2 分钟内刚拒绝过同样的请求')
     return
   }
@@ -221,9 +277,15 @@ async function attention() {
 }
 
 /** 把决定交回去；请求已经不在了（超时、编程软件取消了）时返回 false。 */
-async function reply(r: McpRequest, approve: boolean, note = ''): Promise<boolean> {
+async function reply(r: McpRequest, approve: boolean, note = '', blockSession = false): Promise<boolean> {
   try {
-    await call(['mcp-decide', r.id, approve ? 'approve' : 'reject', ...(note ? ['--note', note] : [])])
+    await call([
+      'mcp-decide',
+      r.id,
+      approve ? 'approve' : 'reject',
+      ...(note ? ['--note', note] : []),
+      ...(!approve && blockSession ? ['--block'] : []),
+    ])
     return true
   } catch (e) {
     ElMessage.warning((e as Error).message)
@@ -243,7 +305,7 @@ async function decide(approve: boolean, blockSession = false) {
     } else {
       rejected.set(keyOf(r), Date.now())
       if (blockSession && r.session) blocked.add(r.session)
-      await reply(r, false, blockSession ? `你在 Ferry 里拒绝了，并且不再接受 ${clientOf(r)} 这次连接的改动请求` : '')
+      await reply(r, false, blockSession ? `你在 Ferry 里拒绝了，并且不再接受 ${clientOf(r)} 这次连接的改动请求` : '', blockSession)
     }
   } finally {
     queue.value = queue.value.filter((x) => x.id !== r.id)
@@ -291,9 +353,10 @@ function execute(r: McpRequest) {
     const title = `${titleOf(r)}（${clientOf(r)} 请求）`
     const args = ['db', 'ai-exec', r.db ?? '', r.database ?? '']
     const task: Task = startTask(title, args, (t) => finish(r, t), {
-      FERRY_VIA: `${clientOf(r)} · MCP`,
+      FERRY_VIA: viaOf(r),
       FERRY_DB_REQ: JSON.stringify({ stmts: r.stmts ?? [], dbCheck: r.dbCheck }),
     })
+    runningTasks.set(r.id, task)
     watchProgress(r, task)
     return
   }
@@ -301,12 +364,13 @@ function execute(r: McpRequest) {
     const title = `${titleOf(r)} ${r.target}（${clientOf(r)} 请求）`
     const args = ['ai-exec', r.target, r.tool ?? '', '-c', r.config, '--scope', scopeOf(r)]
     const task: Task = startTask(title, args, (t) => finish(r, t), {
-      FERRY_VIA: `${clientOf(r)} · MCP`,
+      FERRY_VIA: viaOf(r),
       FERRY_AI_INPUT: JSON.stringify(r.input ?? {}),
       FERRY_AI_STATE: r.aiState ?? '',
       FERRY_AI_SCOPE: r.aiScope ?? '',
       ...(r.action === 'install' ? { FERRY_TASK_ID: r.id } : {}),
     })
+    runningTasks.set(r.id, task)
     watchProgress(r, task)
     return
   }
@@ -360,7 +424,8 @@ function execute(r: McpRequest) {
             ? r.backup || '全部'
             : apps.join('、')
   const title = `${VERBS[r.action]} ${r.target}：${what}（${clientOf(r)} 请求）`
-  const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: `${clientOf(r)} · MCP` })
+  const task: Task = startTask(title, args, (t) => finish(r, t), { FERRY_VIA: viaOf(r) })
+  runningTasks.set(r.id, task)
   watchProgress(r, task)
 }
 
@@ -419,6 +484,7 @@ function lineText(l: FerryLine): string {
 }
 
 function finish(r: McpRequest, t: Task) {
+  runningTasks.delete(r.id)
   watchers.get(t.id)?.()
   watchers.delete(t.id)
   const outcome = {

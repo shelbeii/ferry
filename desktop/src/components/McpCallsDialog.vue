@@ -26,15 +26,19 @@ interface CallEntry {
 
 /** 改动结果那条记录在筛选里的「工具」（与 Go 的 mcpserver.ResultTool 一致） */
 const RESULT_TOOL = '（结果）'
+const CLIENT_CONFIRM_TOOL = '（编程软件里确认）'
 
 const TOOL_NAMES: Record<string, string> = {
   list_projects: '列出项目',
   app_status: '应用状态',
   app_secrets: '应用密钥状态',
   app_logs: '应用日志',
+  app_log_runs: '历史运行日志',
+  app_info: '应用详情',
   app_releases: '应用版本',
   deploy_history: '部署记录',
   audit_log: '审计记录',
+  server_info: '服务器信息',
   server_software: '服务器软件',
   server_ports: '端口和防火墙',
   ssh_sessions: 'SSH 连接',
@@ -42,6 +46,14 @@ const TOOL_NAMES: Record<string, string> = {
   port_check: '测试端口',
   preflight: '部署前检查',
   software_logs: '软件日志',
+  software_templates: '软件模板库',
+  template_guide: '软件模板格式',
+  keep_scan: '保留文件扫描',
+  files_list: '列目录',
+  files_preview: '预览文件',
+  files_size: '统计大小',
+  files_access: '检查文件权限',
+  files_download: '下载文件',
   run_command: '只读命令',
   build_log: '构建日志',
   detect_project: '识别项目',
@@ -49,6 +61,7 @@ const TOOL_NAMES: Record<string, string> = {
   monitor_status: '服务器告警',
   backup_status: '数据备份',
   task_status: '查进展',
+  task_cancel: '停止任务',
   config_schema: '配置项的说明',
   config_get: '查看配置',
   config_check: '检查配置',
@@ -63,18 +76,30 @@ const TOOL_NAMES: Record<string, string> = {
   app_control: '请求启停',
   rollback: '请求回滚',
   software_control: '请求启停软件',
+  software_install: '请求装软件',
+  software_upgrade: '请求升级软件',
+  software_restore: '请求恢复软件',
+  software_backup: '请求设置备份',
+  save_software_template: '请求保存模板',
   port_control: '请求放行 / 关闭端口',
   firewall_enable: '请求打开防火墙',
   ssh_disconnect: '请求断开 SSH',
   backup_run: '请求现在备份',
   backup_fetch: '请求取回异地的备份',
   run_job: '请求现在运行定时任务',
+  run_change_command: '请求执行命令',
+  write_file: '请求写文件',
+  files_upload: '请求上传文件',
+  ask_secret: '请求填写密码',
   create_project: '请求新建项目',
+  confirm_change: '两段式确认执行',
+  [CLIENT_CONFIRM_TOOL]: '编程软件里确认',
   [RESULT_TOOL]: '改动的结果',
 }
 
 const toolName = (t: string) => TOOL_NAMES[t] ?? t
-const toolLabel = (c: CallEntry) => toolName(c.tool.endsWith(RESULT_TOOL) ? RESULT_TOOL : c.tool)
+const toolLabel = (c: CallEntry) =>
+  toolName(c.tool.endsWith(RESULT_TOOL) ? RESULT_TOOL : c.tool.endsWith(CLIENT_CONFIRM_TOOL) ? CLIENT_CONFIRM_TOOL : c.tool)
 
 /** 参数里给人看的部分：项目、服务器、应用、命令…… */
 function argsText(c: CallEntry) {
@@ -88,6 +113,20 @@ function argsText(c: CallEntry) {
     parts.push(Array.isArray(v) ? v.join('、') : String(v))
   }
   return parts.join(' · ')
+}
+
+const channelBadge = (c: CallEntry) => {
+  const ch = typeof c.args?.channel === 'string' ? c.args.channel : ''
+  if (ch === 'mcp-app') return 'MCP 卡片'
+  if (ch === 'elicitation') return 'MCP 表单'
+  if (ch === 'two-step') return '两段式'
+  if (ch === 'desktop') return '桌面弹窗'
+  return ''
+}
+
+function filterByOp(op?: string) {
+  if (!op) return
+  keyword.value = op
 }
 
 function resultText(c: CallEntry) {
@@ -240,7 +279,10 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
       <el-table-column type="expand" width="32">
         <template #default="{ row }">
           <div class="detail">
-            <div v-if="row.op" class="muted small">改动 ID：<span class="mono">{{ row.op }}</span></div>
+            <div v-if="row.op" class="muted small">
+              改动 ID：<el-button link type="primary" size="small" class="mono op-link" @click="filterByOp(row.op)">{{ row.op }}</el-button>
+              <span class="muted">（点击筛选此次改动的完整链路）</span>
+            </div>
             <div v-if="row.decision" class="muted small">确认：{{ row.decision }}</div>
             <div v-if="row.error" class="fail small">错误：{{ row.error }}</div>
             <div class="muted small">耗时 {{ row.ms }} ms</div>
@@ -254,11 +296,19 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
       <el-table-column label="编程软件" width="170" show-overflow-tooltip>
         <template #default="{ row }">{{ row.client || '-' }}</template>
       </el-table-column>
-      <el-table-column label="做了什么" width="120">
-        <template #default="{ row }">{{ toolLabel(row) }}</template>
+      <el-table-column label="做了什么" width="150">
+        <template #default="{ row }">
+          <div class="tool-cell">
+            <span>{{ toolLabel(row) }}</span>
+            <el-tag v-if="channelBadge(row)" size="small" type="info" effect="plain" disable-transitions>{{ channelBadge(row) }}</el-tag>
+          </div>
+        </template>
       </el-table-column>
       <el-table-column label="内容" min-width="220" show-overflow-tooltip>
-        <template #default="{ row }">{{ argsText(row) }}</template>
+        <template #default="{ row }">
+          <el-button v-if="row.op" link type="primary" size="small" class="mono op-chip" title="点击按改动 ID 聚合筛选完整链路" @click="filterByOp(row.op)">#{{ row.op.slice(0, 6) }}</el-button>
+          <span>{{ argsText(row) }}</span>
+        </template>
       </el-table-column>
       <el-table-column label="结果" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
@@ -343,4 +393,7 @@ const pretty = (v: unknown) => JSON.stringify(v, null, 2)
   flex-wrap: wrap;
 }
 .foot > span { min-width: 0; overflow-wrap: anywhere; }
+.tool-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.op-chip { padding: 0; height: auto; margin-right: 4px; font-size: 11px; vertical-align: baseline; }
+.op-link { padding: 0; height: auto; font-size: 12px; vertical-align: baseline; }
 </style>

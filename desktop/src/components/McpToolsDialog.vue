@@ -123,7 +123,7 @@ function onScroll() {
     </div>
     <p class="muted small intro">
       编程软件（Claude Code、Cursor 等）接入 Ferry 后能用下面这些工具，AI 会按需要自己挑着用。
-      「查看」类只读取信息，直接执行；「改动」类每次都会在 Ferry 里弹出确认，你点「同意执行」才做，生产服务器始终不允许。
+      「查看」类只读取信息，直接执行；「改动」类每次都会让你确认（默认在 Ferry 桌面版弹窗，也可在设置里开启优先在编程软件中确认），同意后才执行，生产服务器始终不允许。
       <span v-if="!props.allowChanges" class="warn">「允许编程软件请求改动」现在没打开，改动类工具会被拒绝。</span>
     </p>
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="mb" />
