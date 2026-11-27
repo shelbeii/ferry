@@ -18,8 +18,14 @@ import { installTextSelectionGuard } from './textSelection'
 import { dialogTransition } from './fx/dialogParticles'
 import { installPopperParticles } from './fx/popperParticles'
 
-// 所有对话框打开、关闭时的粒子动画（见 fx/dialogParticles.ts）
-const app = createApp(App).use(ElementPlus, { locale: zhCn, dialog: { transition: dialogTransition } })
+// 所有对话框打开、关闭时的粒子动画（见 fx/dialogParticles.ts）；
+// 表格的 show-overflow-tooltip 默认用 fixed 定位并挂在 tableWrapper 内，开启液态玻璃时弹窗/抽屉上的 backdrop-filter
+// 会新建 fixed 包含块而 Popper.js 不识别 backdrop-filter，导致气泡错位且可能被 overflow: hidden 裁切，统一挂到 body。
+const app = createApp(App).use(ElementPlus, {
+  locale: zhCn,
+  dialog: { transition: dialogTransition },
+  table: { tooltipOptions: { appendTo: 'body' } },
+})
 // 按记着的主题换好标题栏和图标就显示窗口，不等后台读设置（见 state.ts 的 startTheme）
 const themeReady = startTheme()
 // 所有悬停说明（el-tooltip、表格里过长省略的单元格）都写 :show-after="HOVER_DELAY"
