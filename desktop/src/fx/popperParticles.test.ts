@@ -67,3 +67,16 @@ it('keeps the new animation when the popover is reopened during its close transi
   expect(leave.cancel).toHaveBeenCalledOnce()
   expect(enter.cancel).not.toHaveBeenCalled()
 })
+
+it('handles date picker poppers and custom database context menus', () => {
+  const { popper, run } = setup()
+  const selectors: string[] = []
+  popper.matches = ((selector: string) => {
+    selectors.push(selector)
+    return selector.includes('.el-picker__popper') && selector.includes('.db-grid-menu')
+  }) as unknown as () => boolean
+  popper.classList = ['el-zoom-in-top-enter-active']
+  run()
+  expect(selectors.length).toBeGreaterThan(0)
+  expect(popper.animate).toHaveBeenCalledOnce()
+})

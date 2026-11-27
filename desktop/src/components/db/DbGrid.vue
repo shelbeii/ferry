@@ -294,8 +294,10 @@ async function fitMenu() {
   const el = menuEl.value
   if (!m || !el) return
   const r = el.getBoundingClientRect()
-  m.x = Math.max(4, Math.min(m.x, window.innerWidth - r.width - 4))
-  m.y = Math.max(4, Math.min(m.y, window.innerHeight - r.height - 4))
+  const w = el.offsetWidth || r.width
+  const h = el.offsetHeight || r.height
+  m.x = Math.max(4, Math.min(m.x, window.innerWidth - w - 4))
+  m.y = Math.max(4, Math.min(m.y, window.innerHeight - h - 4))
 }
 onBeforeUnmount(() => offMenu?.())
 const menu = ref<{ x: number; y: number; row: number; col: number; added: boolean } | null>(null)
@@ -494,17 +496,19 @@ defineExpose({ selectedRows: () => [...selRows.value], clearSelection: () => { s
     <div v-if="!rows.length && !added?.length" class="empty">没有数据</div>
 
     <teleport to="body">
-      <ul v-if="menu" ref="menuEl" class="db-grid-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" @click.stop>
-        <li @click="menuDo('copy')">复制值</li>
-        <li @click="menuDo('copy-row')">复制整行（制表符分隔）</li>
-        <li @click="menuDo('copy-name')">复制列名</li>
-        <li @click="menuDo('view')">查看全部内容</li>
-        <template v-if="editable && canEdit(menu.col, menu.added, menu.row)">
-          <li class="sep" @click="menuDo('null')">设为 NULL</li>
-          <li v-if="menu.added" @click="menuDo('default')">用默认值</li>
-        </template>
-        <li v-if="editable && (menu.added || !deleted?.has(menu.row))" class="sep danger" @click="menuDo('remove')">删除{{ menu.added ? '这一行' : selRows.size > 1 ? ` ${selRows.size} 行` : '这一行' }}</li>
-      </ul>
+      <Transition name="el-zoom-in-top">
+        <ul v-if="menu" ref="menuEl" class="db-grid-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" @click.stop>
+          <li @click="menuDo('copy')">复制值</li>
+          <li @click="menuDo('copy-row')">复制整行（制表符分隔）</li>
+          <li @click="menuDo('copy-name')">复制列名</li>
+          <li @click="menuDo('view')">查看全部内容</li>
+          <template v-if="editable && canEdit(menu.col, menu.added, menu.row)">
+            <li class="sep" @click="menuDo('null')">设为 NULL</li>
+            <li v-if="menu.added" @click="menuDo('default')">用默认值</li>
+          </template>
+          <li v-if="editable && (menu.added || !deleted?.has(menu.row))" class="sep danger" @click="menuDo('remove')">删除{{ menu.added ? '这一行' : selRows.size > 1 ? ` ${selRows.size} 行` : '这一行' }}</li>
+        </ul>
+      </Transition>
     </teleport>
 
     <el-dialog :model-value="!!viewer" :title="viewer?.title" width="640px" append-to-body @close="viewer = null">
@@ -718,10 +722,11 @@ td.editing {
   font-size: 13px;
 }
 .db-grid-menu li {
+  position: relative;
   padding: 6px 14px;
   cursor: pointer;
 }
-.db-grid-menu li:hover {
+.db-grid-menu li:not(.off):hover {
   background: var(--el-fill-color-light);
 }
 .db-grid-menu li.sep {

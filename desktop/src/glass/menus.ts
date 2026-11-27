@@ -6,8 +6,8 @@
 import { createSprings } from './optics'
 import { glass, reducedMotion } from './runtime'
 
-const POPPER = '.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .cg-menu-popover'
-const ITEM = '.el-select-dropdown__item, .el-dropdown-menu__item, .el-autocomplete-suggestion li, .cg-menu-item'
+const POPPER = '.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .cg-menu-popover, .db-grid-menu'
+const ITEM = '.el-select-dropdown__item, .el-dropdown-menu__item, .el-autocomplete-suggestion li, .cg-menu-item, .db-grid-menu li'
 const POINTER = 'data-menu-pointer'
 const NAVIGATION_KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']
 
@@ -49,7 +49,7 @@ function moveTo(item: HTMLElement, jump = false) {
   const popper = item.closest<HTMLElement>(POPPER)
   if (!popper || !glass.enabled) return
   const menu = menuOf(popper)
-  if (item.classList.contains('is-disabled')) { hide(popper); return }
+  if (item.classList.contains('is-disabled') || item.classList.contains('off')) { hide(popper); return }
   const { x, y, width, height } = place(popper, item)
   const { pill, springs } = menu
   pill.style.left = `${x.toFixed(1)}px`

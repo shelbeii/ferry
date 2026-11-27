@@ -4,6 +4,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { Close, FullScreen, Minus, Monitor, Plus, ScaleToOriginal } from '@element-plus/icons-vue'
 import { activeTerminal, addTerminal, removeTerminal, terminalHeight, terminalShown, terminals, type TermTab } from '../state'
+import GlassButton from './glass/GlassButton.vue'
 
 // 用到时才加载（编辑器、终端、AI 助手和各个对话框不放进启动时加载的代码里）
 const TerminalView = defineAsyncComponent(() => import('./TerminalView.vue'))
@@ -87,10 +88,9 @@ onBeforeUnmount(stopDrag)
       />
     </div>
   </div>
-  <button v-if="!terminalShown && terminals.length" type="button" class="term-pill" @click="terminalShown = true">
-    <el-icon><Monitor /></el-icon>
+  <GlassButton v-if="!terminalShown && terminals.length" :icon="Monitor" class="term-pill" @click="terminalShown = true">
     终端（{{ terminals.length }}）
-  </button>
+  </GlassButton>
 </template>
 
 <style scoped>
@@ -178,24 +178,10 @@ onBeforeUnmount(stopDrag)
   flex: 1;
   min-height: 0;
 }
-.term-pill {
+.cg-button.term-pill {
   position: fixed;
   right: 16px;
   bottom: 16px;
   z-index: 1500;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border: 0;
-  border-radius: 16px;
-  background: #252526;
-  color: #eee;
-  font-size: 13px;
-  cursor: pointer;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
-}
-.term-pill:hover {
-  background: #333;
 }
 </style>

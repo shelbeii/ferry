@@ -1,11 +1,11 @@
-// 下拉框（下拉选择、下拉菜单、输入建议、点击弹出的浮层如「部署参数」）和确认框（ElMessageBox：启动、停止、删除前的确认……）
+// 下拉框（下拉选择、下拉菜单、输入建议、日期时间选择、右键菜单、点击弹出的浮层如「部署参数」）和确认框（ElMessageBox：启动、停止、删除前的确认……）
 // 打开、收起时也用对话框那套粒子动画（见 dialogParticles.ts）。
-// 这些都由 Element Plus 生成、用 CSS 过渡显示和隐藏（下拉框是 el-zoom-in-top，确认框的遮罩是 fade-in-linear），没有全局的过渡设置：
+// 这些都用 CSS 过渡显示和隐藏（下拉框与右键菜单是 el-zoom-in-top，确认框的遮罩是 fade-in-linear），没有全局的过渡设置：
 // 全局监听 transitionrun，过渡开始时看上面是 enter 还是 leave 的 class，就知道是打开还是收起，不用一个个改组件。
 // 打开时不再缩放弹出、确认框不再下落（style.css 里 html.fx-particles 的规则），改由粒子收拢、跟着淡入；收起时淡出、化成粒子散开。
 import { CLOSE_MS, OPEN_MS, particlesIn, particlesOut, slow, type ParticleAmount } from './dialogParticles'
 
-const POPPER = '.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-popover.el-popper'
+const POPPER = '.el-select__popper, .el-dropdown__popper, .el-autocomplete__popper, .el-picker__popper, .el-popover.el-popper, .db-grid-menu'
 const MESSAGE_BOX = '.el-overlay.is-message-box'
 // 下拉框小，按对话框的密度（每 50 平方像素一颗）只有几百颗、显得稀：密一倍多，最少 900 颗；
 // 下拉框要跟手，打开时收拢用对话框六成的时间（约 0.18 秒），收起和对话框一样

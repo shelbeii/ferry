@@ -526,6 +526,17 @@ function onTabsWheel(e: WheelEvent) {
 const tabMenu = ref<{ x: number; y: number; key: string } | null>(null)
 const tabMenuEl = ref<HTMLElement>()
 let offTabMenu: (() => void) | null = null
+async function fitTabMenu() {
+  await nextTick()
+  const m = tabMenu.value
+  const el = tabMenuEl.value
+  if (!m || !el) return
+  const r = el.getBoundingClientRect()
+  const w = el.offsetWidth || r.width
+  const h = el.offsetHeight || r.height
+  m.x = Math.max(4, Math.min(m.x, window.innerWidth - w - 4))
+  m.y = Math.max(4, Math.min(m.y, window.innerHeight - h - 4))
+}
 function onTabsContext(e: MouseEvent) {
   const item = (e.target as HTMLElement).closest('.el-tabs__item')
   const key = item?.id?.replace(/^tab-/, '')
@@ -534,6 +545,7 @@ function onTabsContext(e: MouseEvent) {
   offTabMenu?.()
   tabMenu.value = { x: e.clientX, y: e.clientY, key }
   offTabMenu = closeOnOutside((t) => !!tabMenuEl.value?.contains(t), () => { tabMenu.value = null })
+  void fitTabMenu()
 }
 const tabMenuItems = computed(() => {
   const m = tabMenu.value
@@ -616,8 +628,10 @@ async function fitMenu() {
   const el = menuEl.value
   if (!m || !el) return
   const r = el.getBoundingClientRect()
-  m.x = Math.max(4, Math.min(m.x, window.innerWidth - r.width - 4))
-  m.y = Math.max(4, Math.min(m.y, window.innerHeight - r.height - 4))
+  const w = el.offsetWidth || r.width
+  const h = el.offsetHeight || r.height
+  m.x = Math.max(4, Math.min(m.x, window.innerWidth - w - 4))
+  m.y = Math.max(4, Math.min(m.y, window.innerHeight - h - 4))
 }
 onBeforeUnmount(() => { offMenu?.(); offTabMenu?.() })
 
@@ -1216,15 +1230,19 @@ function nodeIcon(d: TreeData) {
     </div>
 
     <teleport to="body">
-      <ul v-if="menu" ref="menuEl" class="db-grid-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" @click.stop>
-        <li v-for="m in menuItems" :key="m.k" :class="{ sep: m.sep, danger: m.danger, off: m.off }" @click="!m.off && menuDo(m.k)">{{ m.t }}</li>
-      </ul>
+      <Transition name="el-zoom-in-top">
+        <ul v-if="menu" ref="menuEl" class="db-grid-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" @click.stop>
+          <li v-for="m in menuItems" :key="m.k" :class="{ sep: m.sep, danger: m.danger, off: m.off }" @click="!m.off && menuDo(m.k)">{{ m.t }}</li>
+        </ul>
+      </Transition>
     </teleport>
 
     <teleport to="body">
-      <ul v-if="tabMenu" ref="tabMenuEl" class="db-grid-menu" :style="{ left: tabMenu.x + 'px', top: tabMenu.y + 'px' }" @click.stop>
-        <li v-for="m in tabMenuItems" :key="m.k" :class="{ sep: m.sep, off: m.off }" @click="!m.off && tabMenuDo(m.k)">{{ m.t }}</li>
-      </ul>
+      <Transition name="el-zoom-in-top">
+        <ul v-if="tabMenu" ref="tabMenuEl" class="db-grid-menu" :style="{ left: tabMenu.x + 'px', top: tabMenu.y + 'px' }" @click.stop>
+          <li v-for="m in tabMenuItems" :key="m.k" :class="{ sep: m.sep, off: m.off }" @click="!m.off && tabMenuDo(m.k)">{{ m.t }}</li>
+        </ul>
+      </Transition>
     </teleport>
 
     <DbConnDialog :conn="connDialog" @close="connDialog = null" @saved="onSaved" />
