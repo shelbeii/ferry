@@ -1199,7 +1199,7 @@ async function onSaved(deployment?: DeploymentRequest) {
         </template>
       </el-dropdown>
       <!-- 项目名胶囊：项目名、当前服务器的地址（点地址改配置）；窄窗口时地址放回第二行 -->
-      <GlassPane radius="pill" class="title-pill">
+      <GlassPane variant="clear" radius="pill" class="title-pill cg-capsule">
         <el-tooltip :show-after="HOVER_DELAY" :content="project.path" placement="bottom-start">
           <h2>{{ info?.project ?? project.name }}</h2>
         </el-tooltip>

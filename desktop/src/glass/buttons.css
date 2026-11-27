@@ -51,7 +51,7 @@ html.dark .cg-glow {
   html.cg-on :where(.el-dialog, .el-drawer, .el-message-box, .el-popper) {
     --cg-action-optics: clamp(.14, calc(.26 - .07 * var(--cg-k, 1)), .26);
   }
-  html.cg-on :where(button, .el-button, [role="button"], .install-template-card) {
+  html.cg-on :where(button, .el-button, [role="button"], .install-template-card, .cg-capsule) {
     --cg-action-accent: transparent;
     --cg-action-ink: var(--el-text-color-regular);
     --cg-action-hover: 0%;
@@ -76,19 +76,21 @@ html.dark .cg-glow {
     --cg-action-hover: 13%;
   }
 
-  html.cg-on .cg-button {
+  /* 顶栏按钮与静态信息胶囊（.cg-capsule）共用轻量玻璃材质，避免同排深浅与阴影割裂；
+     提高选择器优先级以稳定覆盖各主题下 GlassPane.vue 的默认面板投影与厚内边。 */
+  html.cg-on .cg:not(.cg-plain):is(.cg-button, .cg-capsule) {
     --cg-bright: 1;
     --cg-sat: 1.12;
     --cg-rim-hi: .55;
     --cg-rim-back: .22;
     --cg-rim-lo: .05;
-    color: var(--cg-action-ink);
     box-shadow: 0 0 0 1px var(--cg-action-edge), var(--cg-action-shadow);
   }
-  html.dark.cg-on .cg-button { --cg-rim-hi: .38; }
-  html.cg-on .cg-button > .cg-tint { background: var(--cg-action-fill); }
-  html.cg-on .cg-button > .cg-optic { opacity: var(--cg-action-optics); }
-  html.cg-on .cg-button > .cg-rim { box-shadow: inset 0 1px 1px var(--cg-action-highlight); }
+  html.cg-on .cg:not(.cg-plain).cg-button { color: var(--cg-action-ink); }
+  html.dark.cg-on .cg:not(.cg-plain):is(.cg-button, .cg-capsule) { --cg-rim-hi: .38; }
+  html.cg-on .cg:not(.cg-plain):is(.cg-button, .cg-capsule) > .cg-tint { background: var(--cg-action-fill); }
+  html.cg-on .cg:not(.cg-plain):is(.cg-button, .cg-capsule) > .cg-optic { opacity: var(--cg-action-optics); }
+  html.cg-on .cg:not(.cg-plain):is(.cg-button, .cg-capsule) > .cg-rim { box-shadow: inset 0 1px 1px var(--cg-action-highlight); }
 
   /* Element Plus 的尺寸、图标、默认事件和组合边框继续由组件管理。 */
   html.cg-on .el-button:not(.is-link, .is-text) {
