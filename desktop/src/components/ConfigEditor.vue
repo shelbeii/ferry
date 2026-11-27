@@ -354,6 +354,10 @@ async function beforeClose(done: () => void) {
   }
   done()
 }
+
+function cancel() {
+  void beforeClose(() => { visible.value = false })
+}
 </script>
 
 <template>
@@ -415,6 +419,7 @@ async function beforeClose(done: () => void) {
       <span v-if="saveMsg" :class="saveMsg.ok ? 'ev-ok' : 'ev-error'" class="foot-msg">{{ saveMsg.text }}</span>
       <span v-else class="muted foot-tip">密码等敏感信息不要写进配置</span>
       <el-button :disabled="text === original" @click="restore">撤销全部修改</el-button>
+      <el-button :disabled="saving" @click="cancel">取消</el-button>
       <el-button type="primary" :loading="saving" :disabled="!loaded || refreshing || !!loadError" @click="save">保存</el-button>
       </template>
     </template>

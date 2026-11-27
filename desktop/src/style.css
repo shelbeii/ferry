@@ -460,15 +460,16 @@ html.dark.cg-on .el-dialog .el-collapse:not(.app-list) {
 html.cg-on {
   --ferry-overlay-line: rgb(106 126 165 / .14);
   --ferry-overlay-footer: rgb(237 243 255 / .28);
+  --ferry-overlay-backdrop: rgb(23 35 58 / .24);
 }
 html.dark.cg-on {
   --ferry-overlay-line: rgb(196 211 244 / .12);
   --ferry-overlay-footer: rgb(12 20 36 / .22);
+  --ferry-overlay-backdrop: rgb(3 8 18 / .44);
 }
 html.cg-on .el-overlay {
-  background-color: rgb(23 35 58 / .24);
+  background-color: var(--ferry-overlay-backdrop);
 }
-html.dark.cg-on .el-overlay { background-color: rgb(3 8 18 / .44); }
 /* Element Plus 弹出、关闭对话框和确认框时，让遮罩和外层整体淡入淡出。外层半透明期间，浏览器不给里面的玻璃做背后的磨砂：
    背后的文字清楚地透出来，动画结束才突然变模糊。所以遮罩只渐变底色，由弹窗自己淡入淡出（自己半透明不影响磨砂）。
    位移用 translate，不和可拖动对话框写在 transform 上的位置冲突。 */
@@ -854,8 +855,8 @@ html[data-theme="warm-paper"] {
 html[data-theme="warm-paper"].cg-on {
   --ferry-overlay-line: rgb(125 104 76 / .16);
   --ferry-overlay-footer: rgb(241 233 218 / .36);
+  --ferry-overlay-backdrop: rgb(45 34 22 / .24);
 }
-html[data-theme="warm-paper"].cg-on .el-overlay { background-color: rgb(45 34 22 / .24); }
 html[data-theme="warm-paper"].cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) {
   border-color: rgb(255 252 245 / .68);
 }
@@ -949,8 +950,8 @@ html.dark[data-theme="warm-dusk"] {
 html.dark[data-theme="warm-dusk"].cg-on {
   --ferry-overlay-line: rgb(245 215 180 / .11);
   --ferry-overlay-footer: rgb(18 14 11 / .28);
+  --ferry-overlay-backdrop: rgb(6 4 2 / .5);
 }
-html.dark[data-theme="warm-dusk"].cg-on .el-overlay { background-color: rgb(6 4 2 / .5); }
 html.dark[data-theme="warm-dusk"].cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) {
   border-color: rgb(245 215 180 / .16);
 }
@@ -1025,8 +1026,8 @@ html.dark[data-theme="dimmed-sage"] {
 html.dark[data-theme="dimmed-sage"].cg-on {
   --ferry-overlay-line: rgb(195 235 224 / .12);
   --ferry-overlay-footer: rgb(22 30 33 / .26);
+  --ferry-overlay-backdrop: rgb(10 16 18 / .44);
 }
-html.dark[data-theme="dimmed-sage"].cg-on .el-overlay { background-color: rgb(10 16 18 / .44); }
 html.dark[data-theme="dimmed-sage"].cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) {
   border-color: rgb(195 235 224 / .16);
 }
@@ -1101,8 +1102,8 @@ html.dark[data-theme="obsidian"] {
 html.dark[data-theme="obsidian"].cg-on {
   --ferry-overlay-line: rgb(226 240 255 / .12);
   --ferry-overlay-footer: rgb(6 7 11 / .34);
+  --ferry-overlay-backdrop: rgb(0 0 0 / .62);
 }
-html.dark[data-theme="obsidian"].cg-on .el-overlay { background-color: rgb(0 0 0 / .62); }
 html.dark[data-theme="obsidian"].cg-on :is(.el-dialog, .el-message-box, .el-drawer, .el-popper, .cm-tooltip) {
   border-color: rgb(226 242 255 / .18);
 }
