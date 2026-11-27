@@ -108,7 +108,7 @@ function hideTip() {
     <div v-if="panel === 'filter'" class="panel">
       <template v-if="!textMode">
         <div v-for="(f, i) in fs" :key="i" class="row" :class="{ off: f.off }">
-          <el-checkbox v-model="f.off" :true-value="false" :false-value="true" title="用这个条件" />
+          <el-checkbox :model-value="!f.off" title="用这个条件" @update:model-value="(v: unknown) => (f.off = !v)" />
           <el-select v-if="i > 0" v-model="f.or" size="small" class="join">
             <el-option :value="false" label="并且" />
             <el-option :value="true" label="或者" />
@@ -140,8 +140,7 @@ function hideTip() {
       <div class="actions">
         <el-button v-if="!textMode" size="small" :icon="Plus" @click="addFilter">加条件</el-button>
         <el-button size="small" link :icon="EditPen" @click="textMode = !textMode">{{ textMode ? '用条件列表' : '直接写条件' }}</el-button>
-        <span class="grow" />
-        <el-button size="small" @click="emit('update:panel', '')">收起</el-button>
+        <el-button size="small" class="act-sep" @click="emit('update:panel', '')">收起</el-button>
         <el-button size="small" type="primary" :icon="Check" @click="apply">应用</el-button>
       </div>
     </div>
@@ -165,10 +164,9 @@ function hideTip() {
       <div v-if="!ss.length" class="empty">没有排序：按数据库默认的顺序</div>
       <div class="actions">
         <el-button size="small" :icon="Plus" @click="addSort">加排序列</el-button>
-        <span class="tip">也可以点表头：升序 → 降序 → 不排序</span>
-        <span class="grow" />
-        <el-button size="small" @click="emit('update:panel', '')">收起</el-button>
+        <el-button size="small" class="act-sep" @click="emit('update:panel', '')">收起</el-button>
         <el-button size="small" type="primary" :icon="Check" @click="apply">应用</el-button>
+        <span class="tip">也可以点表头：升序 → 降序 → 不排序</span>
       </div>
     </div>
 
@@ -250,14 +248,15 @@ function hideTip() {
 .actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding-top: 2px;
 }
 .actions .el-button + .el-button {
   margin-left: 0;
 }
-.grow {
-  flex: 1;
+.actions .el-button.act-sep {
+  margin-left: 8px;
 }
 .opt {
   margin: 0 -32px 0 -20px;

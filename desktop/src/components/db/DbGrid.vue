@@ -31,8 +31,13 @@ const emit = defineEmits<{
   removeAdded: [row: number]
 }>()
 
+const TAIL = 96
 const widths = reactive<number[]>([])
+let lastColKey = ''
 watch(() => props.columns, (cols) => {
+  const key = cols.map((c) => c.name).join('\0')
+  if (key === lastColKey && widths.length === cols.length) return
+  lastColKey = key
   widths.length = 0
   for (const c of cols) widths.push(Math.min(320, Math.max(90, c.name.length * 9 + 40)))
 }, { immediate: true })
@@ -358,43 +363,116 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-// 拖动列宽
+// 拖动列宽（含靠近右边缘自动横向滚动，方便把最后一列拉宽；双击分隔线自动适配宽度）
+const resizingCol = ref(-1)
+let colResize: { index: number; x0: number; w0: number; s0: number; x: number; timer: number; prevCursor: string } | null = null
+function updateColWidth() {
+  const r = colResize
+  const el = wrap.value
+  if (!r || !el) return
+  widths[r.index] = Math.max(50, Math.round(r.w0 + (r.x - r.x0) + (el.scrollLeft - r.s0)))
+}
+function autoScrollResize() {
+  const r = colResize
+  const el = wrap.value
+  if (!r || !el) return
+  r.timer = 0
+  const rect = el.getBoundingClientRect()
+  const edge = 28
+  const overRight = r.x - (rect.right - edge)
+  const overLeft = (rect.left + 52 + edge) - r.x
+  if (overRight > 0) {
+    const step = Math.min(24, Math.max(4, Math.round(overRight / 2)))
+    const prev = el.scrollLeft
+    el.scrollLeft = prev + step
+    if (el.scrollLeft !== prev) {
+      updateColWidth()
+      r.timer = requestAnimationFrame(autoScrollResize)
+    }
+  } else if (overLeft > 0 && el.scrollLeft > 0 && widths[r.index] > 50) {
+    const step = Math.min(24, Math.max(4, Math.round(overLeft / 2)))
+    const prev = el.scrollLeft
+    el.scrollLeft = Math.max(0, prev - step)
+    if (el.scrollLeft !== prev) {
+      updateColWidth()
+      r.timer = requestAnimationFrame(autoScrollResize)
+    }
+  }
+}
+function resizeMove(ev: MouseEvent) {
+  if (!colResize) return
+  colResize.x = ev.clientX
+  updateColWidth()
+  if (!colResize.timer) colResize.timer = requestAnimationFrame(autoScrollResize)
+}
+function endResize() {
+  if (!colResize) return
+  if (colResize.timer) cancelAnimationFrame(colResize.timer)
+  document.body.style.cursor = colResize.prevCursor
+  colResize = null
+  resizingCol.value = -1
+  window.removeEventListener('mousemove', resizeMove)
+  window.removeEventListener('mouseup', endResize)
+  window.removeEventListener('blur', endResize)
+}
 function startResize(e: MouseEvent, i: number) {
+  if (e.button !== 0) return
   e.preventDefault()
   e.stopPropagation()
-  const x0 = e.clientX
-  const w0 = widths[i]
-  const move = (ev: MouseEvent) => { widths[i] = Math.max(50, w0 + ev.clientX - x0) }
-  const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
-  window.addEventListener('mousemove', move)
-  window.addEventListener('mouseup', up)
+  endResize()
+  const el = wrap.value
+  colResize = { index: i, x0: e.clientX, w0: widths[i], s0: el?.scrollLeft ?? 0, x: e.clientX, timer: 0, prevCursor: document.body.style.cursor }
+  resizingCol.value = i
+  document.body.style.cursor = 'col-resize'
+  window.addEventListener('mousemove', resizeMove)
+  window.addEventListener('mouseup', endResize)
+  window.addEventListener('blur', endResize)
 }
+function textPx(s: string, charPx: number) {
+  let units = 0
+  for (let i = 0; i < s.length; i++) units += s.charCodeAt(i) > 0x7f ? 1.85 : 1
+  return Math.ceil(units * charPx)
+}
+function autoFitCol(i: number) {
+  const col = props.columns[i]
+  if (!col) return
+  let px = textPx(col.name, 8.5) + textPx(col.type, 6.5) + 38
+  const limit = Math.min(props.rows.length, 200)
+  for (let r = 0; r < limit; r++) {
+    px = Math.max(px, textPx(display(valueOf(r, i, false)), 7.6) + 22)
+    if (px >= 520) break
+  }
+  widths[i] = Math.min(520, Math.max(70, px))
+}
+onBeforeUnmount(endResize)
 
 defineExpose({ selectedRows: () => [...selRows.value], clearSelection: () => { selRows.value = new Set(); sel.value = null } })
 </script>
 
 <template>
   <div ref="wrap" class="grid-wrap" tabindex="0" @keydown="onKey" @scroll="onScroll">
-    <table class="grid" :style="{ width: widths.reduce((a, b) => a + b, 52) + 'px' }">
+    <table class="grid" :style="{ width: widths.reduce((a, b) => a + b, 52 + (columns.length ? TAIL : 0)) + 'px' }">
       <colgroup>
         <col style="width: 52px" />
         <col v-for="(w, i) in widths" :key="i" :style="{ width: w + 'px' }" />
+        <col v-if="columns.length" :style="{ width: TAIL + 'px' }" />
       </colgroup>
       <thead>
         <tr>
           <th class="num">#</th>
-          <th v-for="(c, i) in columns" :key="i" :title="`${c.name}（${c.type || '未知类型'}）`" @click="emit('sort', c.name)">
+          <th v-for="(c, i) in columns" :key="i" :class="{ resizing: resizingCol === i }" :title="`${c.name}（${c.type || '未知类型'}）`" @click="emit('sort', c.name)">
             <span class="th-name">{{ c.name }}</span>
             <template v-for="(st, si) in sorts ?? []" :key="si">
               <span v-if="st.col === c.name" class="sort"><el-icon><CaretBottom v-if="st.desc" /><CaretTop v-else /></el-icon><sub v-if="(sorts?.length ?? 0) > 1">{{ si + 1 }}</sub></span>
             </template>
             <span class="th-type">{{ c.type.toLowerCase() }}</span>
-            <span class="resize" @mousedown="startResize($event, i)" @click.stop />
+            <span class="resize" title="拖动调整列宽，双击自动适配" @mousedown="startResize($event, i)" @dblclick.stop="autoFitCol(i)" @click.stop />
           </th>
+          <th v-if="columns.length" class="tail" aria-hidden="true" />
         </tr>
       </thead>
       <tbody>
-        <tr v-if="padTop" class="pad" :style="{ height: padTop + 'px' }"><td :colspan="columns.length + 1" /></tr>
+        <tr v-if="padTop" class="pad" :style="{ height: padTop + 'px' }"><td :colspan="columns.length + (columns.length ? 2 : 1)" /></tr>
         <tr v-for="v in visible" :key="(v.added ? 'a' : 'r') + v.row" :class="v.added ? 'added' : { deleted: deleted?.has(v.row), picked: selRows.has(v.row) }">
           <td class="num" @mousedown="pick(v.row, sel?.col ?? 0, v.added, $event)">{{ v.added ? '＋' : (offset ?? 0) + v.row + 1 }}</td>
           <td
@@ -408,8 +486,9 @@ defineExpose({ selectedRows: () => [...selRows.value], clearSelection: () => { s
             <textarea v-if="editing && editing.added === v.added && editing.row === v.row && editing.col === ci" :ref="setEditInput" v-model="editing.value" class="cell-input" rows="1" spellcheck="false" @keydown.stop="onEditKey" @blur="commitEdit()" />
             <template v-else>{{ display(valueOf(v.row, ci, v.added)) }}</template>
           </td>
+          <td v-if="columns.length" class="tail" aria-hidden="true" />
         </tr>
-        <tr v-if="padBottom" class="pad" :style="{ height: padBottom + 'px' }"><td :colspan="columns.length + 1" /></tr>
+        <tr v-if="padBottom" class="pad" :style="{ height: padBottom + 'px' }"><td :colspan="columns.length + (columns.length ? 2 : 1)" /></tr>
       </tbody>
     </table>
     <div v-if="!rows.length && !added?.length" class="empty">没有数据</div>
@@ -476,6 +555,7 @@ td {
 }
 th {
   height: 30px;
+  padding-right: 12px;
 }
 tr.pad td {
   padding: 0;
@@ -493,6 +573,15 @@ th {
   user-select: none;
   font-family: var(--el-font-family);
 }
+th.tail,
+td.tail {
+  border-right: none;
+  border-bottom: none;
+  background: transparent !important;
+  cursor: default;
+  pointer-events: none;
+  padding: 0;
+}
 .th-type {
   margin-left: 6px;
   color: var(--el-text-color-placeholder);
@@ -508,12 +597,27 @@ th {
 }
 .resize {
   position: absolute;
-  right: -3px;
+  right: 0;
   top: 0;
   bottom: 0;
-  width: 7px;
+  width: 9px;
   cursor: col-resize;
   z-index: 3;
+}
+.resize::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background-color 0.12s;
+}
+.resize:hover::after,
+th.resizing .resize::after {
+  background: var(--el-color-primary);
 }
 .num {
   position: sticky;
@@ -526,6 +630,7 @@ th {
 }
 th.num {
   z-index: 3;
+  padding-right: 8px;
 }
 td {
   cursor: default;
@@ -546,18 +651,18 @@ td.sel {
   outline: 2px solid var(--el-color-primary);
   outline-offset: -2px;
 }
-tr.picked td:not(.num) {
+tr.picked td:not(.num, .tail) {
   background: var(--el-color-primary-light-9);
 }
 td.edited {
   background: var(--el-color-warning-light-8) !important;
 }
-tr.deleted td {
+tr.deleted td:not(.tail) {
   text-decoration: line-through;
   color: var(--el-color-danger);
   background: var(--el-color-danger-light-9);
 }
-tr.added td:not(.num) {
+tr.added td:not(.num, .tail) {
   background: var(--el-color-success-light-9);
 }
 /* 编辑时输入框盖满整个格子，和格子一样大 */
